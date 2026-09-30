@@ -138,6 +138,9 @@ class SparseAttnV4DecodeFp8Op:
         from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
         B, q_len, H, D = q.shape
+        from rtp_llm.models_py.modules.dsv4.flash_mla_heads import pad_flash_mla_heads
+
+        q, attn_sink = pad_flash_mla_heads(q, attn_sink)
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
         # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
         # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.
@@ -191,4 +194,4 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length=extra_topk_length,
         )
 
-        return attn_out.view(B, q_len, H, self.head_dim).contiguous()
+        return attn_out[:, :, :H, :].contiguous().view(B, q_len, H, self.head_dim)

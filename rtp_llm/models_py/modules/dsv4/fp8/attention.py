@@ -3487,9 +3487,10 @@ class AttentionFP8(nn.Module):
         swa_pool_3d: torch.Tensor,
     ) -> torch.Tensor:
         q = qkv.q
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+        from rtp_llm.models_py.modules.dsv4.flash_mla_heads import (
+            flash_mla_sparse_fwd,
+        )
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
         cp_ctx = common.cp_ctx
@@ -5090,7 +5091,9 @@ class AttentionFP8(nn.Module):
         """
         s_q = int(q.shape[0])
 
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+        from rtp_llm.models_py.modules.dsv4.flash_mla_heads import (
+            flash_mla_sparse_fwd,
+        )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         single_chunk = chunk_rows == s_q

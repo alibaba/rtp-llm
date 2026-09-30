@@ -287,6 +287,10 @@ def get_or_build_sched_meta(
     """
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
+    from rtp_llm.models_py.modules.dsv4.flash_mla_heads import flash_mla_num_heads
+
+    num_heads = flash_mla_num_heads(num_heads)
+
     capturing = False
     try:
         capturing = (
