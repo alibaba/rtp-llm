@@ -676,8 +676,7 @@ public class CostBasedPrefillStrategy {
             long selectedHitTokens,
             long candidateMaxHitTokens,
             long totalTokens) {
-        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
-                roleType, selectedHitTokens, totalTokens);
+        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(roleType, selectedHitTokens);
         engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
                 roleType, candidateMaxHitTokens);
     }

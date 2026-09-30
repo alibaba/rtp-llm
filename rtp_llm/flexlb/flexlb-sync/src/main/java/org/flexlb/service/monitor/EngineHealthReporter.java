@@ -790,10 +790,8 @@ public class EngineHealthReporter {
     /**
      * Delegate routing selected cache match metrics to {@link CacheMetricsReporter}.
      */
-    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
-                                                       long hitTokens,
-                                                       long totalTokens) {
-        cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, hitTokens, totalTokens);
+    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType, long hitTokens) {
+        cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, hitTokens);
     }
 
     public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,

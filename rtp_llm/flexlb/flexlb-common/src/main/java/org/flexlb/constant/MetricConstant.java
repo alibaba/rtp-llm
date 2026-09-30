@@ -427,12 +427,6 @@ public class MetricConstant {
             "app.cache.routing.selected.match.hit.tokens";
 
     /**
-     * Selected-worker routing cache-match input tokens. Tagged by role.
-     */
-    public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
-            "app.cache.routing.selected.match.total.tokens";
-
-    /**
      * Request-level maximum available-candidate cache-match hit tokens. Tagged by role.
      */
     public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
