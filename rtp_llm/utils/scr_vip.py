@@ -135,7 +135,9 @@ def world_info(current, pc):
     from rtp_llm.distribute.distributed_server import WorldInfo
     from rtp_llm.distribute.worker_info import WorkerInfo
 
-    nodes = topology(pc)
+    # C2 may republish an unmerged gang map while the restored process resumes.
+    # Require the same complete topology and network readiness as cold startup.
+    nodes = topology(pc, wait=True)
     if current.self is None:
         raise ValueError("SCR VIP world requires a local worker")
     for member in current.members:

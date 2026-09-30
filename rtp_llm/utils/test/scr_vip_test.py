@@ -38,6 +38,107 @@ class ScrVipTest(unittest.TestCase):
             world_size=4, local_world_size=2, world_rank=2, local_rank=0
         )
 
+    def _world(self):
+        from rtp_llm.distribute.distributed_server import WorldInfo
+        from rtp_llm.distribute.worker_info import WorkerInfo
+
+        members = [
+            WorkerInfo(
+                f"22.0.1.{2 + rank // 2}", rank % 2, rank, f"rank_{rank}", 22290, 10
+            )
+            for rank in range(4)
+        ]
+        return WorldInfo(members, members[0], members[2], 2, True)
+
+    def test_restore_waits_for_merged_gang_info(self):
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        world = self._world()
+        incomplete = {key: {"ip": value["real_ip"]} for key, value in self.rows.items()}
+        self.path.write_text(json.dumps(incomplete))
+
+        def publish_map(_):
+            self.path.write_text(json.dumps(self.rows))
+
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
+            scr_vip.time, "monotonic", side_effect=[0, 1]
+        ), patch.object(
+            scr_vip.time, "sleep", side_effect=publish_map
+        ) as sleep, patch.object(
+            scr_vip, "validate_device"
+        ) as device:
+            restored = RestoreContext("seed", "10.0.0.3").resolve_world_info(
+                world, self.pc
+            )
+        sleep.assert_called_once_with(0.5)
+        device.assert_called_once_with("22.0.1.3")
+        self.assertEqual(
+            [m.ip for m in restored.members], [m.ip for m in world.members]
+        )
+        self.assertEqual(
+            restored.self.cache_store_listen_port, world.self.cache_store_listen_port
+        )
+
+    def test_restore_rejects_persistently_unmerged_gang_info(self):
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        world = self._world()
+        self.path.write_text(
+            json.dumps(
+                {key: {"ip": value["real_ip"]} for key, value in self.rows.items()}
+            )
+        )
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
+            scr_vip.time, "monotonic", side_effect=[0, 1, 121]
+        ), patch.object(scr_vip.time, "sleep") as sleep, patch.object(
+            scr_vip, "validate_device"
+        ) as device:
+            with self.assertRaisesRegex(KeyError, "real_ip"):
+                RestoreContext("seed", "10.0.0.3").resolve_world_info(world, self.pc)
+        sleep.assert_called_once_with(0.5)
+        device.assert_not_called()
+        self.assertEqual(world.self.ip, "22.0.1.3")
+
+    def test_restore_rejects_changed_vip_after_map_becomes_ready(self):
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        world = self._world()
+        self.rows["model-rank-0"]["ip"] = "22.0.1.4"
+        self.path.write_text(json.dumps(self.rows))
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
+            scr_vip, "validate_device"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot change"):
+                RestoreContext("seed", "10.0.0.3").resolve_world_info(world, self.pc)
+        self.assertEqual(world.members[0].ip, "22.0.1.2")
+
+    def test_restore_waits_for_network_and_fails_when_it_stays_unready(self):
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        for readiness in (
+            [RuntimeError("network not ready"), None],
+            [RuntimeError("network not ready")] * 2,
+        ):
+            with self.subTest(recovers=readiness[-1] is None), patch.dict(
+                os.environ, {"SCR_PHASE": "restore"}
+            ), patch.object(
+                scr_vip.time, "monotonic", side_effect=[0, 1, 121]
+            ), patch.object(
+                scr_vip.time, "sleep"
+            ) as sleep, patch.object(
+                scr_vip, "validate_device", side_effect=readiness
+            ):
+                context = RestoreContext("seed", "10.0.0.3")
+                if readiness[-1] is None:
+                    self.assertEqual(
+                        context.resolve_world_info(self._world(), self.pc).self.ip,
+                        "22.0.1.3",
+                    )
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "network not ready"):
+                        context.resolve_world_info(self._world(), self.pc)
+                sleep.assert_called_once_with(0.5)
+
     def test_control_plane_addresses_and_new_underlay(self):
         self.assertEqual(scr_vip.read_topology(4, 2), {0: "22.0.1.2", 1: "22.0.1.3"})
         self.rows["model-rank-1"]["real_ip"] = "10.1.2.3"
