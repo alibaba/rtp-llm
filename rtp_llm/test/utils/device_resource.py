@@ -413,29 +413,38 @@ class DeviceResource:
             logging.info("release done")
 
 
-if __name__ == "__main__":
-    cuda_info = get_cuda_info()
-    if not cuda_info:
-        logging.info("no gpu, continue")
+def run_with_device_lock() -> int:
+    require_count = int(
+        os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
+    )
+    if require_count == 0:
+        logging.info("no gpu required, continue")
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
+        return result.returncode
 
-        sys.exit(result.returncode)
-    else:
-        from jit_sys_path_setup import setup_jit_cache
+    cuda_info = get_cuda_info()
+    if not cuda_info:
+        logging.info("no gpu detected, continue")
+        result = subprocess.run(sys.argv[1:])
+        logging.info("exitcode: %d", result.returncode)
+        return result.returncode
 
-        setup_jit_cache()
+    from jit_sys_path_setup import setup_jit_cache
 
-        device_name, _ = cuda_info
-        require_count = int(
-            os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
-        )
-        with DeviceResource(require_count) as gpu_resource:
-            if "308" in device_name:
-                env_name = "HIP_VISIBLE_DEVICES"
-            else:
-                env_name = "CUDA_VISIBLE_DEVICES"
-            os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
-            result = subprocess.run(sys.argv[1:])
-            logging.info("exitcode: %d", result.returncode)
-            sys.exit(result.returncode)
+    setup_jit_cache()
+
+    device_name, _ = cuda_info
+    with DeviceResource(require_count) as gpu_resource:
+        if "308" in device_name:
+            env_name = "HIP_VISIBLE_DEVICES"
+        else:
+            env_name = "CUDA_VISIBLE_DEVICES"
+        os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+        result = subprocess.run(sys.argv[1:])
+        logging.info("exitcode: %d", result.returncode)
+        return result.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(run_with_device_lock())

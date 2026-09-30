@@ -80,11 +80,13 @@ class XQAImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
-        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
-        # through to PyFlashinferPaged. See blockers.md R-4.
+        # RTX 5000 Pro) and sm_103 (L20D / B300) lack a binding and trigger
+        # cudaErrorInvalidSymbol at first forward. C++ XQAAttnOp.support gate
+        # is `>= kSM_90` and passes them erroneously — short-circuit here so
+        # dispatch falls through to PyFlashinferPaged. See blockers.md R-4.
         if is_sm12x():
+            return False
+        if get_sm() not in [(9, 0), (10, 0)]:
             return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)

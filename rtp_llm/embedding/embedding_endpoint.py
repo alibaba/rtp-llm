@@ -216,7 +216,7 @@ class EmbeddingEndpoint(object):
                 result = []
                 for output_map_iter in response.output_map:
                     tensor_map = {}
-                    for key, tensor_pb in output_map_iter.items():
+                    for key, tensor_pb in output_map_iter.tensor_map.items():
                         torch_tensor = tensor_pb_to_torch(tensor_pb)
                         tensor_map[key] = torch_tensor
                     result.append(tensor_map)
