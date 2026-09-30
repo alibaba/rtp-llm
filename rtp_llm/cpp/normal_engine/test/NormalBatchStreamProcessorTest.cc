@@ -2310,7 +2310,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDecodeBatchCarriesNoTextTokensMask) {
     BatchKVCacheResource kv_cache;
     kv_cache.resetBatchSize(1);
     kv_cache.initGroups(cache_config.topologyPtr());
-    kv_cache.setBatchBlocks(0, 0, {1});
+    kv_cache.setBatchBlocks(0, "default", {1});
     stream->setKVCache(kv_cache);
     stream->setIsContextStream(false);
     stream->setSeqLength(stream->inputLength() + 1);
