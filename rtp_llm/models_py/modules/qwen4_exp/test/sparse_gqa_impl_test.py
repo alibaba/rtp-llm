@@ -680,32 +680,39 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 q, paged_cache, table, kv_lens, indices, **kwargs
             )
 
-        with (
-            patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha."
-                "sparse_prefill_attn",
-                side_effect=AssertionError("local sparse prefill must not run"),
-            ),
-            patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
-                "sparse_paged_gqa_attn",
-                side_effect=_record_paged,
-            ),
-        ):
-            got = impl.forward(
-                qkv,
-                kv_cache=SimpleNamespace(kv_cache_base=cache),
-                selected_indices=selected,
-            )
+        for batch_rows in ("0", "1"):
+            calls.clear()
+            with (
+                patch.dict(os.environ, {"RTP_LLM_QWEN4_BATCH_RAGGED_GQA": batch_rows}),
+                patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha."
+                    "sparse_prefill_attn",
+                    side_effect=AssertionError("local sparse prefill must not run"),
+                ),
+                patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
+                    "sparse_paged_gqa_attn",
+                    side_effect=_record_paged,
+                ),
+            ):
+                got = impl.forward(
+                    qkv,
+                    kv_cache=SimpleNamespace(kv_cache_base=cache),
+                    selected_indices=selected,
+                )
 
-        torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
-        self.assertEqual(
-            calls,
-            [
-                ((1, _H_Q, 3, _D), [[4, 5, 6]], (1, 3, 6)),
-                ((1, _H_Q, 2, _D), [[8, 9]], (1, 2, 6)),
-            ],
-        )
+            torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
+            self.assertEqual(
+                calls,
+                [
+                    ((1, _H_Q, 3, _D), [[4, 5, 6]], (1, 3, 6)),
+                    ((1, _H_Q, 2, _D), [[8, 9]], (1, 2, 6)),
+                ]
+                if batch_rows == "0"
+                else [
+                    ((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))
+                ],
+            )
 
     def test_nonzero_prefix_requires_the_paged_bridge_not_local_prefill(self):
         events = []

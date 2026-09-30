@@ -30,6 +30,7 @@ The top-level Qwen4 serving gate remains closed until those missing modes and
 the indexer's two side pools are integrated.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -712,6 +713,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             "block_table": block_table,
             "page_size": page_size,
             "requests": requests,
+            "selected_indices": selected_indices,
+            "prefixes_device": prefixes_device,
         }
 
     @staticmethod
@@ -937,7 +940,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         plan: dict,
     ) -> torch.Tensor:
-        """Run one B=1 paged call per packed incremental-prefill request."""
+        """Run paged attention over packed incremental-prefill requests."""
         assert kv_cache is not None
         tokens = int(plan["tokens"])
         if q.dim() != 2 or tuple(q.shape) != (tokens, self.q_width):
@@ -952,8 +955,63 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         block_table = plan["block_table"]
         page_size = int(plan["page_size"])
+        requests = plan["requests"]
+        max_rows = max(int(req["end"]) - int(req["start"]) for req in requests)
+        batch_rows = (
+            self._is_mtp_draft
+            and len(requests) > 1
+            and max_rows <= 4
+            and os.environ.get("RTP_LLM_QWEN4_BATCH_RAGGED_GQA", "1") == "1"
+        )
+        if batch_rows:
+            # The draft's short, ragged windows share a single paged launch.
+            # Invalid padded rows cannot read KV: their visible length is zero
+            # and every selected index is -1. Restore packed order afterwards.
+            row_map = []
+            valid = []
+            packed_positions = []
+            for req_idx, request in enumerate(requests):
+                start, end = int(request["start"]), int(request["end"])
+                length = end - start
+                for row in range(max_rows):
+                    row_map.append(start + min(row, length - 1))
+                    valid.append(row < length)
+                    if row < length:
+                        packed_positions.append(req_idx * max_rows + row)
+            row_map = torch.tensor(row_map, dtype=torch.long, device=q.device)
+            valid = torch.tensor(valid, dtype=torch.bool, device=q.device).view(
+                len(requests), max_rows
+            )
+            packed_positions = torch.tensor(
+                packed_positions, dtype=torch.long, device=q.device
+            )
+            query = q.index_select(0, row_map).view(
+                len(requests), max_rows, self.head_num, self.head_dim
+            )
+            query = query.transpose(1, 2).contiguous()
+            selected = plan["selected_indices"].index_select(0, row_map)
+            selected = selected.view(len(requests), max_rows, -1)
+            selected = torch.where(valid.unsqueeze(-1), selected, -1)
+            row_offsets = torch.arange(
+                1, max_rows + 1, dtype=torch.int32, device=q.device
+            )
+            kv_lens = plan["prefixes_device"].unsqueeze(1) + row_offsets
+            kv_lens = torch.where(valid, kv_lens, 0)
+            output = sparse_paged_gqa_attn(
+                query,
+                kv_cache.kv_cache_base,
+                block_table,
+                kv_lens.contiguous(),
+                selected.contiguous(),
+                page_size=page_size,
+                kv_head_num=self.kv_head_num,
+            )
+            return output.transpose(1, 2).reshape(
+                len(requests) * max_rows, self.q_width
+            ).index_select(0, packed_positions)
+
         outputs = []
-        for request_idx, request in enumerate(plan["requests"]):
+        for request_idx, request in enumerate(requests):
             start, end = int(request["start"]), int(request["end"])
             query_len = end - start
             request_q = q[start:end].view(1, query_len, self.head_num, self.head_dim)
