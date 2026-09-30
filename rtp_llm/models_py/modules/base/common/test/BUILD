@@ -10,3 +10,10 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "embedding_tp_test",
+    srcs = ["embedding_tp_test.py"],
+    deps = py_test_deps,
+    tags = ["multi_device"],
+    exec_properties = {"gpu": "H20"},
+)
