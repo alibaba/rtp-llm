@@ -96,7 +96,8 @@ TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
                 config.prefill_cp_config.kv_cache_sharded = true;
                 config.prefill_cp_config.prefill_cp_size  = 4;
                 const auto props                          = buildExecProperties(config, DeviceResourceConfig{});
-                const bool local_cp                       = role != RoleType::DECODE && tp_size > 1;
+                // PREFILL_CP requires a separately resolved compatibility profile.
+                const bool local_cp = role != RoleType::DECODE && tp_size > 1 && method == CPRotateMethod::ALL_GATHER;
                 EXPECT_EQ(props.enable_prefill_cp, local_cp);
                 EXPECT_EQ(props.prefill_cp_kv_cache_sharded, local_cp);
                 // The receiving role must retain remote CP geometry for PD.

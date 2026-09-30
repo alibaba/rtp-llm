@@ -15,7 +15,6 @@ from rtp_llm.models.dsv41_kv_cache import (
 # Load the config types and Torch libraries before the test binding.
 # isort: off
 from rtp_llm.ops import (
-    DataType,
     KVCacheConfig,
     ModelConfig,
     ParallelismConfig,
@@ -35,7 +34,7 @@ class V41ProductionCacheTest(unittest.TestCase):
         self.model = ModelConfig()
         self.model.model_type = "deepseek_v41"
         self.model.num_layers = 40
-        self.model.data_type = DataType.TYPE_BF16
+        self.model.data_type = "bf16"
         self.model.attn_config.tokens_per_block = 256
         self.model.hybrid_attention_config.enable_independent_kv_cache_pools = True
         self.model.kv_cache_spec_descs = build_dsv41_kv_cache_spec_descs(self.text)

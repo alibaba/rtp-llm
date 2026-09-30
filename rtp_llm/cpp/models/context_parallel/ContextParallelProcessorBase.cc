@@ -339,7 +339,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // op would read a global-length mask misaligned with this rank's token chunk
     // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
     const bool need_token_remap = model_input.text_tokens_mask.defined() || model_input.combo_tokens_type_ids.defined()
-                                  || has_explicit_position_ids || has_multimodal_input;
+                                  || has_explicit_position_ids || has_multimodal_input
+                                  || model_input.engram_token_windows.defined();
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
