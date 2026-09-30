@@ -59,6 +59,7 @@ py_library(
     deps = [
         ":utils",
         ":tile_kernels_mhc",
+        "//rtp_llm:safetensors_header",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
@@ -76,6 +77,11 @@ py_library(
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
         ],
+        "//conditions:default": [],
+    }) + select({
+        # Mapped-host Engram registration uses the CUDA runtime Python bindings.
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch_cuda_bindings//:pkg"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch_cuda_bindings//:pkg"],
         "//conditions:default": [],
     }) + select({
         # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
@@ -186,6 +192,8 @@ filegroup(
         "modules/dsv4/v41_pp.py",
         "modules/dsv4/v41_engram_hash.py",
         "modules/dsv4/_v41_engram_hash_triton.py",
+        "modules/dsv4/v41_engram_host.py",
+        "modules/dsv4/_v41_engram_lookup_triton.py",
         "modules/dsv4/hc/delayed.py",
         "modules/dsv4/hc/base.py",
         "modules/dsv4/hc/fallback_impl.py",
