@@ -5,6 +5,22 @@ import triton
 import triton.language as tl
 
 
+def sm120_decode_gemm_configs(rows, up, down):
+    """Opt-in tiles for BF16 E512/K2560/inter80, with M=1 unchanged."""
+    if not 1 < rows <= 32:
+        return up, down
+    if rows <= 8:
+        up = dict(up, BLOCK_SIZE_N=32, BLOCK_SIZE_K=64, num_warps=4, num_stages=2)
+    down = dict(
+        down,
+        BLOCK_SIZE_N=64 if rows <= 16 else 128,
+        BLOCK_SIZE_K=32,
+        num_warps=4,
+        num_stages=2,
+    )
+    return up, down
+
+
 @triton.jit
 def _offsets_and_padding(
     ids,
