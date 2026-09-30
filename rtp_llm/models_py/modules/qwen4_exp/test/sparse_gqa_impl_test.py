@@ -228,18 +228,23 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_draft_graph_replays_ragged_lengths_and_main_pages(self):
+        for lanes in (1, 2, 3, 4):
+            with self.subTest(lanes=lanes):
+                self._check_draft_graph_main_pages(lanes)
+
+    def _check_draft_graph_main_pages(self, lanes):
         configs, inputs = _configs()
         inputs.is_cuda_graph = inputs.is_exact_cuda_graph_batch = inputs.is_s_padded = (
             True
         )
         inputs.input_lengths_device = torch.tensor(
-            [4, 4], device=_DEV, dtype=torch.int32
+            [lanes, lanes], device=_DEV, dtype=torch.int32
         )
         inputs.prefix_lengths_device = torch.tensor(
             [5, 7], device=_DEV, dtype=torch.int32
         )
         inputs.cu_seqlens_device = torch.tensor(
-            [0, 4, 8], device=_DEV, dtype=torch.int32
+            [0, lanes, 2 * lanes], device=_DEV, dtype=torch.int32
         )
         table = torch.tensor([[1, 2, 3], [4, 5, 6]], device=_DEV, dtype=torch.int32)
         inputs.kv_cache_kernel_block_id_device = table
@@ -258,15 +263,23 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 7, 2, _H_KV, 4, _D, device=_DEV, dtype=torch.bfloat16
             )
         )
-        qkv = torch.randn(8, (_H_Q + 2 * _H_KV) * _D, device=_DEV, dtype=torch.bfloat16)
-        selected = torch.tensor([[0, 2, 4, -1]] * 8, device=_DEV, dtype=torch.int32)
+        qkv = torch.randn(
+            2 * lanes, (_H_Q + 2 * _H_KV) * _D, device=_DEV, dtype=torch.bfloat16
+        )
+        selected = torch.tensor(
+            [[0, 2, 4, -1]] * (2 * lanes), device=_DEV, dtype=torch.int32
+        )
         with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
             for _ in range(3):
                 impl.forward(qkv, cache, selected_indices=selected)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = impl.forward(qkv, cache, selected_indices=selected)
-        for lengths, prefixes in (([1, 4], [7, 5]), ([3, 2], [5, 7]), ([4, 0], [7, 0])):
+        for lengths, prefixes in (
+            ([1, lanes], [7, 5]),
+            ([min(3, lanes), min(2, lanes)], [5, 7]),
+            ([lanes, 0], [7, 0]),
+        ):
             inputs.input_lengths_device.copy_(
                 torch.tensor(lengths, device=_DEV, dtype=torch.int32)
             )

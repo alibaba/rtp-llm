@@ -278,24 +278,32 @@ def write_target_window_with_undo_(
     *,
     norm_eps: float,
 ) -> IndexerCacheUndo:
-    """Write the fixed four-row MTP target window with one rollback snapshot.
+    """Write a uniform one-to-four-row target window with one undo snapshot.
 
-    Four ordered launches reuse the graph-safe single-row kernel. Exactly one
+    Ordered launches reuse the graph-safe single-row kernel. At most one
     row completes a compression group, regardless of the prefix residue.
     Capturing all destinations before the first launch preserves the original
     side state if a later main-cache operation fails.
     """
-    if raw_keys.dim() != 2 or raw_keys.shape[0] != prefixes.numel() * 4:
-        raise ValueError("QSA target writer requires four packed rows per request")
     batch = int(prefixes.numel())
+    if (
+        raw_keys.dim() != 2
+        or batch == 0
+        or raw_keys.shape[0] % batch
+        or not 1 <= raw_keys.shape[0] // batch <= 4
+    ):
+        raise ValueError(
+            "QSA target writer requires one to four packed rows per request"
+        )
+    query_len = int(raw_keys.shape[0]) // batch
     if (
         prefixes.dtype != torch.int32
         or prefixes.device != raw_keys.device
         or not prefixes.is_contiguous()
     ):
         raise ValueError("QSA target writer has invalid position or RoPE geometry")
-    if rope_cos.shape != (batch * 4, 64) or rope_sin.shape != rope_cos.shape:
-        raise ValueError("QSA target writer requires four RoPE rows per request")
+    if rope_cos.shape != (batch * query_len, 64) or rope_sin.shape != rope_cos.shape:
+        raise ValueError("QSA target writer requires one RoPE row per packed token")
     if not is_supported(
         raw_keys[:batch].contiguous(),
         prefixes,
@@ -312,19 +320,23 @@ def write_target_window_with_undo_(
     ):
         raise ValueError("unsupported Qwen4 QSA target writer layout")
 
-    offsets = torch.arange(4, dtype=torch.int32, device=prefixes.device)
+    offsets = torch.arange(query_len, dtype=torch.int32, device=prefixes.device)
     positions = prefixes[:, None] + offsets[None, :]
     state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)
     state_ids = state_table.gather(1, state_columns).to(torch.long)
-    state_slots = (state_ids * 8 + positions.remainder(8)).reshape(-1).clamp(
-        0, state_pool.shape[0] * 8 - 1
+    state_slots = (
+        (state_ids * 8 + positions.remainder(8))
+        .reshape(-1)
+        .clamp(0, state_pool.shape[0] * 8 - 1)
     )
     completion = prefixes + 3 - prefixes.remainder(4)
     kv_columns = (completion // 128).clamp(0, kv_table.shape[1] - 1)
     kv_ids = kv_table.gather(1, kv_columns.unsqueeze(1)).reshape(-1).to(torch.long)
-    kv_slots = (kv_ids * 32 + (completion // 4).remainder(32)).clamp(
-        0, kv_pool.shape[0] * 32 - 1
-    )
+    kv_slots = torch.where(
+        completion < prefixes + query_len,
+        kv_ids * 32 + (completion // 4).remainder(32),
+        0,
+    ).clamp(0, kv_pool.shape[0] * 32 - 1)
     undo = IndexerCacheUndo(
         state_pool=state_pool,
         state_slots=state_slots,
@@ -333,11 +345,11 @@ def write_target_window_with_undo_(
         kv_slots=kv_slots,
         original_kv=kv_pool.flatten(0, 1).index_select(0, kv_slots).clone(),
     )
-    keys = raw_keys.reshape(batch, 4, 128).transpose(0, 1).contiguous()
-    cos = rope_cos.reshape(batch, 4, 64).transpose(0, 1).contiguous()
-    sin = rope_sin.reshape(batch, 4, 64).transpose(0, 1).contiguous()
+    keys = raw_keys.reshape(batch, query_len, 128).transpose(0, 1).contiguous()
+    cos = rope_cos.reshape(batch, query_len, 64).transpose(0, 1).contiguous()
+    sin = rope_sin.reshape(batch, query_len, 64).transpose(0, 1).contiguous()
     step_positions = positions.transpose(0, 1).contiguous()
-    for step in range(4):
+    for step in range(query_len):
         write_decode_key_(
             keys[step],
             step_positions[step],

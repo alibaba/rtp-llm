@@ -1233,8 +1233,9 @@ class Qwen4ExpQSARuntimeContext:
     def select_draft_graph_tokens(
         self, q: torch.Tensor, raw_keys: torch.Tensor, *, indexer: Any, rope_config: Any
     ) -> torch.Tensor:
-        """Capture a fixed four-lane draft plan; replay validates live host mirrors."""
+        """Capture a fixed-capacity draft plan; replay validates host mirrors."""
         from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+            draft_graph_lanes,
             draft_graph_rows,
         )
         from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
@@ -1267,10 +1268,9 @@ class Qwen4ExpQSARuntimeContext:
             raise RuntimeError("QSA draft graph requires device-local BF16 projections")
         tokens, heads, dim = q.shape
         batch = inputs.input_lengths_device.numel()
-        if tuple(raw_keys.shape) != (tokens, dim) or tokens != batch * 4:
-            raise RuntimeError(
-                "QSA draft graph projection must use four-token batch capacity"
-            )
+        lanes = draft_graph_lanes(inputs, tokens)
+        if tuple(raw_keys.shape) != (tokens, dim):
+            raise RuntimeError("QSA draft graph raw-key projection capacity changed")
         for tagged in (
             self.main_inputs,
             self.indexer_kv_inputs,
@@ -1360,9 +1360,9 @@ class Qwen4ExpQSARuntimeContext:
         )
         object.__setattr__(self, "_side_cache_undo", undo)
         rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
-        padded = rotated.index_select(0, sources).reshape(batch, 4, heads, dim)
+        padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
         weights = torch.full(
-            (batch * 4, heads),
+            (batch * lanes, heads),
             1.0 / math.sqrt(dim),
             device=q.device,
             dtype=torch.float32,
@@ -1984,7 +1984,7 @@ class Qwen4ExpQSARuntimeContext:
             "RTP_LLM_QWEN4_TRITON_TARGET_WRITER", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
         target_writer = target_writer and (
-            query_len == ratio == 4
+            1 <= query_len <= ratio == 4
             and head_dim == 128
             and int(plan["kv_tokens_per_block"]) == 128
             and int(plan["state_tokens_per_block"]) == 128
