@@ -44,6 +44,17 @@ def inject_into_residual(
     ``hyper_input`` is ``[..., hc_mult * hidden]``, ``sublayer_out`` is
     ``[..., hidden]`` and ``inject_weights`` is ``[..., hc_mult]``.
     """
+    fused_enabled = os.environ.get(
+        "RTP_LLM_QWEN4_FUSED_INJECT", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if fused_enabled:
+        from rtp_llm.models_py.modules.qwen4_exp.gated_residual_inject_triton import (
+            fused_inject,
+            is_supported,
+        )
+
+        if is_supported(hyper_input, sublayer_out, inject_weights):
+            return fused_inject(hyper_input, sublayer_out, inject_weights)
     injection = sublayer_out.unsqueeze(-2) * inject_weights.unsqueeze(-1)
     return hyper_input + injection.flatten(-2)
 
