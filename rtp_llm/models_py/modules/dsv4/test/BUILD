@@ -504,6 +504,29 @@ py_test(
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
+# Pure CPU boundary checks against actual native config and production helpers.
+py_test(
+    name = "test_cep_dspark_prefill",
+    srcs = ["test_cep_dspark_prefill.py"],
+    args = ["CEPDSparkPolicyTest"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+# Execution-model imports select FusedRope by real device capability. Do not
+# force a CPU fallback in this CUDA-only build or monkeypatch device detection.
+py_test(
+    name = "test_cep_dspark_prefill_model",
+    srcs = ["test_cep_dspark_prefill.py"],
+    main = "test_cep_dspark_prefill.py",
+    args = ["CEPDSparkModelTest"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual"],
+)
+
 py_test(
     name = "test_pp_draft_weight_loading",
     srcs = ["test_pp_draft_weight_loading.py"],

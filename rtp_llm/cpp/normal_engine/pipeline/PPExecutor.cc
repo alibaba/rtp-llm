@@ -312,6 +312,10 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || dspark_mask_token_id_ >= 0,
                             "PP DSpARK requires sp_dspark_mask_token_id, got %d",
                             dspark_mask_token_id_);
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config_.dsv4_dspark_prefill_compat
+                                || (is_dspark_ && role_type_ == RoleType::PREFILL
+                                    && parallelism_config_.dsv4_dspark_prefill_profile_valid()),
+                            "resolved DSpARK CEP2PP2 capability requires the PREFILL DSpARK executor");
     // forwardMicroBatched bypasses the CP input/output processing in forward().
     RTP_LLM_CHECK_WITH_INFO((!is_dspark_ && !parallelism_config_.local_cp_enabled())
                                 || params.device_resource_config.enable_layer_micro_batch == 0,

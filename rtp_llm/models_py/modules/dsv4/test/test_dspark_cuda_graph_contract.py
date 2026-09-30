@@ -403,6 +403,9 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 class DSparkCommitOnlyConstructionTest(unittest.TestCase):
     @staticmethod
     def _base_init(model, *args, **kwargs):
+        # Mirror the base constructor's configuration ownership. The role-only
+        # fixture must not hide the resolved-CP interface used by the draft.
+        model.parallelism_config = args[1]
         model._v4_args = SimpleNamespace(
             n_layers=3,
             compress_ratios=[0, 0, 0],
@@ -436,7 +439,11 @@ class DSparkCommitOnlyConstructionTest(unittest.TestCase):
             ):
                 model = DeepSeekV4DSparkModel(
                     config,
-                    SimpleNamespace(role_type=role),
+                    SimpleNamespace(
+                        role_type=role,
+                        local_cp_enabled=lambda: False,
+                        prefill_cp_config=SimpleNamespace(kv_cache_sharded=False),
+                    ),
                     None,
                     None,
                     max_generate_batch_size=4,

@@ -51,6 +51,27 @@ def resolve_pp_ep_opt_in(parallelism_config) -> Tuple[bool, str]:
     return True, raw_backend
 
 
+def resolve_dspark_prefill_opt_in(model_type, sp_type, draft_model_type) -> bool:
+    """Request a narrowly checked native capability, never a blanket spec bypass."""
+    from rtp_llm.ops import SpeculativeType
+
+    raw = os.environ.get("DSV4_PP_EP_DSPARK_PREFILL", "0").strip()
+    if raw in ("", "0"):
+        return False
+    if raw != "1":
+        raise ValueError("DSV4_PP_EP_DSPARK_PREFILL must be unset, 0 or 1")
+    if (
+        model_type != "deepseek_v4"
+        or sp_type != SpeculativeType.DSPARK
+        or draft_model_type != "deepseek_v4_dspark"
+    ):
+        raise ValueError(
+            "DSV4_PP_EP_DSPARK_PREFILL requires deepseek_v4 with "
+            "sp_type=dspark and sp_model_type=deepseek_v4_dspark"
+        )
+    return True
+
+
 def validate_pp_ep_shape(parallelism_config) -> RankLayout:
     """Validate the supported topology before allocating weights or issuing collectives."""
     problems: List[str] = []
@@ -133,7 +154,15 @@ def validate_pp_ep_target(
             "SM120 GroupedFP4 backend unavailable; fork_nccl_mxfp8 would "
             "silently fall back to LocalLoopStrategy"
         )
-    if is_speculative:
+    dspark_prefill = bool(
+        getattr(parallelism_config, "dsv4_dspark_prefill_compat", False)
+    )
+    if dspark_prefill and not (
+        parallelism_config.dsv4_dspark_prefill_profile_valid()
+        and parallelism_config.local_cp_enabled()
+    ):
+        problems.append("invalid resolved DSpARK CEP2PP2 prefill capability")
+    if is_speculative and not dspark_prefill:
         problems.append("speculative (MTP/DSpark) models not supported under PP+EP")
 
     role_type = getattr(parallelism_config, "role_type", None)

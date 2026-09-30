@@ -74,6 +74,7 @@ std::string ParallelismConfig::to_string() const {
         << prefill_cp_config.to_string() << "}\n"
         << "local_cp_enabled: " << local_cp_enabled() << "\n"
         << "dsv4_prefill_cp_compat: " << dsv4_prefill_cp_compat << "\n"
+        << "dsv4_dspark_prefill_compat: " << dsv4_dspark_prefill_compat << "\n"
         << "pp_ep_enabled: " << pp_ep_enabled << "\n"
         << "pp_ep_backend: " << pp_ep_backend << "\n";
     return oss.str();

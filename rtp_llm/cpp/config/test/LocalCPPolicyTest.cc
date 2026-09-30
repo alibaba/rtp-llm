@@ -182,5 +182,58 @@ int main() {
         c.role_type = RoleType::DECODE;
         check(!c.local_cp_enabled(), "native method executed in decode");
     }
+    // New DSpARK allowance is explicit, PREFILL-only, and proxy-only. All old
+    // four-argument resolutions above still fail closed on speculation.
+    c           = makeProxy();
+    c.role_type = RoleType::PREFILL;
+    c.resolve_local_cp("deepseek_v4", true, false, false, true);
+    check(c.local_cp_enabled() && c.dsv4_dspark_prefill_compat, "DSpARK proxy capability missing");
+    check(c.get_attn_tp_size() == 1, "DSpARK target and draft must retain CP weight semantics");
+    c.resolve_local_cp("deepseek_v4", false, false, false);
+    check(!c.dsv4_dspark_prefill_compat, "DSpARK capability survived ordinary re-resolution");
+
+    auto reject_dspark = [](ParallelismConfig candidate, bool spec = true, bool graph = false, bool micro = false) {
+        bool rejected = false;
+        try {
+            candidate.resolve_local_cp("deepseek_v4", spec, graph, micro, true);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "unsupported DSpARK prefill profile did not fail closed");
+        check(!candidate.dsv4_dspark_prefill_compat && !candidate.dsv4_prefill_cp_compat,
+              "failed DSpARK resolution retained a capability");
+    };
+    reject_dspark(c, false);
+    reject_dspark(c, true, true);
+    reject_dspark(c, true, false, true);
+    for (auto role : {RoleType::PDFUSION, RoleType::DECODE}) {
+        auto bad      = c;
+        bad.role_type = role;
+        reject_dspark(bad);
+    }
+    auto bad      = makeCompat(true);  // CEP4PP2 has not been qualified for this feature.
+    bad.role_type = RoleType::PREFILL;
+    reject_dspark(bad);
+    bad                                    = c;
+    bad.prefill_cp_config.kv_cache_sharded = true;
+    reject_dspark(bad);
+    bad                          = c;
+    bad.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    reject_dspark(bad);
+    bad           = c;
+    bad.enable_sp = true;
+    reject_dspark(bad);
+    bad             = c;
+    bad.ffn_sp_size = 2;
+    reject_dspark(bad);
+    bad             = c;
+    bad.use_ub_comm = true;
+    reject_dspark(bad);
+    bad               = c;
+    bad.pp_ep_enabled = false;
+    reject_dspark(bad);
+    bad                                   = c;
+    bad.prefill_cp_config.prefill_cp_size = 4;
+    reject_dspark(bad);
     std::cout << checks << " production local-CP policy checks passed\n";
 }

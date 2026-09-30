@@ -13,7 +13,12 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
-from rtp_llm.config.pp_layout import ModuleKind, ModulePlacement, resolve_pp_partition
+from rtp_llm.config.pp_layout import (
+    ModuleKind,
+    ModulePlacement,
+    resolve_pp_partition,
+    stage_layer_range,
+)
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -558,14 +563,20 @@ class ModelFactory:
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(
-                sp_config, model_config, propose_model_config
+                sp_config,
+                model_config,
+                propose_model_config,
+                parallelism_config=engine_config.parallelism_config,
             )
 
         return propose_model_config
 
     @staticmethod
     def _setup_dspark_configs(
-        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+        sp_config,
+        model_config: ModelConfig,
+        propose_model_config: ModelConfig,
+        parallelism_config=None,
     ) -> None:
         """Validate fixed-width DSpARK and wire target aux-state capture.
 
@@ -614,6 +625,31 @@ class ModelFactory:
                 f"dspark_target_layer_ids {invalid_layer_ids} are out of range "
                 f"for target with {model_config.num_layers} layers"
             )
+
+        if parallelism_config is not None and parallelism_config.pp_size > 1:
+            if not (
+                parallelism_config.dsv4_dspark_prefill_compat
+                and parallelism_config.dsv4_dspark_prefill_profile_valid()
+                and parallelism_config.local_cp_enabled()
+            ):
+                raise ValueError(
+                    "DSpARK PP requires the opt-in CEP2PP2 PREFILL commit profile"
+                )
+            # The current checkpoint captures [40, 41, 42], all on the last
+            # target stage. Do not silently consume unwritten shared-buffer
+            # segments for a checkpoint/partition that needs cross-stage aux
+            # transport: that is a different, unsupported feature protocol.
+            last_layers = stage_layer_range(
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                parallelism_config.pp_size - 1,
+                parallelism_config.pp_stage_layer_counts,
+            )
+            if any(layer not in last_layers for layer in target_layer_ids):
+                raise ValueError(
+                    "DSpARK PP prefill requires every captured target layer on "
+                    "the last stage; cross-stage auxiliary features are unsupported"
+                )
 
         markov_rank = int(propose_model_config.dspark_markov_rank)
         if markov_rank <= 0:

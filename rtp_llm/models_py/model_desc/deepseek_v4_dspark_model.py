@@ -89,6 +89,15 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # derivation but consumes the features — only the target captures.
     _captures_aux_hidden = False
 
+    def pp_layer_ids(self) -> list[int]:
+        """The co-located draft is whole, not a slice of the target partition.
+
+        ModelFactory loads it with apply_pp_partition=False on the last stage;
+        cache creation likewise keeps all draft layers. Preserve the physical
+        PP/TP rank configuration for stage-local CP collectives and KV routing.
+        """
+        return list(range(self.layer_num))
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -142,14 +151,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # target model's zigzag prefill; the commit forward goes through the
         # standard CP handleInputs, so its row map is derived per call from
         # the attached context_parallel_info (see map_commit_rows).
-        self._dspark_commit_cp_enabled = False
-        self._dspark_kv_cache_sharded = False
-        _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
-        if _cp_cfg is not None and bool(_cp_cfg.is_enabled()) and self.tp_size > 1:
-            self._dspark_commit_cp_enabled = True
-            self._dspark_kv_cache_sharded = bool(
-                getattr(_cp_cfg, "kv_cache_sharded", False)
-            )
+        self._configure_commit_cp()
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -189,6 +191,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             self._dspark_target_layer_ids,
             self._dspark_markov_rank,
             int(self._v4_args.window_size),
+        )
+
+    def _configure_commit_cp(self) -> None:
+        """Use resolved local CP, not the remote-layout method enum alone."""
+        self._dspark_commit_cp_enabled = self.parallelism_config.local_cp_enabled()
+        self._dspark_kv_cache_sharded = self._dspark_commit_cp_enabled and bool(
+            self.parallelism_config.prefill_cp_config.kv_cache_sharded
         )
 
     # ------------------------------------------------------------------

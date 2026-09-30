@@ -95,6 +95,15 @@ struct ParallelismConfig {
     // The raw method also describes remote KV on DECODE and is not a capability.
     // Set only by resolve_local_cp(), before weight partitioning.
     bool dsv4_prefill_cp_compat = false;
+    // Resolved, default-off DSpARK COMMIT capability for the four-rank CEP proxy.
+    // The draft stays whole on the last PREFILL stage; no PP decode is admitted.
+    bool dsv4_dspark_prefill_compat = false;
+
+    bool dsv4_dspark_prefill_profile_valid() const {
+        return dsv4_prefill_cp_profile_valid() && role_type == RoleType::PREFILL && pp_size == 2 && tp_size == 2
+               && ep_size == 2 && world_size == 4 && !enable_sp && ffn_sp_size == 1 && !use_ub_comm
+               && !ffn_disaggregate_config.enable_ffn_disaggregate;
+    }
 
     bool dsv4_prefill_cp_profile_valid() const {
         const bool cp2pp4 = pp_size == 4 && tp_size == 2 && ep_size == 1 && !pp_ep_enabled && world_size == 8
@@ -113,22 +122,35 @@ struct ParallelismConfig {
                && (prefill_cp_config.is_enabled() || (dsv4_prefill_cp_compat && dsv4_prefill_cp_profile_valid()));
     }
 
-    void resolve_local_cp(const std::string& model_type, bool speculative, bool cuda_graph, bool layer_micro_batch) {
-        dsv4_prefill_cp_compat = false;
+    void resolve_local_cp(const std::string& model_type,
+                          bool               speculative,
+                          bool               cuda_graph,
+                          bool               layer_micro_batch,
+                          bool               dspark_prefill = false) {
+        dsv4_prefill_cp_compat     = false;
+        dsv4_dspark_prefill_compat = false;
+        if (dspark_prefill
+            && (model_type != "deepseek_v4" || !speculative || !dsv4_dspark_prefill_profile_valid() || cuda_graph
+                || layer_micro_batch)) {
+            throw std::invalid_argument("DSpARK PP prefill opt-in requires the exact unsharded CEP2PP2 PREFILL "
+                                        "profile, speculative DSV4 and no graphs or layer micro-batching");
+        }
         if (pp_size > 1 && prefill_cp_config.is_enabled() && role_type != RoleType::PREFILL) {
             throw std::invalid_argument("native PP context parallelism requires PREFILL role");
         }
         if (!prefill_cp_config.is_prefill_enabled() || role_type == RoleType::DECODE || tp_size <= 1) {
             return;
         }
-        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || speculative || cuda_graph
-            || layer_micro_batch || enable_sp || use_ub_comm || ffn_disaggregate_config.enable_ffn_disaggregate) {
+        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || (speculative && !dspark_prefill)
+            || cuda_graph || layer_micro_batch || enable_sp || use_ub_comm
+            || ffn_disaggregate_config.enable_ffn_disaggregate) {
             throw std::invalid_argument("local PREFILL_CP requires a DSV4 PDFUSION CP2PP4 or opted-in "
                                         "CEP4PP2/CEP2PP2 prefill-only profile (PDFUSION, or PREFILL role for "
                                         "the PP+EP shapes), with unsharded cache and no speculative, graph, "
                                         "micro-batch, SP, UB or FFN-disaggregation execution");
         }
-        dsv4_prefill_cp_compat = true;
+        dsv4_prefill_cp_compat     = true;
+        dsv4_dspark_prefill_compat = dspark_prefill;
     }
     int64_t get_attn_tp_size() const {
         return local_cp_enabled() ? 1 : tp_size;

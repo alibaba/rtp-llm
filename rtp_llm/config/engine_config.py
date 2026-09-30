@@ -211,12 +211,22 @@ class EngineConfig:
         parallelism_config.role_type = pd_sep_config.role_type
         # Resolve once before model construction and weight partitioning. Do not
         # infer local execution later from the remote producer's CP method.
+        from rtp_llm.models_py.distributed.ep_stage_context import (
+            resolve_dspark_prefill_opt_in,
+        )
+
+        dspark_prefill = resolve_dspark_prefill_opt_in(
+            py_env_configs.model_args.model_type or "",
+            sp_config.type,
+            sp_config.model_type,
+        )
         parallelism_config.resolve_local_cp(
             py_env_configs.model_args.model_type or "",
             sp_config.type != SpeculativeType.NONE,
             hw_kernel_config.enable_cuda_graph
             or hw_kernel_config.enable_native_cuda_graph,
             device_resource_config.enable_layer_micro_batch != 0,
+            dspark_prefill,
         )
 
         if nccl_comm_config is None:

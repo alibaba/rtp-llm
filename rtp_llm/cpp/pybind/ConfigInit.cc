@@ -1248,7 +1248,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &ParallelismConfig::to_string)
         .def_readonly("dsv4_prefill_cp_compat", &ParallelismConfig::dsv4_prefill_cp_compat)
         .def("local_cp_enabled", &ParallelismConfig::local_cp_enabled)
-        .def("resolve_local_cp", &ParallelismConfig::resolve_local_cp)
+        .def_readonly("dsv4_dspark_prefill_compat", &ParallelismConfig::dsv4_dspark_prefill_compat)
+        .def("dsv4_dspark_prefill_profile_valid", &ParallelismConfig::dsv4_dspark_prefill_profile_valid)
+        .def("resolve_local_cp",
+             &ParallelismConfig::resolve_local_cp,
+             py::arg("model_type"),
+             py::arg("speculative"),
+             py::arg("cuda_graph"),
+             py::arg("layer_micro_batch"),
+             py::arg("dspark_prefill") = false)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
         .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
@@ -1277,11 +1285,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.pp_stage_layer_counts,
                                       self.pp_ep_enabled,
                                       self.pp_ep_backend,
-                                      self.dsv4_prefill_cp_compat);
+                                      self.dsv4_prefill_cp_compat,
+                                      self.dsv4_dspark_prefill_compat);
             },
             [](py::tuple t) {
                 if (t.size() != 17 && t.size() != 18 && t.size() != 19 && t.size() != 20 && t.size() != 21
-                    && t.size() != 22 && t.size() != 23)
+                    && t.size() != 22 && t.size() != 23 && t.size() != 24)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1321,6 +1330,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.dsv4_prefill_cp_compat = t[22].cast<bool>();
                         if (c.dsv4_prefill_cp_compat && !c.dsv4_prefill_cp_profile_valid()) {
                             throw std::invalid_argument("invalid DSV4 local CP compatibility profile");
+                        }
+                    }
+                    if (t.size() >= 24) {
+                        c.dsv4_dspark_prefill_compat = t[23].cast<bool>();
+                        if (c.dsv4_dspark_prefill_compat
+                            && (!c.dsv4_prefill_cp_compat || !c.dsv4_dspark_prefill_profile_valid())) {
+                            throw std::invalid_argument("invalid DSV4 DSpARK PP prefill compatibility profile");
                         }
                     }
                 } catch (const std::exception& e) {

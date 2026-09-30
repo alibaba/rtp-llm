@@ -978,6 +978,11 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             W.v4_dspark_main_norm,
             W.v4_dspark_main_proj_w,
         }
+        if getattr(self, "pp_size", 1) > 1:
+            # Commit-only PP draft sits with the target lm_head, not embedding.
+            # Keep the former as a zero-copy alias for dynamic-loader metadata;
+            # no embedding is consumed or available to alias on this stage.
+            global_names.discard(W.embedding)
         original_layer_count = len(info.layer_weights)
         info.layer_weights = [
             (
@@ -1079,6 +1084,13 @@ class DeepSeekV4DSpark(DeepSeekV4):
                 "DeepSeek-V4 DSpark cannot alias semantically incompatible "
                 f"target weights: {details}"
             )
+        if (
+            _is_prefill_role(target_model.parallelism_config.role_type)
+            and target_model.parallelism_config.pp_size > 1
+        ):
+            # Only lm_head is retained for dynamic-loader bookkeeping. The
+            # last PP stage owns no embedding and COMMIT never consumes it.
+            return (W.lm_head,)
         return (W.embedding, W.lm_head)
 
     @classmethod
