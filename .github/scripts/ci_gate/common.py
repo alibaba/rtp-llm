@@ -28,6 +28,14 @@ def log(message):
     print(message, flush=True)
 
 
+def _lower_headers(headers):
+    # type: (Any) -> Dict[str, str]
+    """Normalize response header names for direct dict lookup."""
+    if not headers:
+        return {}
+    return dict((str(key).lower(), str(value)) for key, value in headers.items())
+
+
 def http_json(
     url,        # type: str
     headers=None,   # type: Optional[Dict[str, str]]
@@ -35,7 +43,13 @@ def http_json(
     context="",     # type: str
     method=None,    # type: Optional[str]
 ):
-    # type: (...) -> Tuple[int, Any, str]
+    # type: (...) -> Tuple[int, Any, str, Dict[str, str]]
+    """Returns (status, parsed_body, raw_body, response_headers).
+
+    Header names are lowercased before returning. They are case-insensitive on
+    the wire, so handing back the server's casing in a plain dict would turn
+    every rate-limit lookup into a silent miss.
+    """
     data = None
     request_headers = headers or {}
     if payload is not None:
@@ -49,9 +63,11 @@ def http_json(
         with urllib.request.urlopen(request, timeout=60) as response:
             body = response.read().decode("utf-8")
             status = response.getcode()
+            response_headers = _lower_headers(response.headers)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         status = exc.code
+        response_headers = _lower_headers(exc.headers)
     except urllib.error.URLError as exc:
         raise GateError("::error::Network error during %s: %s" % (context, exc), 2)
 
@@ -62,7 +78,7 @@ def http_json(
             parsed = json.loads(body)
         except json.JSONDecodeError:
             parsed = body
-    return status, parsed, body
+    return status, parsed, body, response_headers
 
 
 def short_sha(sha):
