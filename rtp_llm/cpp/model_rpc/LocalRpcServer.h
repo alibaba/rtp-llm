@@ -8,11 +8,14 @@
 #include <mutex>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/sleep/AdmissionGate.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
@@ -30,7 +33,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
-class LocalRpcServer {
+class LocalRpcServer: public std::enable_shared_from_this<LocalRpcServer> {
 public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
@@ -62,6 +65,13 @@ public:
     grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status SleepServing(grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response);
+    grpc::Status
+    QuiesceSleep(grpc::ServerContext* context, const SleepQuiesceRequestPB* request, SleepQuiesceResponsePB* response);
+    grpc::Status WakeUpServing(grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response);
+    grpc::Status IsSleeping(grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response);
+    grpc::Status GetSleepStatus(grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response);
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
@@ -97,6 +107,7 @@ public:
     }
 
     virtual size_t onflightRequestNum();
+    virtual size_t activeCacheTransferCount();
 
     void stop() {
         (void)engine_->stop();
@@ -115,6 +126,22 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    grpc::Status checkAdmission() const {
+        return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
+    }
+    virtual AdmissionAcquireResult acquireAdmission() const {
+        return admission_gate_ ? admission_gate_->acquire() : AdmissionAcquireResult{};
+    }
+    AdmissionAcquireResult acquireCacheTransferAdmission() const {
+        return admission_gate_ ? admission_gate_->acquireCacheTransfer() : AdmissionAcquireResult{};
+    }
+    void                  installSleepHooks();
+    void                  logSleepMemorySnapshot(const std::string& phase, int64_t epoch) const;
+    static bool           validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller);
+    std::shared_ptr<void> registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream);
+    void                  unregisterAbortableStream(int64_t request_id);
+    size_t                cancelAbortableStreams();
+
     virtual bool isCancelled(grpc::ServerContext* context) const {
         return context && context->IsCancelled();
     }
@@ -153,27 +180,38 @@ protected:
     virtual TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id);
 
 protected:
-    std::shared_ptr<EngineBase>           engine_;
-    std::shared_ptr<MultimodalProcessor>  mm_processor_;
-    EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr          metrics_reporter_;
-    std::atomic<size_t>                   onflight_requests_{0};
-    std::shared_ptr<RpcServerRuntimeMeta> meta_;
-    py::object                            weight_manager_;
-    std::shared_ptr<BroadcastManager>     tp_broadcaster_;
-    bool                                  torch_allocator_dump_enabled_{false};
-    std::string                           torch_allocator_dump_auth_token_;
-    double                                torch_allocator_dump_cooldown_seconds_{60.0};
-    std::mutex                            torch_allocator_dump_mutex_;
-    bool                                  torch_allocator_dump_in_progress_{false};
-    bool                                  torch_allocator_dump_has_completed_{false};
-    bool                                  torch_allocator_dump_active_started_by_public_{false};
-    bool                                  torch_allocator_dump_active_internal_started_{false};
-    std::string                           torch_allocator_dump_active_id_;
-    std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
-    std::unordered_set<std::string>       torch_allocator_dump_ids_;
-    std::deque<std::string>               torch_allocator_dump_id_order_;
+    std::shared_ptr<EngineBase>    engine_;
+    std::shared_ptr<AdmissionGate> admission_gate_;
+    std::shared_ptr<VmmBackend>    vmm_backend_;
+    struct AbortableStreamRegistry {
+        std::mutex                                                 mutex;
+        std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> streams;
+        void                                                       erase(int64_t request_id) {
+            std::lock_guard<std::mutex> lock(mutex);
+            streams.erase(request_id);
+        }
+    };
+    std::shared_ptr<AbortableStreamRegistry> abortable_streams_ = std::make_shared<AbortableStreamRegistry>();
+    std::shared_ptr<MultimodalProcessor>     mm_processor_;
+    EngineInitParams                         maga_init_params_;
+    ProposeModelEngineInitParams*            propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    std::atomic<size_t>                      onflight_requests_{0};
+    std::shared_ptr<RpcServerRuntimeMeta>    meta_;
+    py::object                               weight_manager_;
+    std::shared_ptr<BroadcastManager>        tp_broadcaster_;
+    bool                                     torch_allocator_dump_enabled_{false};
+    std::string                              torch_allocator_dump_auth_token_;
+    double                                   torch_allocator_dump_cooldown_seconds_{60.0};
+    std::mutex                               torch_allocator_dump_mutex_;
+    bool                                     torch_allocator_dump_in_progress_{false};
+    bool                                     torch_allocator_dump_has_completed_{false};
+    bool                                     torch_allocator_dump_active_started_by_public_{false};
+    bool                                     torch_allocator_dump_active_internal_started_{false};
+    std::string                              torch_allocator_dump_active_id_;
+    std::chrono::steady_clock::time_point    torch_allocator_dump_last_completed_at_;
+    std::unordered_set<std::string>          torch_allocator_dump_ids_;
+    std::deque<std::string>                  torch_allocator_dump_id_order_;
 };
 
 }  // namespace rtp_llm

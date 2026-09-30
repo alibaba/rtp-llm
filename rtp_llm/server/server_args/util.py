@@ -3,6 +3,18 @@ import argparse
 from rtp_llm.ops import CPRotateMethod
 
 
+def nonnegative_int(value):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "A nonnegative integer is required."
+        ) from error
+    if result < 0:
+        raise argparse.ArgumentTypeError("A nonnegative integer is required.")
+    return result
+
+
 def str2bool(v):
     if v is None:
         return None

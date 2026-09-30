@@ -3,6 +3,7 @@ import os
 import sys
 import types
 import unittest
+import weakref
 from typing import Optional
 
 import torch
@@ -252,6 +253,35 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_native_wrapper_releases_python_model_reference(self) -> None:
+        for cycle in range(2):
+            with self.subTest(cycle=cycle):
+                model = CacheStoreForwardModel()
+                reference = weakref.ref(model)
+                run_scenario(model, "multi_tag")
+                self.assertGreater(model.forward_calls, 0)
+                del model
+                self.assertIsNone(
+                    reference(), "native wrapper leaked its owning Python reference"
+                )
+
+    def test_retained_forward_input_cannot_keep_cache_service_alive(self) -> None:
+        class RetainingModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                # Python models / diagnostics can keep the last forward input.
+                # Its writer must become inert when the native executor stops.
+                self.last_inputs = inputs
+                return super()._forward_one(inputs)
+
+        model = RetainingModel()
+        result = run_scenario(model, "multi_tag")
+        self.assertTrue(result["cache_manager_released"])
+        self.assertIsNotNone(model.last_inputs)
+        inputs = next(iter(model.last_inputs.attention_inputs.values()))
+        layer_cache = model.kv_cache.get_layer_cache_groups(0)[0]
+        with self.assertRaisesRegex(RuntimeError, "CacheStoreAsyncWriter is closed"):
+            inputs.cache_store_writer.write(inputs.cache_store_inputs, layer_cache)
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -406,6 +436,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(model.forward_calls, 1)
         self.assertEqual(result["records"], [])
+        reference = weakref.ref(model)
+        del model
+        self.assertIsNone(reference())
 
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
@@ -596,9 +629,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         ]
         single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
         for scenario, on_cuda, two_dimensional, tags, tables in (
-            ("micro_batch_split_pinned", False, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_cuda", True, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_single_group", False, False, ["default"], single_group_tables),
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
             ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
         ):
             with self.subTest(scenario=scenario):
@@ -624,7 +675,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         self.assertEqual(tensor.device, source.device)
                         self.assertEqual(tensor.is_pinned(), not on_cuda)
                         self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(tensor.cpu(), expected.narrow(batch_axis, start, count))
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
                 self.assertEqual(
                     [batch["input_lengths"].tolist() for batch in result["batches"]],
                     [[2, 4], [2]],

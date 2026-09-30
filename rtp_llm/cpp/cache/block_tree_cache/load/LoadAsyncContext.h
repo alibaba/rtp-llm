@@ -147,6 +147,7 @@ public:
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
     void                              shutdown();
+    bool                              shutdownUntil(std::chrono::steady_clock::time_point deadline);
 
 private:
     using PendingContextMap = std::unordered_map<uint64_t, std::weak_ptr<LoadAsyncContext>>;

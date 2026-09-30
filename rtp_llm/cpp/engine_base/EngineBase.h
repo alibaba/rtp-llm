@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+#include <optional>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -13,8 +16,11 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
 
 namespace rtp_llm {
+
+class CpuQuiesceCoordinator;
 
 enum preRunMode {
     prefill_warm_up     = 0,
@@ -42,12 +48,47 @@ public:
 
     void initRuntime(const EngineInitParams& params);
 
-    void pause() {
-        pause_ = true;
+    // Execution controls are rank-local. Admission/drain and all-rank
+    // acknowledgement remain the lifecycle coordinator's responsibility.
+    virtual absl::Status start() {
+        return absl::UnimplementedError("first execution start is not supported");
+    }
+    virtual absl::Status quiesce(int64_t timeout_ms, std::optional<uint64_t> target_round = std::nullopt) {
+        (void)timeout_ms;
+        (void)target_round;
+        return absl::UnimplementedError("safe execution quiesce is not supported");
+    }
+    absl::Status         coordinatedQuiesce(const std::string& token, int64_t timeout_ms);
+    void                 setQuiesceCoordinator(std::shared_ptr<CpuQuiesceCoordinator> coordinator);
+    virtual absl::Status resume() {
+        return absl::UnimplementedError("safe execution resume is not supported");
+    }
+    virtual absl::Status terminate() {
+        return absl::UnimplementedError("safe execution termination is not supported");
+    }
+    virtual bool executionQuiesceSupported() const {
+        return false;
+    }
+    virtual void requestTermination();
+    bool         terminationRequested() const {
+        return termination_requested_.load(std::memory_order_acquire);
     }
 
-    void restart() {
-        pause_ = false;
+    virtual void pause() {
+        pause_.store(true, std::memory_order_release);
+    }
+
+    virtual void restart() {
+        pause_.store(false, std::memory_order_release);
+    }
+
+    // Keep idle peers polling until every rank reaches the frozen boundary.
+    virtual void armCollectiveSleepQuiesce() {}
+    virtual bool requiresCoordinatedSleepQuiesce() const {
+        return false;
+    }
+    virtual uint64_t freezeSleepRounds() {
+        return 0;
     }
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
@@ -94,15 +135,28 @@ public:
         return false;
     }
     virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
+    virtual bool isTimelineProfilingEnabled() const {
+        return false;
+    }
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 
+    SleepLifecycleController& sleepController() {
+        return sleep_controller_;
+    }
+    const SleepLifecycleController& sleepController() const {
+        return sleep_controller_;
+    }
+
 protected:
-    ResourceContext                resource_context_;
-    MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
-    int32_t                        kv_cache_group_num_ = 1;
-    std::unique_ptr<SchedulerBase> scheduler_          = nullptr;
-    bool                           pause_              = false;
+    std::shared_ptr<CpuQuiesceCoordinator> quiesce_coordinator_;
+    std::atomic<bool>                      termination_requested_{false};
+    SleepLifecycleController               sleep_controller_;
+    ResourceContext                        resource_context_;
+    MlaOpsType                             mla_ops_type_       = MlaOpsType::AUTO;
+    int32_t                                kv_cache_group_num_ = 1;
+    std::unique_ptr<SchedulerBase>         scheduler_          = nullptr;
+    std::atomic<bool>                      pause_{false};
 };
 
 }  // namespace rtp_llm

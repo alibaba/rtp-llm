@@ -4,7 +4,7 @@ import logging
 from typing import Any, List, Optional, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
@@ -61,6 +61,7 @@ class LoadConfig(BaseModel):
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
     moe_pure_tp_preshard: bool = False
+    fastsafetensors_reserve_mb: int = Field(default=2048, ge=0, strict=True)
 
     @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod

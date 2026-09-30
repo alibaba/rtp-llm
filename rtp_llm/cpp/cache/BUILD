@@ -2,6 +2,22 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "kv_cache_physical_memory_controller",
+    srcs = ["KVCachePhysicalMemoryController.cc"],
+    hdrs = ["KVCachePhysicalMemoryController.h"],
+    copts = copts(),
+    linkopts = ["-ldl"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"] + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_library(
     name = "cache_async_context",
     srcs = ["AsyncContext.cc"],
     hdrs = [
