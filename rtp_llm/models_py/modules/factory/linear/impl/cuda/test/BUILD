@@ -9,6 +9,12 @@ py_test(
 )
 
 py_test(
+    name = "nccl_fp8_rs_projection_overlap_test",
+    srcs = ["nccl_fp8_rs_projection_overlap_test.py"],
+    deps = ["//rtp_llm/models_py:modules"],
+)
+
+py_test(
     name = "fp8_deepgemm_linear_out_test",
     srcs = ["fp8_deepgemm_linear_out_test.py"],
     deps = [

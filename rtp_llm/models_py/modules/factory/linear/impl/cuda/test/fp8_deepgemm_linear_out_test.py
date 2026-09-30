@@ -30,6 +30,31 @@ def _make_linear_for_forward(bias: torch.Tensor | None = None):
 
 
 class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
+    def test_quantized_column_projection_slices_e8m0_weights_and_bias(self):
+        linear = CudaFp8DeepGEMMLinear.__new__(CudaFp8DeepGEMMLinear)
+        torch.nn.Module.__init__(linear)
+        linear.K = 4
+        linear.N = 256
+        linear.weight = torch.empty((256, 4), dtype=torch.float8_e4m3fn)
+        linear.weight_scales = torch.empty((256, 1), dtype=torch.int32)
+        linear.bias = torch.arange(256, dtype=torch.bfloat16)
+        linear.scale_ue8m0 = True
+        values = torch.zeros((4, 4), dtype=torch.float8_e4m3fn)
+        scales = torch.empty((4, 1), dtype=torch.int32)
+        calls = []
+
+        def fake_fp8_gemm_nt(input_pair, weight_pair, output, **kwargs):
+            calls.append((input_pair, weight_pair, output, kwargs))
+            output.fill_(1)
+
+        with patch.object(deepgemm_linear_mod, "fp8_gemm_nt", side_effect=fake_fp8_gemm_nt):
+            output = linear.forward_quantized_columns(values, scales, 128, 256)
+
+        self.assertEqual(tuple(output.shape), (4, 128))
+        self.assertEqual(tuple(calls[0][1][0].shape), (128, 4))
+        self.assertEqual(tuple(calls[0][1][1].shape), (128, 1))
+        torch.testing.assert_close(output[0], 1 + linear.bias[128:256])
+
     def test_forward_passes_out_buffer_to_gemm_and_returns_it(self):
         bias = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
         linear = _make_linear_for_forward(bias=bias)

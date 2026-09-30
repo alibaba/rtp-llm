@@ -87,6 +87,12 @@ class KimiK3KDA(nn.Module):
                 raise ValueError("BF16 NCCL/FP8 local overlap requires a grouped FP8 input projection")
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
+        self._rs_column_overlap = (
+            os.environ.get("RTP_LLM_NCCL_FP8_RS_COLUMN_OVERLAP", "0") == "1"
+        )
+        self._rs_column_overlap_min_rows = int(
+            os.environ.get("RTP_LLM_NCCL_FP8_RS_COLUMN_OVERLAP_MIN_ROWS", "4096")
+        )
         self._fp8_output_norm = False
         if weights[W.linear_attn_out_w].dtype == torch.float8_e4m3fn:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -96,6 +102,8 @@ class KimiK3KDA(nn.Module):
             if not isinstance(self.output, CudaFp8GEMMLinear) or not self.output.scale_ue8m0:
                 raise ValueError("FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales")
             self._fp8_output_norm = True
+        if self._rs_column_overlap and not self._fp8_output_norm:
+            raise ValueError("BF16 NCCL/FP8 column overlap requires an E4M3 output")
         forget_weight = weights[W.linear_attn_f_b_w]
         self.fa_width = forget_weight.shape[
             1 if forget_weight.dtype == torch.float8_e4m3fn else 0
@@ -196,6 +204,23 @@ class KimiK3KDA(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
                 )
+        if (
+            self._rs_column_overlap
+            and self.tp_size > 1
+            and values.shape[0] >= self._rs_column_overlap_min_rows
+            and values.is_cuda
+            and attention_inputs.is_prefill
+            and not metadata.is_target_verify
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.nccl_fp8_projection_overlap import (
+                reduce_scatter_project_columns_overlap,
+            )
+
+            with profile_scope("RTP::attention.kda.output_proj_rs_overlap"):
+                return reduce_scatter_project_columns_overlap(
+                    values, scales, self.output, _get_group(Group.TP)
+                )
         with profile_scope("RTP::attention.kda.output_proj"):
             output = (
                 self.output.forward_quantized(values, scales)
@@ -232,6 +257,12 @@ class KimiK3MLA(nn.Module):
         self.input = linear(weights, W.mla_fusedqkrope_w, hardware)
         self.q_b = linear(weights, W.mla_q_b_w, hardware)
         self.output = linear(weights, W.attn_o_w, hardware)
+        self._rs_column_overlap = (
+            os.environ.get("RTP_LLM_NCCL_FP8_RS_COLUMN_OVERLAP", "0") == "1"
+        )
+        self._rs_column_overlap_min_rows = int(
+            os.environ.get("RTP_LLM_NCCL_FP8_RS_COLUMN_OVERLAP_MIN_ROWS", "4096")
+        )
         self.q_norm = RMSNorm(weights[W.mla_q_a_ln_gamma], config.layernorm_eps)
         self.kv_norm = RMSNorm(weights[W.mla_kv_a_ln_gamma], config.layernorm_eps)
         self._fp8_output_gate = False
@@ -244,6 +275,8 @@ class KimiK3MLA(nn.Module):
                 isinstance(self.output, CudaFp8GEMMLinear)
                 and self.output.scale_ue8m0
             )
+        if self._rs_column_overlap and not self._fp8_output_gate:
+            raise ValueError("BF16 NCCL/FP8 column overlap requires an E4M3 output")
         self._gate_stream = None
         weight = weights[W.mla_fusedqkrope_w]
         if (
@@ -327,6 +360,23 @@ class KimiK3MLA(nn.Module):
                     gate_sigmoid_mul(output, gate)
                     if output.is_cuda
                     else output * gate.sigmoid()
+                )
+        if (
+            self._rs_column_overlap
+            and self.tp_size > 1
+            and values.shape[0] >= self._rs_column_overlap_min_rows
+            and values.is_cuda
+            and attention_inputs.is_prefill
+            and not metadata.is_target_verify
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.nccl_fp8_projection_overlap import (
+                reduce_scatter_project_columns_overlap,
+            )
+
+            with profile_scope("RTP::attention.mla.output_proj_rs_overlap"):
+                return reduce_scatter_project_columns_overlap(
+                    values, scales, self.output, _get_group(Group.TP)
                 )
         with profile_scope("RTP::attention.mla.output_proj"):
             output = (

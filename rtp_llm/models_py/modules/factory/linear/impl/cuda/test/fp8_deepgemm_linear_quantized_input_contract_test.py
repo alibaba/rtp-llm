@@ -27,6 +27,8 @@ def _install_stubs(calls):
         output.fill_(3.0)
 
     deepgemm_wrapper.fp8_gemm_nt = fp8_gemm_nt
+    deepgemm_wrapper.fp8_gemm_nt_skip_head_mid = lambda *a, **k: None
+    deepgemm_wrapper.has_fp8_gemm_nt_skip_head_mid = lambda: False
     deepgemm_wrapper.has_deep_gemm = lambda: True
     deepgemm_wrapper.is_deep_gemm_e8m0_used = lambda: True
 
@@ -137,6 +139,22 @@ class QuantizedInputContractTest(unittest.TestCase):
 
         self.assertIs(got, out)
         self.assertTrue(torch.all(out == torch.tensor(3.0, dtype=out.dtype)))
+
+    def test_forward_quantized_columns_slices_e8m0_rows(self):
+        calls = []
+        mod = _load_module(calls)
+        layer = self._make_linear(mod)
+        layer.N = 256
+        layer.weight = torch.empty((256, 4), dtype=torch.float8_e4m3fn)
+        layer.weight_scales = torch.empty((256, 1), dtype=torch.int32)
+        values = torch.empty((2, 4), dtype=torch.float8_e4m3fn)
+        scales = torch.empty((2, 1), dtype=torch.int32)
+
+        output = layer.forward_quantized_columns(values, scales, 128, 256)
+
+        self.assertEqual(tuple(output.shape), (2, 128))
+        self.assertEqual(tuple(calls[-1][2][0].shape), (128, 4))
+        self.assertEqual(tuple(calls[-1][2][1].shape), (128, 1))
 
 
 if __name__ == "__main__":

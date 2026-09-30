@@ -328,6 +328,36 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             output.add_(self.bias.to(output.dtype))
         return output
 
+    def forward_quantized_columns(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        start: int,
+        end: int,
+    ) -> torch.Tensor:
+        """Project an aligned output-column stripe from an already quantized input."""
+        if input_fp8.dtype != torch.float8_e4m3fn:
+            raise ValueError("column projection requires E4M3 input")
+        rows, _ = self._validate_input(input_fp8)
+        if not (0 <= start < end <= self.N and start % 128 == 0 and end % 128 == 0):
+            raise ValueError("FP8 output column stripe must align to 128 columns")
+        output = input_fp8.new_empty((rows, end - start), dtype=torch.bfloat16)
+        scale_rows = (
+            self.weight_scales[start:end]
+            if self.scale_ue8m0
+            else self.weight_scales[start // 128 : end // 128]
+        )
+        fp8_gemm_nt(
+            (input_fp8, input_scales),
+            (self.weight[start:end], scale_rows),
+            output,
+            c=None,
+            disable_ue8m0_cast=not self.scale_ue8m0,
+        )
+        if self.bias is not None:
+            output.add_(self.bias[start:end].to(output.dtype))
+        return output
+
     def forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:

@@ -165,3 +165,15 @@ class CudaFp8GEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Consume grouped E4M3 values and their explicit scales without requantizing."""
         return self._deepgemm_linear.forward_quantized(values, scales, out=out)
+
+    def forward_quantized_columns(
+        self,
+        values: torch.Tensor,
+        scales: torch.Tensor,
+        start: int,
+        end: int,
+    ) -> torch.Tensor:
+        """Use DeepGEMM for an aligned output-column stripe."""
+        return self._deepgemm_linear.forward_quantized_columns(
+            values, scales, start, end
+        )
