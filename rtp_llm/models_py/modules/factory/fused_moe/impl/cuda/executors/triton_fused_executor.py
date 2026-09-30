@@ -70,6 +70,15 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             and self.w1.dtype == torch.bfloat16
             and torch.version.hip is None
         )
+        self._qwen4_decode_tiles = (
+            os.environ.get("RTP_LLM_QWEN4_SM120_MOE_TILES", "0") == "1"
+            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
+            and (self.E, self.N, self.K, self.top_k) == (512, 160, 2560, 10)
+            and self.w1.dtype == torch.bfloat16
+            and self.w1.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(self.w1.device) == (12, 0)
+        )
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -106,6 +115,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Config selection for both GEMMs
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
+        if self._qwen4_decode_tiles:
+            from rtp_llm.models_py.modules.qwen4_exp.moe_align_triton import (
+                sm120_decode_gemm_configs,
+            )
+
+            config1, config2 = sm120_decode_gemm_configs(M, config1, config2)
 
         # Flat routing tensors for the kernel
         flat_topk_weights = topk_weights.view(-1)  # [M * top_k]
