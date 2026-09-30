@@ -347,6 +347,17 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             if self.scale_ue8m0
             else self.weight_scales[start // 128 : end // 128]
         )
+        if self.scale_ue8m0:
+            # UE8M0 scales have N as their fastest dimension. A row slice
+            # retains the original N pitch, but DeepGEMM requires the TMA
+            # pitch to match this stripe's N. Materialize each stripe once.
+            cache = getattr(self, "_column_scale_cache", None)
+            if cache is None:
+                cache = self._column_scale_cache = {}
+            key = (self.weight_scales.data_ptr(), start, end)
+            if key not in cache:
+                cache[key] = scale_rows.T.contiguous().T
+            scale_rows = cache[key]
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight[start:end], scale_rows),

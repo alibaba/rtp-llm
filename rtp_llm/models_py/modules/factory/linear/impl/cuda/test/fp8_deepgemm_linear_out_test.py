@@ -92,6 +92,24 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         self.assertTrue(gemm_calls[0][4]["disable_ue8m0_cast"])
         self.assertTrue(torch.equal(out, gemm_output + bias))
 
+    def test_column_scale_preserves_tma_aligned_stripe_stride(self):
+        linear = CudaFp8DeepGEMMLinear.__new__(CudaFp8DeepGEMMLinear)
+        torch.nn.Module.__init__(linear)
+        linear.K = 1024
+        linear.N = 512
+        linear.weight = torch.empty((512, 1024), dtype=torch.float8_e4m3fn)
+        # Requantized UE8M0 scale has packed K as its slow dimension.
+        linear.weight_scales = torch.empty((2, 512), dtype=torch.int32).T
+        linear.bias = None
+        linear.scale_ue8m0 = True
+        values = torch.zeros((4, 1024), dtype=torch.float8_e4m3fn)
+        scales = torch.empty((4, 2), dtype=torch.int32)
+        with patch.object(deepgemm_linear_mod, "fp8_gemm_nt") as gemm:
+            linear.forward_quantized_columns(values, scales, 128, 384)
+        scale = gemm.call_args.args[1][1]
+        self.assertEqual(scale.shape, (256, 2))
+        self.assertEqual(scale.stride(), (1, 256))
+
     def test_forward_rejects_invalid_out_buffer(self):
         linear = _make_linear_for_forward()
         input_tensor = torch.ones(2, linear.K, dtype=torch.bfloat16)
