@@ -24,6 +24,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.modules import Embedding, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear, profile_scope
+from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE, situ
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
@@ -42,17 +43,34 @@ class KimiK3DenseMLP(nn.Module):
 
     def __init__(self, config, parallelism, weights, hardware):
         super().__init__()
-        self.gate = linear(weights, W.ffn_w1, hardware)
-        self.up = linear(weights, W.ffn_w3, hardware)
+        self.gate_up = None
+        if weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16:
+            gate_weight, up_weight = weights[W.ffn_w1], weights[W.ffn_w3]
+            if gate_weight.shape != up_weight.shape:
+                raise ValueError("Dense gate and up projections must have the same shape")
+            width = gate_weight.shape[1]
+            merged = torch.cat((gate_weight.T, up_weight.T), dim=0)
+            self.gate_up = KimiK3Bf16Linear(merged.T)
+            # ModelWeights retains these logical keys. Keep them as views into
+            # the merged GEMM weight so the original storages can be released.
+            weights[W.ffn_w1] = merged.narrow(0, 0, width).T
+            weights[W.ffn_w3] = merged.narrow(0, width, width).T
+        else:
+            self.gate = linear(weights, W.ffn_w1, hardware)
+            self.up = linear(weights, W.ffn_w3, hardware)
         self.down = linear(weights, W.ffn_w2, hardware)
         self.beta = config.k3_runtime_config.activation_situ_beta
         self.linear_beta = config.k3_runtime_config.activation_situ_linear_beta
 
     def forward(self, hidden, valid_mask=None):
-        with profile_scope("RTP::mlp.dense.gate_proj"):
-            gate = self.gate(hidden)
-        with profile_scope("RTP::mlp.dense.up_proj"):
-            up = self.up(hidden)
+        if self.gate_up is not None:
+            with profile_scope("RTP::mlp.dense.gate_up_proj"):
+                gate, up = self.gate_up(hidden).chunk(2, dim=-1)
+        else:
+            with profile_scope("RTP::mlp.dense.gate_proj"):
+                gate = self.gate(hidden)
+            with profile_scope("RTP::mlp.dense.up_proj"):
+                up = self.up(hidden)
         with profile_scope("RTP::mlp.dense.activation"):
             activated = situ(gate, up, self.beta, self.linear_beta, inplace=True)
         with profile_scope("RTP::mlp.dense.down_proj"):
