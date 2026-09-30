@@ -174,6 +174,9 @@ UniConfig / Nacos 的 v1 部分更新示例：
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。
+  理论命中监控使用 `app.cache.theory.hit.count`、`app.cache.theory.total.count` 与
+  `app.cache.theory.hit.ratio`，以 Gauge 上报当前 Master 已记录请求的累计命中 Tokens、
+  累计输入 Tokens 与两者比值。历史记录过期不扣减累计值，Master 重启后重新累计。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
 - `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中

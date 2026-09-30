@@ -28,8 +28,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKEN
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
@@ -61,11 +59,9 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_register_recent_cache_key_metrics_as_visible_series() {
+    void should_register_theory_cache_hit_metrics_as_visible_series() {
         reporter.init();
 
-        verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.COUNTER);
-        verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.COUNTER);
         verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
@@ -97,11 +93,12 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_zero_hit_token_request_as_visible_data_point() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 300L);
+        reporter.reportTheoryCacheHitMetrics(new CacheHitTheoryStats().record(0L, 300L));
 
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
-        verify(monitor).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 300L);
+        FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
+        verify(monitor).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
+        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, tags, 300L);
+        verify(monitor).report(CACHE_THEORY_HIT_RATIO, tags, 0.0D);
     }
 
     @Test
@@ -161,11 +158,11 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_skip_empty_token_request() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 0L);
+        reporter.reportTheoryCacheHitMetrics(new CacheHitTheoryStats().record(0L, 0L));
 
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
-        verify(monitor, never()).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor, never()).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 0L);
+        FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
+        verify(monitor, never()).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
+        verify(monitor, never()).report(CACHE_THEORY_TOTAL_COUNT, tags, 0L);
     }
 
     @Test
