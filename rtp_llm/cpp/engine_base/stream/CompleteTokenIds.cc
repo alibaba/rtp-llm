@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace rtp_llm {
@@ -108,9 +109,10 @@ std::vector<int> CompleteTokenIds::getLatestTokens(size_t token_num) {
     return std::vector<int>(ptr, ptr + token_num);
 }
 
-bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
-    int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+bool CompleteTokenIds::matchEosToken(int batch_id, int token_id, int min_seq_length) {
+    int*         token_ids = data(batch_id);
+    const size_t begin     = std::max({start_check_seq_length_, min_seq_length, 1});
+    for (size_t i = begin; i <= seq_length_; ++i) {
         if (token_id == token_ids[i - 1]) {
             seq_length_ = i;
             return true;
@@ -119,9 +121,11 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
     return false;
 }
 
-bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
-    int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words, int min_seq_length) {
+    int*         token_ids = data(batch_id);
+    const size_t begin =
+        std::max(static_cast<size_t>(std::max({start_check_seq_length_, min_seq_length, 1})), stop_words.size());
+    for (size_t i = begin; i <= seq_length_; ++i) {
         bool   match_one   = true;
         size_t begin_index = i - stop_words.size();
         for (auto& token : stop_words) {

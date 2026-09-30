@@ -970,7 +970,10 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    // An accepted speculative batch may reach the length cap after an earlier
+    // EOS/stop boundary. Scan and trim first; short-circuiting on the cap would
+    // publish trailing tokens and make usage/finish reason depend on batching.
+    return needFinishBySPTokens() || seqLength() >= maxTokenNum();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -999,7 +1002,8 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(
+            batch_id, special_tokens_.eos_token_id, inputLength() + generate_input_->generate_config->min_new_tokens)) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
 }
@@ -1026,7 +1030,8 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (complete_token_ids_->matchStopWordsList(
+                batch_id, stop_words, inputLength() + generate_input_->generate_config->min_new_tokens)) {
             match = true;
             break;
         }
