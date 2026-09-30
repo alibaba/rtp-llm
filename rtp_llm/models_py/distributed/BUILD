@@ -7,6 +7,7 @@ py_library(
     srcs = [
         "collective_torch.py",
         "flashinfer_all_reduce.py",
+        "lifecycle_group.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],

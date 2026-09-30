@@ -17,19 +17,21 @@ namespace rtp_llm {
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
-                                        bool                     enable_disk_cache                         = false,
-                                        DeviceHostCopyOptions    device_host_options                       = {},
-                                        size_t                   device_disk_staging_block_count           = 128,
-                                        size_t                   max_descriptors_per_batch                  = 8,
-                                        size_t                   transfer_worker_count                     = 4,
-                                        size_t                   transfer_queue_max_size                   = 10000,
-                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr);
+                                        bool                     enable_disk_cache                      = false,
+                                        DeviceHostCopyOptions    device_host_options                    = {},
+                                        size_t                   device_disk_staging_block_count        = 128,
+                                        size_t                   max_descriptors_per_batch              = 8,
+                                        size_t                   transfer_worker_count                  = 4,
+                                        size_t                   transfer_queue_max_size                = 10000,
+                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
     virtual std::shared_ptr<AsyncContext> execute(TransferTask task);
     void                                  cancelPendingStagingTransfers();
     BlockTreeQueueSizes                   queueSizes() const;
+    bool                                  waitForIdleUntil(std::chrono::steady_clock::time_point deadline);
+    size_t                                pendingTaskCount() const;
 
     size_t transferWorkerCount() const {
         return transfer_worker_count_;

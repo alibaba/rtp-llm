@@ -1,13 +1,21 @@
 package org.flexlb.sync.runner;
 
+import com.google.protobuf.UnknownFieldSet;
+import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
@@ -15,9 +23,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -26,12 +37,156 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GrpcWorkerStatusRunnerTest {
+
+    @ParameterizedTest
+    @CsvSource({"DECODE", "PREFILL", "PDFUSION"})
+    void closedAdmissionPreservesGenerationAndInflightUntilWake(RoleType role)
+            throws Exception {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(
+                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        PlacementAvailability availability = mock(PlacementAvailability.class);
+        EndpointRegistry registry = new EndpointRegistry(config,
+                mock(EndpointEventProjector.class), mock(BatchSchedulerReporter.class),
+                mock(DeliveryStrategy.class), availability);
+        WorkerStatus status = RunnerTestSupport.discovered(
+                role, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerDirectory directory = directory(registry, status);
+        WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
+                registry, role, status.getIpPort(), status);
+        DecodeEndpoint.ReservationHandle decodeReservation = null;
+        CacheAwareService cache = mock(CacheAwareService.class);
+        try {
+            poll(directory, status, role, EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setRole(role.getCode()).setAlive(true).setStatusVersion(2L).build(), cache);
+            try (var pin = registry.capture(role, status.getIpPort())) {
+                assertNotNull(pin, "legacy responses without admission_closed remain routable");
+                if (endpoint instanceof DecodeEndpoint decode) {
+                    decodeReservation = decode.reserveUnqueued(pin, 123L, 0L, 0L, 0);
+                } else if (endpoint instanceof PrefillEndpoint prefill) {
+                    ScheduledRequest item = mock(ScheduledRequest.class);
+                    when(item.requestId()).thenReturn(123L);
+                    try (var reservation = prefill.reserveUnqueuedRoute(pin, item, 1L).reservation();
+                         var commit = prefill.tryBeginRouteCommitAdmission();
+                         var handoff = commit.commit(List.of(item), List.of(reservation))) {
+                        assertNotNull(handoff);
+                    }
+                }
+            }
+            // DRAINING, SLEEPING and WAKING all close admission without changing generation.
+            for (long version = 3L; version <= 5L; version++) {
+                poll(directory, status, role, lifecycleResponse(role, version, true, true), cache);
+                assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
+                assertSame(endpoint, registry.get(role, status.getIpPort()));
+                assertTrue(status.isActiveGeneration());
+                try (var newPlacement = registry.capture(role, status.getIpPort())) {
+                    assertNull(newPlacement, "closed admission must reject new placement");
+                }
+                if (role == RoleType.DECODE) {
+                    assertTrue(registry.decodeRoutingSnapshot().isEmpty());
+                    DecodeEndpoint decode = (DecodeEndpoint) endpoint;
+                    assertTrue(decode.isAcceptedByEngine(decodeReservation));
+                    assertEquals(1, decode.resourceSnapshot().runningCount());
+                    assertFalse(decode.isRetired());
+                } else {
+                    assertTrue(registry.prefillRoutingSnapshot(role).isEmpty());
+                    assertEquals(1, ((PrefillEndpoint) endpoint).getIndividuallyTrackedRequestCount());
+                }
+                try (var continuation = endpoint.tryPinGeneration()) {
+                    assertNotNull(continuation, "already-owned work may finish its handoff");
+                }
+                verifyNoInteractions(cache);
+            }
+            clearInvocations(availability);
+            poll(directory, status, role, lifecycleResponse(role, 6L, true, false), cache);
+            verify(availability).capacityChanged(role, null, status.getIpPort());
+            assertSame(endpoint, registry.get(role, status.getIpPort()));
+            try (var pin = registry.capture(role, status.getIpPort())) {
+                assertNotNull(pin, "wake reopens placement on the same generation");
+            }
+            if (role == RoleType.DECODE) {
+                assertEquals(1, registry.decodeRoutingSnapshot().size());
+            } else {
+                assertEquals(1, registry.prefillRoutingSnapshot(role).size());
+            }
+            // A real death must still retire the generation, even if admission was closed.
+            poll(directory, status, role, lifecycleResponse(role, 7L, false, true), cache);
+            assertNull(registry.get(role, status.getIpPort()));
+            assertFalse(status.isActiveGeneration());
+        } finally {
+            endpoint.close();
+            endpoint.awaitRetirement();
+        }
+    }
+
+    @Test
+    void decodeDispatchAckAfterAdmissionClosesRetainsOwnership() throws Exception {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(
+                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.2", 8080, 8081, "test-site");
+        WorkerDirectory directory = directory(registry, status);
+        DecodeEndpoint endpoint = (DecodeEndpoint) RunnerTestSupport.publishEndpoint(
+                registry, RoleType.DECODE, status.getIpPort(), status);
+        try {
+            DecodeEndpoint.ReservationHandle reservation;
+            try (var pin = registry.capture(RoleType.DECODE, status.getIpPort())) {
+                reservation = endpoint.reserve(pin, 123L, 0L, 0L, 0);
+            }
+            var acquired = endpoint.acquireDispatchPermit(
+                    reservation, new DecodeEndpoint.AdmissionCapacity(0L, 100L));
+            assertNotNull(acquired.permit());
+            poll(directory, status, RoleType.DECODE,
+                    lifecycleResponse(RoleType.DECODE, 2L, true, true).toBuilder()
+                            .clearRunningTaskInfo().build(), mock(CacheAwareService.class));
+            assertNull(registry.capture(RoleType.DECODE, status.getIpPort()));
+            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    endpoint.dispatch(acquired.permit(), DecodeEndpoint.DispatchOutcome.ENGINE_OWNED));
+            assertNotNull(endpoint.reservationHandle(123L));
+            assertFalse(endpoint.isRetired());
+        } finally {
+            endpoint.close();
+            endpoint.awaitRetirement();
+        }
+    }
+
+    private static EngineRpcService.WorkerStatusPB lifecycleResponse(
+            RoleType role, long version, boolean alive, boolean admissionClosed) throws Exception {
+        // Construct the wire field directly so this regression runs against the old schema too.
+        var wire = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(role.getCode())
+                .setStatusVersion(version)
+                .setAlive(alive)
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(123L)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                .setUnknownFields(UnknownFieldSet.newBuilder().addField(23,
+                        UnknownFieldSet.Field.newBuilder().addVarint(admissionClosed ? 1L : 0L).build()).build())
+                .build().toByteArray();
+        return EngineRpcService.WorkerStatusPB.parseFrom(wire);
+    }
+
+    private static void poll(WorkerDirectory directory, WorkerStatus status, RoleType role,
+                             EngineRpcService.WorkerStatusPB response, CacheAwareService cache) {
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        var lease = status.tryBeginStatusPoll();
+        assertNotNull(lease, "non-serving workers continue status polling");
+        new GrpcWorkerStatusRunner(
+                "test-model", status.getIpPort(), "test-site", role, null,
+                status, lease, directory, mock(EngineHealthReporter.class),
+                grpc, 5_000L, cache, Runnable::run).run();
+    }
 
     @ParameterizedTest
     @CsvSource({"DECODE,false", "PREFILL,true", "PDFUSION,true"})

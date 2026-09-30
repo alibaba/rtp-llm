@@ -4,10 +4,13 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -37,8 +40,8 @@ public:
     }
     virtual ~BatchDecodeScheduler() = default;
 
-    // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
-    // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
+    // Reject requests that cannot fit in the available KV arena before they
+    // enter the batch queue.  This mirrors FIFOScheduler's admission check.
     bool checkInputLength(const GenerateStreamPtr& stream) {
         if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
             stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
@@ -52,10 +55,15 @@ public:
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override {
         if (!checkInputLength(stream)) {
-            return absl::InvalidArgumentError("Check input length failed");
+            return absl::InvalidArgumentError("BatchDecodeScheduler input exceeds KV cache capacity");
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stop_) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                stream->moveToNext();
+                return absl::CancelledError("BatchDecodeScheduler stopped");
+            }
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -66,26 +74,30 @@ public:
         return absl::OkStatus();
     }
 
-    // Returns the input vector unchanged so callers can index 1:1 with their original list.
-    // Streams that fail checkInputLength are NOT added to the waiting queue; their success flag
-    // is false and their error is already reported via reportError(). No group co-scheduling:
-    // valid streams are admitted as ordinary individual streams.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
         std::vector<bool> enqueue_successes;
         enqueue_successes.reserve(streams.size());
-        std::vector<GenerateStreamPtr> stream_enqueued;
-        stream_enqueued.reserve(streams.size());
+        std::vector<GenerateStreamPtr> valid_streams;
+        valid_streams.reserve(streams.size());
         for (const auto& stream : streams) {
             const bool success = checkInputLength(stream);
             enqueue_successes.push_back(success);
             if (success) {
-                stream_enqueued.emplace_back(stream);
+                valid_streams.push_back(stream);
             }
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
-            waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+            if (stop_) {
+                std::fill(enqueue_successes.begin(), enqueue_successes.end(), false);
+                for (const auto& stream : valid_streams) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                    stream->moveToNext();
+                }
+            } else {
+                waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
+            }
         }
         cond_.notify_all();
         return {std::move(enqueue_successes), streams};
@@ -138,10 +150,20 @@ public:
         }
     }
 
-    void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+    void retireTerminalWaitingStreams() {
+        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if ((*it)->hasError() || (*it)->getStatus() == StreamState::FINISHED) {
+                // Cancellation only posts an event. Drive final cleanup even
+                // when the queue never reaches the configured batch size.
+                (*it)->moveToNext();
+                it = waiting_streams_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
+    void evaluateWaitingStreams() {
         std::list<GenerateStreamPtr> new_streams;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
             // 先检查是否有错误，避免错误请求占用资源
@@ -160,14 +182,13 @@ public:
                 while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                // Retire every selected stream, including one that failed
+                // during cache allocation/loading before it became RUNNING.
+                waiting_streams_.remove(stream);
             }
             // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-            // 从waiting_streams_中移除已调度的stream
-            for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
-            }
         }
     }
 
@@ -191,15 +212,21 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+        const auto poll_interval = force_poll_ ? std::chrono::milliseconds(10) : std::chrono::milliseconds(30000);
+        cond_.wait_for(lock, poll_interval, [this] {
+            return stop_ || wake_requested_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+        wake_requested_ = false;
+        if (stop_) {
+            return running_streams_;
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
+        retireTerminalWaitingStreams();
 
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
             evaluateWaitingStreams();
@@ -210,21 +237,56 @@ public:
             }
         }
 
+        last_schedule_time_.store(autil::TimeUtility::currentTimeInMilliSeconds(), std::memory_order_release);
         return running_streams_;
     }
 
+    void cancelStreams(std::list<GenerateStreamPtr>& streams) {
+        for (auto& stream : streams) {
+            stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+            stream->moveToNext();
+        }
+        streams.clear();
+    }
+
     absl::Status stop() override {
-        // Not implemented
-        return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
+        RTP_LLM_LOG_INFO("stop BatchDecodeScheduler");
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            stop_ = true;
+            cancelStreams(waiting_streams_);
+            cancelStreams(loading_cache_streams_);
+            cancelStreams(running_streams_);
+        }
+        cond_.notify_all();
+        return absl::OkStatus();
+    }
+
+    void wake() override {
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            wake_requested_ = true;
+        }
+        cond_.notify_all();
+    }
+
+    void setForcePoll(bool enable) override {
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            force_poll_     = enable;
+            wake_requested_ = true;
+        }
+        cond_.notify_all();
     }
 
     bool empty() override {
-        // Not implemented
-        return true;  // 默认返回值
+        std::lock_guard<std::mutex> lock(lock_);
+        return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty();
     }
 
     int64_t lastScheduleTime() override {
-        return 0;  // 默认返回值
+        return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() :
+                         last_schedule_time_.load(std::memory_order_acquire);
     }
 
     int64_t onflightStreams() override {
@@ -241,6 +303,10 @@ private:
     uint32_t                     batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
+    std::atomic<int64_t>         last_schedule_time_{autil::TimeUtility::currentTimeInMilliSeconds()};
+    std::atomic<bool>            stop_{false};
+    bool                         wake_requested_ = false;
+    bool                         force_poll_     = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;

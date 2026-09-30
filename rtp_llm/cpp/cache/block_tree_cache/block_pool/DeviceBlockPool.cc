@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <limits>
 #include <unordered_map>
@@ -19,6 +20,12 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <torch/version.h>
+#if __has_include(<ATen/cuda/MemPool.h>)
+#include <ATen/cuda/MemPool.h>
+#endif
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAFunctions.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #endif
@@ -298,9 +305,14 @@ void DeviceBlockPool::initializeCacheBuffer() {
     RTP_LLM_CHECK_WITH_INFO(!(cfg.use_pinned_cpu_backing && cfg.use_device_malloc_backing),
                             "device block pool [%s] cannot use pinned CPU and cudaMalloc backing together",
                             cfg.pool_name.c_str());
+    RTP_LLM_CHECK_WITH_INFO(!(cfg.use_sleep_backing && cfg.use_pinned_cpu_backing),
+                            "sleep mode does not yet support engine KV groups placed in host memory: %s",
+                            cfg.pool_name.c_str());
 
     if (cfg.use_pinned_cpu_backing) {
         initializePinnedCpuBuffer();
+    } else if (cfg.use_sleep_backing) {
+        initializeSleepBuffer();
     } else if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer();
     } else {
@@ -326,6 +338,50 @@ void DeviceBlockPool::initializeCacheBuffer() {
                      cfg.total_size_bytes,
                      static_cast<double>(cfg.total_size_bytes) / kBytesPerMB,
                      cfg.memory_layouts.size());
+}
+
+void DeviceBlockPool::initializeSleepBuffer() {
+#if USING_CUDA
+    auto backend = std::make_shared<VmmBackend>();
+    RTP_LLM_CHECK_WITH_INFO(backend->isAvailable(), "sleep KV backing requires the torch_memory_saver preload shim");
+    static std::atomic<uint64_t> next_id{0};
+    const auto tag = std::string(KVCachePhysicalMemoryController::kDefaultTag) + "/" + config().pool_name + "/"
+                     + std::to_string(next_id.fetch_add(1));
+    const auto device = c10::cuda::current_device();
+#if __has_include(<ATen/cuda/MemPool.h>)
+    const auto pool_id = at::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+#else
+    const auto pool_id = c10::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+#endif
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
+    c10::cuda::CUDACachingAllocator::createOrIncrefPool(device, pool_id);
+#else
+    c10::cuda::CUDACachingAllocator::ensureExistsAndIncrefPool(device, pool_id);
+#endif
+    // A fresh private pool forces cudaMalloc through the shim and keeps paused
+    // ranges out of the default allocator's emptyCache path. Its reservation
+    // lives as long as the engine's fixed-address KV arena.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    c10::cuda::CUDACachingAllocator::beginAllocateToPool(device, pool_id, [](cudaStream_t) { return true; });
+    const bool region_started = backend->beginAllocationRegion(tag);
+    try {
+        RTP_LLM_CHECK_WITH_INFO(region_started, "failed to enter sleep allocation region for %s", tag.c_str());
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config().total_size_bytes)},
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    } catch (...) {
+        if (region_started) {
+            backend->endAllocationRegion();
+        }
+        c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+        throw;
+    }
+    backend->endAllocationRegion();
+    c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+    memory_controller_ = std::make_shared<KVCachePhysicalMemoryController>(backend, tag);
+    RTP_LLM_CHECK(memory_controller_->allocateOrAttach(cache_aligned_buffer_.data_ptr(), config().total_size_bytes));
+#else
+    RTP_LLM_FAIL("sleep KV backing is only supported on CUDA");
+#endif
 }
 
 void DeviceBlockPool::initializePinnedCpuBuffer() {
@@ -564,55 +620,71 @@ bool DeviceBlockPool::init() {
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    if (cache_store) {
+    if (cache_store && cache_store != cache_store_) {
+        RTP_LLM_CHECK_WITH_INFO(registered_mrs_.empty(), "cannot replace cache store with registered memory");
         cache_store_ = std::move(cache_store);
     }
-    if (cache_store_ && !kvcache_reg_mr_) {
-        RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
-
+    if (!cache_store_ || kvcache_reg_mr_) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(registered_mrs_.empty(), "previous MR cleanup failed; refusing partial re-registration");
+    // Tracking must not allocate after an MR has become externally registered.
+    registered_mrs_.reserve(config().memory_layouts.size() * 2);
+    auto       memory_util = cache_store_->getMemoryUtil();
+    const bool gpu         = where() == MemoryType::MEMORY_GPU;
+    try {
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
-            const auto& layout_cfg = config().memory_layouts[layout_idx];
-
+            const auto& layout = config().memory_layouts[layout_idx];
             registerUserMrForBuffer(memory_util,
                                     layout_idx,
-                                    layout_cfg.kv_cache_offset_bytes,
-                                    layout_cfg.kv_block_pool_size_bytes,
-                                    layout_cfg.kv_block_stride_bytes,
+                                    layout.kv_cache_offset_bytes,
+                                    layout.kv_block_pool_size_bytes,
+                                    layout.kv_block_stride_bytes,
                                     gpu,
                                     "kv");
-
-            if (layout_cfg.hasScale()) {
+            if (layout.hasScale()) {
                 registerUserMrForBuffer(memory_util,
                                         layout_idx,
-                                        layout_cfg.kv_scale_offset_bytes,
-                                        layout_cfg.kv_scale_pool_size_bytes,
-                                        layout_cfg.kv_scale_stride_bytes,
+                                        layout.kv_scale_offset_bytes,
+                                        layout.kv_scale_pool_size_bytes,
+                                        layout.kv_scale_stride_bytes,
                                         gpu,
                                         "scale");
             }
         }
         kvcache_reg_mr_ = true;
+    } catch (...) {
+        // Remember every successful registration, including a partial attempt.
+        // Cleanup failures stay tracked and prevent physical memory release.
+        try {
+            deregUserMr();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("MR registration rollback failed: %s", error.what());
+        }
+        throw;
     }
 }
 
 void DeviceBlockPool::deregUserMr() {
-    if (kvcache_reg_mr_ && cache_store_) {
-        RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
-
-        for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
-            const auto& layout_cfg = config().memory_layouts[layout_idx];
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
-            if (layout_cfg.hasScale()) {
-                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
-            }
-        }
-        RTP_LLM_LOG_INFO("deregister user mr for block pool success, pool_name=%s", config().pool_name.c_str());
+    if (registered_mrs_.empty()) {
         kvcache_reg_mr_ = false;
+        return;
     }
+    auto       memory_util = cache_store_->getMemoryUtil();
+    const bool gpu         = where() == MemoryType::MEMORY_GPU;
+    kvcache_reg_mr_        = false;
+    // Attempt every MR even if one deregistration fails. Retain failed entries
+    // so callers cannot mistake a partial teardown for safe-to-unmap memory.
+    for (size_t i = registered_mrs_.size(); i > 0; --i) {
+        const auto& mr = registered_mrs_[i - 1];
+        try {
+            deregisterUserMrForBuffer(memory_util, mr.layout_idx, mr.offset_bytes, gpu, mr.buffer_type);
+            registered_mrs_.erase(registered_mrs_.begin() + i - 1);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("MR deregistration failed: %s", error.what());
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(registered_mrs_.empty(), "MR deregistration incomplete; retaining physical backing");
 }
 
 void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
@@ -624,6 +696,7 @@ void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory
                                               const std::string&          buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     auto  start_us = currentTimeUs();
+    RegisteredMr registration{layout_idx, offset_bytes, buffer_type};
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
@@ -631,10 +704,9 @@ void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory
                      buffer_type.c_str(),
                      config().pool_name.c_str());
     }
-
-    auto cost_ms = (currentTimeUs() - start_us) / 1000;
+    registered_mrs_.push_back(std::move(registration));
+    const auto cost_ms = (currentTimeUs() - start_us) / 1000;
     mr_cost_time_ms_ += cost_ms;
-
     RTP_LLM_LOG_INFO("register user mr success: pool_name=%s layout[%zu] %s base=%p len=%zu aligned=%zu cost=%ld ms",
                      config().pool_name.c_str(),
                      layout_idx,

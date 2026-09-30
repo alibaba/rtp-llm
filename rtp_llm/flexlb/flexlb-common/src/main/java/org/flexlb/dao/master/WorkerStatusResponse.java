@@ -66,6 +66,9 @@ public class WorkerStatusResponse {
     @JsonProperty("alive")
     private boolean alive;
 
+    @JsonProperty("admission_closed")
+    private boolean admissionClosed;
+
     @JsonProperty("available_kv_cache")
     private long availableKvCacheTokens;
 

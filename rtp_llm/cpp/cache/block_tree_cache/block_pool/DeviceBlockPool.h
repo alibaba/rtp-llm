@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 namespace rtp_llm {
@@ -27,6 +28,7 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     std::vector<MemoryLayoutConfig> memory_layouts;
     bool                            use_pinned_cpu_backing{false};
     bool                            use_device_malloc_backing{false};
+    bool                            use_sleep_backing{false};
 };
 
 class DeviceBlockPool;
@@ -88,8 +90,11 @@ public:
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
-    size_t getTotalSizeBytes() const;
-    size_t blockSizeBytes() const override;
+    size_t                             getTotalSizeBytes() const;
+    size_t                             blockSizeBytes() const override;
+    KVCachePhysicalMemoryControllerPtr memoryController() const {
+        return memory_controller_;
+    }
 
     std::string debugString() const override;
 
@@ -111,6 +116,7 @@ private:
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer();
     void initializeDeviceMallocBuffer();
+    void initializeSleepBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -145,9 +151,16 @@ private:
     std::vector<uint32_t> refcounts_;
     size_t                request_referenced_blocks_num_{0};
 
-    torch::Tensor cache_aligned_buffer_;
-    void*         cache_base_ptr_{nullptr};
+    torch::Tensor                      cache_aligned_buffer_;
+    KVCachePhysicalMemoryControllerPtr memory_controller_;
+    void*                              cache_base_ptr_{nullptr};
 
+    struct RegisteredMr {
+        size_t      layout_idx;
+        size_t      offset_bytes;
+        std::string buffer_type;
+    };
+    std::vector<RegisteredMr>   registered_mrs_;
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;
     std::shared_ptr<CacheStore> cache_store_;

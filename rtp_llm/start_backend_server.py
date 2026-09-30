@@ -23,6 +23,13 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.model_loader.weight_memory_saver import (
+    limit_init_segment_splitting,
+    prepare_expandable_coexistence,
+)
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
+)
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -90,6 +97,8 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
+        prepare_expandable_coexistence()
+        limit_init_segment_splitting()
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
@@ -185,7 +194,7 @@ def _create_rank_processes(
         )
         processes.append(proc)
         try:
-            proc.start()
+            start_memory_saver_configured_process(proc)
         finally:
             writer.close()  # drop parent copy so reader EOFs when the rank dies
 

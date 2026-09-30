@@ -19,6 +19,10 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+size_t RemoteRpcServer::activeCacheTransferCount() {
+    return LocalRpcServer::activeCacheTransferCount() + loading_cache_requests_.load(std::memory_order_relaxed);
+}
+
 void RemoteRpcServer::initLocalHostInfo() {
     string local_id, local_ip, hostname;
     if (!autil::NetUtil::GetDefaultIp(local_ip) || local_ip.empty()) {
@@ -80,6 +84,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.metrics_reporter             = metrics_reporter_;
     params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank);
+    params.enable_sleep_mode            = init_params.runtime_config.enable_sleep_mode;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
                      params.rdma_listen_port,

@@ -97,6 +97,18 @@ cc_test(
 )
 
 cc_test(
+    name = "engine_admission_test",
+    srcs = ["EngineAdmissionTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/sleep:admission_gate",
+    ] + cuda13_torch_link_deps,
+    env = device_test_envs(),
+    exec_properties = {"gpu": "A10"},
+)
+
+cc_test(
     name = "async_runner_test",
     srcs = [
         "AsyncRunnerTest.cc",

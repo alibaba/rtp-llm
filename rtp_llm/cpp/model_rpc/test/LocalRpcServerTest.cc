@@ -20,6 +20,103 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
+TEST(LocalRpcServerTest, LifecycleRpcsRejectUninitializedEngine) {
+    LocalRpcServer         server;
+    grpc::ServerContext    context;
+    EmptyPB                empty;
+    SleepRequestPB         sleep;
+    SleepQuiesceRequestPB  quiesce;
+    SleepQuiesceResponsePB quiesce_response;
+    WakeUpRequestPB        wake;
+    IsSleepingResponsePB   sleeping;
+    SleepStatusResponsePB  status;
+    quiesce.set_protocol(2);
+    const auto check = [](const grpc::Status& result) {
+        EXPECT_EQ(result.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+        EXPECT_EQ(result.error_message(), "engine is not initialized");
+    };
+    check(server.SleepServing(&context, &sleep, &empty));
+    check(server.QuiesceSleep(&context, &quiesce, &quiesce_response));
+    check(server.WakeUpServing(&context, &wake, &empty));
+    check(server.IsSleeping(&context, &empty, &sleeping));
+    check(server.GetSleepStatus(&context, &empty, &status));
+}
+
+class WorkerStatusTestEngine: public EngineBase {
+public:
+    WorkerStatusTestEngine(): EngineBase(EngineInitParams{}) {}
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return KVCacheInfo{};
+    }
+};
+
+class WorkerStatusTestServer: public LocalRpcServer {
+public:
+    WorkerStatusTestServer() {
+        engine_ = std::make_shared<WorkerStatusTestEngine>();
+    }
+    EngineScheduleInfo getEngineScheduleInfo(int64_t) override {
+        return EngineScheduleInfo{};
+    }
+    SleepLifecycleController& lifecycle() {
+        return engine_->sleepController();
+    }
+};
+
+TEST(LocalRpcServerTest, WorkerStatusSeparatesSleepAdmissionFromLiveness) {
+    WorkerStatusTestServer server;
+    auto&                  controller = server.lifecycle();
+    controller.setEnabled(true);
+    controller.bindAdmission(std::make_shared<SchedulerAdmission>());
+    controller.setHooks(SleepHooks{});
+    const auto check = [&](bool alive, bool closed) {
+        grpc::ServerContext context;
+        StatusVersionPB     request;
+        WorkerStatusPB      response;
+        ASSERT_TRUE(server.GetWorkerStatus(&context, &request, &response).ok());
+        EXPECT_EQ(response.alive(), alive);
+        EXPECT_EQ(response.admission_closed(), closed);
+    };
+    check(true, false);
+    SleepOptions sleep;
+    sleep.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(sleep).ok);
+    ASSERT_EQ(controller.state(), SleepState::DRAINING);
+    check(true, true);
+    sleep.prepare_only = false;
+    sleep.commit_only  = true;
+    ASSERT_TRUE(controller.sleep(sleep).ok);
+    ASSERT_EQ(controller.state(), SleepState::SLEEPING);
+    check(true, true);
+    WakeUpOptions wake;
+    wake.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake).ok);
+    ASSERT_EQ(controller.state(), SleepState::WAKING_UP);
+    check(true, true);
+    wake.prepare_only = false;
+    wake.commit_only  = true;
+    ASSERT_TRUE(controller.wakeUp(wake).ok);
+    check(true, false);
+
+    SleepHooks failure;
+    failure.restoreRestorableGpuMemory = [] { return false; };
+    controller.setHooks(failure);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    ASSERT_FALSE(controller.wakeUp().ok);
+    ASSERT_EQ(controller.state(), SleepState::ERROR);
+    check(false, true);
+}
+
 class MockGenerateStream: public GenerateStream {
 public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input,

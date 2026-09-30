@@ -207,6 +207,7 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
+        self.fastsafetensors_reserve_mb: int = 2048
         self.loader_recycle_handles: bool = True
         self.moe_pure_tp_preshard: bool = False
 
@@ -214,6 +215,7 @@ class LoadConfig:
         return (
             f"load_method: {self.load_method}\n"
             f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
+            f"fastsafetensors_reserve_mb: {self.fastsafetensors_reserve_mb}\n"
             f"loader_recycle_handles: {self.loader_recycle_handles}\n"
             f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
         )

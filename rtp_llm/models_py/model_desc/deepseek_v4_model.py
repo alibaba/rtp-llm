@@ -36,9 +36,18 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.model_loader.weight_memory_saver import (
+    current_model_scope,
+    feature_weights_region,
+    model_build_scope,
+    pausable_empty,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -134,7 +143,7 @@ class Dsv4SharedRuntimeBufferStore:
             int(mtp_hidden.hc_dim) if mtp_hidden is not None else 0
         )
         self._mtp_hidden_storage = (
-            torch.empty(
+            pausable_empty(
                 self._mtp_hidden_token_capacity,
                 self._mtp_hidden_hc_dim,
                 dtype=dtype,
@@ -491,6 +500,9 @@ class DeepSeekV4Model(GptModelBase):
 
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
+        # Native initialization happens later on a worker thread. Carry the
+        # owning model across that boundary for model/draft-specific wake reload.
+        self._build_scope_token: Any = current_model_scope()
 
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
@@ -590,15 +602,16 @@ class DeepSeekV4Model(GptModelBase):
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
-            with torch.device("meta"):
+            with model_build_scope(self._build_scope_token), torch.device("meta"):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
 
-        for layer in self.v4.layers:
-            layer.attn.init_rope_cache(device=device_str)
+        with feature_weights_region():
+            for layer in self.v4.layers:
+                layer.attn.init_rope_cache(device=device_str)
 
-        self._load_extra_weights(self.weight)
+        self._load_scoped_extra_weights(self.weight)
         del self.weight
         self._bind_runtime_buffers(torch.device(device_str))
         self._materialized = True
@@ -733,7 +746,7 @@ class DeepSeekV4Model(GptModelBase):
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
-            with torch.device("meta"):
+            with model_build_scope(self._build_scope_token), torch.device("meta"):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
@@ -742,13 +755,14 @@ class DeepSeekV4Model(GptModelBase):
 
         # Recompute RoPE on the real device and prebuild the compressors'
         # shared cos_sin_cache before runtime memory allocation starts.
-        for layer in self.v4.layers:
-            layer.attn.init_rope_cache(device=device_str)
+        with feature_weights_region():
+            for layer in self.v4.layers:
+                layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
         # discard it.  Default impl is a no-op.
-        self._load_extra_weights(self.weight)
+        self._load_scoped_extra_weights(self.weight)
 
         # Drop the ModelWeights wrapper — per-tensor refs are now held
         # only by the V4Transformer modules (or were popped during
@@ -1117,6 +1131,10 @@ class DeepSeekV4Model(GptModelBase):
         post-verify multi-token batch arrives with ``is_prefill=True``
         but is functionally a multi-token decode."""
         return not (bool(attn.is_prefill) and not is_target_verify)
+
+    def _load_scoped_extra_weights(self, weights: ModelWeights) -> None:
+        with model_build_scope(self._build_scope_token), feature_weights_region():
+            self._load_extra_weights(weights)
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         """Subclass hook for loading model-level (non-Block) tensors off
