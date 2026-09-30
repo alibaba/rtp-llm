@@ -112,6 +112,8 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    // Caller has closed admission and drained all references and cache work.
+    void detachBlockTreeCacheForSleep();
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
@@ -119,6 +121,9 @@ public:
 
     void setUseDeviceMallocBlockPool(bool use_device_malloc_block_pool) {
         use_device_malloc_block_pool_ = use_device_malloc_block_pool;
+    }
+    void setUseSleepBacking(bool enabled) {
+        use_sleep_backing_ = enabled;
     }
 
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
@@ -214,6 +219,7 @@ protected:
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
+    bool                               use_sleep_backing_            = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

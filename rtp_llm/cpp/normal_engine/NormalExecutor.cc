@@ -17,6 +17,10 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
+#endif
+
 using namespace std;
 
 namespace rtp_llm {
@@ -171,8 +175,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const auto& model_cache_config =
             is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
         const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
-        const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
-        const auto& topology = model_init_params.kv_cache_layer_layout->topology();
+        const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
+        const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
         RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
                                 "CUDA graph max sequence length must be positive");
         const size_t max_seq_len = static_cast<size_t>(params.model_config_.max_seq_len);
@@ -185,17 +189,31 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const size_t warmup_span = params.model_config_.attn_config.tokens_per_block;
         RTP_LLM_CHECK_WITH_INFO(warmup_span > 0 && runtime_tokens_per_block > 0,
                                 "CUDA graph fake block spans must be positive");
-        const size_t warmup_len = warmUpInputLength(max_seq_len, max_reserved_step);
-        const size_t decode_tokens = warmup_len + max_reserved_step;
+        const size_t warmup_len           = warmUpInputLength(max_seq_len, max_reserved_step);
+        const size_t decode_tokens        = warmup_len + max_reserved_step;
         const size_t decode_warmup_blocks = decode_tokens / warmup_span + (decode_tokens % warmup_span != 0);
-        const size_t prefill_warmup_blocks = warmup_len / runtime_tokens_per_block
-                                             + (warmup_len % runtime_tokens_per_block != 0);
+        const size_t prefill_warmup_blocks =
+            warmup_len / runtime_tokens_per_block + (warmup_len % runtime_tokens_per_block != 0);
         const size_t fake_count = std::max<size_t>({1, decode_warmup_blocks, prefill_warmup_blocks});
         const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
-        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width)
-                                    <= std::numeric_limits<int64_t>::max(),
+        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width) <= std::numeric_limits<int64_t>::max(),
                                 "CUDA graph kernel block table width exceeds int64 range");
         model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
+    }
+#endif
+
+#if USING_CUDA
+    if (warm_up_ && cache_manager && model_init_params.hw_kernel_config.enable_cuda_graph
+        && VmmBackend().isAvailable()) {
+        // Decode warmup has real KV geometry, so it bypasses the Python
+        // no-cache warmup guard. Its throwaway graphs must not retain VMM
+        // allocations across warmup teardown. Change only this executor's
+        // owned config, never the caller's potentially const EngineInitParams.
+        // The serving executor keeps the original graph setting, even when
+        // construction below throws; no restoration or Python-object copy is needed.
+        model_init_params.hw_kernel_config.enable_cuda_graph = false;
+        RTP_LLM_LOG_INFO("decodeWarmUp: VMM active, disabling CUDA graph capture for the throwaway warmup "
+                         "executor; real executor captures after CacheManager init");
     }
 #endif
 
@@ -232,6 +250,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                  params.sp_config.tree_decode_config,
                                  params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
+}
+
+void NormalExecutor::drainAsyncRunners() {
+    // Flush the stream-async output-dispatch worker (D2H/KV release/update). sync() is a
+    // no-op when nothing is in flight (task_done_ starts true). Only meaningful when
+    // stream-async is enabled; unconditionally safe otherwise.
+    if (useStreamAsync()) {
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

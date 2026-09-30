@@ -15,6 +15,7 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
+from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
@@ -22,6 +23,11 @@ from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
+)
+from rtp_llm.model_loader.weight_memory_saver import (
+    limit_init_segment_splitting,
+    prepare_expandable_coexistence,
+    start_configured_process as start_memory_saver_configured_process,
 )
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -61,8 +67,11 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    reporting_state=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
+    if reporting_state is not None:
+        reporting.configure(reporting_state)
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
@@ -90,6 +99,8 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
+        prepare_expandable_coexistence()
+        limit_init_segment_splitting()
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
@@ -123,9 +134,8 @@ def local_rank_start(
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
-    """Calculate local world size based on environment and hardware"""
-    world_size = py_env_configs.parallelism_config.world_size
-    local_world_size = min(torch.cuda.device_count(), world_size)
+    """Use the resolved rank count, rejecting ranks without visible GPUs."""
+    local_world_size = py_env_configs.parallelism_config.local_world_size
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
             f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
@@ -133,8 +143,16 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
         local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
     else:
         logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
+            f"multi rank starts with resolved local world size: {local_world_size}, "
+            f"world size = {py_env_configs.parallelism_config.world_size}"
+        )
+    if local_world_size < 1:
+        raise ValueError(f"LOCAL_WORLD_SIZE must be positive, got {local_world_size}")
+    visible_cuda_devices = torch.cuda.device_count()
+    if local_world_size > visible_cuda_devices:
+        raise ValueError(
+            f"local_world_size={local_world_size} exceeds "
+            f"{visible_cuda_devices} visible CUDA devices"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
     return local_world_size
@@ -164,6 +182,7 @@ def _create_rank_processes(
     ctx,
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
+    reporting_state=None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -180,12 +199,18 @@ def _create_rank_processes(
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                reporting_state,
+            ),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
         try:
-            proc.start()
+            start_memory_saver_configured_process(proc)
         finally:
             writer.close()  # drop parent copy so reader EOFs when the rank dies
 
@@ -286,13 +311,19 @@ def multi_rank_start(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     cleanup=None,
+    reporting_state=None,
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
         _create_rank_processes(
-            global_controller, py_env_configs, ctx, processes, rank_pipe_readers
+            global_controller,
+            py_env_configs,
+            ctx,
+            processes,
+            rank_pipe_readers,
+            reporting_state=reporting_state,
         )
         local_world_size = len(processes)
 
@@ -367,6 +398,7 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    reporting_state=None,
 ):
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
@@ -388,7 +420,11 @@ def start_backend_server(
     pc = py_env_configs.parallelism_config
     if not torch.cuda.is_available():
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            reporting_state,
         )
 
     if (
@@ -414,9 +450,14 @@ def start_backend_server(
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
+                reporting_state=reporting_state,
             )
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            reporting_state,
         )
     finally:
         if manager:

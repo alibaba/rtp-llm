@@ -123,7 +123,13 @@ public:
     KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
-    void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void   regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void   deregUserMr();
+    size_t activeCacheWorkCount() const;
+    std::vector<KVCachePhysicalMemoryControllerPtr> kvMemoryControllers() const;
+    // Called only after all-rank execution quiesce and the final admission seal.
+    bool releaseKVCacheMemoryBacking(int64_t timeout_ms);
+    bool restoreKVCacheMemoryBackingAndResetMetadata();
     void stopMetricsReporter();
     void recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics);
 
@@ -135,8 +141,14 @@ public:
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    // These RPCs finish transfers initiated by an already-admitted cache user.
+    // Unknown and P2P requests must continue to use root admission.
+    static bool isCacheTransferContinuation(const FunctionRequestPB& request) {
+        return request.has_mem_request() || request.has_remote_request();
+    }
 
     BlockTreeCachePtr blockTreeCache() const {
+        std::lock_guard<std::mutex> lock(cache_lifecycle_mutex_);
         return block_tree_cache_;
     }
 
@@ -152,6 +164,7 @@ public:
     }
 
 private:
+    bool                  initBlockTreeCache();
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
@@ -189,7 +202,17 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    BlockTreeCachePtr                           block_tree_cache_;
+    BlockTreeCachePtr block_tree_cache_;
+    // Serving admission protects cache users. This lock additionally protects
+    // diagnostic readers that remain alive while the cache is retired/rebuilt.
+    mutable std::mutex cache_lifecycle_mutex_;
+    enum class CacheBackingState {
+        LIVE,
+        RETIRED,
+        RELEASED
+    };
+    CacheBackingState                           cache_backing_state_{CacheBackingState::LIVE};
+    int64_t                                     cache_version_offset_{0};
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
