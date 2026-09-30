@@ -6,7 +6,6 @@ import weakref
 from typing import Optional
 
 import torch
-
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
@@ -98,6 +97,36 @@ class TaggedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class HostPartitionPrepare:
+    """Validate the host partition consumed by attention replay preparation."""
+
+    def __init__(self) -> None:
+        self.snapshots: list[tuple[list[int], list[int]]] = []
+
+    def prepare_cuda_graph(self, inputs: PyAttentionInputs) -> None:
+        lengths = inputs.input_lengths.tolist()
+        starts = inputs.cu_seqlens.tolist()
+        expected = [0]
+        for length in lengths:
+            expected.append(expected[-1] + length)
+        if starts != expected:
+            raise RuntimeError("host cumulative lengths do not match input lengths")
+        self.snapshots.append((lengths, starts))
+
+
+class HostPartitionModel(TaggedSequenceLengthModel):
+    def __init__(self) -> None:
+        self.impls = {tag: HostPartitionPrepare() for tag in GROUP_TAGS}
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
+        return self.impls
 
 
 class TaggedDecodePaddingModel:
@@ -657,9 +686,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             GROUP_TAGS,
             exact_batch_only=True,
         )
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=1
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=1)
         self._assert_replay_signature(runner, inputs, 18)
 
     def _assert_replay_signature(
@@ -700,9 +727,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     )
                     for tag, value in (("full", full), ("aux", aux)):
                         inputs.attention_inputs[tag].kv_cache_block_id_device = (
-                            torch.full(
-                                (2, 1), value, dtype=torch.int32, device="cuda"
-                            )
+                            torch.full((2, 1), value, dtype=torch.int32, device="cuda")
                         )
                     self._assert_replay_signature(runner, inputs, full + 16 * aux)
 
@@ -938,6 +963,50 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             torch.testing.assert_close(
                 snapshot, expected_signature.unsqueeze(0).expand_as(snapshot)
             )
+
+    def test_prefill_device_metadata_refreshes_host_partition(self) -> None:
+        model = HostPartitionModel()
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            model,
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+
+        for seq_lens in ([1, 3], [3, 1], [2, 1], [1]):
+            with self.subTest(lengths=seq_lens):
+                inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=seq_lens
+                )
+                groups = inputs.attention_inputs
+                for attention in groups.values():
+                    attention.input_lengths = attention.input_lengths.cuda()
+                    attention.prefix_lengths = attention.prefix_lengths.cuda()
+                    # PyWrappedModel's device-input path has no host CU source.
+                    attention.cu_seqlens = torch.empty(0, dtype=torch.int32)
+                # The setter refreshes the canonical anchor as well as the map.
+                inputs.attention_inputs = groups
+                self.assertTrue(runner.prepare(inputs))
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                for impl in model.impls.values():
+                    lengths, starts = impl.snapshots[-1]
+                    self.assertEqual(lengths[: len(seq_lens)], seq_lens)
+                    self.assertEqual(starts[len(seq_lens)], sum(seq_lens))
+                expected = torch.tensor(
+                    [sum(seq_lens), sum(seq_lens), sum(seq_lens), 0],
+                    dtype=output.hidden_states.dtype,
+                    device=output.hidden_states.device,
+                )
+                torch.testing.assert_close(
+                    output.hidden_states,
+                    expected.unsqueeze(0).expand_as(output.hidden_states),
+                )
 
     @unittest.skipUnless(
         torch.version.hip is not None, "ROCm-specific host-pointer ABI"
