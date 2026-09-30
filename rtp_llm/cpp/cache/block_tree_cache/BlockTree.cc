@@ -55,6 +55,9 @@ BlockTree::~BlockTree() {
     for (const std::unique_ptr<TreeNode>& node : node_pool_) {
         releaseNode(node.get());
     }
+    for (const auto& [_, node] : detached_nodes_) {
+        releaseNode(node.get());
+    }
     for (auto& node : node_pool_) {
         node->children.clear();
         node->parent = nullptr;
@@ -185,12 +188,17 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
             TreeNode* child = it->second;
+            // Normal FULL eviction can leave a detached transfer on an attached node.
+            if (std::any_of(child->group_set_resources.begin(),
+                            child->group_set_resources.end(),
+                            [](const GroupSetResource& resource) { return resource.transfer_detached; })) {
+                break;
+            }
             if (is_resident
                 && std::any_of(child->group_set_resources.begin(),
                                child->group_set_resources.end(),
                                [](const GroupSetResource& resource) {
-                                   return resource.transfer_state != GroupSetTransferState::IDLE
-                                          || resource.transfer_detached;
+                                   return resource.transfer_state != GroupSetTransferState::IDLE;
                                })) {
                 RTP_LLM_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu key=%ld", i, key);
                 break;
@@ -297,7 +305,10 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
 }
 
 bool BlockTree::isRemovable(TreeNode* node) const {
-    return node != root_.get() && !node->is_resident && node->children.empty()
+    if (node == nullptr || node == root_.get() || node->detached) {
+        return false;
+    }
+    return !node->is_resident && node->children.empty()
            && std::all_of(node->group_set_resources.begin(),
                           node->group_set_resources.end(),
                           [](const GroupSetResource& resource) { return resource.is_removable(); });
@@ -315,6 +326,50 @@ void BlockTree::removeNode(TreeNode* node) {
         node_pool_[index]->index = index;
     }
     node_pool_.pop_back();
+}
+
+std::vector<TreeNode*> BlockTree::detachSubtree(TreeNode* node) {
+    if (node->detached) {
+        return {};
+    }
+    RTP_LLM_CHECK(node != root_.get());
+    std::vector<TreeNode*> nodes{node};
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        for (const auto& [_, child] : nodes[i]->children) {
+            nodes.push_back(child);
+        }
+    }
+    node->parent->children.erase(node->cache_key);
+    for (TreeNode* current : nodes) {
+        removePublishedKey(current->cache_key);
+        current->detached = true;
+        current->parent   = nullptr;
+        current->children.clear();
+        const size_t index = current->index;
+        detached_nodes_.emplace(current, std::move(node_pool_[index]));
+        if (index != node_pool_.size() - 1) {
+            node_pool_[index]        = std::move(node_pool_.back());
+            node_pool_[index]->index = index;
+        }
+        node_pool_.pop_back();
+    }
+    return nodes;
+}
+
+void BlockTree::reclaimDetachedNodes(const std::vector<TreeNode*>& nodes) {
+    for (TreeNode* node : nodes) {
+        const auto it = detached_nodes_.find(node);
+        if (it == detached_nodes_.end()) {
+            continue;
+        }
+        const auto& resources = it->second->group_set_resources;
+        if (std::all_of(resources.begin(), resources.end(), [](const GroupSetResource& resource) {
+                return resource.transfer_state == GroupSetTransferState::IDLE;
+            })) {
+            releaseNode(it->second.get());
+            detached_nodes_.erase(it);
+        }
+    }
 }
 
 TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
@@ -373,7 +428,7 @@ void BlockTree::removePublishedKey(CacheKeyType key) {
 }
 
 void BlockTree::refreshPublishedState(const TreeNode* node) {
-    if (!event_publisher_ || node == root_.get()) {
+    if (!event_publisher_ || node == root_.get() || node->detached) {
         return;
     }
     for (const auto& location : publication_groups_) {

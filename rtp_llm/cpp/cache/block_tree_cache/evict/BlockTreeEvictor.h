@@ -77,8 +77,12 @@ public:
     bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
-    // Discard a detached operation's source without publishing its target.
+    // Settle a detached operation without publishing its target; retired nodes retain CACHE refs until reclamation.
     void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
+
+    // Detach corrupt sources' subtrees for every GroupSet type and reclaim idle nodes after the batch's last node
+    // access. Returns whether pending loads need cancellation after unlocking the cache mutex.
+    bool invalidateSources(const std::vector<TransferDescriptor>& descriptors);
 
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);

@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
 class MetricsReporter;
@@ -110,6 +111,11 @@ public:
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
+    // Report once after all batches/ranks of a logical copy have completed.
+    void reportCopyError(Tier                                   source_tier,
+                         Tier                                   target_tier,
+                         const ErrorInfo&                       error,
+                         const std::vector<TransferDescriptor>& descriptors) const;
     void    reportTransferFinished(CacheTransferOperation                 operation,
                                    Tier                                   source_tier,
                                    Tier                                   target_tier,

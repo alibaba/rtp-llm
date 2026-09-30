@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -40,6 +41,10 @@ public:
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
     size_t                batchCapacity(CacheGroupType group_type) const;
+
+    // Failure injection around allocations, before any copy for this batch.
+    std::function<void(size_t)> before_batch_prepare_for_test_;
+    std::function<void()>       before_staging_submit_for_test_;
 
     DeviceHostTransferExecutor&                    device_host_executor_;
     HostDiskTransferExecutor&                      host_disk_executor_;

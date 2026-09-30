@@ -45,6 +45,15 @@ cc_library(
 )
 
 cc_library(
+    name = "crc_dump_writer",
+    srcs = ["transfer/CrcDumpWriter.cc"],
+    hdrs = ["transfer/CrcDumpWriter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/models_py/bindings:crc_block_copy_hdr"],
+)
+
+cc_library(
     name = "block_tree_cache",
     srcs = [
         "BlockTree.cc",
@@ -74,6 +83,7 @@ cc_library(
         "transfer/PerRankBlockTransferEngine.cc",
         "transfer/TransferExecutor.cc",
         "transfer/TransferBatchAsyncContext.cc",
+        "transfer/CrcTransferService.cc",
         "transfer/DeviceHostCopyStrategy.cc",
         "transfer/DeviceHostTransferExecutor.cc",
         "transfer/HostDiskTransferExecutor.cc",
@@ -117,7 +127,9 @@ cc_library(
         "transfer/TransferExecutor.h",
         "transfer/TransferBatchAsyncContext.h",
         "transfer/TransferStageState.h",
+        "transfer/CrcTransferService.h",
         "transfer/DeviceHostCopyStrategy.h",
+        "transfer/DeviceHostCopyGeometry.h",
         "transfer/DeviceHostTransferExecutor.h",
         "transfer/HostDiskTransferExecutor.h",
         "transfer/DeviceDiskTransferExecutor.h",
@@ -134,6 +146,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache/events:kv_cache_event",
         ":block_tree_task_pool",
+        ":crc_dump_writer",
         ":device_block_pool",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
@@ -147,6 +160,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings:crc_block_copy",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "@havenask//aios/autil:thread",
     ] + torch_deps() + no_block_copy_link_deps() + select({

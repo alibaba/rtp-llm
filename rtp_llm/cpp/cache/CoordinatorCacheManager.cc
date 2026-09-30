@@ -71,6 +71,14 @@ void appendPoolSummary(std::ostringstream&          os,
 
 }  // namespace
 
+CoordinatorCacheManager::~CoordinatorCacheManager() {
+    // Deferred matching uses this allocator without retaining its ownership.
+    // Close those callbacks while every allocation member is still alive.
+    if (block_tree_cache_) {
+        block_tree_cache_->shutdownLoads();
+    }
+}
+
 bool CoordinatorCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
@@ -484,12 +492,14 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     };
 
     if (load_context && load_context->needBackendMatch()) {
-        auto self              = shared_from_this();
         auto deferred_prepared = std::make_shared<PreparedKVCache>(std::move(prepared));
-        load_context->setMatchCallback([self = std::move(self), malloc_info, deferred_prepared](
+        // Keeping shared_from_this() in the context can destroy this allocator
+        // and its task pool on that pool's own settlement worker. Destruction
+        // instead drains the active load callbacks before releasing members.
+        load_context->setMatchCallback([this, malloc_info, deferred_prepared](
                                            LoadAsyncContext& context, size_t matched_blocks) mutable {
             auto       invocation_prepared = std::move(deferred_prepared);
-            const bool success = self->finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
+            const bool success = finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
             return LoadMatchResult{success, invocation_prepared->materialize_status};
         });
         MallocResult result{true,

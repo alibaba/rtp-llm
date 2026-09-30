@@ -80,7 +80,7 @@ EvictionHeap* BlockTreeEvictor::heapFor(size_t group_set_id, Tier tier) const {
 
 bool BlockTreeEvictor::isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const {
     const GroupSetResource& resource = node->group_set_resources[group_set_id];
-    return !node->is_resident && resource.transfer_state == GroupSetTransferState::IDLE
+    return !node->detached && !node->is_resident && resource.transfer_state == GroupSetTransferState::IDLE
            && resource.getTopTier() == source_tier
            && (tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL
                || tree_->isLeafAtTier(node, group_set_id, source_tier));
@@ -93,7 +93,7 @@ void BlockTreeEvictor::suspendCandidate(TreeNode* node, size_t group_set_id, Tie
 }
 
 void BlockTreeEvictor::admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier) {
-    if (node->is_resident || target_tier == Tier::NONE) {
+    if (node->detached || node->is_resident || target_tier == Tier::NONE) {
         return;
     }
     const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
@@ -344,14 +344,18 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         descriptors.push_back(std::move(*eviction_desc));
     }
     if (descriptors.empty()) {
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
 
     auto target_blocks =
         tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
         rollbackTransferLocked(descriptors);
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
         descriptors[desc_index].target_blocks = {(*target_blocks)[desc_index]};
@@ -413,8 +417,10 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                     settled_task.timings.push_back(task->timings[desc_index]);
                 }
             }
+            const size_t group_set_id = descriptor.group_set_id;
+            const Tier   source_tier  = descriptor.source_tier;
             settled_(success || any_detached, success && any_not_detached);
-            finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
+            finishWatermarkRoundLocked(group_set_id, source_tier);
         }
         if (!settled_task.descriptors().empty()) {
             metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
@@ -829,14 +835,44 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
 
     for (const TransferDescriptor& desc : transfer_descs) {
         GroupSetResource&  resource  = desc.node->group_set_resources[desc.group_set_id];
-        const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
-        const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
-        group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
-        resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
-        resource.transfer_detached    = false;
+        // Retired nodes keep their CACHE references until every GroupSet transfer has settled.
+        if (!desc.node->detached) {
+            const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+            const MultiNodeResource source_holder{
+                desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
+            group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
+            resource.evictFromTier(desc.source_tier);
+        }
+        resource.transfer_state    = GroupSetTransferState::IDLE;
+        resource.transfer_detached = false;
         tree_->refreshPublishedState(desc.node);
     }
+}
+
+bool BlockTreeEvictor::invalidateSources(const std::vector<TransferDescriptor>& descriptors) {
+    std::vector<TreeNode*> affected_nodes;
+    bool                   cancel_pending_loads = false;
+    for (const auto& desc : descriptors) {
+        if (desc.node->detached) {
+            continue;
+        }
+        TreeNode* parent = desc.node->parent;
+        auto      nodes  = tree_->detachSubtree(desc.node);
+        for (TreeNode* node : nodes) {
+            eraseNodeFromAllHeaps(node);
+            for (auto& resource : node->group_set_resources) {
+                if (resource.transfer_state != GroupSetTransferState::IDLE) {
+                    resource.transfer_detached = true;
+                    cancel_pending_loads |= resource.transfer_state == GroupSetTransferState::LOAD_PENDING;
+                }
+            }
+        }
+        affected_nodes.insert(affected_nodes.end(), nodes.begin(), nodes.end());
+        updateFullCandidate(parent);
+    }
+    // All descriptors must be consumed before releasing overlapping subtrees.
+    tree_->reclaimDetachedNodes(affected_nodes);
+    return cancel_pending_loads;
 }
 
 void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>& descs) {
@@ -858,13 +894,19 @@ void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>
 }
 
 void BlockTreeEvictor::settleEviction(const std::vector<TransferDescriptor>& descs) {
+    std::vector<TreeNode*>        detached_nodes;
     std::unordered_set<TreeNode*> pending_nodes;
     std::unordered_set<TreeNode*> refresh_nodes;
     pending_nodes.reserve(descs.size());
     refresh_nodes.reserve(descs.size());
     for (const TransferDescriptor& desc : descs) {
-        pending_nodes.insert(desc.node);
+        if (desc.node->detached) {
+            detached_nodes.push_back(desc.node);
+        } else {
+            pending_nodes.insert(desc.node);
+        }
     }
+    tree_->reclaimDetachedNodes(detached_nodes);
 
     while (!pending_nodes.empty()) {
         TreeNode* node = *pending_nodes.begin();

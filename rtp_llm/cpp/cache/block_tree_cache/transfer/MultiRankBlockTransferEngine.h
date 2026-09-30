@@ -19,6 +19,8 @@ public:
     std::shared_ptr<AsyncContext> execute(TransferTask task) const;
 
 private:
+    friend class BlockTransferDispatcher;
+
     std::vector<GroupSetPtr>          group_sets_;
     std::shared_ptr<BroadcastManager> broadcast_manager_;
 };

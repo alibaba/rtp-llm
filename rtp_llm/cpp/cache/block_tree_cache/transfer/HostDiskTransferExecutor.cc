@@ -48,8 +48,14 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
 TransferStatus HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                       const std::vector<TransferDescriptor>& descriptors,
                                                       const std::vector<const GroupSet*>&    group_sets) {
+    if (hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != group_sets.size()) {
+        return TransferStatus::INVALID_ARGS;
+    }
     const bool               write_to_disk = descriptors.front().target_tier == Tier::DISK;
     BlockTreeDiskBlockPool*  disk_pool     = group_sets.front()->diskPool().get();
+    if (!disk_pool) {
+        return TransferStatus::INVALID_ARGS;
+    }
     const size_t             disk_stride   = disk_pool->strideBytes();
     BlockIdList              disk_blocks;
     std::vector<void*>       read_buffers;
@@ -63,12 +69,14 @@ TransferStatus HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
         const auto&  host       = hosts[index];
         const auto*  group_set  = group_sets[index];
         const size_t payload    = group_set->payloadBytes();
-        if (!isValidHostBufferView(host, payload, disk_stride)) {
+        if (!group_set->diskPool() || group_set->diskPool().get() != disk_pool
+            || group_set->storageBytes() > disk_stride || !isValidHostBufferView(host, payload, disk_stride)) {
             RTP_LLM_LOG_WARNING("invalid host-disk batch item index=%zu group=%zu", index, descriptor.group_set_id);
             return TransferStatus::DISK_IO_ERROR;
         }
-        if (write_to_disk && disk_stride > payload) {
-            std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
+        const size_t encoded_bytes = group_set->storageBytes();
+        if (write_to_disk && disk_stride > encoded_bytes) {
+            std::memset(static_cast<uint8_t*>(host.base) + encoded_bytes, 0, disk_stride - encoded_bytes);
         }
         disk_blocks.push_back(descriptor.singleBlockAt(Tier::DISK));
         read_buffers.push_back(host.base);

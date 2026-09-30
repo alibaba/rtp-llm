@@ -54,6 +54,7 @@ public:
     void                 shutdown();
 
 private:
+    void                 cancelInvalidatedPendingLoads();
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
                                                                                   size_t  matched_device_blocks,
@@ -72,7 +73,8 @@ private:
     bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
     bool                 settleLoadLocked(LoadTaskRunner::Task&                           task,
                                           bool                                            aggregate_success,
-                                          std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+                                          std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                          bool&                                           cancel_pending_loads);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

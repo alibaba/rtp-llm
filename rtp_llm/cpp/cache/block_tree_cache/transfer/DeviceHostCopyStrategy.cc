@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include <torch/torch.h>
 
@@ -13,6 +14,21 @@ namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
                                                                   const DeviceHostCopyOptions& /*options*/) {
+    if (!plan.copy_tiles.empty() && plan.copy_tiles.front().device_index < 0) {
+        // A reusable pool may itself live in pinned host memory. Its plan has
+        // no CUDA device and must not label these pointers as CUDA tensors.
+        for (const auto& tile : plan.copy_tiles) {
+            if (tile.device_index >= 0) {
+                return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+            }
+            void*       dst = plan.device_to_host ? tile.host_addr : tile.device_addr;
+            const void* src = plan.device_to_host ? tile.device_addr : tile.host_addr;
+            if (dst != src) {
+                std::memcpy(dst, src, tile.bytes);
+            }
+        }
+        return StrategyResult::done();
+    }
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 

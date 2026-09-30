@@ -270,6 +270,34 @@ bool BlockTreeLoader::abortPendingLoad(const std::shared_ptr<AsyncContext>& cont
     return load_context->abortPending();
 }
 
+void BlockTreeLoader::cancelInvalidatedPendingLoads() {
+    // Keep the entire snapshot alive through unlock: dropping the last context
+    // reference runs abortPending(), which acquires the cache mutex again.
+    std::vector<std::shared_ptr<LoadAsyncContext>> pending;
+    std::vector<bool>                              invalidated;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending = load_context_coordinator_->pendingContexts();
+        for (const auto& context : pending) {
+            bool cancel = false;
+            for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+                const auto& desc = context->loadDescs()[i];
+                if (!context->joinedLoads()[i] && desc.source_tier != Tier::DEVICE
+                    && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
+                    cancel = true;
+                    break;
+                }
+            }
+            invalidated.push_back(cancel);
+        }
+    }
+    for (size_t i = 0; i < pending.size(); ++i) {
+        if (invalidated[i]) {
+            pending[i]->abortPending();
+        }
+    }
+}
+
 void BlockTreeLoader::shutdown() {
     load_context_coordinator_->shutdown();
 }
@@ -289,14 +317,26 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                             /*release_transferred_refs=*/false);
         });
 
+    for (size_t i = 0; i < load_descs.size(); ++i) {
+        const auto& desc = load_descs[i];
+        if (!joined_loads[i] && desc.source_tier != Tier::DEVICE
+            && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
+            abortLoadLocked(load_descs, joined_loads, 0, context_id, false);
+            rollback_guard.dismiss();
+            context->setSettlementReadyCallback(
+                [this](const auto& ready) { scheduleContextSettlement(nullptr, ready); });
+            context->cancelUnsubmittedTransfers();
+            return true;
+        }
+    }
+
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc = load_descs[desc_index];
         if (desc.source_tier == Tier::DEVICE || joined_loads[desc_index]) {
             ++prepared_desc_count;
             continue;
         }
-        if (desc.node->group_set_resources[desc.group_set_id].transfer_detached
-            || !changeTransferState(
+        if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
             return false;
@@ -363,6 +403,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
                                       bool                                   release_transferred_refs) {
     bool device_refs_released = false;
     bool tree_data_mutated    = false;
+    std::vector<TreeNode*> detached_nodes;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc           = load_descs[desc_index];
         const bool                joined_load    = joined_loads[desc_index];
@@ -390,6 +431,9 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             device_refs_released = device_refs_released || release_transferred_refs;
             continue;
         }
+        if (desc.source_tier != Tier::DEVICE && desc.node->detached) {
+            detached_nodes.push_back(desc.node);
+        }
 
         MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         if (desc.source_tier == Tier::DEVICE) {
@@ -414,6 +458,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
         }
     }
+    tree_->reclaimDetachedNodes(detached_nodes);
     if (tree_data_mutated || device_refs_released) {
         settled_(tree_data_mutated, device_refs_released);
     }
@@ -443,9 +488,13 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         bool                                           settlement_success = context->aggregateSuccess();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
+            bool cancel_pending_loads = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
+                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts, cancel_pending_loads);
+            }
+            if (cancel_pending_loads) {
+                cancelInvalidatedPendingLoads();
             }
             for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
                 bool    join_completed       = false;
@@ -495,7 +544,8 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
 
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
                                        bool                                            aggregate_success,
-                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                       bool&                                           cancel_pending_loads) {
     const bool settlement_success = aggregate_success && validateLoadTaskLocked(task);
     bool       state_settled      = false;
     bool       tree_data_mutated  = false;
@@ -538,7 +588,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             continue;
         }
 
-        // On copy/batch-settlement failure, leave the source data untouched.
+        // Ordinary copy failures still retain a reusable source.
         if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
             RTP_LLM_LOG_WARNING(
@@ -548,13 +598,26 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             state_settled = true;
         }
     }
-    settled_(tree_data_mutated, state_settled);
     load_task_runner_.releaseTaskResources(task);
     for (const TransferDescriptor& desc : task.load_descs) {
         if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
         }
     }
+    std::vector<TransferDescriptor> corrupted;
+    std::vector<TreeNode*>          detached_nodes;
+    for (const auto& desc : task.load_descs) {
+        if (desc.node->detached) {
+            detached_nodes.push_back(desc.node);
+        } else if (desc.corrupted()) {
+            corrupted.push_back(desc);
+        }
+    }
+    // The two sets are disjoint; neither path accesses a node after it is reclaimed.
+    tree_->reclaimDetachedNodes(detached_nodes);
+    cancel_pending_loads = evictor_.invalidateSources(corrupted);
+    tree_data_mutated = !corrupted.empty() || tree_data_mutated;
+    settled_(tree_data_mutated, state_settled);
     return settlement_success;
 }
 
