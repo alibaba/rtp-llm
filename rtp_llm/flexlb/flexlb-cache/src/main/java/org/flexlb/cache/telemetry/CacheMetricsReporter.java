@@ -38,8 +38,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_T
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_ACTIVE_SOURCE;
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_SOURCE_CHANGE_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QPS;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
@@ -111,8 +109,6 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.COUNTER);
-        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
@@ -316,24 +312,6 @@ public class CacheMetricsReporter {
                 "engineIp", engineIp,
                 "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
-    }
-
-    /**
-     * Report token hits for the current request against the recent cache-key pool.
-     */
-    public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
-                                               long hitTokens,
-                                               long inputTokens) {
-        if (inputTokens <= 0L) {
-            return;
-        }
-
-        FlexMetricTags tags = FlexMetricTags.of(
-                "timeWindowMs", String.valueOf(timeWindowMs)
-        );
-
-        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
-        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
     }
 
     /**
