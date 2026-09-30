@@ -49,6 +49,11 @@ def launch_config(args):
     finally:
         route.close()
     no_proxy = f"localhost,127.0.0.1,{local_ip},{args.peer_ip}"
+    # K3's post-norm BF16 MoE inputs are finite in the validated serving path.
+    # Keep the generic packer choice explicit in the emitted launch config.
+    packer_impl = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "fast_finite").strip().lower()
+    if packer_impl not in ("legacy", "optimized", "fast_finite"):
+        raise ValueError("MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite")
     environment = {
         "MODEL_TYPE": "kimi_k3",
         "CHECKPOINT_PATH": str(checkpoint),
@@ -66,6 +71,7 @@ def launch_config(args):
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),
+        "MEGA_MOE_INPUT_PACKER_IMPL": packer_impl,
         "START_PORT": str(args.start_port),
         "LOCAL_WORLD_SIZE": "8",
         "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",

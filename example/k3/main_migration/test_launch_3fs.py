@@ -51,6 +51,24 @@ class CheckpointSourceTest(unittest.TestCase):
             )
             environment, _ = launch.launch_config(args)
             self.assertEqual(environment["FASTSAFETENSORS_NOGDS"], "0")
+            self.assertEqual(environment["MEGA_MOE_INPUT_PACKER_IMPL"], "fast_finite")
+
+    def test_moe_input_packer_can_keep_safe_finite_check(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            draft = root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
+            args = SimpleNamespace(
+                checkpoint=str(target), draft_checkpoint=str(draft),
+                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                role="PREFILL", server="/bin/true", allow_hf3fs_root=str(root),
+            )
+            with patch.dict(launch.os.environ, {"MEGA_MOE_INPUT_PACKER_IMPL": "optimized"}):
+                environment, _ = launch.launch_config(args)
+            self.assertEqual(environment["MEGA_MOE_INPUT_PACKER_IMPL"], "optimized")
 
     def test_explicit_hf3fs_root_accepts_only_matching_fuse_mount(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
