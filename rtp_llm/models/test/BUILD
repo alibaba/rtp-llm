@@ -128,7 +128,7 @@ py_test(
 
 py_test(
     name = "dsv41_moe_test",
-    srcs = ["dsv41_moe_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    srcs = ["dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_moe_test.py",
     data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
     deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],

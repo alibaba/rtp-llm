@@ -28,6 +28,19 @@ from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import (
 GROUPED_ALIGNMENT = 128
 
 
+def _validate_input_scales(x, scales):
+    if (
+        x.dtype != torch.float8_e4m3fn
+        or scales.dtype != torch.uint8
+        or scales.shape != (*x.shape[:-1], x.shape[-1] // GROUP_SIZE)
+        or scales.device != x.device
+        or not scales.is_contiguous()
+    ):
+        raise ValueError(
+            "V4.1 received FP8 requires contiguous linear uint8 group-32 UE8M0 scales"
+        )
+
+
 def _fp4_bytes(weight):
     if weight.dtype in (torch.uint8, torch.int8) or weight.dtype == getattr(
         torch, "float4_e2m1fn_x2", None
@@ -139,21 +152,24 @@ class V41RoutedExperts(nn.Module):
             self._packed_s13 = pack_group32_scales(self.s13, column_major=True)
             self._packed_s2 = pack_group32_scales(self.s2, column_major=True)
 
-    def _validate_input(self, x, row_shape, route_weights, out, metadata):
+    def _validate_input(self, x, row_shape, route_weights, out, metadata, input_scales):
+        dtype = torch.bfloat16 if input_scales is None else torch.float8_e4m3fn
         if (
             x.shape != (*row_shape, self.dim)
             or x.device != self.device
-            or x.dtype != torch.bfloat16
+            or x.dtype != dtype
             or not x.is_contiguous()
             or (torch.is_grad_enabled() and x.requires_grad)
         ):
             raise ValueError(
-                "V4.1 routed input must be contiguous inference BF16 on the weight device"
+                "V4.1 routed input must be contiguous inference BF16 or scaled E4M3 on the weight device"
             )
+        if input_scales is not None:
+            _validate_input_scales(x, input_scales)
         if out is not None:
             if (
                 out.shape != x.shape
-                or out.dtype != x.dtype
+                or out.dtype != torch.bfloat16
                 or out.device != x.device
                 or not out.is_contiguous()
                 or out.requires_grad
@@ -163,6 +179,7 @@ class V41RoutedExperts(nn.Module):
                 )
             protected = (
                 x,
+                input_scales,
                 route_weights,
                 metadata,
                 self.w13,
@@ -181,8 +198,9 @@ class V41RoutedExperts(nn.Module):
                     "V4.1 routed output must not share input or weight storage"
                 )
 
-    def _run(self, x, valid, route_weights, key, gemm, *, out):
+    def _run(self, x, valid, route_weights, key, gemm, *, out, input_scales):
         active = _check_rows(valid.shape, self.device, valid, route_weights)
+        key = (*key, "bf16" if input_scales is None else "received_fp8")
         context = (
             nullcontext() if self.backend == "eager" else torch.cuda.device(self.device)
         )
@@ -191,15 +209,23 @@ class V41RoutedExperts(nn.Module):
                 self.backend != "eager" and torch.cuda.is_current_stream_capturing()
             )
             if not x.numel():
-                return torch.empty_like(x) if out is None else out
+                return torch.empty_like(x, dtype=torch.bfloat16) if out is None else out
             if capturing and key not in self._warmed:
                 raise RuntimeError(
                     "V4.1 routed layout/capacity must be warmed before capture"
                 )
-            safe_x = torch.where(active[..., None], x, 0)
             quant_backend = "eager" if self.backend == "eager" else "triton"
-            values, scales = quantize_group32(safe_x, backend=quant_backend)
-            scales = scales.reshape(*valid.shape, self.dim // 32)
+            if input_scales is None:
+                safe_x = torch.where(active[..., None], x, 0)
+                values, scales = quantize_group32(safe_x, backend=quant_backend)
+                scales = scales.reshape(*valid.shape, self.dim // 32)
+            else:
+                # Preserve transported E4M3 bits, including signed zero. Only
+                # inactive rows are canonicalized before provider execution.
+                values = torch.where(active[..., None], x.view(torch.uint8), 0).view(
+                    torch.float8_e4m3fn
+                )
+                scales = input_scales
             scales = torch.where(active[..., None], scales, 0)
             gate_up = gemm(values, scales, self.w13, self.s13, self._packed_s13)
             gate, up = gate_up.chunk(2, dim=-1)
@@ -218,17 +244,23 @@ class V41RoutedExperts(nn.Module):
                 self._warmed.add(key)
             return result if out is None else out.copy_(result)
 
-    def forward_masked(self, x, counts, route_weights, *, expected_m=None, out=None):
+    def forward_masked(
+        self, x, counts, route_weights, *, expected_m=None, out=None, input_scales=None
+    ):
         """Execute [E,M,D] with active prefixes ``counts[E]`` and route weights.
 
         CUDA counts must be in [0,M]; a stream-ordered device assertion checks
         them before provider calls. Zero-weight rows inside prefixes are allowed.
         ``expected_m`` is an explicit scheduling hint, not an occupancy limit.
+        Explicit ``input_scales`` selects received E4M3 input with linear uint8
+        UE8M0 bytes; those inputs are never dequantized or requantized.
         """
         if x.ndim != 3 or x.shape[0] != self.experts:
             raise ValueError("V4.1 masked experts require [E,M,D]")
         capacity = x.shape[1]
-        self._validate_input(x, (self.experts, capacity), route_weights, out, counts)
+        self._validate_input(
+            x, (self.experts, capacity), route_weights, out, counts, input_scales
+        )
         if (
             counts.shape != (self.experts,)
             or counts.dtype != torch.int32
@@ -281,16 +313,30 @@ class V41RoutedExperts(nn.Module):
             return result
 
         return self._run(
-            x, valid, route_weights, ("masked", capacity, expected_m), gemm, out=out
+            x,
+            valid,
+            route_weights,
+            ("masked", capacity, expected_m),
+            gemm,
+            out=out,
+            input_scales=input_scales,
         )
 
     def forward_contiguous(
-        self, x, rows_per_expert, valid_rows, route_weights, *, out=None
+        self,
+        x,
+        rows_per_expert,
+        valid_rows,
+        route_weights,
+        *,
+        out=None,
+        input_scales=None
     ):
         """Execute aligned expert segments, including explicit padding masks.
 
         Segment sizes are host admission metadata, not read from device counts.
         Every segment must be 128-aligned. Zero-sized experts are valid.
+        ``input_scales`` has the same byte-preserving meaning as in masked mode.
         """
         if (
             type(rows_per_expert) is not tuple
@@ -304,7 +350,7 @@ class V41RoutedExperts(nn.Module):
                 "V4.1 contiguous segments require a tuple of 128-aligned expert row counts"
             )
         rows = sum(rows_per_expert)
-        self._validate_input(x, (rows,), route_weights, out, valid_rows)
+        self._validate_input(x, (rows,), route_weights, out, valid_rows, input_scales)
         _check_rows((rows,), self.device, valid_rows, route_weights)
 
         def gemm(values, scales, weight, raw_scales, packed_scales):
@@ -340,5 +386,11 @@ class V41RoutedExperts(nn.Module):
             return result
 
         return self._run(
-            x, valid_rows, route_weights, ("contiguous", rows_per_expert), gemm, out=out
+            x,
+            valid_rows,
+            route_weights,
+            ("contiguous", rows_per_expert),
+            gemm,
+            out=out,
+            input_scales=input_scales,
         )

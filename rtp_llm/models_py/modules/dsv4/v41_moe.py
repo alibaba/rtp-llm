@@ -3,10 +3,12 @@
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
 from rtp_llm.models_py.modules.dsv4.v41_routed import (
     GROUPED_ALIGNMENT,
     V41RoutedExperts,
+    _validate_input_scales,
 )
 
 
@@ -62,16 +64,57 @@ class V41LocalMoE(nn.Module):
         self.max_tokens, self.masked_token_limit = max_tokens, masked_token_limit
         self.max_topk = max_topk
 
-    def forward(self, x, weights, indices, *, valid_rows=None, layout="contiguous"):
+    def forward_received(self, payload, dispatch_layout, *, layout="contiguous"):
+        """Return FP32 local contributions from an already-admitted EP payload."""
+        if (
+            type(dispatch_layout) is not V41DispatchLayout
+            or dispatch_layout.recipe != self.recipe
+            or dispatch_layout.hidden != self.experts.dim
+            or dispatch_layout.topk > self.max_topk
+            or self.expert_start_id + self.experts.experts > dispatch_layout.experts
+        ):
+            raise ValueError(
+                "V4.1 received dispatch layout disagrees with expert shard"
+            )
+        dispatch_layout.views(payload)
+        if (
+            payload.device != self.experts.device
+            or payload.shape[0] > self.max_tokens
+            or layout not in ("contiguous", "masked")
+            or (layout == "masked" and payload.shape[0] > self.masked_token_limit)
+        ):
+            raise ValueError(
+                "V4.1 received payload exceeds device, layout or token bounds"
+            )
+        values, scales, weights, indices = dispatch_layout.unpack(payload)
+        return self(values, weights, indices, layout=layout, input_scales=scales)
+
+    def forward(
+        self,
+        x,
+        weights,
+        indices,
+        *,
+        valid_rows=None,
+        layout="contiguous",
+        input_scales=None
+    ):
+        """Route BF16 or explicit received E4M3/linear UE8M0 rows without reweighting."""
+        dtype = torch.bfloat16 if input_scales is None else torch.float8_e4m3fn
         if (
             x.ndim != 2
             or x.shape[1] != self.experts.dim
-            or x.dtype != torch.bfloat16
+            or x.dtype != dtype
             or x.device != self.experts.device
             or not x.is_contiguous()
             or (torch.is_grad_enabled() and x.requires_grad)
         ):
-            raise ValueError("V4.1 MoE input requires contiguous inference BF16 [N,D]")
+            raise ValueError(
+                "V4.1 MoE input requires contiguous inference BF16 or scaled E4M3 [N,D]"
+            )
+        if input_scales is not None:
+            _validate_input_scales(x, input_scales)
+        source = x if input_scales is None else x.view(torch.uint8)
         rows, dim = x.shape
         if rows > self.max_tokens or layout not in ("contiguous", "masked"):
             raise ValueError("V4.1 routing layout or token bound is invalid")
@@ -160,19 +203,33 @@ class V41LocalMoE(nn.Module):
                 base.index_select(0, sorted_experts[:active_count])
                 + offsets[:active_count]
             )
-            routed_x = torch.zeros((allocated, dim), device=x.device, dtype=x.dtype)
+            routed_x = torch.zeros(
+                (allocated, dim), device=x.device, dtype=source.dtype
+            )
             routed_weights = torch.zeros(
                 allocated, device=x.device, dtype=torch.float32
             )
             valid = torch.zeros(allocated, device=x.device, dtype=torch.bool)
             valid[destinations] = True
-            routed_x.index_copy_(0, destinations, x.index_select(0, order // topk))
+            routed_x.index_copy_(0, destinations, source.index_select(0, order // topk))
+            routed_scales = None
+            if input_scales is not None:
+                routed_scales = torch.zeros(
+                    (allocated, dim // 32), device=x.device, dtype=torch.uint8
+                )
+                routed_scales.index_copy_(
+                    0, destinations, input_scales.index_select(0, order // topk)
+                )
             routed_weights.index_copy_(
                 0, destinations, weights.flatten().index_select(0, order)
             )
             route_map.index_copy_(0, order, destinations)
             down = self.experts.forward_contiguous(
-                routed_x, segments, valid, routed_weights
+                routed_x.view(x.dtype),
+                segments,
+                valid,
+                routed_weights,
+                input_scales=routed_scales,
             )
         else:
             capacity = (
@@ -187,13 +244,26 @@ class V41LocalMoE(nn.Module):
                 allocated + torch.arange(route_count, device=x.device),
             )
             routed_x = torch.zeros(
-                (allocated + route_count, dim), device=x.device, dtype=x.dtype
+                (allocated + route_count, dim), device=x.device, dtype=source.dtype
             )
             routed_weights = torch.zeros(
                 allocated + route_count, device=x.device, dtype=torch.float32
             )
-            safe_x = torch.where(active.any(-1)[:, None], x, 0)
+            safe_x = torch.where(active.any(-1)[:, None], source, 0)
             routed_x.index_copy_(0, destinations, safe_x.index_select(0, order // topk))
+            routed_scales = None
+            if input_scales is not None:
+                routed_scales = torch.zeros(
+                    (allocated + route_count, dim // 32),
+                    device=x.device,
+                    dtype=torch.uint8,
+                )
+                routed_scales.index_copy_(
+                    0, destinations, input_scales.index_select(0, order // topk)
+                )
+                routed_scales = routed_scales[:allocated].view(
+                    experts, capacity, dim // 32
+                )
             sorted_weights = (
                 torch.where(active, weights, 0).flatten().index_select(0, order)
             )
@@ -202,14 +272,17 @@ class V41LocalMoE(nn.Module):
                 0, order, torch.where(sorted_active, destinations, -1)
             )
             down = self.experts.forward_masked(
-                routed_x[:allocated].view(experts, capacity, dim),
+                routed_x[:allocated].view(x.dtype).view(experts, capacity, dim),
                 counts[:experts].to(torch.int32),
                 routed_weights[:allocated].view(experts, capacity),
+                input_scales=routed_scales,
             ).reshape(allocated, dim)
         # The expert already applied weights before its BF16/down-input rounding.
         # Accumulate in expert-ID order and FP32, as the checkpoint loop does.
         output = torch.zeros((rows, dim), device=x.device, dtype=torch.float32)
-        down = torch.cat((down, torch.zeros((1, dim), device=x.device, dtype=x.dtype)))
+        down = torch.cat(
+            (down, torch.zeros((1, dim), device=x.device, dtype=down.dtype))
+        )
         route_map = route_map.reshape(rows, topk)
         route_map = route_map.gather(1, keys.argsort(dim=-1, stable=True))
         for slot in range(topk):

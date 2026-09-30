@@ -142,6 +142,102 @@ def mock_provider(op):
 
 
 class V41RoutedTest(unittest.TestCase):
+    def test_received_fp8_preserves_provider_bytes_in_both_layouts(self):
+        op = routed.V41RoutedExperts(
+            routed_weights(dim=128, inter=128), backend="eager"
+        )
+        provider = mock_provider(op)
+        raw = torch.arange(128, dtype=torch.uint8).repeat(3, 128, 1)
+        raw[..., 127] = 126
+        raw[..., 0] = 128  # Signed zero must survive transport and row placement.
+        scales = torch.tensor([118, 120, 122, 124], dtype=torch.uint8).repeat(3, 128, 1)
+        counts = torch.tensor([2, 0, 1], dtype=torch.int32)
+        active = torch.arange(128)[None] < counts[:, None]
+        route = torch.full((3, 128), 0.37)
+        route[~active] = float("nan")
+        raw[~active] = 127
+        scales[~active] = 255
+        with provider_runtime(), patch.object(
+            routed, "quantize_group32", side_effect=AssertionError("input requantized")
+        ):
+            masked = op.forward_masked(
+                raw.view(torch.float8_e4m3fn), counts, route, input_scales=scales
+            )
+            contiguous = op.forward_contiguous(
+                raw.reshape(-1, 128).view(torch.float8_e4m3fn),
+                (128, 128, 128),
+                active.flatten(),
+                route.flatten(),
+                input_scales=scales.reshape(-1, 4),
+            )
+        torch.testing.assert_close(masked.flatten(0, 1), contiguous, rtol=0, atol=0)
+        for call in (provider.calls[0], provider.calls[2]):
+            values, packed, _, _ = call
+            torch.testing.assert_close(
+                values.view(torch.uint8).reshape_as(raw),
+                torch.where(active[..., None], raw, 0),
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                unpack_tma(packed, 4).reshape_as(scales),
+                torch.where(active[..., None], scales, 0),
+                rtol=0,
+                atol=0,
+            )
+        self.assertEqual(masked.dtype, torch.bfloat16)
+        self.assertTrue(bool(torch.isfinite(masked).all()))
+        self.assertTrue(bool((masked[~active] == 0).all()))
+
+    def test_received_scales_admission_empty_output_and_alias_protection(self):
+        op = routed.V41RoutedExperts(routed_weights(), backend="eager")
+        x = torch.ones(3, 2, 64).to(torch.float8_e4m3fn)
+        scales = torch.full((3, 2, 2), 127, dtype=torch.uint8)
+        counts, weights = torch.tensor([2, 0, 1], dtype=torch.int32), torch.ones(3, 2)
+        out = torch.full(x.shape, 42, dtype=torch.bfloat16)
+        for bad in (scales.int(), scales[..., :1], scales.transpose(1, 2)):
+            with self.assertRaisesRegex(ValueError, "scales"):
+                op.forward_masked(x, counts, weights, input_scales=bad, out=out)
+            self.assertTrue(bool((out == 42).all()))
+        with self.assertRaises(ValueError):
+            op.forward_masked(x, counts, weights, input_scales=scales, out=x)
+        storage = torch.zeros(3 * 2 * 64 * 2, dtype=torch.uint8)
+        alias_scales = storage[:12].view(3, 2, 2)
+        alias_out = storage.view(torch.bfloat16).view_as(out)
+        with self.assertRaisesRegex(ValueError, "share"):
+            op.forward_masked(
+                x, counts, weights, input_scales=alias_scales, out=alias_out
+            )
+        empty = op.forward_masked(
+            x[:, :0],
+            torch.zeros_like(counts),
+            weights[:, :0],
+            input_scales=scales[:, :0],
+        )
+        self.assertEqual(empty.shape, (3, 0, 64))
+        self.assertEqual(empty.dtype, torch.bfloat16)
+
+    def test_received_input_requires_its_own_graph_warmup(self):
+        op = routed.V41RoutedExperts(
+            routed_weights(dim=128, inter=128), backend="eager"
+        )
+        mock_provider(op)
+        x = torch.ones(3, 128, 128, dtype=torch.bfloat16)
+        counts, weights = torch.tensor([1, 0, 0], dtype=torch.int32), torch.ones(3, 128)
+        values, scales = linear.quantize_group32(x, backend="eager")
+        scales = scales.reshape(3, 128, 4)
+        with provider_runtime():
+            expected = op.forward_masked(x, counts, weights)
+        with provider_runtime(capturing=True):
+            with self.assertRaisesRegex(RuntimeError, "warmed"):
+                op.forward_masked(values, counts, weights, input_scales=scales)
+        with provider_runtime():
+            actual = op.forward_masked(values, counts, weights, input_scales=scales)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        with provider_runtime(capturing=True):
+            actual = op.forward_masked(values, counts, weights, input_scales=scales)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_fp4_oracle_decodes_all_nibbles_and_group_scales(self):
         weight = torch.arange(256, dtype=torch.uint8).reshape(8, 32)
         scales = torch.tensor([[126, 128]], dtype=torch.uint8).expand(8, 2).contiguous()

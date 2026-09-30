@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout, pack_dispatch
 from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
 from rtp_llm.models_py.modules.dsv4.v41_routed import V41RoutedExperts
 
@@ -212,6 +213,55 @@ class V41RoutedHardwareTest(unittest.TestCase):
         weights.zero_()
         graph.replay()
         check(output, "masked")
+
+    def test_received_fp8_ep48_ep96_and_dispatch_graph_updates(self):
+        wire = V41DispatchLayout(5120, 6, 384)
+        for experts in (48, 96):
+            local = V41LocalMoE(
+                V41RoutedExperts(self.weights(experts)),
+                expert_start_id=experts,
+                max_tokens=8,
+                masked_token_limit=8,
+            )
+            x = torch.randn(4, 5120, device="cuda", dtype=torch.bfloat16)
+            weights = torch.rand(4, 6, device="cuda", dtype=torch.float32)
+            ids = torch.tensor(
+                [experts, 2 * experts - 1, experts + 4, 0, 1, 383],
+                device="cuda",
+                dtype=torch.int32,
+            ).repeat(4, 1)
+            valid = torch.tensor([True, False, True, True], device="cuda")
+            x[~valid] = float("nan")
+            payload = wire.allocate(8, device="cuda")
+            pack_dispatch(x, weights, ids, valid, wire, out=payload)
+
+            def check(actual, layout):
+                expected = local(x, weights, ids, valid_rows=valid, layout=layout)
+                torch.testing.assert_close(actual[:4], expected, rtol=0, atol=0)
+                self.assertEqual(actual.dtype, torch.float32)
+                self.assertTrue(bool((actual[4:] == 0).all()))
+
+            for layout in ("contiguous", "masked"):
+                check(local.forward_received(payload, wire, layout=layout), layout)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    pack_dispatch(x, weights, ids, valid, wire, out=payload)
+                    local.forward_received(payload, wire, layout="masked")
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                pack_dispatch(x, weights, ids, valid, wire, out=payload)
+                actual = local.forward_received(payload, wire, layout="masked")
+            for route_weight in (0, 0.37, 1.5):
+                x.normal_()
+                valid.logical_not_()
+                weights.fill_(route_weight)
+                ids.copy_(ids.flip(1))
+                graph.replay()
+                check(actual, "masked")
+            del graph, local, actual
 
 
 if __name__ == "__main__":

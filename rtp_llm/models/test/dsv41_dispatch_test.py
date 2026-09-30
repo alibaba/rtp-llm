@@ -23,6 +23,48 @@ with patch.dict(
 
 
 class V41DispatchTest(unittest.TestCase):
+    def test_unpack_preserves_bits_and_removes_scale_padding(self):
+        for hidden in (32, 96, 5120):
+            layout = dispatch.V41DispatchLayout(hidden, 2, 384)
+            payload = layout.allocate(3, device="cpu")
+            values, packed, weights, ids = layout.views(payload)
+            values.view(torch.uint8).copy_(
+                torch.arange(hidden, dtype=torch.int64).remainder(256).byte()
+            )
+            packed.copy_(torch.arange(layout.packed_scales, dtype=torch.int32))
+            weights.copy_(torch.tensor([0.37, 0.5]))
+            ids.copy_(torch.tensor([8, 12], dtype=torch.int32))
+            q, s, w, i = layout.unpack(payload)
+            for field in (q, s, w, i):
+                self.assertTrue(field.is_contiguous())
+            torch.testing.assert_close(
+                q.view(torch.uint8), values.view(torch.uint8), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                s,
+                packed.contiguous().view(torch.uint8)[:, : hidden // 32],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(w, weights, rtol=0, atol=0)
+            torch.testing.assert_close(i, ids, rtol=0, atol=0)
+            self.assertEqual(layout.unpack(payload[:0])[1].shape, (0, hidden // 32))
+
+    def test_received_route_values_reject_corruption(self):
+        layout = dispatch.V41DispatchLayout(64, 2, 16)
+        for weights, ids in (
+            ([1, -1], [1, 2]),
+            ([1, float("nan")], [1, 2]),
+            ([1, 1], [1, 16]),
+            ([1, 1], [1, 1]),
+        ):
+            payload = layout.allocate(1, device="cpu").zero_()
+            _, _, w, i = layout.views(payload)
+            w.copy_(torch.tensor(weights))
+            i.copy_(torch.tensor(ids))
+            with self.assertRaises(ValueError):
+                layout.unpack(payload)
+
     def test_real_geometry_recipe_identity_and_invalid_layouts(self):
         layout = dispatch.V41DispatchLayout(5120, 6, 384)
         self.assertEqual(

@@ -12,6 +12,27 @@ from rtp_llm.models_py.modules.dsv4.v41_expert import (
 from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import quantize_group32
 
 
+def _validate_routes(weights, indices, valid_rows, experts):
+    legal_weights = (
+        ~valid_rows[:, None] | (torch.isfinite(weights) & (weights >= 0))
+    ).all()
+    active = valid_rows[:, None] & (weights != 0)
+    legal_ids = (~active | ((indices >= 0) & (indices < experts))).all()
+    ordered_ids = torch.where(active, indices.long(), experts).sort(dim=-1).values
+    unique_ids = (
+        ~((ordered_ids[:, 1:] == ordered_ids[:, :-1]) & (ordered_ids[:, 1:] < experts))
+    ).all()
+    legal = legal_weights & legal_ids & unique_ids
+    if weights.device.type == "cpu":
+        if not bool(legal):
+            raise ValueError(
+                "V4.1 dispatch requires finite nonnegative weights and unique in-range active IDs"
+            )
+    else:
+        torch._assert_async(legal, "Invalid V4.1 dispatch route values")
+    return active
+
+
 @dataclass(frozen=True)
 class V41DispatchLayout:
     hidden: int
@@ -76,6 +97,25 @@ class V41DispatchLayout:
             raise ValueError("V4.1 dispatch row capacity must be nonnegative")
         return torch.empty((rows, self.payload_bytes), device=device, dtype=torch.uint8)
 
+    def unpack(self, payload):
+        """Copy received fields to expert-ready rows without numerical conversion.
+
+        The caller must finish transport writes before use and retain the input
+        through stream completion. Peer layout admission precedes this method;
+        row geometry alone cannot establish the sender's numerical recipe.
+        """
+        values, packed, weights, indices = self.views(payload)
+        valid_rows = torch.ones(
+            payload.shape[0], dtype=torch.bool, device=payload.device
+        )
+        _validate_routes(weights, indices, valid_rows, self.experts)
+        return (
+            values.view(torch.uint8).contiguous().view(torch.float8_e4m3fn),
+            packed.contiguous().view(torch.uint8)[:, : self.hidden // 32].contiguous(),
+            weights.contiguous(),
+            indices.contiguous(),
+        )
+
 
 def pack_dispatch(
     x, weights, indices, valid_rows, layout, *, out=None, backend="triton"
@@ -130,28 +170,7 @@ def pack_dispatch(
             for t in (x, weights, indices, valid_rows)
         ):
             raise ValueError("V4.1 dispatch output must not share input storage")
-    legal_weights = (
-        ~valid_rows[:, None] | (torch.isfinite(weights) & (weights >= 0))
-    ).all()
-    active = valid_rows[:, None] & (weights != 0)
-    legal_ids = (~active | ((indices >= 0) & (indices < layout.experts))).all()
-    ordered_ids = (
-        torch.where(active, indices.long(), layout.experts).sort(dim=-1).values
-    )
-    unique_ids = (
-        ~(
-            (ordered_ids[:, 1:] == ordered_ids[:, :-1])
-            & (ordered_ids[:, 1:] < layout.experts)
-        )
-    ).all()
-    legal = legal_weights & legal_ids & unique_ids
-    if x.device.type == "cpu":
-        if not bool(legal):
-            raise ValueError(
-                "V4.1 dispatch requires finite nonnegative weights and unique in-range active IDs"
-            )
-    else:
-        torch._assert_async(legal, "Invalid V4.1 dispatch route values")
+    active = _validate_routes(weights, indices, valid_rows, layout.experts)
     active_rows = active.any(-1)
     safe_x = torch.where(active_rows[:, None], x, 0)
     values, scales = quantize_group32(safe_x, backend=backend)

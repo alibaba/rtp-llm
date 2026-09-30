@@ -10,6 +10,7 @@ from unittest.mock import PropertyMock, patch
 import torch
 
 from rtp_llm.models.test.dsv41_cache_codec_test import load_codec_source
+from rtp_llm.models.test.dsv41_dispatch_test import dispatch
 from rtp_llm.models.test.dsv41_expert_test import expert
 from rtp_llm.models.test.dsv41_mxfp8_test import linear
 from rtp_llm.models.test.dsv41_routed_test import (
@@ -19,6 +20,7 @@ from rtp_llm.models.test.dsv41_routed_test import (
 )
 
 MODULES = {
+    "rtp_llm.models_py.modules.dsv4.v41_dispatch": dispatch,
     "rtp_llm.models_py.modules.dsv4.v41_expert": expert,
     "rtp_llm.models_py.modules.dsv4.v41_mxfp8": linear,
     "rtp_llm.models_py.modules.dsv4.v41_routed": routed,
@@ -79,6 +81,90 @@ def local_reference(x, weights, ids, valid, tensors, start):
 
 
 class V41MoETest(unittest.TestCase):
+    def test_wire_to_expert_path_matches_routing_with_capacity_padding(self):
+        local, _, x, weights, ids, valid = self.fixtures()
+        weights = torch.nan_to_num(weights)
+        weights[2:] = 0
+        wire = dispatch.V41DispatchLayout(64, 3, 16)
+        payload = dispatch.pack_dispatch(
+            x,
+            weights,
+            ids,
+            valid,
+            wire,
+            out=wire.allocate(8, device="cpu"),
+            backend="eager",
+        )
+        before = payload.clone()
+        for layout in ("masked", "contiguous"):
+            expected = local(x, weights, ids, valid_rows=valid, layout=layout)
+            with patch.object(
+                routed,
+                "quantize_group32",
+                side_effect=AssertionError("input requantized"),
+            ):
+                actual = local.forward_received(payload, wire, layout=layout)
+            torch.testing.assert_close(actual[:5], expected, rtol=0, atol=0)
+            self.assertTrue(bool((actual[5:] == 0).all()))
+        torch.testing.assert_close(payload, before, rtol=0, atol=0)
+        for bad in (
+            dataclasses.replace(wire, hidden=96),
+            dataclasses.replace(wire, experts=12),
+        ):
+            with self.assertRaisesRegex(ValueError, "layout"):
+                local.forward_received(payload, bad)
+        with self.assertRaisesRegex(ValueError, "bounds"):
+            local.forward_received(
+                wire.allocate(9, device="cpu"), wire, layout="masked"
+            )
+
+    def test_received_rows_keep_quantized_bytes_and_match_bf16_routing(self):
+        local, _, x, weights, ids, valid = self.fixtures()
+        active = valid & (weights != 0).any(-1)
+        # Fixtures include nonlocal rows with garbage; this rank need not consume them.
+        active[2:] = False
+        values, scales = linear.quantize_group32(
+            torch.where(active[:, None], x, 0), backend="eager"
+        )
+        values.view(torch.uint8)[~active] = 127
+        scales[~active] = 255
+        for layout in ("masked", "contiguous"):
+            expected = local(x, weights, ids, valid_rows=valid, layout=layout)
+            with patch.object(
+                routed,
+                "quantize_group32",
+                side_effect=AssertionError("input requantized"),
+            ):
+                actual = local(
+                    values,
+                    weights,
+                    ids,
+                    valid_rows=valid,
+                    layout=layout,
+                    input_scales=scales,
+                )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            self.assertEqual(actual.dtype, torch.float32)
+            empty = local(
+                values[:0], weights[:0], ids[:0], layout=layout, input_scales=scales[:0]
+            )
+            self.assertEqual(empty.shape, (0, 64))
+            self.assertEqual(empty.dtype, torch.float32)
+
+    def test_received_scale_metadata_rejected_before_expert_execution(self):
+        local, _, x, weights, ids, valid = self.fixtures()
+        with patch.object(local.experts, "forward_masked") as run:
+            with self.assertRaisesRegex(ValueError, "scales"):
+                local(
+                    x.to(torch.float8_e4m3fn),
+                    weights,
+                    ids,
+                    valid_rows=valid,
+                    layout="masked",
+                    input_scales=torch.ones(5, 1, dtype=torch.uint8),
+                )
+            run.assert_not_called()
+
     def fixtures(self, *, dim=64, inter=96):
         tensors = routed_weights(dim=dim, inter=inter)
         local = moe.V41LocalMoE(
