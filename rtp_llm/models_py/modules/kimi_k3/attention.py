@@ -102,8 +102,6 @@ class KimiK3KDA(nn.Module):
             if not isinstance(self.output, CudaFp8GEMMLinear) or not self.output.scale_ue8m0:
                 raise ValueError("FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales")
             self._fp8_output_norm = True
-        if self._rs_column_overlap and not self._fp8_output_norm:
-            raise ValueError("BF16 NCCL/FP8 column overlap requires an E4M3 output")
         forget_weight = weights[W.linear_attn_f_b_w]
         self.fa_width = forget_weight.shape[
             1 if forget_weight.dtype == torch.float8_e4m3fn else 0
@@ -206,6 +204,7 @@ class KimiK3KDA(nn.Module):
                 )
         if (
             self._rs_column_overlap
+            and self._fp8_output_norm
             and self.tp_size > 1
             and values.shape[0] >= self._rs_column_overlap_min_rows
             and values.is_cuda
@@ -275,8 +274,6 @@ class KimiK3MLA(nn.Module):
                 isinstance(self.output, CudaFp8GEMMLinear)
                 and self.output.scale_ue8m0
             )
-        if self._rs_column_overlap and not self._fp8_output_gate:
-            raise ValueError("BF16 NCCL/FP8 column overlap requires an E4M3 output")
         self._gate_stream = None
         weight = weights[W.mla_fusedqkrope_w]
         if (
@@ -363,6 +360,7 @@ class KimiK3MLA(nn.Module):
                 )
         if (
             self._rs_column_overlap
+            and self._fp8_output_gate
             and self.tp_size > 1
             and values.shape[0] >= self._rs_column_overlap_min_rows
             and values.is_cuda
