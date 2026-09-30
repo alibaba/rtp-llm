@@ -554,7 +554,7 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
         ), patch.dict(
             "sys.modules",
             {
-                "flash_mla": SimpleNamespace(
+                "rtp_llm.models_py.modules.dsv4.flash_mla_heads": SimpleNamespace(
                     flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
                 ),
                 "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton": SimpleNamespace(),
@@ -622,9 +622,7 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
         flash_args = []
         projection_args = []
 
-        def fake_flash_mla_sparse_fwd(
-            q, kv, indices, sm_scale, attn_sink, topk_length
-        ):
+        def fake_flash_mla_sparse_fwd(q, kv, indices, sm_scale, attn_sink, topk_length):
             flash_args.append((q, indices, topk_length))
             return torch.ones_like(q), None, None
 
@@ -641,7 +639,7 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
         ), patch.dict(
             "sys.modules",
             {
-                "flash_mla": SimpleNamespace(
+                "rtp_llm.models_py.modules.dsv4.flash_mla_heads": SimpleNamespace(
                     flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
                 )
             },
@@ -786,7 +784,7 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
         ), patch.dict(
             "sys.modules",
             {
-                "flash_mla": SimpleNamespace(
+                "rtp_llm.models_py.modules.dsv4.flash_mla_heads": SimpleNamespace(
                     flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
                 )
             },

@@ -219,7 +219,7 @@ class V4Transformer(nn.Module):
         else:
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
-            self.embed = EmbeddingTorch(gw[W.embedding])
+            self.embed = EmbeddingTorch(gw[W.embedding], tp_size=args.tp_size)
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either

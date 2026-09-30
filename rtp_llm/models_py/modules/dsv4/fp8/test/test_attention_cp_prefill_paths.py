@@ -410,7 +410,7 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
                 patch.dict(
                     sys.modules,
                     {
-                        "flash_mla": SimpleNamespace(
+                        "rtp_llm.models_py.modules.dsv4.flash_mla_heads": SimpleNamespace(
                             flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
                         )
                     },

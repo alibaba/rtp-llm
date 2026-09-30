@@ -313,5 +313,135 @@ class FlashMlaDecodeKernelLayoutTest(unittest.TestCase):
                     )
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class FlashMlaTensorParallelHeadsTest(unittest.TestCase):
+    def test_sparse_bf16_tp2_matches_reference(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.flash_mla_heads import (
+            flash_mla_sparse_fwd,
+            pad_flash_mla_heads,
+        )
+
+        torch.manual_seed(7)
+        for heads in (32, 64):
+            q = (
+                torch.randn(2, heads, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+                * 0.1
+            )
+            kv = torch.randn(5, 1, HEAD_DIM, device="cuda", dtype=torch.bfloat16) * 0.1
+            sink = torch.randn(heads, device="cuda", dtype=torch.float32) * 0.1
+            indices = torch.full((2, 1, 128), -1, device="cuda", dtype=torch.int32)
+            indices[:, :, :5] = torch.arange(5, device="cuda", dtype=torch.int32)
+            lengths = torch.full((2,), 5, device="cuda", dtype=torch.int32)
+            out, maximum, lse = flash_mla_sparse_fwd(
+                q=q,
+                kv=kv,
+                indices=indices,
+                sm_scale=HEAD_DIM**-0.5,
+                attn_sink=sink,
+                topk_length=lengths,
+            )
+            self.assertEqual(tuple(out.shape), (2, heads, HEAD_DIM))
+            self.assertEqual(tuple(maximum.shape), (2, heads))
+            self.assertEqual(tuple(lse.shape), (2, heads))
+            logits = (
+                torch.einsum("thd,kd->thk", q.float(), kv[:, 0].float())
+                * HEAD_DIM**-0.5
+            )
+            probs = torch.softmax(
+                torch.cat((logits, sink[None, :, None].expand(2, -1, -1)), dim=-1),
+                dim=-1,
+            )[..., :5]
+            expected = torch.einsum("thk,kd->thd", probs, kv[:, 0].float())
+            torch.testing.assert_close(out.float(), expected, atol=0.003, rtol=0.01)
+            if heads == 64:
+                padded_q, padded_sink = pad_flash_mla_heads(q, sink)
+                self.assertIs(padded_q, q)
+                self.assertIs(padded_sink, sink)
+
+    def test_fp8_tp2_single_dual_and_graph_replay(self) -> None:
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
+            SparseAttnV4DecodeFp8Op,
+        )
+
+        torch.manual_seed(11)
+        for heads, q_len, dual in ((32, 1, False), (32, 4, True), (64, 1, True)):
+            with self.subTest(heads=heads, q_len=q_len, dual=dual):
+                q = (
+                    torch.randn(
+                        1, q_len, heads, HEAD_DIM, device="cuda", dtype=torch.bfloat16
+                    )
+                    * 0.1
+                )
+                kv = (
+                    torch.randn(128, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+                    * 0.1
+                )
+                cache = _pack_model1_fp8_cache(kv, 128)
+                extra = _pack_model1_fp8_cache(kv.flip(0), 32) if dual else None
+                indices = (
+                    torch.arange(128, device="cuda", dtype=torch.int32)
+                    .view(1, 1, 128)
+                    .expand(1, q_len, 128)
+                    .contiguous()
+                )
+                sink = torch.zeros(heads, device="cuda", dtype=torch.float32)
+                metadata = SimpleNamespace(sched_meta_cache={})
+                op = SparseAttnV4DecodeFp8Op(heads, HEAD_DIM, HEAD_DIM**-0.5)
+
+                def run():
+                    schedule = get_or_build_sched_meta(
+                        metadata,
+                        batch_size=1,
+                        q_len=q_len,
+                        num_heads=heads,
+                        topk=128,
+                        extra_attn_type=1 if dual else None,
+                    )
+                    return op.forward(
+                        q,
+                        cache.squeeze(-2),
+                        sink,
+                        indices,
+                        schedule,
+                        extra_k_cache=extra.squeeze(-2) if dual else None,
+                        extra_topk_idxs=indices if dual else None,
+                    )
+
+                def reference():
+                    # Unrelated extra heads must not affect the original heads.
+                    full_q = (
+                        torch.cat((q, torch.randn_like(q)), dim=2) if heads == 32 else q
+                    )
+                    return _call_flash_mla(
+                        full_q,
+                        cache,
+                        indices,
+                        extra_k_cache=extra,
+                        extra_indices=indices if dual else None,
+                    )[:, :, :heads, :].contiguous()
+
+                actual = run()
+                self.assertEqual(tuple(actual.shape), tuple(q.shape))
+                torch.testing.assert_close(actual, reference(), rtol=0.01, atol=0.003)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    run()
+                    run()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = run()
+                q.mul_(1.75)
+                graph.replay()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(captured, reference(), rtol=0.01, atol=0.003)
+
+
 if __name__ == "__main__":
     unittest.main()
