@@ -30,7 +30,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
@@ -119,8 +119,9 @@ void            execBroadcastCpu(const BroadcastParams& params);
 bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
-void            execSyncCommunication(bool timeout = true);
-void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+void execSyncCommunication(bool timeout = true);
+void execSyncCommunication(ParallelMode mode, bool timeout = true);
 
 // ===================================================================
 // MOE / EPLB

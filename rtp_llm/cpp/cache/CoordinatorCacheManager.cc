@@ -256,6 +256,13 @@ void CoordinatorCacheManager::attachBlockTreeCache(BlockTreeCachePtr block_tree_
     }
 }
 
+void CoordinatorCacheManager::detachBlockTreeCacheForSleep() {
+    for (const auto& group : cacheGroups()) {
+        group->setEvictCallback({});
+    }
+    block_tree_cache_.reset();
+}
+
 bool CoordinatorCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
 }
@@ -1412,9 +1419,10 @@ bool CoordinatorCacheManager::doInit() {
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     const auto& topology_groups = config_.topology().groups();
     for (const auto& group : topology_groups) {
-        const int              group_id    = static_cast<int>(group_pool_configs.size());
-        DeviceBlockPoolConfig  pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
-        const CacheGroupPolicy policy      = group.policy;
+        const int             group_id    = static_cast<int>(group_pool_configs.size());
+        DeviceBlockPoolConfig pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
+        pool_config.use_sleep_backing     = use_sleep_backing_;
+        const CacheGroupPolicy policy     = group.policy;
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
             pool_config.use_device_malloc_backing =
@@ -1766,8 +1774,19 @@ size_t CoordinatorCacheManager::reserveBlocksForPoolMetrics(size_t pool_index) c
 }
 
 void CoordinatorCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    for (auto& pool : group_block_pools_) {
-        pool->regUserMr(model_id, cache_store);
+    try {
+        for (auto& pool : group_block_pools_) {
+            pool->regUserMr(model_id, cache_store);
+        }
+    } catch (...) {
+        for (auto& pool : group_block_pools_) {
+            try {
+                pool->deregUserMr();
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("pool MR rollback failed: %s", error.what());
+            }
+        }
+        throw;
     }
 }
 

@@ -82,6 +82,10 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
+void LogitsProcessorFactory::shutdown() {
+    grammarBackend().reset();
+}
+
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,

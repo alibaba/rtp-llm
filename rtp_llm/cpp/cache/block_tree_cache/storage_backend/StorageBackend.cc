@@ -27,7 +27,9 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
         callback();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("StorageBackend completion failed: %s", error.what());
-    } catch (...) { RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception"); }
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception");
+    }
 }
 
 struct StorageTaskState {
@@ -193,6 +195,18 @@ void StorageBackend::taskFinished() {
     }
 }
 
+bool StorageBackend::waitForIdleUntil(std::chrono::steady_clock::time_point deadline) {
+    RTP_LLM_CHECK_WITH_INFO(storage_backend_detail::completing_backend != this,
+                            "StorageBackend drain cannot run from its callback");
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    return lifecycle_cv_.wait_until(lock, deadline, [this] { return in_flight_ == 0; });
+}
+
+size_t StorageBackend::activeRequestCount() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return in_flight_;
+}
+
 void StorageBackend::shutdown() {
     RTP_LLM_CHECK_WITH_INFO(storage_backend_detail::completing_backend != this,
                             "StorageBackend shutdown cannot run from its callback");
@@ -296,7 +310,9 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
         if (success) {
             try {
                 result = matchImpl(request);
-            } catch (...) { success = false; }
+            } catch (...) {
+                success = false;
+            }
         }
         if (done) {
             done(success ? result.matched_blocks_num : 0, success ? std::move(result.match_meta) : nullptr, success);
@@ -312,7 +328,9 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         if (success) {
             try {
                 readImpl(state->request, match_meta);
-            } catch (...) { success = false; }
+            } catch (...) {
+                success = false;
+            }
         }
         state->finish();
         if (done) {

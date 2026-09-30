@@ -1559,6 +1559,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
         .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
+        .def_readwrite("enable_sleep_mode", &RuntimeConfig::enable_sleep_mode)
+        .def_readwrite("sleep_mode_level", &RuntimeConfig::sleep_mode_level)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1590,10 +1592,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.enable_sleep_mode,
+                                      self.sleep_mode_level);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                // Append sleep fields after main's existing 14 fields; do not
+                // reuse DSv4's different positional tuple layout.
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1614,6 +1620,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() == 16) {
+                        c.enable_sleep_mode = t[14].cast<bool>();
+                        c.sleep_mode_level  = t[15].cast<int32_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());

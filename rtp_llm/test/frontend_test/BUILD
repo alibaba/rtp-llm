@@ -1,3 +1,20 @@
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["httpx"])
+
+py_test(
+    name = "lifecycle_http_test",
+    srcs = ["lifecycle_http_test.py"],
+    deps = [
+        ":httpx",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend_sleep_routes",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 py_test(
     name = "vip_server_test",
     srcs = [
@@ -12,6 +29,25 @@ py_test(
         "A10_CU13",
         "frontend",
     ],
+)
+
+py_test(
+    name = "sleep_routes_test",
+    srcs = [
+        "sleep_routes_test.py",
+    ],
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend_sleep_routes",
+        "//rtp_llm:frontend_worker_address_utils",
+        "//rtp_llm:protobuf",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics:metrics",
+    ],
+    exec_properties = {'gpu': 'H20'},
+    tags = ["frontend"],
 )
 
 py_test(

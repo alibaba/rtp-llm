@@ -1,4 +1,5 @@
 -r requirements_base.txt
+torch_memory_saver==0.0.9.post1
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and

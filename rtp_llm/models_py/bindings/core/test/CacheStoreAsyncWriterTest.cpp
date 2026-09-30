@@ -78,7 +78,7 @@ public:
         }
     }
 
-    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&) = delete;
+    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&)            = delete;
     ScopedDeviceResetForTest& operator=(const ScopedDeviceResetForTest&) = delete;
 
 private:
@@ -664,6 +664,18 @@ TEST_F(CacheStoreAsyncWriterTest, ShutdownMakesOutstandingCallbackHarmless) {
     }
 
     EXPECT_NO_THROW(complete(nullptr));
+}
+
+TEST_F(CacheStoreAsyncWriterTest, ExplicitCloseIsIdempotentAndRejectsRetainedWriter) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+    writer.close();
+    EXPECT_NO_THROW(writer.close());
+    EXPECT_NO_THROW(complete(nullptr));
+    EXPECT_THROW(writer.init(), std::runtime_error);
+    EXPECT_THROW(writer.write(torch_ext::PyCacheStoreInputs{}, torch_ext::LayerKVCache{}), std::runtime_error);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, PublicationFailurePropagatesOnceAndCycleIsReusable) {

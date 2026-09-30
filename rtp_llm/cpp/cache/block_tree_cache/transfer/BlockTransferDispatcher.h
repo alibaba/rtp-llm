@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
@@ -21,7 +22,7 @@ public:
     using TransferDoneCallback = std::function<void(ErrorInfo)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
+                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
                             size_t                                        max_descriptors_per_batch = 8);
     ~BlockTransferDispatcher();
 
@@ -36,6 +37,12 @@ public:
     // Lifecycle-only drain, not task admission or a request-level sync API.
     // Call after producers stop; callbacks can still submit a subsequent stage.
     void drainTransfers() const;
+    // A timed-out wait retains all unfinished futures, so resources cannot be
+    // released by a later drain that mistakes them for completed work.
+    bool   drainTransfersUntil(std::chrono::steady_clock::time_point deadline) const;
+    size_t activeTransferCount() const;
+    bool   waitForPerRankIdleUntil(std::chrono::steady_clock::time_point deadline) const;
+    size_t pendingPerRankTaskCount() const;
 
 private:
     std::shared_ptr<AsyncContext> executeMultiRank(TransferTask task) const;
@@ -44,7 +51,7 @@ private:
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
     size_t                                        max_descriptors_per_batch_{8};
     mutable std::mutex                            completion_mutex_;
-    mutable std::vector<std::shared_future<void>>  transfer_completions_;
+    mutable std::vector<std::shared_future<void>> transfer_completions_;
     std::function<void()>                         drain_observer_for_test_;
 };
 
