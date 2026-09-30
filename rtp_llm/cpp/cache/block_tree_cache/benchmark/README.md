@@ -2,17 +2,24 @@
 
 ## Device/Host copy API priority
 
-默认顺序为 `cuda_batch > sm > generic`。
+默认顺序为 `cuda_3d_batch > cuda_batch > sm > generic`；3D batch 默认启用 descriptor 内的 tile 合并。
 
-`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_batch`、`sm` 或 `generic`。
+`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_3d_batch`、`cuda_batch`、`sm` 或 `generic`。
 只把指定接口移到首位，其他接口保持相对顺序。例如：
 
 ```bash
-export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
+# 实验组：优先使用带 tile 合并的 CUDA 3D batch copy
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=cuda_3d_batch
+# 对照组：优先使用普通 CUDA batch copy
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=cuda_batch
+# 其他选择：sm > cuda_3d_batch > cuda_batch > generic
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm
 ```
 
-仅在 executor 构造时读取；未设置/空值使用默认顺序，非法值告警后使用默认顺序。
+每次启动只选择上述一个值。仅在 executor 构造时读取，线上变更需重启服务；未设置/空值使用默认顺序，非法值告警后使用默认顺序。
+合法的非空值会在初始化日志中输出 `BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY='<value>'; promoting device-host copy strategy`，确认优先级设置已生效。
 优先级不会覆盖接口禁用选项或 SM 阈值。不适用时尝试下一个接口，执行失败则返回错误。
+因此 `cuda_batch` 是优先级对照，不会彻底禁用 3D fallback；初始化日志也不代表每次传输实际使用了该接口。
 
 本目录提供 BlockTreeCache 的 Tree 在线生命周期 microbenchmark 与 Device/Host/Disk transfer benchmark。当前实现以 workload 可核对、失败可传播、repetition 相互独立为前提；整改前的 buffered 大工作集与 round-trip 数值不能作为基线。
 

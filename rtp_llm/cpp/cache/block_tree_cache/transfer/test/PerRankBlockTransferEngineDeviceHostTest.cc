@@ -326,18 +326,20 @@ TEST(DeviceHostTransferExecutorConfigTest, Prefers3DBatchThenCudaBatchThenStaged
 
 TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
     const std::pair<const char*, const char*> cases[] = {
-        {nullptr, "DBSG"},      {"", "DBSG"},          {"cuda_batch", "BDSG"},
-        {"sm", "SDBG"},        {"generic", "GDBS"},   {"cuda_3d_batch", "DBSG"},
-        {"unknown", "DBSG"},   {"SM", "DBSG"}};
+        {nullptr, "DBSG"},         {"", "DBSG"},            {"cuda_3d_batch", "DBSG"},
+        {"cuda_batch", "BDSG"},    {"sm", "SDBG"},          {"generic", "GDBS"},
+        {"unknown", "DBSG"},       {"SM", "DBSG"},          {"3d-batch", "DBSG"}};
     BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
     for (const auto& [value, expected] : cases) {
         SCOPED_TRACE(value != nullptr ? value : "<unset>");
         ScopedCopyPriorityEnv priority(value);
         DeviceHostCopyOptions options;
         options.staged_sm_min_tile_count = 123;
+        options.cuda_3d_batch_copy_enabled = false;
         DeviceHostTransferExecutor executor(task_pool, 8, options);
         EXPECT_EQ(copyStrategyOrder(executor), expected);
         EXPECT_EQ(executor.options_.staged_sm_min_tile_count, 123u);
+        EXPECT_FALSE(executor.options_.cuda_3d_batch_copy_enabled);
         ScopedCopyPriorityEnv::set("generic");
         EXPECT_EQ(copyStrategyOrder(executor), expected);
         DeviceHostTransferExecutor later(task_pool, 8, options);
