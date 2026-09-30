@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -61,6 +62,14 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+        self._qwen4_decode_alignment = (
+            os.environ.get("RTP_LLM_QWEN4_TRITON_MOE_ALIGN", "0") == "1"
+            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
+            and self.E == 512
+            and self.top_k == 10
+            and self.w1.dtype == torch.bfloat16
+            and torch.version.hip is None
+        )
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -105,8 +114,15 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Token-expert alignment: compute once if block sizes match, else twice
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size_torch(topk_ids, block_m1, self.E)
+        align = moe_align_block_size_torch
+        if self._qwen4_decode_alignment and 0 < M <= 32:
+            from rtp_llm.models_py.modules.qwen4_exp.moe_align_triton import (
+                moe_align_decode,
+            )
+
+            align = moe_align_decode
+        sorted_token_ids, expert_ids, num_tokens_post_padded = align(
+            topk_ids, block_m1, self.E
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -115,8 +131,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
                 num_tokens_post_padded,
             )
         else:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                moe_align_block_size_torch(topk_ids, block_m2, self.E)
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = align(
+                topk_ids, block_m2, self.E
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
