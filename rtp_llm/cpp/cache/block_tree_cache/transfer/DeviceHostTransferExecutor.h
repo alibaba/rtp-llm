@@ -12,13 +12,15 @@ namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class DeviceDiskTransferExecutor;
+class CrcTransferService;
 
 class DeviceHostTransferExecutor: public TransferExecutor {
 public:
     DeviceHostTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                                size_t                                         max_descriptors_per_batch,
                                DeviceHostCopyOptions                          options          = {},
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                               std::shared_ptr<CrcTransferService>            crc_service      = nullptr);
     ~DeviceHostTransferExecutor() = default;
 
 private:
@@ -33,6 +35,7 @@ private:
                  const std::vector<TransferDescriptor>& descriptors,
                  const std::vector<const GroupSet*>&    group_sets) const;
 
+    std::shared_ptr<CrcTransferService>                  crc_service_;
     DeviceHostCopyOptions                                options_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;
 };

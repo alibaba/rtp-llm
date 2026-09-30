@@ -52,7 +52,11 @@ public:
     void releaseTaskResources(const Task& task);
 
 private:
+    friend class StoreTaskRunnerTestPeer;
     const std::vector<GroupSetPtr>& group_sets_;
+    // Test-only allocation failure injection: false before batch construction,
+    // true after registering its completion token, before dispatcher admission.
+    std::function<void(size_t, bool)> before_batch_for_test_;
 };
 
 }  // namespace rtp_llm

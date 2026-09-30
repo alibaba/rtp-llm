@@ -18,6 +18,9 @@ void GroupSetResource::evictFromTier(Tier tier) {
         default:
             break;
     }
+    if (is_empty()) {
+        integrity_quarantined = false;
+    }
 }
 
 std::vector<BlockIdxType> GroupSetResource::getBlocks(Tier tier) const {

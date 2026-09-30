@@ -22,6 +22,7 @@ enum class TransferStatus {
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
+    CACHE_INTEGRITY_ERROR,
 };
 
 struct DeviceHostCopyOptions {
@@ -218,8 +219,19 @@ public:
         return !remainingTimeout().has_value();
     }
 
+    // A protected parent can include ordinary-format backings. Their RPCs
+    // still need confirmed completion before the parent's targets are reused.
+    void requireConfirmedCompletion() {
+        require_confirmed_completion_ = true;
+    }
+    bool requiresConfirmedCompletion() const {
+        return require_confirmed_completion_;
+    }
+
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_);
+        auto result                          = TransferTask(std::move(descriptors), deadline_);
+        result.require_confirmed_completion_ = require_confirmed_completion_;
+        return result;
     }
 
 private:
@@ -228,6 +240,7 @@ private:
 
     std::vector<TransferDescriptor> descriptors_;
     Clock::time_point               deadline_;
+    bool                            require_confirmed_completion_{false};
 };
 
 }  // namespace rtp_llm

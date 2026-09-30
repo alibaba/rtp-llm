@@ -17,8 +17,15 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
     std::vector<TransferDescriptor>        task_load_descs;
     std::vector<TransferDescriptor>        host_to_device_descriptors;
     std::vector<TransferDescriptor>        disk_to_device_descriptors;
+    bool                                   require_confirmed_completion = false;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc = load_descs[desc_index];
+        // The parent also owns ordinary-format transfers when a protected
+        // sibling is joined or belongs to the other HOST/DISK stage.
+        if ((desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK) && desc.group_set_id < group_sets_.size()
+            && group_sets_[desc.group_set_id] && group_sets_[desc.group_set_id]->crcEnabled()) {
+            require_confirmed_completion = true;
+        }
         if (context->joinedLoads()[desc_index] || desc.source_tier == Tier::DEVICE) {
             continue;
         }
@@ -33,11 +40,16 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         return nullptr;
     }
 
-    return std::make_shared<Task>(
+    auto task = std::make_shared<Task>(
         std::move(task_load_descs),
         TransferTask(std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_)),
         TransferTask(std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_)),
         context);
+    if (require_confirmed_completion) {
+        task->host_to_device_task.requireConfirmedCompletion();
+        task->disk_to_device_task.requireConfirmedCompletion();
+    }
+    return task;
 }
 
 void LoadTaskRunner::runTransfer(TaskPtr                        task,

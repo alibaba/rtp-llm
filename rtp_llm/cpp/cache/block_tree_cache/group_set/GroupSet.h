@@ -42,7 +42,8 @@ public:
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
                     std::vector<std::string>             group_tags,
-                    size_t                               physical_payload_bytes = 0);
+                    size_t                               physical_payload_bytes = 0,
+                    bool                                 enable_crc             = false);
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -62,6 +63,13 @@ public:
     bool usesPhysicalPayloadGeometry() const {
         return uses_physical_payload_geometry_;
     }
+    // Storage adds a per-backing footer after the physical payload.
+    size_t storageBytes() const {
+        return storage_bytes_;
+    }
+    bool crcEnabled() const {
+        return enable_crc_;
+    }
     CacheGroupType groupType() const {
         return group(groupTags().front()).policy.group_type;
     }
@@ -78,8 +86,6 @@ public:
     std::shared_ptr<BlockTreeDiskBlockPool> diskPool() const {
         return disk_pool_;
     }
-
-    bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
     void referenceBlocks(const MultiNodeResource& resource) const;
     void unreferenceBlocks(const MultiNodeResource& resource) const;
@@ -99,6 +105,8 @@ private:
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<std::string>                group_tags_;
     size_t                                  payload_bytes_{0};
+    size_t                                  storage_bytes_{0};
+    bool                                    enable_crc_{false};
     bool                                    uses_physical_payload_geometry_{false};
 };
 
