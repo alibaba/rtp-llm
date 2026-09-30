@@ -196,6 +196,8 @@ filegroup(
         "modules/dsv4/_v41_engram_lookup_triton.py",
         "modules/dsv4/v41_engram_inject.py",
         "modules/dsv4/_v41_engram_inject_triton.py",
+        "modules/dsv4/v41_mxfp8.py",
+        "modules/dsv4/_v41_mxfp8_triton.py",
         "modules/dsv4/hc/delayed.py",
         "modules/dsv4/hc/base.py",
         "modules/dsv4/hc/fallback_impl.py",
