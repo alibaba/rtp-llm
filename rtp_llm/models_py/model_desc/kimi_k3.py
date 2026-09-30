@@ -262,7 +262,12 @@ class KimiK3Model(GptModelBase):
         ready = super().initialize(init_resource)
         if self._fp8_collective is not None:
             return ready
-        if self.parallelism_config.role_type != RoleType.PREFILL or self.tp_size == 1:
+        # Native MTP subclasses this model but keeps its projections in BF16.
+        if (
+            type(self) is not KimiK3Model
+            or self.parallelism_config.role_type != RoleType.PREFILL
+            or self.tp_size == 1
+        ):
             return ready
         enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
         enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"

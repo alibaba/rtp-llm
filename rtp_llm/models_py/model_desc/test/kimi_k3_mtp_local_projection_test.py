@@ -1,13 +1,34 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
+from rtp_llm.ops import RoleType
 
 
 class KimiK3MtpLocalProjectionTest(unittest.TestCase):
+    def test_fp8_collective_flags_do_not_initialize_bf16_draft(self):
+        model = object.__new__(KimiK3MtpModel)
+        nn.Module.__init__(model)
+        model.tp_size = 8
+        model.parallelism_config = SimpleNamespace(role_type=RoleType.PREFILL)
+        model._fp8_collective = None
+        with (
+            patch.dict(
+                "os.environ",
+                {"RTP_LLM_FP8_AG_GEMM": "1", "RTP_LLM_FP8_GEMM_RS": "1"},
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.GptModelBase.initialize",
+                return_value=True,
+            ),
+        ):
+            self.assertTrue(model.initialize(SimpleNamespace(kv_cache=None)))
+        self.assertIsNone(model._fp8_collective)
+
     def test_local_projection_matches_full_projection_slice(self):
         torch.manual_seed(20260928)
         model = object.__new__(KimiK3MtpModel)
