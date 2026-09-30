@@ -503,3 +503,27 @@ py_test(
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
     target_compatible_with = _DSV4_SM120_ONLY,
 )
+
+py_test(
+    name = "test_pp_draft_weight_loading",
+    srcs = ["test_pp_draft_weight_loading.py"],
+    args = [
+        "PPDraftWeightLoadingTest.test_policy_preserves_target_and_single_stage_loading",
+        "PPDraftWeightLoadingTest.test_last_stage_loads_without_entering_other_stages_world_collectives",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+    timeout = "short",
+)
+
+py_test(
+    name = "test_pp_draft_weight_loading_cuda",
+    srcs = ["test_pp_draft_weight_loading.py"],
+    main = "test_pp_draft_weight_loading.py",
+    args = ["PPDraftWeightLoadingTest.test_cuda_local_reader_owns_values_after_close"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual"],
+)

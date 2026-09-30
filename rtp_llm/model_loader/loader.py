@@ -53,6 +53,7 @@ class ModelLoader:
         self.model_config = model_config
         self._task_type = model_config.task_type
         self._load_method = load_method
+        self._apply_pp_partition = apply_pp_partition
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         if self._misc_weights_info is None:
@@ -412,6 +413,14 @@ class ModelLoader:
             return False
         return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
 
+    def _fastsafetensors_use_distributed(self) -> bool:
+        # A whole draft is loaded only on its owning PP stage. Other stages
+        # have already entered model warmup: using WORLD here mismatches their
+        # collectives. Keep the fast reader but load each draft replica locally.
+        # The pinned reader interprets collective src ranks as WORLD ranks, so
+        # passing a nonzero-rank subgroup is not a safe substitute either.
+        return self._load_config.pp_size <= 1 or self._apply_pp_partition
+
     def _load_from_fastsafetensor(self, device: str):
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
@@ -439,6 +448,7 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            use_distributed=self._fastsafetensors_use_distributed(),
         )
 
         _inline_count = 0

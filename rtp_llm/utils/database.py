@@ -311,6 +311,8 @@ class CkptDatabase(BaseDatabase):
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
+        *,
+        use_distributed: bool = True,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
 
@@ -319,10 +321,21 @@ class CkptDatabase(BaseDatabase):
         )
 
         def iterator(device: str, use_tqdm_on_load: bool):
-            if torch.distributed.is_initialized():
+            if use_distributed and torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
             else:
                 pg = SingleGroup()
+            logging.info(
+                "fastsafetensors process group: %s, rank=%d size=%d device=%s",
+                (
+                    "WORLD"
+                    if use_distributed and torch.distributed.is_initialized()
+                    else "LOCAL"
+                ),
+                pg.rank(),
+                pg.size(),
+                device,
+            )
 
             hf_weights_files = sorted(
                 [file.file_name for file in self.pretrain_file_list]
@@ -351,7 +364,19 @@ class CkptDatabase(BaseDatabase):
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:
-                yield from loader.iterate_weights()
+                if use_distributed:
+                    yield from loader.iterate_weights()
+                else:
+                    # SingleGroup returns views into the reader's batch buffer
+                    # (unlike the multi-rank shuffle, which clones). Own every
+                    # tensor before advancing/closing that buffer. The CUDA
+                    # copy must finish before the external allocator can reuse
+                    # its source; startup-only, not an inference-path sync.
+                    for name, tensor in loader.iterate_weights():
+                        owned = tensor.clone()
+                        if tensor.is_cuda:
+                            torch.cuda.current_stream(tensor.device).synchronize()
+                        yield name, owned
             finally:
                 loader.loader.close()
 
