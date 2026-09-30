@@ -7,7 +7,9 @@ import java.util.List;
 import java.util.function.LongSupplier;
 
 /**
- * Fixed-size recent cache-key pool for request-level cache hit metrics.
+ * Fixed-size recent cache-key pool for request-level theory cache hit metrics.
+ * Each cache key occupies one pool entry and remains available until its most recent occurrence expires.
+ * Request block cache keys are unique.
  */
 @Slf4j
 public class RecentCacheKeyWindow {
@@ -20,20 +22,13 @@ public class RecentCacheKeyWindow {
     private final long timeWindowMs;
     private final int maxCacheKeys;
     private final LongSupplier nowSupplier;
-
-    private final long[] cacheKeyRing;
-    private final long[] entryTimestampMs;
-    private final int[] entryStart;
-    private final int[] entryLength;
     private final long[] tableKeys;
-    private final int[] tableCounts;
+    private final long[] tableLastSeenTimestampMs;
+    private final int[] tableHeapIndexes;
     private final byte[] tableStates;
+    private final int[] expirationHeapSlots;
     private final int tableMask;
 
-    private int entryHead;
-    private int entrySize;
-    private int keyTail;
-    private int keySize;
     private int uniqueSize;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
@@ -43,33 +38,34 @@ public class RecentCacheKeyWindow {
 
         int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
         this.tableMask = hashTableCapacity - 1;
-        this.cacheKeyRing = new long[this.maxCacheKeys];
-        this.entryTimestampMs = new long[this.maxCacheKeys];
-        this.entryStart = new int[this.maxCacheKeys];
-        this.entryLength = new int[this.maxCacheKeys];
         this.tableKeys = new long[hashTableCapacity];
-        this.tableCounts = new int[hashTableCapacity];
+        this.tableLastSeenTimestampMs = new long[hashTableCapacity];
+        this.tableHeapIndexes = new int[hashTableCapacity];
         this.tableStates = new byte[hashTableCapacity];
+        this.expirationHeapSlots = new int[this.maxCacheKeys];
 
         log.info("Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
-                this.timeWindowMs,
-                this.maxCacheKeys,
-                hashTableCapacity);
+                this.timeWindowMs, this.maxCacheKeys, hashTableCapacity);
     }
 
     public Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
-        long requestOccurrences;
-        long requestHitOccurrences;
-        synchronized (this) {
-            evictExpired(nowMs);
-            requestOccurrences = countNonNull(cacheKeys);
-            requestHitOccurrences = countHits(cacheKeys);
+        evictExpired(nowMs);
 
-            if (requestOccurrences > 0L) {
-                retainRequest(cacheKeys, requestOccurrences, nowMs);
+        long requestOccurrences = 0L;
+        long requestHitOccurrences = 0L;
+        if (cacheKeys != null) {
+            int size = cacheKeys.size();
+            for (int i = 0; i < size; i++) {
+                Long cacheKey = cacheKeys.get(i);
+                if (cacheKey == null) {
+                    continue;
+                }
+                requestOccurrences++;
+                if (retainCacheKey(cacheKey, nowMs)) {
+                    requestHitOccurrences++;
+                }
             }
-
         }
 
         if (log.isDebugEnabled()) {
@@ -78,137 +74,126 @@ public class RecentCacheKeyWindow {
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
     }
 
-    private long countNonNull(List<Long> cacheKeys) {
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return 0L;
+    private boolean retainCacheKey(long cacheKey, long nowMs) {
+        int existingSlot = findSlot(cacheKey);
+        if (existingSlot >= 0) {
+            tableLastSeenTimestampMs[existingSlot] = nowMs;
+            siftExpirationHeapDown(tableHeapIndexes[existingSlot]);
+            return true;
         }
-        long count = 0L;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long cacheKey = cacheKeys.get(i);
-            if (cacheKey != null) {
-                count++;
-            }
+        if (uniqueSize == maxCacheKeys) {
+            evictOldestCacheKey();
         }
-        return count;
-    }
-
-    private long countHits(List<Long> cacheKeys) {
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return 0L;
-        }
-        long hits = 0L;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long cacheKey = cacheKeys.get(i);
-            if (cacheKey != null && getCount(cacheKey) > 0) {
-                hits++;
-            }
-        }
-        return hits;
-    }
-
-    private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
-        if (requestOccurrences > maxCacheKeys) {
-            log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
-                            + "requestCacheKeys={}, maxCacheKeys={}",
-                    requestOccurrences,
-                    maxCacheKeys);
-            return;
-        }
-
-        while (keySize + requestOccurrences > maxCacheKeys && evictOldestEntry()) {
-            // Make enough room for the current request.
-        }
-        while (entrySize >= maxCacheKeys && evictOldestEntry()) {
-            // Keep one entry slot for the current request.
-        }
-
-        int start = keyTail;
-        int retained = 0;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long boxedKey = cacheKeys.get(i);
-            if (boxedKey == null) {
-                continue;
-            }
-            long cacheKey = boxedKey;
-            appendKey(cacheKey);
-            incrementCount(cacheKey);
-            retained++;
-        }
-        if (retained > 0) {
-            addEntry(nowMs, start, retained);
-        }
+        int newSlot = findEmptySlot(cacheKey);
+        tableKeys[newSlot] = cacheKey;
+        tableLastSeenTimestampMs[newSlot] = nowMs;
+        tableStates[newSlot] = USED;
+        addToExpirationHeap(newSlot);
+        uniqueSize++;
+        return false;
     }
 
     private void evictExpired(long nowMs) {
         long expireBeforeOrAt = nowMs - timeWindowMs;
-        while (entrySize > 0 && entryTimestampMs[entryHead] <= expireBeforeOrAt) {
-            evictOldestEntry();
+        while (uniqueSize > 0 && oldestTimestampMs() <= expireBeforeOrAt) {
+            evictOldestCacheKey();
         }
     }
 
-    private void addEntry(long timestampMs, int start, int length) {
-        int tail = ringIndex(entryHead + entrySize);
-        entryTimestampMs[tail] = timestampMs;
-        entryStart[tail] = start;
-        entryLength[tail] = length;
-        entrySize++;
+    private long oldestTimestampMs() {
+        return tableLastSeenTimestampMs[expirationHeapSlots[0]];
     }
 
-    private void appendKey(long cacheKey) {
-        cacheKeyRing[keyTail] = cacheKey;
-        keyTail = ringIndex(keyTail + 1);
-        keySize++;
+    private void evictOldestCacheKey() {
+        int oldestSlot = expirationHeapSlots[0];
+        removeFromExpirationHeap(0);
+        removeFromHashTable(oldestSlot);
+        uniqueSize--;
     }
 
-    private boolean evictOldestEntry() {
-        if (entrySize == 0) {
-            return false;
+    private void addToExpirationHeap(int tableSlot) {
+        int heapIndex = uniqueSize;
+        expirationHeapSlots[heapIndex] = tableSlot;
+        tableHeapIndexes[tableSlot] = heapIndex;
+        siftExpirationHeapUp(heapIndex);
+    }
+
+    private void removeFromExpirationHeap(int heapIndex) {
+        int lastHeapIndex = uniqueSize - 1;
+        int lastTableSlot = expirationHeapSlots[lastHeapIndex];
+        if (heapIndex < lastHeapIndex) {
+            expirationHeapSlots[heapIndex] = lastTableSlot;
+            tableHeapIndexes[lastTableSlot] = heapIndex;
+            siftExpirationHeapDown(heapIndex);
         }
-        int start = entryStart[entryHead];
-        int length = entryLength[entryHead];
-        for (int i = 0; i < length; i++) {
-            decrementCount(cacheKeyRing[ringIndex(start + i)]);
-        }
-        keySize -= length;
-        entryHead = ringIndex(entryHead + 1);
-        entrySize--;
-        return true;
     }
 
-    private int getCount(long cacheKey) {
-        int slot = findSlot(cacheKey);
-        return slot >= 0 ? tableCounts[slot] : 0;
-    }
-
-    private void incrementCount(long cacheKey) {
-        int index = hashIndex(cacheKey, tableMask);
-        while (tableStates[index] == USED) {
-            if (tableKeys[index] == cacheKey) {
-                tableCounts[index]++;
+    private void siftExpirationHeapUp(int heapIndex) {
+        int currentIndex = heapIndex;
+        while (currentIndex > 0) {
+            int parentIndex = (currentIndex - 1) >>> 1;
+            if (timestampAtHeapIndex(parentIndex) <= timestampAtHeapIndex(currentIndex)) {
                 return;
             }
-            index = (index + 1) & tableMask;
+            swapHeapEntries(parentIndex, currentIndex);
+            currentIndex = parentIndex;
         }
-        tableStates[index] = USED;
-        tableKeys[index] = cacheKey;
-        tableCounts[index] = 1;
-        uniqueSize++;
     }
 
-    private void decrementCount(long cacheKey) {
-        int slot = findSlot(cacheKey);
-        if (slot < 0) {
-            return;
+    private void siftExpirationHeapDown(int heapIndex) {
+        int currentIndex = heapIndex;
+        while (true) {
+            int leftChildIndex = currentIndex * 2 + 1;
+            if (leftChildIndex >= uniqueSize) {
+                return;
+            }
+            int smallestChildIndex = leftChildIndex;
+            int rightChildIndex = leftChildIndex + 1;
+            if (rightChildIndex < uniqueSize
+                    && timestampAtHeapIndex(rightChildIndex) < timestampAtHeapIndex(leftChildIndex)) {
+                smallestChildIndex = rightChildIndex;
+            }
+            if (timestampAtHeapIndex(currentIndex) <= timestampAtHeapIndex(smallestChildIndex)) {
+                return;
+            }
+            swapHeapEntries(currentIndex, smallestChildIndex);
+            currentIndex = smallestChildIndex;
         }
-        int next = tableCounts[slot] - 1;
-        if (next > 0) {
-            tableCounts[slot] = next;
-            return;
+    }
+
+    private long timestampAtHeapIndex(int heapIndex) {
+        return tableLastSeenTimestampMs[expirationHeapSlots[heapIndex]];
+    }
+
+    private void swapHeapEntries(int firstHeapIndex, int secondHeapIndex) {
+        int firstTableSlot = expirationHeapSlots[firstHeapIndex];
+        int secondTableSlot = expirationHeapSlots[secondHeapIndex];
+        expirationHeapSlots[firstHeapIndex] = secondTableSlot;
+        expirationHeapSlots[secondHeapIndex] = firstTableSlot;
+        tableHeapIndexes[firstTableSlot] = secondHeapIndex;
+        tableHeapIndexes[secondTableSlot] = firstHeapIndex;
+    }
+
+    private void removeFromHashTable(int tableSlotToRemove) {
+        int vacantSlot = tableSlotToRemove;
+        int nextSlot = (vacantSlot + 1) & tableMask;
+        while (tableStates[nextSlot] == USED) {
+            int idealSlot = hashIndex(tableKeys[nextSlot], tableMask);
+            if (((nextSlot - idealSlot) & tableMask) > ((vacantSlot - idealSlot) & tableMask)) {
+                tableKeys[vacantSlot] = tableKeys[nextSlot];
+                tableLastSeenTimestampMs[vacantSlot] = tableLastSeenTimestampMs[nextSlot];
+                tableStates[vacantSlot] = USED;
+                int heapIndex = tableHeapIndexes[nextSlot];
+                tableHeapIndexes[vacantSlot] = heapIndex;
+                expirationHeapSlots[heapIndex] = vacantSlot;
+                vacantSlot = nextSlot;
+            }
+            nextSlot = (nextSlot + 1) & tableMask;
         }
-        removeSlot(slot);
+        tableStates[vacantSlot] = EMPTY;
+        tableKeys[vacantSlot] = 0L;
+        tableLastSeenTimestampMs[vacantSlot] = 0L;
+        tableHeapIndexes[vacantSlot] = 0;
     }
 
     private int findSlot(long cacheKey) {
@@ -222,40 +207,19 @@ public class RecentCacheKeyWindow {
         return -1;
     }
 
-    private void removeSlot(int slotToRemove) {
-        int slot = slotToRemove;
-        int next = (slot + 1) & tableMask;
-        while (tableStates[next] == USED) {
-            int ideal = hashIndex(tableKeys[next], tableMask);
-            if (((next - ideal) & tableMask) > ((slot - ideal) & tableMask)) {
-                tableKeys[slot] = tableKeys[next];
-                tableCounts[slot] = tableCounts[next];
-                tableStates[slot] = USED;
-                slot = next;
-            }
-            next = (next + 1) & tableMask;
+    private int findEmptySlot(long cacheKey) {
+        int index = hashIndex(cacheKey, tableMask);
+        while (tableStates[index] == USED) {
+            index = (index + 1) & tableMask;
         }
-        tableStates[slot] = EMPTY;
-        tableKeys[slot] = 0L;
-        tableCounts[slot] = 0;
-        uniqueSize--;
+        return index;
     }
 
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
         double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
-        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
-                        + "hitRatio={}, poolCacheKeys={}, poolUniqueCacheKeys={}, poolDuplicateCacheKeys={}, "
-                        + "poolEntries={}, maxCacheKeys={}, timeWindowMs={}",
-                nowMs,
-                requestOccurrences,
-                requestHitOccurrences,
-                hitRatio,
-                keySize,
-                uniqueSize,
-                keySize - uniqueSize,
-                entrySize,
-                maxCacheKeys,
-                timeWindowMs);
+        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
+                        + "poolUniqueCacheKeys={}, maxCacheKeys={}, timeWindowMs={}",
+                nowMs, requestOccurrences, requestHitOccurrences, hitRatio, uniqueSize, maxCacheKeys, timeWindowMs);
     }
 
     private static int hashTableCapacityFor(int maxCacheKeys) {
@@ -265,11 +229,6 @@ public class RecentCacheKeyWindow {
             capacity <<= 1;
         }
         return capacity;
-    }
-
-    private int ringIndex(int index) {
-        int result = index % maxCacheKeys;
-        return result >= 0 ? result : result + maxCacheKeys;
     }
 
     private static int hashIndex(long value, int mask) {

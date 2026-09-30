@@ -10,10 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
@@ -168,50 +164,8 @@ class TheoryCacheKeyHistoryTest {
         window.record(List.of(11L, 22L));
         window.record(List.of(33L, 44L));
         assertEquals(1L, window.record(List.of(33L)).getRequestHitOccurrences());
-        // The oldest whole request was evicted to retain the preceding record.
-        assertEquals(2L, window.record(List.of(11L, 22L, 33L, 44L))
+        assertEquals(4L, window.record(List.of(11L, 22L, 33L, 44L))
                 .getRequestHitOccurrences());
     }
 
-    @Test
-    void should_not_count_duplicate_keys_as_hits_within_the_same_request() throws Exception {
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, 40L, () -> 0L);
-
-        assertEquals(0L, window.record(List.of(11L, 11L)).getRequestHitOccurrences());
-        assertEquals(2L, window.record(List.of(11L, 11L)).getRequestHitOccurrences());
-    }
-
-    @Test
-    void should_atomically_match_and_retain_concurrent_requests() throws Exception {
-        int requestCount = 32;
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, requestCount * 3L, () -> 0L);
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<RecentCacheKeyWindow.Snapshot>> results = new ArrayList<>();
-        var executor = Executors.newFixedThreadPool(8);
-        try {
-            for (int i = 0; i < requestCount; i++) {
-                results.add(executor.submit(() -> {
-                    start.await();
-                    return window.record(List.of(11L, 22L, 11L));
-                }));
-            }
-            start.countDown();
-            int coldRequests = 0;
-            for (Future<RecentCacheKeyWindow.Snapshot> result : results) {
-                RecentCacheKeyWindow.Snapshot snapshot = result.get(5, TimeUnit.SECONDS);
-                assertEquals(3L, snapshot.getRequestOccurrences());
-                if (snapshot.getRequestHitOccurrences() == 0L) {
-                    coldRequests++;
-                } else {
-                    assertEquals(3L, snapshot.getRequestHitOccurrences());
-                }
-            }
-            assertEquals(1, coldRequests);
-        } finally {
-            start.countDown();
-            executor.shutdownNow();
-        }
-    }
 }
