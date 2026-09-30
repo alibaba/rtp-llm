@@ -199,6 +199,21 @@ cc_library(
 )
 
 cc_library(
+    name = "copy_tile_kernel",
+    srcs = ["CopyTileKernel.cu"],
+    hdrs = ["CopyTileKernel.h"],
+    copts = any_cuda_copts(),
+    deps = select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "sm_copy_kernel",
     srcs = ["sm_copy_kernel.cu"],
     hdrs = ["sm_copy_kernel.h"],

@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm {
 namespace {
@@ -176,7 +177,8 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
     return aligned;
 }
 
-std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks) {
+std::shared_ptr<HostBlockPool>
+createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks, bool enable_crc) {
     if (payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -185,9 +187,10 @@ std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t pa
     config->pool_name            = name;
     config->physical_block_count = usable_blocks + 1;
     config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->alignment            = kPoolAlignment;
-    auto pool                    = std::make_shared<HostBlockPool>(config);
+    config->stride_bytes =
+        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
+    config->alignment = kPoolAlignment;
+    auto pool         = std::make_shared<HostBlockPool>(config);
     return pool->init() ? pool : nullptr;
 }
 
@@ -208,18 +211,20 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
                                          size_t                                          payload_bytes,
                                          size_t                                          usable_blocks,
                                          int64_t                                         world_rank,
-                                         int64_t                                         local_rank) {
+                                         int64_t                                         local_rank,
+                                         bool                                            enable_crc) {
     if (!guard || payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
-    auto config                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
-    config->pool_type            = BlockPoolType::DISK;
-    config->pool_name            = name;
-    config->work_dir             = guard->workDir();
-    config->local_rank           = local_rank;
-    config->world_rank           = world_rank;
-    config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
+    auto config           = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    config->pool_type     = BlockPoolType::DISK;
+    config->pool_name     = name;
+    config->work_dir      = guard->workDir();
+    config->local_rank    = local_rank;
+    config->world_rank    = world_rank;
+    config->payload_bytes = payload_bytes;
+    config->stride_bytes =
+        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
     config->physical_block_count = usable_blocks + 1;
     config->disk_size_bytes      = config->physical_block_count * config->stride_bytes;
     config->buffered_io          = kv_config.disk_cache_buffered_io;
@@ -412,8 +417,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool       host_enabled = kv_cache_config.enable_memory_cache;
-    const bool       disk_enabled = kv_cache_config.enable_disk_cache;
+    const bool       host_enabled          = kv_cache_config.enable_memory_cache;
+    const bool       disk_enabled          = kv_cache_config.enable_disk_cache;
+    const bool       crc_backend_available = CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
     constexpr size_t bytes_per_mb = 1024UL * 1024UL;
     const auto       valid_budget = [](int64_t mb) {
         return mb > 0 && static_cast<uint64_t>(mb) <= std::numeric_limits<size_t>::max() / bytes_per_mb;
@@ -444,12 +450,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
 
     std::vector<size_t> group_set_payload_bytes;
+    std::vector<bool>   group_set_crc_enabled;
     group_set_payload_bytes.reserve(group_members.size());
+    group_set_crc_enabled.reserve(group_members.size());
     size_t combined_stride = 0;
     for (const std::vector<std::string>& members : group_members) {
         const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
         group_set_payload_bytes.push_back(payload_bytes);
-        const size_t stride = alignUp(payload_bytes, kPoolAlignment);
+        // CPU-pinned members are staged on the rank's GPU as part of the same
+        // record; residency does not change the backing's integrity protection.
+        const bool enable_crc = crc_backend_available;
+        group_set_crc_enabled.push_back(enable_crc);
+        const size_t stride =
+            alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
         RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() - combined_stride,
                                 "BlockTreeCache combined lower-tier stride overflow");
         combined_stride += stride;
@@ -468,7 +481,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             const GroupBase&                first   = cache_config.topology().group(members.front());
             const std::string               pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
-            host_pools[group_set_id] = createHostPool(pool_name, group_set_payload_bytes[group_set_id], usable);
+            host_pools[group_set_id] = createHostPool(
+                pool_name, group_set_payload_bytes[group_set_id], usable, group_set_crc_enabled[group_set_id]);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -499,7 +513,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                       group_set_payload_bytes[group_set_id],
                                                       usable,
                                                       parallelism_config.world_rank,
-                                                      parallelism_config.local_rank);
+                                                      parallelism_config.local_rank,
+                                                      group_set_crc_enabled[group_set_id]);
             if (!disk_pools[group_set_id]) {
                 return nullptr;
             }
@@ -532,7 +547,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const auto& first     = cache_topology->group(members.front());
         auto        group_set = createGroupSet(
             first, std::move(device_pools), std::move(host_pools[group_set_id]), std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id, cache_topology, members, group_set_payload_bytes[group_set_id]);
+        group_set->initialize(group_set_id,
+                              cache_topology,
+                              members,
+                              group_set_payload_bytes[group_set_id],
+                              group_set_crc_enabled[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));

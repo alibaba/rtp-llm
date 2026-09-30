@@ -135,13 +135,18 @@ BlockTreeCache::~BlockTreeCache() {
 }
 
 bool BlockTreeCache::executeTransfer(TransferTask task) {
+    return executeTransferWithError(std::move(task)).ok();
+}
+
+ErrorInfo BlockTreeCache::executeTransferWithError(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
     if (!context->success()) {
         RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
-        return false;
+        const auto error = context->errorInfo();
+        return error.ok() ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "per-rank block transfer failed") : error;
     }
-    return true;
+    return ErrorInfo::OkStatus();
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {

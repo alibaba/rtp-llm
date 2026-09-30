@@ -42,7 +42,9 @@ struct GroupSetResource {
     // Async migration state and the single sorting-metadata copy (current serving tier).
     GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
     // The source remains owned by the in-flight operation, but its target must no longer be installed.
-    bool          transfer_detached{false};
+    bool transfer_detached{false};
+    // Poisoned data remains owned until safe topology-aware eviction.
+    bool          integrity_quarantined{false};
     CandidateMeta candidate_meta;
 
     bool hasTier(Tier tier) const {
@@ -73,7 +75,8 @@ struct GroupSetResource {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
     bool isMatchUsable() const {
-        return transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING;
+        return !integrity_quarantined
+               && (transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING);
     }
     bool hasCompleteDeviceValue() const {
         return !device_blocks.empty()

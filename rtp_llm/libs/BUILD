@@ -5,6 +5,15 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+copy_files(
+    name = "copy_nvcomp_lib",
+    srcs = select({
+        "//:using_cuda13_x86": ["@nvcomp_cuda13_x86//:shared_library"],
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:shared_library"],
+        "//conditions:default": [],
+    }),
+)
+
 # FlashInfer's AOT kernels are cc_shared_library targets. Bazel adds them to
 # runfiles automatically, but py_wheel does not include transitive shared
 # libraries unless they are explicit package data. CUDA 12 images get these
@@ -74,6 +83,7 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
+        ":copy_nvcomp_lib",
         ":copy_acclep_libs",
         ":copy_hf3fs_libs",
         ":libmm_rdma_exporter_so",
@@ -86,6 +96,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":copy_nvcomp_lib",
         ":libmm_rdma_exporter_so",
         ":copy_flashinfer_runtime_libs",
         ":librtp_compute_ops_so",

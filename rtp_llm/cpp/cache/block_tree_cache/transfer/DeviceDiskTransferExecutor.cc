@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <exception>
 #include <string>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -21,20 +23,25 @@ namespace {
 
 size_t alignedStride(size_t payload_bytes) {
     const size_t alignment = HostStagingBlockPool::kAlignment;
+    if (payload_bytes > std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        throw std::overflow_error("disk staging stride overflow");
+    }
     return ((payload_bytes + alignment - 1) / alignment) * alignment;
 }
 
 ErrorInfo deviceToDiskError(TransferStatus status, const char* stage) {
-    const ErrorCode code =
-        status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS : ErrorCode::EXECUTION_EXCEPTION;
+    const ErrorCode code = status == TransferStatus::CACHE_INTEGRITY_ERROR ? ErrorCode::CACHE_INTEGRITY_ERROR :
+                           status == TransferStatus::INVALID_ARGS          ? ErrorCode::INVALID_PARAMS :
+                                                                             ErrorCode::EXECUTION_EXCEPTION;
     return ErrorInfo(code, std::string("device-to-disk ") + stage + " failed");
 }
 
 ErrorInfo transferError(TransferStatus status, size_t begin, size_t end) {
-    const ErrorCode code =
-        status == TransferStatus::RESOURCE_EXHAUSTED ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION;
-    const char* message = status == TransferStatus::RESOURCE_EXHAUSTED ? "staging slice wait timed out" :
-                                                                         "disk-to-device transfer failed";
+    const ErrorCode code    = status == TransferStatus::CACHE_INTEGRITY_ERROR ? ErrorCode::CACHE_INTEGRITY_ERROR :
+                              status == TransferStatus::RESOURCE_EXHAUSTED    ? ErrorCode::DEADLINE_EXCEEDED :
+                                                                                ErrorCode::EXECUTION_EXCEPTION;
+    const char*     message = status == TransferStatus::RESOURCE_EXHAUSTED ? "staging slice wait timed out" :
+                                                                             "disk-to-device transfer failed";
     return ErrorInfo(
         code, std::string(message) + ", descriptor_range=[" + std::to_string(begin) + "," + std::to_string(end) + ")");
 }
@@ -67,7 +74,7 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
     size_t full_stride = 0;
     size_t swa_stride  = 0;
     for (const auto& group_set : group_sets) {
-        const size_t stride = alignedStride(group_set->payloadBytes());
+        const size_t stride = alignedStride(group_set->storageBytes());
         max_stride          = std::max(max_stride, stride);
         if (group_set->groupType() == CacheGroupType::FULL) {
             full_stride = std::max(full_stride, stride);
@@ -82,6 +89,7 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
         swa_stride = max_stride;
     }
 
+    RTP_LLM_CHECK(max_stride > 0 && staging_block_count <= std::numeric_limits<size_t>::max() / max_stride);
     const size_t lane_bytes = staging_block_count * max_stride / 2;
     full_batch_capacity_    = lane_bytes / full_stride;
     swa_batch_capacity_     = lane_bytes / swa_stride;

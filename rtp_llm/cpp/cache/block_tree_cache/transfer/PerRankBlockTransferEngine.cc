@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <memory>
+#include <algorithm>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -33,13 +35,19 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
+    std::shared_ptr<CrcTransferService> crc_service;
+    if (std::any_of(
+            group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group) { return group->crcEnabled(); })) {
+        crc_service =
+            std::make_shared<CrcTransferService>(group_sets_, max_descriptors_per_batch, transfer_worker_count);
+    }
     transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
-    host_disk_executor_ =
-        std::make_unique<HostDiskTransferExecutor>(*transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
+        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter, crc_service);
+    host_disk_executor_ = std::make_unique<HostDiskTransferExecutor>(
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, crc_service);
     if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,

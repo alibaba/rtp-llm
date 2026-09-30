@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -91,6 +93,12 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
         callback(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"));
         return;
     }
+    if (multi_rank_engine_) {
+        // Keep the parent lifetime requirement before grouping by GroupSet;
+        // otherwise an ordinary-format child could lose the CRC parent's
+        // protection against unacknowledged remote writes.
+        multi_rank_engine_->requireProtectedCompletion(task);
+    }
 
     struct DescriptorGroup {
         Tier                            source{Tier::NONE};
@@ -114,29 +122,57 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
     }
 
     auto stage_state = std::make_shared<TransferStageState>(std::move(callback));
-    for (const auto& group : groups) {
-        const size_t batch_limit = max_descriptors_per_batch_;
-        for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
-            const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
-            std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin, group.descriptors.begin() + end);
-            stage_state->addBatch();
-            try {
-                auto context = executeMultiRank(task.subtask(std::move(batch)));
-                if (context == nullptr) {
+    bool submission_started = false;
+    try {
+        for (const auto& group : groups) {
+            const size_t batch_limit = max_descriptors_per_batch_;
+            for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
+                const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
+                std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin,
+                                                      group.descriptors.begin() + end);
+                stage_state->addBatch();
+                bool completion_pending = false;
+                try {
+                    submission_started = true;
+                    auto context       = executeMultiRank(task.subtask(std::move(batch)));
+                    if (context == nullptr) {
+                        stage_state->completeBatch(
+                            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
+                        continue;
+                    }
+                    // Callback registration can allocate after RPC submission.
+                    // Its failure must not acknowledge still-active remote writes.
+                    completion_pending = true;
+                    context->onDone([stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
+                } catch (const std::exception& error) {
+                    if (completion_pending && task.requiresConfirmedCompletion()) {
+                        RTP_LLM_LOG_ERROR(
+                            "protected transfer completion callback registration failed after submission");
+                        std::abort();
+                    }
+                    stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                } catch (...) {
+                    if (completion_pending && task.requiresConfirmedCompletion()) {
+                        RTP_LLM_LOG_ERROR(
+                            "protected transfer completion callback registration failed after submission");
+                        std::abort();
+                    }
                     stage_state->completeBatch(
-                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
-                    continue;
+                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"));
                 }
-                context->onDone([stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
-            } catch (const std::exception& error) {
-                stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-            } catch (...) {
-                stage_state->completeBatch(
-                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"));
             }
         }
+        stage_state->finishSubmitting();
+    } catch (...) {
+        // Later batch construction and stage accounting can throw after an
+        // earlier RPC was submitted. Propagating that exception would let the
+        // caller release targets without waiting for those remote writes.
+        if (submission_started && task.requiresConfirmedCompletion()) {
+            RTP_LLM_LOG_ERROR("protected transfer submission loop failed after dispatch; completion is ambiguous");
+            std::abort();
+        }
+        throw;
     }
-    stage_state->finishSubmitting();
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {

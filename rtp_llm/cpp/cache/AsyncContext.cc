@@ -78,7 +78,7 @@ void FusedAsyncContext::onDone(DoneCallback callback) {
             ErrorInfo    result = ErrorInfo::OkStatus();
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
-                if (!error.ok() && state->first_error.ok()) {
+                if (!error.ok() && (state->first_error.ok() || error.code() == ErrorCode::CACHE_INTEGRITY_ERROR)) {
                     state->first_error = std::move(error);
                 }
                 if (--state->remaining == 0) {
@@ -114,12 +114,16 @@ bool FusedAsyncContext::success() const {
 }
 
 ErrorInfo FusedAsyncContext::errorInfo() const {
+    ErrorInfo result = ErrorInfo::OkStatus();
     for (const auto& context : contexts_) {
         if (context && !context->success()) {
-            return context->errorInfo();
+            const auto error = context->errorInfo();
+            if (result.ok() || error.code() == ErrorCode::CACHE_INTEGRITY_ERROR) {
+                result = error;
+            }
         }
     }
-    return ErrorInfo::OkStatus();
+    return result;
 }
 
 }  // namespace rtp_llm

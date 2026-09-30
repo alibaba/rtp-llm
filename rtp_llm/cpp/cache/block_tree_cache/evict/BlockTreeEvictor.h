@@ -74,6 +74,8 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
+    // Remove poisoned idle resources even below the normal eviction watermark.
+    bool   dropQuarantinedLocked();
     bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
@@ -122,7 +124,8 @@ private:
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
-    void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
+    void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
+                                    bool success, bool copy_attempted = true) noexcept;
     void runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
     void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);

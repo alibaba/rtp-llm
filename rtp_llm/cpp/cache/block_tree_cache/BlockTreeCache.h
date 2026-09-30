@@ -144,7 +144,8 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    bool      executeTransfer(TransferTask task);
+    ErrorInfo executeTransferWithError(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {
