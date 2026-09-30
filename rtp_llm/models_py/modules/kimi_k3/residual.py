@@ -26,6 +26,32 @@ class KimiK3AttentionResidual(nn.Module):
         self.projection_weight = projection_weight.reshape(-1).contiguous()
         self.eps = float(eps)
 
+    def forward_fp8(
+        self,
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        *,
+        output_norm_weight: torch.Tensor,
+        output_norm_eps: float,
+        num_blocks: int,
+        block_write_idx: int = -1,
+    ):
+        from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import (
+            kimi_k3_attn_res_fp8,
+        )
+
+        return kimi_k3_attn_res_fp8(
+            prefix_sum,
+            block_residual,
+            self.norm_weight,
+            self.projection_weight,
+            self.eps,
+            output_norm_weight=output_norm_weight,
+            output_norm_eps=output_norm_eps,
+            num_blocks=num_blocks,
+            block_write_idx=block_write_idx,
+        )
+
     def forward(
         self,
         prefix_sum: torch.Tensor,

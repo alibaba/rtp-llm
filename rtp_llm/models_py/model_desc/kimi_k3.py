@@ -125,8 +125,24 @@ class KimiK3DecoderLayer(nn.Module):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
             writes = self.index % self.block_size == 0
+            fp8_ag = getattr(self.attention, "_fp8_collective", None)
+            produce_fp8 = (
+                fp8_ag is not None
+                and fp8_ag.enable_ag
+                and hidden.is_cuda
+                and hidden.shape[0] >= 4096
+                and attention_inputs is not None
+                and attention_inputs.is_prefill
+                and not getattr(metadata, "is_target_verify", False)
+                and not getattr(attention_inputs, "is_mtp_draft_update", False)
+                and not torch.cuda.is_current_stream_capturing()
+            )
             with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
-                attn_input = self.attention_residual(
+                residual = (
+                    self.attention_residual.forward_fp8
+                    if produce_fp8 else self.attention_residual
+                )
+                attn_input = residual(
                     hidden, anchors, num_blocks=previous,
                     block_write_idx=previous if writes else -1,
                     output_norm_weight=self.attention_norm.weight,

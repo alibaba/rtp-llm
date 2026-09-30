@@ -6,9 +6,52 @@ FP8 GEMM partials into BF16 sequence-parallel rows. Resources are initialized
 collectively before CUDA Graph capture and are reused by all projection layers.
 """
 
+from dataclasses import dataclass
+
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm
+
+
+@dataclass(frozen=True)
+class Fp8Activation:
+    """Group128 E4M3 rows with TMA-aligned packed UE8M0 scale storage."""
+
+    values: torch.Tensor
+    scale_wire: torch.Tensor
+
+    def __post_init__(self):
+        if (
+            self.values.ndim != 2
+            or self.values.dtype != torch.float8_e4m3fn
+            or not self.values.is_contiguous()
+        ):
+            raise ValueError("FP8 activation values must be contiguous E4M3 [M,K]")
+        m, k = self.values.shape
+        if (
+            k % 128
+            or self.scale_wire.shape != ((k + 511) // 512, (m + 3) // 4 * 4)
+            or self.scale_wire.dtype != torch.int32
+            or not self.scale_wire.is_contiguous()
+            or self.scale_wire.device != self.values.device
+        ):
+            raise ValueError("FP8 activation scales must be packed UE8M0 group128")
+
+    @property
+    def shape(self):
+        return self.values.shape
+
+    @property
+    def device(self):
+        return self.values.device
+
+    @property
+    def dtype(self):
+        return self.values.dtype
+
+    @property
+    def is_cuda(self):
+        return self.values.is_cuda
 
 
 class Fp8CollectiveProjection:
@@ -49,15 +92,12 @@ class Fp8CollectiveProjection:
             )
             self.deep_gemm = deep_gemm
 
-    def all_gather_gemm(self, local_input: torch.Tensor, projection):
+    def all_gather_gemm(self, local_input: torch.Tensor | Fp8Activation, projection):
         """Gather FP8 values and scales, projecting each source rank's rows."""
         if not self.enable_ag:
             raise RuntimeError("FP8 AG/GEMM was not initialized")
         if (
-            local_input.ndim != 2
-            or local_input.dtype != torch.bfloat16
-            or not local_input.is_contiguous()
-            or local_input.device != self.device
+            local_input.device != self.device
             or local_input.shape[1] != self.hidden_size
             or local_input.shape[0] * self.world_size > self.max_m
             or not projection.scale_ue8m0
@@ -65,11 +105,20 @@ class Fp8CollectiveProjection:
         ):
             raise ValueError("FP8 AG/GEMM input or projection is incompatible")
         local_m, k = local_input.shape
-        values, scales = projection.quantize_input(local_input)
-        aligned_m = (local_m + 3) // 4 * 4
-        scale_wire = scales.as_strided(
-            ((k + 511) // 512, aligned_m), (aligned_m, 1)
-        )
+        if isinstance(local_input, Fp8Activation):
+            values, scale_wire = local_input.values, local_input.scale_wire
+        else:
+            if (
+                local_input.ndim != 2
+                or local_input.dtype != torch.bfloat16
+                or not local_input.is_contiguous()
+            ):
+                raise ValueError("FP8 AG/GEMM requires BF16 or prequantized E4M3")
+            values, scales = projection.quantize_input(local_input)
+            aligned_m = (local_m + 3) // 4 * 4
+            scale_wire = scales.as_strided(
+                ((k + 511) // 512, aligned_m), (aligned_m, 1)
+            )
         values_wire = values.view(torch.uint8)
         gathered = torch.empty(
             (local_m * self.world_size, k), dtype=torch.uint8, device=self.device
