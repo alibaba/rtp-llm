@@ -7,6 +7,7 @@ layer picks up the right weight tags and threads the wide stream through both
 sublayers in the right order.
 """
 
+import os
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
@@ -755,9 +756,7 @@ class Qwen4ExpQSAConstructionTest(TestCase):
         ).reshape(-1)
         runtime = self._runtime(attention, inputs)
 
-        output = attention(
-            torch.randn(5, 16), fmha, None, inputs, qsa_runtime=runtime
-        )
+        output = attention(torch.randn(5, 16), fmha, None, inputs, qsa_runtime=runtime)
 
         self.assertEqual(output.shape, (5, 16))
         self.assertTrue(fmha.is_mtp_draft)
@@ -1134,6 +1133,35 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         )
         got = self.model._apply_ple(1, hyper, ids, inputs)
         return ids, hyper, got
+
+    def test_bulk_prefill_preserves_ragged_page_writes_and_reused_prefixes(self):
+        for prefixes, lengths in (((0, 0), (17, 16)), ((8, 8), (16, 16))):
+            with self.subTest(prefixes=prefixes, lengths=lengths):
+                self.state_base.normal_()
+                self.ctx_base.random_(1, 7)
+                state_before = self.state_base.clone()
+                context_before = self.ctx_base.clone()
+                hyper = torch.randn(sum(lengths), _HC * _HIDDEN, dtype=torch.bfloat16)
+                ids = torch.randint(0, 10, (sum(lengths),), dtype=torch.long)
+                inputs = self._inputs_by_tag(
+                    is_prefill=True,
+                    input_lengths=torch.tensor(lengths, dtype=torch.int32),
+                    prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
+                    sequence_lengths=torch.empty(0, dtype=torch.int32),
+                )
+                with patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_BULK_PREFILL": "0"}):
+                    expected = self.model._apply_ple(1, hyper, ids, inputs)
+                expected_state = self.state_base.clone()
+                expected_context = self.ctx_base.clone()
+                self.state_base.copy_(state_before)
+                self.ctx_base.copy_(context_before)
+                with patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_BULK_PREFILL": "1"}):
+                    actual = self.model._apply_ple(1, hyper, ids, inputs)
+                torch.testing.assert_close(actual, expected)
+                torch.testing.assert_close(self.state_base, expected_state)
+                torch.testing.assert_close(
+                    self.ctx_base, expected_context, atol=0, rtol=0
+                )
 
     def test_ragged_prefill_and_decode_use_tag_local_state_pools(self):
         ids, hyper, got = self._prefill()
