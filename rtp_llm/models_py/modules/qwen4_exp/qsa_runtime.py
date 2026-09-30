@@ -1027,12 +1027,14 @@ class Qwen4ExpQSARuntimeContext:
     ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
         """Write one ragged prefill projection to both side pools.
 
-        Page-aligned non-zero prefixes are supported: the request starts at its
-        absolute prefix position and the block tables already map the reused
-        prefix pages, so the writer seals the prefix's last partial block with
-        raw keys retained from the earlier request.
+        This path requires zero prefixes. Page-aligned prefix reuse uses
+        select_prefix_reuse_prefill_tokens and its paged writer instead.
         """
         lengths = self._validate_mode_and_metadata(expect_prefill=True)
+        # The mode check already rejects every nonzero prefix in all regions.
+        metadata_fusion = (
+            os.environ.get("RTP_LLM_QWEN4_PREFILL_METADATA_FUSION", "0") == "1"
+        )
         token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
         if token_count < 0 or sum(lengths) != token_count:
             raise RuntimeError(
@@ -1065,13 +1067,16 @@ class Qwen4ExpQSARuntimeContext:
         start_positions = prefix_tensor.to(
             device=raw_keys.device, dtype=torch.int64, non_blocking=True
         ).contiguous()
-        if bool((start_positions < 0).any().item()):
-            raise RuntimeError("qwen4_exp QSA prefill prefixes must be non-negative")
-        if bool((start_positions % kv_tokens_per_block != 0).any().item()):
-            raise RuntimeError(
-                "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
-                f"indexer KV page size ({kv_tokens_per_block})"
-            )
+        if not metadata_fusion:
+            if bool((start_positions < 0).any().item()):
+                raise RuntimeError(
+                    "qwen4_exp QSA prefill prefixes must be non-negative"
+                )
+            if bool((start_positions % kv_tokens_per_block != 0).any().item()):
+                raise RuntimeError(
+                    "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
+                    f"indexer KV page size ({kv_tokens_per_block})"
+                )
         kv_pool = _typed_2d_pool(
             self.indexer_kv_cache,
             tag=INDEXER_KV_TAG,
@@ -1116,13 +1121,27 @@ class Qwen4ExpQSARuntimeContext:
             or cu_seqlens.device != raw_keys.device
         ):
             raise RuntimeError("qwen4_exp QSA requires device int32 cu_seqlens [B + 1]")
-        expected_cu = torch.tensor(
-            [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
-            dtype=torch.int32,
-            device=raw_keys.device,
+
+        def check_cu_partition():
+            expected_cu = torch.tensor(
+                [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+                dtype=torch.int32,
+                device=raw_keys.device,
+            )
+            if not bool(torch.equal(cu_seqlens, expected_cu)):
+                raise RuntimeError(
+                    "qwen4_exp QSA cu_seqlens do not match input_lengths"
+                )
+
+        defer_cu = (
+            metadata_fusion
+            and os.environ.get("RTP_LLM_QWEN4_FUSED_INDEXER_PREFILL", "0") == "1"
+            and ratio == 4
+            and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
+            and raw_keys.is_cuda
         )
-        if not bool(torch.equal(cu_seqlens, expected_cu)):
-            raise RuntimeError("qwen4_exp QSA cu_seqlens do not match input_lengths")
+        if not defer_cu:
+            check_cu_partition()
 
         position_ids = self.main_inputs.combo_position_ids
         index_factor = int(rope_config.index_factor)
@@ -1153,7 +1172,9 @@ class Qwen4ExpQSARuntimeContext:
             # RoPE positions intentionally differ from the logical cache rows.
             logical_positions = None
             if is_qsa_rope_style(rope_config, "Base") and not self.is_mtp_draft:
-                prefix_len = int(start_positions[request_idx].item())
+                prefix_len = (
+                    0 if metadata_fusion else int(start_positions[request_idx].item())
+                )
                 logical_positions = prefix_len + torch.arange(
                     seq_len, dtype=torch.int64, device=raw_keys.device
                 )
@@ -1184,7 +1205,7 @@ class Qwen4ExpQSARuntimeContext:
             and ratio == 4
             and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
             and raw_keys.is_cuda
-            and not bool(torch.any(start_positions != 0).item())
+            and (metadata_fusion or not bool(torch.any(start_positions != 0).item()))
         ):
             from rtp_llm.models_py.modules.qwen4_exp.indexer_prefill_triton import (
                 write_zero_prefix_prefill,
@@ -1194,24 +1215,35 @@ class Qwen4ExpQSARuntimeContext:
                 raise RuntimeError(
                     "qwen4_exp QSA side-cache transaction is already active"
                 )
-            fused_result = write_zero_prefix_prefill(
-                raw_keys,
-                cu_seqlens,
-                lengths,
-                rope_cos,
-                rope_sin,
-                indexer.k_norm_gamma,
-                kv_pool,
-                kv_table,
-                state_pool,
-                state_table,
-                page_size=kv_tokens_per_block,
-                norm_eps=float(indexer.norm_eps),
-            )
+            try:
+                fused_result = write_zero_prefix_prefill(
+                    raw_keys,
+                    cu_seqlens,
+                    lengths,
+                    rope_cos,
+                    rope_sin,
+                    indexer.k_norm_gamma,
+                    kv_pool,
+                    kv_table,
+                    state_pool,
+                    state_table,
+                    page_size=kv_tokens_per_block,
+                    norm_eps=float(indexer.norm_eps),
+                )
+            except ValueError:
+                # Preserve the runtime's CU diagnostic; error-only checking
+                # happens before either side pool was mutated by the writer.
+                if defer_cu:
+                    check_cu_partition()
+                raise
             if fused_result is not None:
                 object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
                 return lengths, rope_cos, rope_sin, fused_result
 
+        # Unsupported geometry or aliased pages returned without a mutation.
+        # The fallback writer still needs the ordinary partition preflight.
+        if defer_cu:
+            check_cu_partition()
         result = self._write_indexer_cache_transactional(
             raw_keys,
             cu_seqlens,

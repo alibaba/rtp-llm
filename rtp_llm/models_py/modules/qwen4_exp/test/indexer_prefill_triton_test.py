@@ -1,9 +1,15 @@
 import itertools
+import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_KV_TAG,
+    INDEXER_STATE_TAG,
+)
 from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
@@ -11,10 +17,160 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
 from rtp_llm.models_py.modules.qwen4_exp.indexer_prefill_triton import (
     write_zero_prefix_prefill,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import Qwen4ExpQSARuntimeContext
+from rtp_llm.ops import RopeStyle
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class IndexerPrefillTritonTest(unittest.TestCase):
+    def runtime_inputs(self, lengths):
+        args = self.inputs(lengths)
+        raw, cu, _, _, _, gamma, kv, table, state, state_table = args
+        metadata = dict(
+            is_prefill=True,
+            is_target_verify=False,
+            is_cuda_graph=False,
+            is_s_padded=False,
+            context_parallel_info=None,
+            cache_store_inputs=None,
+            input_lengths=torch.tensor(lengths, dtype=torch.int32),
+            prefix_lengths=torch.zeros(len(lengths), dtype=torch.int32),
+            sequence_lengths=torch.zeros(len(lengths), dtype=torch.int32),
+            cu_seqlens_device=cu,
+            cu_kv_seqlens_device=cu,
+            combo_position_ids=torch.cat(
+                [torch.arange(n, dtype=torch.int32) for n in lengths]
+            ),
+        )
+        context = Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=SimpleNamespace(**metadata),
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=kv.view(torch.uint8).reshape(kv.shape[0], -1),
+                seq_size_per_block=128,
+            ),
+            indexer_kv_inputs=SimpleNamespace(
+                **metadata, kv_cache_kernel_block_id_device=table
+            ),
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=state.reshape(state.shape[0], -1),
+                seq_size_per_block=128,
+            ),
+            indexer_state_inputs=SimpleNamespace(
+                **metadata, kv_cache_block_id_device=state_table
+            ),
+        )
+        indexer = SimpleNamespace(
+            head_dim=128, compress_ratio=4, k_norm_gamma=gamma, norm_eps=1e-6
+        )
+        rope = SimpleNamespace(
+            style=RopeStyle.Base,
+            index_factor=1,
+            dim=64,
+            base=10_000,
+            scale=1,
+            indexer_is_neox_style=True,
+        )
+        return context, raw, indexer, rope, kv, state
+
+    def test_runtime_metadata_fusion_preserves_cache_and_exact_undo(self):
+        for lengths in ([129, 7], [4096, 131]):
+            results = []
+            for enabled in ("0", "1"):
+                context, raw, indexer, rope, kv, state = self.runtime_inputs(lengths)
+                before = kv.clone(), state.clone()
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RTP_LLM_QWEN4_FUSED_INDEXER_PREFILL": "1",
+                        "RTP_LLM_QWEN4_PREFILL_METADATA_FUSION": enabled,
+                    },
+                ):
+                    result = context.write_prefill_indexer_cache(
+                        raw, indexer=indexer, rope_config=rope
+                    )
+                results.append((kv.clone(), state.clone(), result))
+                self.assertIsNotNone(context._side_cache_undo)
+                restore_indexer_cache(context._side_cache_undo)
+                torch.testing.assert_close(kv, before[0], atol=0, rtol=0)
+                torch.testing.assert_close(state, before[1], atol=0, rtol=0)
+            for i in (0, 1):
+                torch.testing.assert_close(results[0][i], results[1][i], atol=0, rtol=0)
+            for i in (1, 2):
+                torch.testing.assert_close(
+                    results[0][2][i], results[1][2][i], atol=0, rtol=0
+                )
+            for key in ("state_slots", "kv_slots", "completed"):
+                torch.testing.assert_close(
+                    results[0][2][3][key], results[1][2][3][key], atol=0, rtol=0
+                )
+
+    def test_runtime_metadata_fusion_keeps_all_write_preflights(self):
+        for enabled, case in itertools.product(
+            ("0", "1"),
+            ("cu", "prefix", "position", "state_missing", "kv_oob", "alias_bad_cu"),
+        ):
+            with self.subTest(enabled=enabled, case=case):
+                context, raw, indexer, rope, kv, state = self.runtime_inputs([129, 7])
+                before = kv.clone(), state.clone()
+                if case in ("cu", "alias_bad_cu"):
+                    context.main_inputs.cu_seqlens_device[1] = 128
+                    if case == "alias_bad_cu":
+                        table = (
+                            context.indexer_kv_inputs.kv_cache_kernel_block_id_device
+                        )
+                        table[1, 0] = table[0, 0]
+                elif case == "prefix":
+                    context.main_inputs.prefix_lengths[0] = 128
+                elif case == "position":
+                    context.main_inputs.combo_position_ids[0] = 7
+                elif case == "state_missing":
+                    context.indexer_state_inputs.kv_cache_block_id_device[0, 0] = 0
+                else:
+                    context.indexer_kv_inputs.kv_cache_kernel_block_id_device[0, 0] = (
+                        kv.shape[0]
+                    )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RTP_LLM_QWEN4_FUSED_INDEXER_PREFILL": "1",
+                        "RTP_LLM_QWEN4_PREFILL_METADATA_FUSION": enabled,
+                    },
+                ):
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        context.write_prefill_indexer_cache(
+                            raw, indexer=indexer, rope_config=rope
+                        )
+                self.assertIsNone(context._side_cache_undo)
+                torch.testing.assert_close(kv, before[0], atol=0, rtol=0)
+                torch.testing.assert_close(state, before[1], atol=0, rtol=0)
+
+    def test_runtime_metadata_fallback_checks_cu_before_any_write(self):
+        context, raw, indexer, rope, kv, state = self.runtime_inputs([129, 7])
+        before = kv.clone(), state.clone()
+        context.main_inputs.cu_seqlens_device[1] = 128
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_FUSED_INDEXER_PREFILL": "1",
+                    "RTP_LLM_QWEN4_PREFILL_METADATA_FUSION": "1",
+                },
+            ),
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.indexer_prefill_triton.write_zero_prefix_prefill",
+                return_value=None,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cu_seqlens do not match"):
+                context.write_prefill_indexer_cache(
+                    raw, indexer=indexer, rope_config=rope
+                )
+        torch.testing.assert_close(kv, before[0], atol=0, rtol=0)
+        torch.testing.assert_close(state, before[1], atol=0, rtol=0)
+
     def inputs(self, lengths):
         torch.manual_seed(412)
         b, maximum = len(lengths), max(lengths)
