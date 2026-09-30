@@ -9,6 +9,10 @@ from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.shared_expert_overlap import (
+    can_overlap_shared_expert,
+    start_shared_expert,
+)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear, profile_scope
@@ -110,7 +114,39 @@ class KimiK3LatentMoE(nn.Module):
         }
         self.experts = FusedMoeFactory().create_fused_moe(cfg, packed)
 
+    def _shared_expert_forward(self, hidden):
+        with profile_scope("RTP::moe.shared_gate_up_proj"):
+            gate_up = bf16_linear(hidden, self.shared_gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        with profile_scope("RTP::moe.shared_activation"):
+            shared_input = situ_and_mul(gate, up, self.beta, self.linear_beta)
+        del gate, up, gate_up
+        with profile_scope("RTP::moe.shared_down_proj"):
+            return self.shared_down(shared_input)
+
     def forward(self, hidden, valid_mask=None):
+        pending_shared = (
+            start_shared_expert(self._shared_expert_forward, hidden)
+            if can_overlap_shared_expert(hidden) else None
+        )
+        try:
+            routed = self._routed_forward(hidden, valid_mask)
+        except Exception:
+            if pending_shared is not None:
+                pending_shared.finish()
+            raise
+        shared = (
+            pending_shared.finish() if pending_shared is not None
+            else self._shared_expert_forward(hidden)
+        )
+        if isinstance(self.up, KimiK3Bf16Linear):
+            with profile_scope("RTP::moe.routed_up_proj_add_shared"):
+                return self.up(routed, residual=shared)
+        with profile_scope("RTP::moe.routed_up_proj"):
+            routed_up = self.up(routed)
+        return routed_up + shared
+
+    def _routed_forward(self, hidden, valid_mask):
         with profile_scope("RTP::moe.router"):
             routing, ids = grouped_topk(
                 self.router(hidden),
@@ -131,17 +167,4 @@ class KimiK3LatentMoE(nn.Module):
         if self.norm is not None:
             with profile_scope("RTP::moe.routed_norm"):
                 routed = self.norm(routed.contiguous())
-        with profile_scope("RTP::moe.shared_gate_up_proj"):
-            gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
-        with profile_scope("RTP::moe.shared_activation"):
-            shared_input = situ_and_mul(gate, up, self.beta, self.linear_beta)
-        with profile_scope("RTP::moe.shared_down_proj"):
-            shared = self.shared_down(shared_input)
-        if isinstance(self.up, KimiK3Bf16Linear):
-            # Match native K3: combine the routed projection and shared
-            # output in a single addmm GEMM call.
-            with profile_scope("RTP::moe.routed_up_proj_add_shared"):
-                return self.up(routed, residual=shared)
-        with profile_scope("RTP::moe.routed_up_proj"):
-            routed_up = self.up(routed)
-        return routed_up + shared
+        return routed
