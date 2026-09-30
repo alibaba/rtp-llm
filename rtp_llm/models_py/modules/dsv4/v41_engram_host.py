@@ -24,38 +24,23 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.utils.safetensors_header import read_safetensors_header, unique_json_object
+from rtp_llm.utils.safetensors_header import (
+    SafetensorsSpan,
+    named_safetensors_spans,
+    safetensors_file_identity as _identity,
+    unique_json_object,
+)
 
 _COPY_BYTES = 8 * 1024 * 1024
 _FAILED_CLOSES = []
-
-
-def _identity(stat) -> tuple[int, ...]:
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-
-
-@dataclass(frozen=True)
-class _TensorSpan:
-    path: str
-    name: str
-    shape: tuple[int, int]
-    dtype: str
-    offset: int
-    size: int
-    file_identity: tuple[int, ...]
-    header_sha256: str
-
-    def check_source(self):
-        if _identity(Path(self.path).stat()) != self.file_identity:
-            raise RuntimeError("Engram checkpoint changed after metadata admission")
 
 
 @dataclass(frozen=True)
 class V41EngramTableSource:
     checkpoint_sha256: str
     layer_id: int
-    weight: _TensorSpan
-    scales: _TensorSpan
+    weight: SafetensorsSpan
+    scales: SafetensorsSpan
 
     @classmethod
     def from_checkpoint(cls, checkpoint, layer_id, rows, dim, checkpoint_sha256):
@@ -74,49 +59,20 @@ class V41EngramTableSource:
             or any(c not in "0123456789abcdef" for c in checkpoint_sha256)
         ):
             raise ValueError("Engram requires a canonical deployment checkpoint SHA256")
-        root = Path(checkpoint).resolve()
-        with (root / "model.safetensors.index.json").open() as reader:
-            weight_map = json.load(reader, object_pairs_hook=unique_json_object)[
-                "weight_map"
-            ]
-        spans, headers = [], {}
-        for suffix, shape, dtype in (
-            ("weight", (rows, dim), "F8_E4M3"),
-            ("scale", (rows, dim // 32), "F8_E8M0"),
-        ):
-            name = f"layers.{layer_id}.engram.embed.{suffix}"
-            filename = weight_map[name]
-            if not isinstance(filename, str) or Path(filename).name != filename:
-                raise ValueError("Engram shard must be in the checkpoint directory")
-            path = root / filename
-            if path not in headers:
-                before = _identity(path.stat())
-                tensors, header = read_safetensors_header(path)
-                if before != _identity(path.stat()):
-                    raise RuntimeError(
-                        "Engram checkpoint changed while reading headers"
-                    )
-                headers[path] = tensors, header, before
-            tensors, header, identity = headers[path]
-            entry = tensors[name]
-            if tuple(entry["shape"]) != shape or entry["dtype"] != dtype:
-                raise ValueError(
-                    f"Engram {name} shape/dtype disagrees with configuration"
-                )
-            begin, end = entry["data_offsets"]
-            spans.append(
-                _TensorSpan(
-                    str(path),
-                    name,
-                    shape,
-                    dtype,
-                    8 + header["header_bytes"] + begin,
-                    end - begin,
-                    identity,
-                    header["header_sha256"],
-                )
-            )
-        return cls(checkpoint_sha256, layer_id, *spans)
+        prefix = f"layers.{layer_id}.engram.embed."
+        spans = named_safetensors_spans(
+            checkpoint,
+            {
+                prefix + "weight": ((rows, dim), "F8_E4M3"),
+                prefix + "scale": ((rows, dim // 32), "F8_E8M0"),
+            },
+        )
+        return cls(
+            checkpoint_sha256,
+            layer_id,
+            spans[prefix + "weight"],
+            spans[prefix + "scale"],
+        )
 
     @property
     def nbytes(self):

@@ -84,6 +84,22 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_engram_weights_test",
+    srcs = [
+        "dsv41_engram_weights_test.py",
+        "dsv41_engram_test.py",
+        "dsv41_engram_host_test.py",
+        "dsv41_engram_inject_test.py",
+        "dsv41_mxfp8_test.py",
+        "dsv41_cache_codec_test.py",
+    ],
+    main = "dsv41_engram_weights_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "dsv41_pp_test",
     srcs = ["dsv41_pp_test.py", "dsv41_cache_transfer_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_pp_test.py",
