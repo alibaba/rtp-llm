@@ -1299,23 +1299,60 @@ class Qwen4ExpQSARuntimeContext:
 
         # All metadata, tables, physical destinations and position contracts
         # above are validated before this first side-cache mutation.
-        self._write_indexer_cache_transactional(
-            raw_keys,
-            plan["cu_seqlens"],
-            plan["prefixes"],
-            plan["rope_cos"],
-            plan["rope_sin"],
-            indexer.k_norm_gamma,
-            plan["kv_pool"],
-            plan["kv_table"],
-            plan["state_pool"],
-            plan["state_table"],
-            ratio=int(plan["ratio"]),
-            kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
-            state_tokens_per_block=int(plan["state_tokens_per_block"]),
-            norm_eps=float(indexer.norm_eps),
-            rope_is_token_aligned=True,
+        draft_writer_enabled = os.environ.get(
+            "RTP_LLM_QWEN4_DRAFT_WINDOW_WRITER", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        triton_draft_window = (
+            draft
+            and max(plan["lengths"]) <= 4
+            and int(plan["ratio"]) == 4
+            and int(plan["head_dim"]) == 128
+            and int(plan["kv_tokens_per_block"]) == 128
+            and int(plan["state_tokens_per_block"]) == 128
+            and draft_writer_enabled
         )
+        if triton_draft_window:
+            from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+                write_draft_window_with_undo_,
+            )
+
+            if self._side_cache_undo is not None:
+                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+            undo = write_draft_window_with_undo_(
+                raw_keys,
+                plan["cu_seqlens"],
+                plan["prefixes"].to(torch.int32).contiguous(),
+                self.main_inputs.input_lengths.to(
+                    device=raw_keys.device, dtype=torch.int32
+                ).contiguous(),
+                plan["rope_cos"],
+                plan["rope_sin"],
+                indexer.k_norm_gamma,
+                plan["kv_pool"],
+                plan["kv_table"],
+                plan["state_pool"],
+                plan["state_table"],
+                norm_eps=float(indexer.norm_eps),
+            )
+            object.__setattr__(self, "_side_cache_undo", undo)
+        else:
+            self._write_indexer_cache_transactional(
+                raw_keys,
+                plan["cu_seqlens"],
+                plan["prefixes"],
+                plan["rope_cos"],
+                plan["rope_sin"],
+                indexer.k_norm_gamma,
+                plan["kv_pool"],
+                plan["kv_table"],
+                plan["state_pool"],
+                plan["state_table"],
+                ratio=int(plan["ratio"]),
+                kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
+                state_tokens_per_block=int(plan["state_tokens_per_block"]),
+                norm_eps=float(indexer.norm_eps),
+                rope_is_token_aligned=True,
+            )
 
         rotated_q = apply_partial_rope(
             q,

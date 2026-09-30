@@ -9,12 +9,68 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
 from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
     write_decode_key_,
     write_decode_key_with_undo_,
+    write_draft_window_with_undo_,
     write_target_window_with_undo_,
 )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class IndexerDecodeTritonTest(unittest.TestCase):
+    def test_ragged_draft_window_graph_replay_and_rollback(self):
+        raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case(
+            [7, 127]
+        )
+        raw, cos, sin = raw[:5].contiguous(), cos[:5].contiguous(), sin[:5].contiguous()
+        lengths = torch.tensor([1, 4], dtype=torch.int32, device=raw.device)
+        cu = torch.tensor([0, 1, 5], dtype=torch.int32, device=raw.device)
+        original_kv, original_state = kv.clone(), state.clone()
+
+        def write():
+            return write_draft_window_with_undo_(
+                raw, cu, prefixes, lengths, cos, sin, gamma, kv, kt, state, st,
+                norm_eps=1e-6,
+            )
+
+        write()
+        reference_kv, reference_state = original_kv.clone(), original_state.clone()
+        write_indexer_cache(
+            raw, cu, prefixes, cos, sin, gamma, reference_kv, kt,
+            reference_state, st, ratio=4, kv_tokens_per_block=128,
+            state_tokens_per_block=128, norm_eps=1e-6,
+            rope_is_token_aligned=True,
+        )
+        torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+
+        kv.copy_(original_kv)
+        state.copy_(original_state)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            undo = write()
+
+        kv.copy_(original_kv)
+        state.copy_(original_state)
+        lengths.copy_(torch.tensor([3, 2], dtype=torch.int32, device=raw.device))
+        cu.copy_(torch.tensor([0, 3, 5], dtype=torch.int32, device=raw.device))
+        prefixes.copy_(torch.tensor([5, 125], dtype=torch.int32, device=raw.device))
+        raw.copy_(torch.randn_like(raw.float()).bfloat16())
+        kt[:, 0], kt[:, 1] = kt[:, 1].clone(), kt[:, 0].clone()
+        st[:, 0], st[:, 1] = st[:, 1].clone(), st[:, 0].clone()
+        graph.replay()
+
+        reference_kv, reference_state = original_kv.clone(), original_state.clone()
+        write_indexer_cache(
+            raw, cu, prefixes, cos, sin, gamma, reference_kv, kt,
+            reference_state, st, ratio=4, kv_tokens_per_block=128,
+            state_tokens_per_block=128, norm_eps=1e-6,
+            rope_is_token_aligned=True,
+        )
+        torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+        restore_indexer_cache(undo)
+        torch.testing.assert_close(state, original_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, original_kv, rtol=0, atol=0)
+
     def _target_case(self, prefixes):
         device = torch.device("cuda")
         batch = len(prefixes)
