@@ -140,6 +140,15 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_dispatch_hardware",
+    srcs = ["test_v41_dispatch_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_routed_hardware",
     srcs = ["test_v41_routed_hardware.py"],
     deps = _DSV4_FP8_TEST_DEPS,
