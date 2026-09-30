@@ -28,22 +28,22 @@ with patch.dict(
     loading = load_codec_source("_dsv41_engram_weights_test", "v41_engram_weights.py")
 
 
-def write_checkpoint(root):
+def write_checkpoint(root, rows_by_layer=((1, 7), (14, 11))):
     config = SimpleNamespace(
         text=dict(
             num_hidden_layers=40,
             hidden_size=32,
             hc_mult=4,
             rms_norm_eps=1e-20,
-            engram_layer_ids=[1, 14],
-            engram_num_embeddings=[7, 11],
+            engram_layer_ids=[layer for layer, _ in rows_by_layer],
+            engram_num_embeddings=[rows for _, rows in rows_by_layer],
             engram_n_heads=1,
             engram_head_dim=64,
             engram_max_ngram_size=4,
         )
     )
     tensors, kinds = {}, {}
-    for layer, rows in ((1, 7), (14, 11)):
+    for layer, rows in rows_by_layer:
         prefix = f"layers.{layer}.engram."
         entries = {
             "embed.weight": (

@@ -197,6 +197,7 @@ filegroup(
         "modules/dsv4/v41_engram_inject.py",
         "modules/dsv4/v41_engram.py",
         "modules/dsv4/v41_engram_weights.py",
+        "modules/dsv4/v41_engram_stage.py",
         "modules/dsv4/_v41_engram_inject_triton.py",
         "modules/dsv4/v41_mxfp8.py",
         "modules/dsv4/_v41_mxfp8_triton.py",
