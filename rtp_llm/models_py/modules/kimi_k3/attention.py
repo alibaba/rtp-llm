@@ -10,7 +10,6 @@ from torch import nn
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
-    _get_group,
     all_gather,
 )
 from rtp_llm.models_py.model_desc.kimi_linear import (
@@ -72,19 +71,6 @@ class KimiK3KDA(nn.Module):
         self.dim = cfg.linear_value_head_dim
         self.width = self.heads * self.dim
         self.input = linear(weights, K3W.KDA_INPUT, hardware)
-        self._ag_local_fp8_overlap = (
-            os.environ.get("RTP_LLM_NCCL_FP8_AG_LOCAL_OVERLAP", "0") == "1"
-        )
-        self._ag_local_fp8_overlap_min_rows = int(
-            os.environ.get("RTP_LLM_NCCL_FP8_AG_LOCAL_OVERLAP_MIN_ROWS", "4096")
-        )
-        if self._ag_local_fp8_overlap:
-            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-                CudaFp8GEMMLinear,
-            )
-
-            if not isinstance(self.input, CudaFp8GEMMLinear):
-                raise ValueError("BF16 NCCL/FP8 local overlap requires a grouped FP8 input projection")
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
         self._fp8_output_norm = False
@@ -130,30 +116,10 @@ class KimiK3KDA(nn.Module):
         self.decode.gate_lower_bound = runtime.kda_gate_lower_bound
 
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
-        use_overlap = (
-            self._ag_local_fp8_overlap
-            and self.tp_size > 1
-            and hidden.shape[0] >= self._ag_local_fp8_overlap_min_rows
-            and hidden.is_cuda
-            and hidden.dtype == torch.bfloat16
-            and attention_inputs.is_prefill
-            and not metadata.is_target_verify
-            and not torch.cuda.is_current_stream_capturing()
-        )
-        if use_overlap:
-            from rtp_llm.models_py.modules.factory.linear.impl.cuda.nccl_fp8_projection_overlap import (
-                all_gather_project_local_overlap,
-            )
-
-            with profile_scope("RTP::attention.kda.ag_local_fp8_overlap"):
-                fused = all_gather_project_local_overlap(
-                    hidden, self.input, _get_group(Group.TP)
-                )
-        else:
-            with profile_scope("RTP::attention.input_all_gather"):
-                full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-            with profile_scope("RTP::attention.kda.input_proj"):
-                fused = self.input(full_hidden)
+        with profile_scope("RTP::attention.input_all_gather"):
+            full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+        with profile_scope("RTP::attention.kda.input_proj"):
+            fused = self.input(full_hidden)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
