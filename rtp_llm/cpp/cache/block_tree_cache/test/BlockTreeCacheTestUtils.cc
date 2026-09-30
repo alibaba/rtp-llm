@@ -876,6 +876,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
+    config.task_pool_size      = options.task_pool_size;
     config.enable_device_cache = true;
     config.enable_host_cache   = true;
     config.enable_disk_cache   = options.enable_disk;
@@ -929,11 +930,14 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     if (request_refs_released_[static_cast<size_t>(group_id)]) {
         return;
     }
-    const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
-    ASSERT_EQ(path.size(), options_.path_length);
-    MultiNodeResource released_blocks = makeMultiNodeResourceForTest(
-        static_cast<size_t>(group_id), Tier::DEVICE, path, request_blocks[static_cast<size_t>(group_id)]);
-    block_tree_cache_test::releaseRequestRefsForTest(*cache, {released_blocks});
+    // Requests can outlive the cache nodes that originally published their blocks.
+    const auto& pools = groups[static_cast<size_t>(group_id)]->devicePools();
+    for (const auto& blocks : request_blocks[static_cast<size_t>(group_id)]) {
+        ASSERT_EQ(blocks.size(), pools.size());
+        for (size_t member = 0; member < pools.size(); ++member) {
+            pools[member]->decRef(blocks[member]);
+        }
+    }
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
 

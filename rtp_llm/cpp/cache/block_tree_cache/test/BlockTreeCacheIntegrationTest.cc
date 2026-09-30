@@ -1120,7 +1120,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFallback) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
     auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -1152,19 +1152,25 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     const BlockIdList target_blocks{20};
     device_pool->incRef(target_blocks);
     context->setTargetBlocks(0, target_blocks);
-    EXPECT_FALSE(context->commit());
+    // Accept the context so the caller can recover from the failed cache load.
+    EXPECT_TRUE(context->commit());
+    context->waitDone();
     EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
+    EXPECT_NE(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), path);
+    for (TreeNode* node : path) {
+        EXPECT_TRUE(node->group_set_resources[0].is_empty());
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    }
+    EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();
     releaseDeviceBlocks(*cache, device_pool, target_blocks);
+    EXPECT_FALSE(device_pool->isAllocated(target_blocks.front()));
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
@@ -1220,12 +1226,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
 
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), path);
+    for (TreeNode* node : path) {
+        EXPECT_TRUE(node->group_set_resources[0].is_empty());
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    }
     EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();

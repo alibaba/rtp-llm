@@ -156,3 +156,27 @@ cc_test(
     deps = test_deps,
     tags = ["A10_CU13"],
 )
+
+cc_test(
+    name = "per_rank_transfer_engine_crc_test",
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
+        "//conditions:default": {"gpu": "H20_CU13"},
+    }),
+    testonly = True,
+    srcs = ["PerRankBlockTransferEngineCrcTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive-if-local"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+)
+
+cc_test(
+    name = "crc_dump_writer_test",
+    srcs = ["CrcDumpWriterTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:crc_dump_writer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

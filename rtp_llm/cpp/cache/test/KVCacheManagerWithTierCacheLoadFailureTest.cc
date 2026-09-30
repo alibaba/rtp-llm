@@ -3,6 +3,22 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordDeletesSubtreeAndAllowsRecompute) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptFullRecordDeletesSubtreeAndAllowsRecompute) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::FULL));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordCancelsPendingChildLoad) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA, /*pending_child=*/true));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptFullRecordCancelsPendingChildLoad) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::FULL, /*pending_child=*/true));
+}
+
 TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierLoadFailureReleasesRefsAndCanRetry) {
     const auto source = GetParam() == TierLayout::HOST_ONLY ? LoadFailureSource::HOST : LoadFailureSource::DISK;
     ASSERT_NO_FATAL_FAILURE(runLowerTierLoadFailureScenario(source));

@@ -513,72 +513,41 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             }
             ASSERT_TRUE(failure_entered);
             engine->release();
-            // Await the public load-completion transition before scheduling again.
-            // A failed protected request leaves all scheduler queues empty; polling
-            // schedule() after it is removed would block waiting for a new request.
+            // Await settlement and private fallback allocation before rescheduling.
             ASSERT_TRUE(
                 waitForConditionFor([&] { return prefill_stream->streamCacheResource().loadCacheDone(); },
                                     std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
             BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
             const auto second_schedule = scheduler->schedule();
             ASSERT_TRUE(second_schedule.ok());
-            const bool crc_enabled = cache->groupSets().front()->crcEnabled();
-            if (crc_enabled) {
-                EXPECT_TRUE(second_schedule.value().empty());
-                EXPECT_EQ(prefill_stream->getStatus(), StreamState::FINISHED);
-                EXPECT_TRUE(prefill_stream->hasError());
-                EXPECT_EQ(prefill_stream->statusInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
-                EXPECT_EQ(prefill_stream->reuseLength(), 0);
-                EXPECT_EQ(prefill_stream->initialReuseLength(), 0);
-                EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
-                EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
-                EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
-
-                const auto quarantined = snapshotPathResources(*cache, seed.cache_keys);
-                ASSERT_TRUE(quarantined.has_value());
-                ASSERT_EQ(quarantined->size(), 3u);
-                for (const auto& group_set : cache->groupSets()) {
-                    const size_t group_set_id = group_set->groupSetId();
-                    const size_t reuse_begin  = 3 - group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-                    for (size_t path = std::max(size_t{1}, reuse_begin); path < 3; ++path) {
-                        const auto& source = (*quarantined)[path][group_set_id];
-                        EXPECT_TRUE(source.integrity_quarantined);
-                        EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
-                        EXPECT_FALSE(source.hasTier(Tier::DEVICE));
-                        if (path == 1) {
-                            EXPECT_EQ(source.host_block, host_sources[group_set_id]);
-                            EXPECT_EQ(group_set->hostPool()->treeRefCount(source.host_block), 1u);
-                            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-                        } else {
-                            EXPECT_EQ(source.disk_block, disk_sources[group_set_id]);
-                            EXPECT_EQ(group_set->diskPool()->treeRefCount(source.disk_block), 1u);
-                            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-                        }
-                    }
+            ASSERT_EQ(second_schedule.value().size(), 1u);
+            EXPECT_EQ(second_schedule.value().front(), prefill_stream);
+            EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
+            EXPECT_FALSE(prefill_stream->hasError());
+            EXPECT_EQ(prefill_stream->reuseLength(), 0);
+            EXPECT_EQ(prefill_stream->initialReuseLength(), 0);
+            EXPECT_EQ(prefill_stream->deviceReuseLength(), 0);
+            EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
+            EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
+            EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).reuseBlockNum(), 0u);
+            EXPECT_FALSE(prefill_stream->streamCacheResource().enableCacheLookup());
+            const auto after_failure = snapshotPathResources(*cache, seed.cache_keys);
+            ASSERT_TRUE(after_failure.has_value());
+            for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
+                const auto&  group_set   = cache->groupSets()[group_set_id];
+                // Injected transport failure does not identify a corrupt record.
+                for (size_t path = 0; path < 3; ++path) {
+                    const auto& source = (*after_failure)[path][group_set_id];
+                    EXPECT_TRUE(source.isMatchUsable());
+                    EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
+                    EXPECT_EQ(source.getTopTier(), (*mixed)[path][group_set_id].getTopTier());
                 }
-            } else {
-                ASSERT_EQ(second_schedule.value().size(), 1u);
-                EXPECT_EQ(second_schedule.value().front(), prefill_stream);
-                EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
-                EXPECT_FALSE(prefill_stream->hasError());
-                EXPECT_EQ(prefill_stream->reuseLength(), block_size);
-                EXPECT_EQ(prefill_stream->initialReuseLength(), block_size);
-                EXPECT_EQ(prefill_stream->deviceReuseLength(), block_size);
-                EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
-                EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
-                EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
-
-                for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-                    const auto&  group_set   = cache->groupSets()[group_set_id];
-                    const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-                    const size_t reuse_begin = 3 - reuse_count;
-                    for (const auto& tag : group_set->groupTags()) {
-                        const BlockIndicesType& blocks =
-                            prefill_stream->streamCacheResource().kvCache().blocks(0, tag);
-                        for (size_t path = reuse_begin; path < 3; ++path) {
-                            ASSERT_LT(path, blocks.size());
-                            EXPECT_FALSE(isNullBlockIdx(blocks[path]));
-                        }
+                for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                    const auto& blocks =
+                        prefill_stream->streamCacheResource().kvCache().blocks(0, group_set->groupTags()[member]);
+                    for (const auto block : blocks) {
+                        EXPECT_FALSE(isNullBlockIdx(block));
+                        EXPECT_NE(block, (*mixed)[0][group_set_id].device_blocks[member]);
                     }
                 }
             }
@@ -593,31 +562,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].source_tier, Tier::DISK);
             EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].target_tier, Tier::DEVICE);
 
-            if (crc_enabled) {
-                // Only the ready DEVICE prefix remains reusable. A fresh request must
-                // allocate the rest for recomputation without retrying quarantined sources.
-                const size_t descriptors_before_retry = engine->submittedDescriptorCount();
-                auto         retry_resource           = makeResource(cache_config_);
-                auto         retry_tokens             = makeTokenIds(0, 4 * block_size, 4 * block_size, block_size);
-                MallocInfo   retry_info{retry_resource, retry_tokens};
-                retry_info.reuse_cache         = true;
-                retry_info.enable_cache_lookup = true;
-                const auto retry               = manager_->malloc(retry_info);
-                ASSERT_TRUE(retry.success);
-                EXPECT_EQ(retry.reuse_len, block_size);
-                EXPECT_EQ(retry.async_context, nullptr);
-                EXPECT_EQ(retry_resource->cacheResource(0).deviceReuseBlockNum(), 1u);
-                EXPECT_EQ(retry_resource->cacheResource(0).memoryReuseBlockNum(), 0u);
-                EXPECT_EQ(retry_resource->cacheResource(0).diskReuseBlockNum(), 0u);
-                EXPECT_EQ(engine->submittedDescriptorCount(), descriptors_before_retry);
-                ASSERT_TRUE(requestReusesExpectedPath(
-                    *cache, cache_config_, seed.cache_keys, retry_resource, /*logical_reuse_blocks=*/1));
-                manager_->free(FreeInfo{retry_resource, retry_tokens});
-            } else {
-                prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-                ASSERT_TRUE(scheduler->schedule().ok());
-                EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
-            }
+            prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+            ASSERT_TRUE(scheduler->schedule().ok());
+            EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
         } else {
             const size_t descriptors_before_load = engine->submittedDescriptorCount();
             ASSERT_TRUE(engine->armPause());
