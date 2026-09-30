@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.modules.qwen4_exp.sparse_fmha import (
     sparse_prefill_attn,
     sparse_prefill_attn_torch_reference,
@@ -108,6 +109,40 @@ class SparsePrefillBitmapTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside KV sequence"):
                 sparse_prefill_attn(q, k, v, selected)
         self.assertTrue(torch.equal(k, snapshot))
+
+
+class SparsePrefillWordsTest(SparsePrefillBitmapTest):
+    def setUp(self):
+        setting = patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_WORDS": "1"})
+        setting.start()
+        self.addCleanup(setting.stop)
+
+    def test_word_boundaries_and_repeated_bits(self):
+        q, k, v, selected = self.inputs()
+        selected.fill_(-1)
+        selected[..., :6] = torch.tensor(
+            [0, 31, 32, 63, 64, 130], device="cuda", dtype=torch.int32
+        )
+        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_WORDS": "0"}):
+            expected = try_bitmap_prefill(q, k, v, selected)
+        candidate = try_bitmap_prefill(q, k, v, selected)
+        self.assertIsNotNone(candidate)
+        torch.testing.assert_close(candidate, expected, atol=0, rtol=0)
+        # This six-key fixture exposes BF16 intermediate rounding in the Torch
+        # gather reference. Check the unchanged attention math in FP64 as well.
+        ids = selected[0, 0, :6].long()
+        oracle = torch.empty_like(q, dtype=torch.float64)
+        for batch in range(q.shape[0]):
+            for head in range(q.shape[1]):
+                keys = k[batch, head // 3, ids].double()
+                values = v[batch, head // 3, ids].double()
+                probabilities = torch.softmax(q[batch, head].double() @ keys.T / 16, -1)
+                oracle[batch, head] = probabilities @ values
+        torch.testing.assert_close(
+            candidate.double(), oracle, atol=0.0078125, rtol=0.008
+        )
+        selected[..., 200] = 31
+        self.assertIsNone(try_bitmap_prefill(q, k, v, selected))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """Opt-in BF16 GQA prefill using a membership bitmap across query rows."""
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -14,6 +16,33 @@ def _membership(
     idx = tl.load(ids + row * K + r, r < K, other=-1)
     valid = (r < K) & (idx >= 0) & (idx < T)
     tl.store(mask + row * T + idx, 1, valid)
+    tl.store(ends + row, tl.max(tl.where(valid, idx, -1)) + 1)
+
+
+@triton.jit
+def _membership_words(
+    ids,
+    mask,
+    byte_mask,
+    ends,
+    duplicates,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    BK: tl.constexpr,
+    WORDS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    slots = tl.arange(0, BK)
+    idx = tl.load(ids + row * K + slots, slots < K, other=-1)
+    valid = (slots < K) & (idx >= 0) & (idx < T)
+    bit = tl.full((BK,), 1, tl.uint32) << (idx % 32)
+    tl.store(byte_mask + row * T + idx, 1, valid)
+    old = tl.atomic_or(
+        mask + row * WORDS + idx // 32, bit, mask=valid, sem="relaxed"
+    ).to(tl.uint32)
+    repeated = valid & ((old & bit) != 0)
+    invalid = (slots < K) & (idx >= T)
+    tl.store(duplicates + row, tl.max((repeated | invalid).to(tl.int32), 0))
     tl.store(ends + row, tl.max(tl.where(valid, idx, -1)) + 1)
 
 
@@ -117,21 +146,42 @@ def try_bitmap_prefill(q, k, v, selected):
         and b * s * t <= 64 * 1024 * 1024
     ):
         return None
-    membership = torch.zeros((b, s, t), device=q.device, dtype=torch.uint8)
     ends = torch.empty((b, s), device=q.device, dtype=torch.int32)
-    _membership[(b * s,)](
-        selected,
-        membership,
-        ends,
-        S=s,
-        T=t,
-        K=width,
-        BK=triton.next_power_of_2(width),
-        num_warps=4,
-    )
-    counts = (selected >= 0).sum(-1)
-    if not bool(torch.all(membership.sum(-1) == counts).item()):
-        return None
+    membership = torch.zeros((b, s, t), device=q.device, dtype=torch.uint8)
+    if os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_WORDS", "0") == "1":
+        words = triton.cdiv(t, 32)
+        # Keep the attention kernel and its accumulation order unchanged.
+        # Packed words only replace the large byte-bitmap duplicate reduction.
+        packed = torch.zeros((b, s, words), device=q.device, dtype=torch.int32)
+        duplicates = torch.empty_like(ends)
+        _membership_words[(b * s,)](
+            selected,
+            packed,
+            membership,
+            ends,
+            duplicates,
+            T=t,
+            K=width,
+            BK=triton.next_power_of_2(width),
+            WORDS=words,
+            num_warps=4,
+        )
+        if bool(torch.any(duplicates).item()):
+            return None
+    else:
+        _membership[(b * s,)](
+            selected,
+            membership,
+            ends,
+            S=s,
+            T=t,
+            K=width,
+            BK=triton.next_power_of_2(width),
+            num_warps=4,
+        )
+        counts = (selected >= 0).sum(-1)
+        if not bool(torch.all(membership.sum(-1) == counts).item()):
+            return None
     out = torch.empty_like(q)
     _bitmap_gqa[(b, hk, triton.cdiv(s, 5))](
         q,
