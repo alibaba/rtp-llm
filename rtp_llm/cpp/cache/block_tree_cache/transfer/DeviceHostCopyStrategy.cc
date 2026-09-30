@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 
 #include <torch/torch.h>
@@ -13,7 +14,8 @@
 namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
-                                                                  const DeviceHostCopyOptions& /*options*/) {
+                                                                  const DeviceHostCopyOptions& /*options*/,
+                                                                  const DeviceHostCopyExecutionContext& context) {
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -36,12 +38,20 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     }
 
     MultiCopyParams mc{dst_buffers, src_buffers};
-    execNoBlockCopy(mc);
+    try {
+        execNoBlockCopy(mc, context);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("generic copy failed group_set=%zu device=%d direction=%s stream=%p: %s",
+                            plan.group_set_id, context.deviceIndex(), plan.device_to_host ? "D2H" : "H2D",
+                            reinterpret_cast<void*>(context.stream()), error.what());
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+    }
     return StrategyResult::done();
 }
 
 StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                           const DeviceHostCopyOptions& options) {
+                                                           const DeviceHostCopyOptions& options,
+                                                           const DeviceHostCopyExecutionContext& context) {
     if (!options.cuda_batch_copy_enabled) {
         return StrategyResult::notApplicable();
     }
@@ -53,6 +63,7 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
 
     BatchedMemoryCopyParams params;
     params.device_index = device_index;
+    params.direction = plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D;
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
@@ -68,11 +79,14 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         params.tiles.push_back(batch_tile);
     }
 
-    const auto status = execBatchedMemoryCopy(params);
+    const auto status = execBatchedMemoryCopy(params, context);
     if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
         return StrategyResult::notApplicable();
     }
     if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
+        RTP_LLM_LOG_WARNING("batch copy failed group_set=%zu device=%d direction=%s stream=%p",
+                            plan.group_set_id, context.deviceIndex(), plan.device_to_host ? "D2H" : "H2D",
+                            reinterpret_cast<void*>(context.stream()));
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
     return StrategyResult::done();
@@ -81,7 +95,8 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
 static constexpr size_t kStagedAlignment = 16;
 
 StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                          const DeviceHostCopyOptions& options) {
+                                                          const DeviceHostCopyOptions& options,
+                                                          const DeviceHostCopyExecutionContext& context) {
     if (!options.staged_sm_copy_enabled || plan.copy_tiles.empty()) {
         return StrategyResult::notApplicable();
     }
@@ -168,7 +183,7 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
         return StrategyResult::notApplicable();
     }
     auto& lease = *acquired.lease;
-    const auto status = execStagedMemoryCopy(staged_params, lease.scratchFor(device_index));
+    const auto status = execStagedMemoryCopy(staged_params, lease.scratchFor(device_index), context);
     if (status == StagedMemoryCopyStatus::SUCCESS) {
         return StrategyResult::done();
     }
@@ -178,6 +193,9 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     if (status == StagedMemoryCopyStatus::UNSAFE) {
         lease.quarantine();
     }
+    RTP_LLM_LOG_WARNING("staged copy failed group_set=%zu device=%d direction=%s stream=%p status=%d",
+                        plan.group_set_id, context.deviceIndex(), plan.device_to_host ? "D2H" : "H2D",
+                        reinterpret_cast<void*>(context.stream()), static_cast<int>(status));
     return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
 }
 

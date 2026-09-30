@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <limits>
+#include <stdexcept>
 #include <unordered_map>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -24,16 +25,63 @@ enum class HostCoverage {
     Full,
 };
 
-std::mutex& cudaBatchSubmitMutex(int device_index) {
-    static std::mutex                                           registry_mutex;
-    static std::unordered_map<int, std::unique_ptr<std::mutex>> mutexes;
+struct CopyStreamRegistry {
+    struct Entry {
+        std::weak_ptr<DeviceHostCopyStreams> pair;
+        bool                                 poisoned{false};
+    };
+    std::mutex                     mutex;
+    std::unordered_map<int, Entry> entries;
+};
 
-    std::lock_guard<std::mutex> registry_lock(registry_mutex);
-    auto&                       mutex = mutexes[device_index];
-    if (!mutex) {
-        mutex = std::make_unique<std::mutex>();
+CopyStreamRegistry& copyStreamRegistry() {
+    static CopyStreamRegistry registry;
+    return registry;
+}
+
+void markCopyStreamsUnsafe(const DeviceHostCopyExecutionContext& context) {
+    context.owner->unsafe.store(true, std::memory_order_release);
+    auto& registry = copyStreamRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto entry = registry.entries.find(context.deviceIndex());
+    if (entry != registry.entries.end()) {
+        // Keep the device unavailable even after the last owner exits: the
+        // unfinished copy may still be using buffers on the old stream.
+        entry->second.poisoned = true;
     }
-    return *mutex;
+}
+
+class CudaDeviceHostCopyStreams final: public DeviceHostCopyStreams {
+public:
+    CudaDeviceHostCopyStreams(int device, cudaStream_t h2d, cudaStream_t d2h):
+        DeviceHostCopyStreams(device, reinterpret_cast<uintptr_t>(h2d), reinterpret_cast<uintptr_t>(d2h)) {}
+
+    ~CudaDeviceHostCopyStreams() override {
+        if (unsafe.load(std::memory_order_acquire)) {
+            RTP_LLM_LOG_WARNING("retaining unsafe copy streams device=%d h2d=%p d2h=%p until context teardown",
+                                device_index, reinterpret_cast<void*>(h2d_stream), reinterpret_cast<void*>(d2h_stream));
+            return;
+        }
+        try {
+            c10::cuda::CUDAGuard guard(device_index);
+            for (auto handle : {h2d_stream, d2h_stream}) {
+                const auto error = cudaStreamDestroy(reinterpret_cast<cudaStream_t>(handle));
+                if (error != cudaSuccess) {
+                    RTP_LLM_LOG_WARNING("copy stream destroy failed device=%d stream=%p: %s",
+                                        device_index, reinterpret_cast<void*>(handle), cudaGetErrorString(error));
+                }
+            }
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("copy stream teardown failed device=%d: %s", device_index, error.what());
+        }
+    }
+};
+
+bool validCopyContext(const DeviceHostCopyExecutionContext& context,
+                      int device_index,
+                      DeviceHostCopyDirection direction) {
+    return context.owner && context.deviceIndex() == device_index && context.direction == direction
+           && context.stream() != 0 && !context.owner->unsafe.load(std::memory_order_acquire);
 }
 
 HostCoverage checkHostCoverage(const StagedMemoryCopyParams& params) {
@@ -216,6 +264,49 @@ StagedMemoryCopyStatus ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& sc
 
 }  // namespace
 
+std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index) {
+    if (device_index < 0) {
+        throw std::invalid_argument("invalid copy stream device");
+    }
+    auto& registry = copyStreamRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    auto& entry = registry.entries[device_index];
+    if (entry.poisoned) {
+        throw std::runtime_error("copy stream device has unconfirmed GPU completion");
+    }
+    if (auto existing = entry.pair.lock()) {
+        return existing;
+    }
+    c10::cuda::CUDAGuard guard(device_index);
+    cudaStream_t h2d = nullptr;
+    cudaStream_t d2h = nullptr;
+    check_cuda_value(cudaStreamCreateWithFlags(&h2d, cudaStreamNonBlocking));
+    try {
+        check_cuda_value(cudaStreamCreateWithFlags(&d2h, cudaStreamNonBlocking));
+        if (h2d == d2h || h2d == nullptr || d2h == nullptr) {
+            throw std::runtime_error("copy direction streams are not distinct non-default streams");
+        }
+        auto pair = std::make_shared<CudaDeviceHostCopyStreams>(device_index, h2d, d2h);
+        h2d = nullptr;
+        d2h = nullptr;
+        entry.pair = pair;
+        RTP_LLM_LOG_INFO("copy streams initialized device=%d owner=%p h2d=%p d2h=%p",
+                         device_index,
+                         pair.get(),
+                         reinterpret_cast<void*>(pair->h2d_stream),
+                         reinterpret_cast<void*>(pair->d2h_stream));
+        return pair;
+    } catch (...) {
+        if (d2h != nullptr) {
+            cudaStreamDestroy(d2h);
+        }
+        if (h2d != nullptr) {
+            cudaStreamDestroy(h2d);
+        }
+        throw;
+    }
+}
+
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) noexcept {
     int  previous_device = -1;
     auto get_error       = cudaGetDevice(&previous_device);
@@ -253,7 +344,7 @@ void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) noexcept {
     }
 }
 
-void execNoBlockCopy(const MultiCopyParams& params) {
+static void execNoBlockCopyImpl(const MultiCopyParams& params, const DeviceHostCopyExecutionContext* context) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",
                             params.multi_src.size(),
@@ -265,7 +356,15 @@ void execNoBlockCopy(const MultiCopyParams& params) {
         params.multi_dst.empty() ? getCopyDevice(-1, -1) : getCopyDevice(params.multi_dst[0], params.multi_src[0]);
     c10::cuda::CUDAGuard device_guard(copy_device);
 
-    auto stream = getNoBlockCopyStream(copy_device).stream();
+    if (context != nullptr) {
+        const auto direction = !params.multi_dst.empty() && params.multi_dst[0].is_cuda()
+                                   ? DeviceHostCopyDirection::H2D : DeviceHostCopyDirection::D2H;
+        if (!validCopyContext(*context, copy_device, direction) || params.split_kv_layer_num > 0) {
+            throw std::invalid_argument("invalid explicit generic copy context");
+        }
+    }
+    auto stream = context ? reinterpret_cast<cudaStream_t>(context->stream()) :
+                            getNoBlockCopyStream(copy_device).stream();
 
     if (params.split_kv_layer_num > 0 && has_cuda_tensor) {
         if (splitKvMultiCopy(params.multi_src,
@@ -280,18 +379,42 @@ void execNoBlockCopy(const MultiCopyParams& params) {
         }
     }
 
-    for (size_t i = 0; i < params.multi_src.size(); ++i) {
-        check_cuda_value(cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
-                                         params.multi_src[i].data_ptr(),
-                                         params.multi_src[i].nbytes(),
-                                         cudaMemcpyDefault,
-                                         stream));
+    bool submitted = false;
+    try {
+        for (size_t i = 0; i < params.multi_src.size(); ++i) {
+            submitted = true;
+            check_cuda_value(cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
+                                             params.multi_src[i].data_ptr(),
+                                             params.multi_src[i].nbytes(),
+                                             cudaMemcpyDefault,
+                                             stream));
+        }
+        check_cuda_value(cudaStreamSynchronize(stream));
+        check_cuda_error();
+    } catch (...) {
+        if (submitted && cudaStreamSynchronize(stream) != cudaSuccess && context != nullptr) {
+            markCopyStreamsUnsafe(*context);
+            RTP_LLM_LOG_WARNING("generic copy completion unconfirmed device=%d direction=%s stream=%p",
+                                copy_device, context->direction == DeviceHostCopyDirection::H2D ? "H2D" : "D2H",
+                                static_cast<void*>(stream));
+        }
+        throw;
     }
-    check_cuda_value(cudaStreamSynchronize(stream));
-    check_cuda_error();
 }
 
-BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
+void execNoBlockCopy(const MultiCopyParams& params) {
+    execNoBlockCopyImpl(params, nullptr);
+}
+
+void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutionContext& context) {
+    execNoBlockCopyImpl(params, &context);
+}
+
+BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params,
+                                              const DeviceHostCopyExecutionContext& context) {
+    if (!validCopyContext(context, params.device_index, params.direction)) {
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
     if (params.tiles.empty()) {
         return BatchedMemoryCopyStatus::SUCCESS;
     }
@@ -344,7 +467,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     }
 
     c10::cuda::CUDAGuard device_guard(params.device_index);
-    auto stream = getNoBlockCopyStream(params.device_index).stream();
+    auto stream = reinterpret_cast<cudaStream_t>(context.stream());
 
     const size_t             tile_num = params.tiles.size();
     std::vector<void*>       dsts;
@@ -373,10 +496,6 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     cudaMemcpyAttributes attr{};
     attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     size_t attr_idx     = 0;
-    // cuMemcpyBatchAsync_v2 in the deployed CUDA stack is not safe under
-    // concurrent host submissions. Protect only the runtime API entry; each
-    // call keeps its own stream and completion wait, so transfers may overlap.
-    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(params.device_index));
 #if CUDART_VERSION >= 13000
     const auto submit_error =
         cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
@@ -390,7 +509,6 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     const auto submit_error = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif
-    submit_lock.unlock();
     if (submit_error != cudaSuccess) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
                             "error=%s",
@@ -399,6 +517,9 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                             dsts.size(),
                             static_cast<int>(submit_error),
                             cudaGetErrorString(submit_error));
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            markCopyStreamsUnsafe(context);
+        }
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
     }
 
@@ -409,6 +530,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
 
     const auto completion_error = cudaStreamSynchronize(stream);
     if (completion_error != cudaSuccess) {
+        markCopyStreamsUnsafe(context);
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=completion device=%d stream=%p tiles=%zu "
                             "error_code=%d error=%s",
                             params.device_index,
@@ -435,7 +557,14 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
 #endif
 }
 
-StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch& scratch) {
+StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams&           params,
+                                            StagedMemoryCopyScratch&                scratch,
+                                            const DeviceHostCopyExecutionContext& context) {
+    if (!validCopyContext(context, params.device_index,
+                          params.direction == StagedMemoryCopyDirection::H2D ? DeviceHostCopyDirection::H2D
+                                                                               : DeviceHostCopyDirection::D2H)) {
+        return StagedMemoryCopyStatus::FAILED;
+    }
     if (params.tiles.empty()) {
         return StagedMemoryCopyStatus::SUCCESS;
     }
@@ -486,7 +615,7 @@ StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams& params
     const size_t tile_num = h_ptrs.size();
     try {
         c10::cuda::CUDAGuard device_guard(params.device_index);
-        auto stream = getNoBlockCopyStream(params.device_index).stream();
+        auto stream = reinterpret_cast<cudaStream_t>(context.stream());
         const auto allocation_status =
             ensureStagedMemoryCopyScratch(scratch, params.device_index, params.host_bytes, tile_num);
         if (allocation_status != StagedMemoryCopyStatus::SUCCESS) {
@@ -559,6 +688,7 @@ StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams& params
             // failures. A failed sync makes this scratch permanently unsafe.
             const auto sync_error = submitted ? cudaStreamSynchronize(stream) : cudaSuccess;
             if (sync_error != cudaSuccess) {
+                markCopyStreamsUnsafe(context);
                 RTP_LLM_LOG_WARNING("execStagedMemoryCopy stream sync failed: %s", cudaGetErrorString(sync_error));
                 return StagedMemoryCopyStatus::UNSAFE;
             }
@@ -577,6 +707,7 @@ StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams& params
             return StagedMemoryCopyStatus::SUCCESS;
         } catch (...) {
             if (submitted && !synchronized && cudaStreamSynchronize(stream) != cudaSuccess) {
+                markCopyStreamsUnsafe(context);
                 RTP_LLM_LOG_WARNING("execStagedMemoryCopy could not drain stream after exception");
                 return StagedMemoryCopyStatus::UNSAFE;
             }

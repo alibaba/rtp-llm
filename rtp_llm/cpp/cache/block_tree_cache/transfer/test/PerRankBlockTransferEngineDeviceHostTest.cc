@@ -198,9 +198,10 @@ public:
     RecordingStrategy(std::unique_ptr<DeviceHostCopyStrategy> delegate, StrategyCounters* counters):
         delegate_(std::move(delegate)), counters_(counters) {}
 
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override {
+    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options,
+                              const DeviceHostCopyExecutionContext& context) override {
         ++counters_->attempts;
-        auto result = delegate_->tryExecute(plan, options);
+        auto result = delegate_->tryExecute(plan, options, context);
         switch (result.status) {
             case StrategyStatus::DONE:
                 ++counters_->done;
@@ -222,16 +223,19 @@ private:
 
 class FailingStrategy: public DeviceHostCopyStrategy {
 public:
-    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
+    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&,
+                              const DeviceHostCopyExecutionContext&) override {
         return StrategyResult::failed(TransferStatus::INVALID_ARGS);
     }
 };
 
 class BlockingStrategy: public DeviceHostCopyStrategy {
 public:
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions&) override {
+    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions&,
+                              const DeviceHostCopyExecutionContext& context) override {
         std::unique_lock<std::mutex> lock(mutex_);
         directions_.push_back(plan.device_to_host);
+        streams_.push_back(context.stream());
         ++entered_count_;
         cv_.notify_all();
         cv_.wait(lock, [this] { return released_; });
@@ -251,11 +255,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return directions_;
     }
+    std::vector<uintptr_t> streams() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return streams_;
+    }
 
 private:
     std::mutex              mutex_;
     std::condition_variable cv_;
     std::vector<bool>       directions_;
+    std::vector<uintptr_t>  streams_;
     size_t                  entered_count_{0};
     bool                    released_{false};
 };
@@ -376,6 +385,169 @@ protected:
     GroupSetPtr                                 group_set_;
 };
 
+TEST_F(PerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetweenExecutors) {
+    const int device = device_pool_->deviceIndex();
+    auto first = acquireDeviceHostCopyStreams(device);
+    auto second_engine = makeEngine({group_set_});
+    auto second = second_engine->device_host_executor_->streams_by_device_.at(device);
+    ASSERT_EQ(first.get(), second.get());
+    ASSERT_NE(first->h2d_stream, 0u);
+    ASSERT_NE(first->d2h_stream, 0u);
+    EXPECT_NE(first->h2d_stream, first->d2h_stream);
+    unsigned int flags = 0;
+    ASSERT_EQ(cudaStreamGetFlags(reinterpret_cast<cudaStream_t>(first->h2d_stream), &flags), cudaSuccess);
+    EXPECT_EQ(flags & cudaStreamNonBlocking, cudaStreamNonBlocking);
+    ASSERT_EQ(cudaStreamGetFlags(reinterpret_cast<cudaStream_t>(first->d2h_stream), &flags), cudaSuccess);
+    EXPECT_EQ(flags & cudaStreamNonBlocking, cudaStreamNonBlocking);
+    second_engine.reset();
+    EXPECT_EQ(per_rank_transfer_engine_->device_host_executor_->streams_by_device_.at(device).get(), first.get());
+}
+
+// A blocked predecessor on the selected stream distinguishes actual backend
+// submission from an accidental worker-local TLS stream.
+class CopyStreamGate {
+public:
+    explicit CopyStreamGate(cudaStream_t target) {
+        RTP_LLM_CHECK(cudaStreamCreateWithFlags(&producer_, cudaStreamNonBlocking) == cudaSuccess);
+        RTP_LLM_CHECK(cudaEventCreateWithFlags(&event_, cudaEventDisableTiming) == cudaSuccess);
+        RTP_LLM_CHECK(cudaLaunchHostFunc(producer_, [](void* arg) {
+            auto* gate = static_cast<CopyStreamGate*>(arg);
+            std::unique_lock<std::mutex> lock(gate->mutex_);
+            gate->cv_.wait(lock, [gate] { return gate->released_; });
+        }, this) == cudaSuccess);
+        RTP_LLM_CHECK(cudaEventRecord(event_, producer_) == cudaSuccess);
+        RTP_LLM_CHECK(cudaStreamWaitEvent(target, event_, 0) == cudaSuccess);
+    }
+
+    ~CopyStreamGate() {
+        release();
+        cudaStreamSynchronize(producer_);
+        cudaEventDestroy(event_);
+        cudaStreamDestroy(producer_);
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    cudaStream_t            producer_{nullptr};
+    cudaEvent_t             event_{nullptr};
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    released_{false};
+};
+
+TEST_F(PerRankBlockTransferEngineTest, BatchAndGenericSubmitToSelectedDirectionStreams) {
+    const int device = device_pool_->deviceIndex();
+    auto pair = acquireDeviceHostCopyStreams(device);
+    const auto device_buffer = device_pool_->convertIndexToBuffer(0, device_block_)[0];
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    auto host = host_pool_->blockBuffer(host_block);
+    constexpr size_t bytes = 64;
+    ASSERT_GE(device_buffer.size_bytes, bytes);
+    ASSERT_GE(host.payload_bytes, bytes);
+    ASSERT_EQ(cudaMemset(device_buffer.addr, 0x5A, bytes), cudaSuccess);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    DeviceHostCopyExecutionContext d2h{pair, DeviceHostCopyDirection::D2H};
+    BatchedMemoryCopyParams batch{{{host.addr, device_buffer.addr, bytes}}, device, DeviceHostCopyDirection::D2H};
+    {
+        CopyStreamGate gate(reinterpret_cast<cudaStream_t>(d2h.stream()));
+        auto copy = std::async(std::launch::async, [&] { return execBatchedMemoryCopy(batch, d2h); });
+        const auto blocked = copy.wait_for(std::chrono::milliseconds(150));
+        gate.release();
+        EXPECT_EQ(blocked, std::future_status::timeout);
+        EXPECT_EQ(copy.get(), BatchedMemoryCopyStatus::SUCCESS);
+    }
+    for (size_t i = 0; i < bytes; ++i) {
+        EXPECT_EQ(static_cast<uint8_t*>(host.addr)[i], 0x5A);
+    }
+
+    std::memset(host.addr, 0xA6, bytes);
+    auto cpu_tensor = torch::from_blob(host.addr, {static_cast<int64_t>(bytes)}, torch::kUInt8);
+    auto gpu_tensor = makePoolByteTensor(device_buffer.addr, bytes);
+    MultiCopyParams generic{{gpu_tensor}, {cpu_tensor}};
+    DeviceHostCopyExecutionContext h2d{pair, DeviceHostCopyDirection::H2D};
+    {
+        CopyStreamGate gate(reinterpret_cast<cudaStream_t>(h2d.stream()));
+        auto copy = std::async(std::launch::async, [&] { execNoBlockCopy(generic, h2d); });
+        const auto blocked = copy.wait_for(std::chrono::milliseconds(150));
+        gate.release();
+        EXPECT_EQ(blocked, std::future_status::timeout);
+        EXPECT_NO_THROW(copy.get());
+    }
+    const auto readback = gpu_tensor.cpu();
+    for (size_t i = 0; i < bytes; ++i) {
+        EXPECT_EQ(readback.data_ptr<uint8_t>()[i], 0xA6);
+    }
+    releasePoolBlock(*host_pool_, host_block);
+}
+
+TEST_F(PerRankBlockTransferEngineTest, ConcurrentSameDirectionBatchesPreserveIndependentPayloads) {
+    constexpr size_t count = 4;
+    constexpr size_t bytes = 256;
+    const int device = device_pool_->deviceIndex();
+    auto pair = acquireDeviceHostCopyStreams(device);
+    DeviceHostCopyExecutionContext h2d{pair, DeviceHostCopyDirection::H2D};
+
+    std::array<void*, count> hosts{};
+    std::array<void*, count> devices{};
+    for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(cudaMallocHost(&hosts[i], bytes), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&devices[i], bytes), cudaSuccess);
+        std::memset(hosts[i], static_cast<int>(0x20 + i), bytes);
+    }
+
+    std::mutex start_mutex;
+    std::condition_variable start_cv;
+    size_t ready = 0;
+    bool go = false;
+    std::array<std::future<BatchedMemoryCopyStatus>, count> copies;
+    {
+        CopyStreamGate gate(reinterpret_cast<cudaStream_t>(h2d.stream()));
+        for (size_t i = 0; i < count; ++i) {
+            copies[i] = std::async(std::launch::async, [&, i] {
+                {
+                    std::unique_lock<std::mutex> lock(start_mutex);
+                    ++ready;
+                    start_cv.notify_all();
+                    start_cv.wait(lock, [&] { return go; });
+                }
+                BatchedMemoryCopyParams params{{{devices[i], hosts[i], bytes}}, device, DeviceHostCopyDirection::H2D};
+                return execBatchedMemoryCopy(params, h2d);
+            });
+        }
+        {
+            std::unique_lock<std::mutex> lock(start_mutex);
+            const bool all_ready = start_cv.wait_for(lock, std::chrono::seconds(5), [&] { return ready == count; });
+            go = true;
+            start_cv.notify_all();
+            EXPECT_TRUE(all_ready);
+        }
+        const auto blocked = copies[0].wait_for(std::chrono::milliseconds(150));
+        gate.release();
+        EXPECT_EQ(blocked, std::future_status::timeout);
+        for (auto& copy : copies) {
+            EXPECT_EQ(copy.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+            EXPECT_EQ(copy.get(), BatchedMemoryCopyStatus::SUCCESS);
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        std::array<uint8_t, bytes> output{};
+        ASSERT_EQ(cudaMemcpy(output.data(), devices[i], bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+        for (uint8_t value : output) {
+            EXPECT_EQ(value, static_cast<uint8_t>(0x20 + i));
+        }
+        cudaFree(devices[i]);
+        cudaFreeHost(hosts[i]);
+    }
+}
+
 TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
     fillDeviceLayerSequential(device_pool_, 0, device_block_);
     fillDeviceLayer(device_pool_, 1, device_block_, {0x5A});
@@ -422,7 +594,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
 TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorDirectionTest");
     StagedCopyScratchPool      scratch_pool(1, {device_pool_->deviceIndex()}, {64 * 1024 * 1024, 4096});
-    DeviceHostTransferExecutor executor(task_pool, scratch_pool, 8);
+    DeviceHostTransferExecutor executor(task_pool, scratch_pool, 8, {}, nullptr, {device_pool_->deviceIndex()});
     fillDeviceLayer(device_pool_, 0, device_block_, {0xA5});
 
     const BlockIdxType host_block = poolMalloc(*host_pool_);
@@ -448,12 +620,25 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTar
     releasePoolBlock(*host_pool_, host_block);
 }
 
+TEST_F(PerRankBlockTransferEngineTest, ExecutorRejectsDeviceOutsideInitializedSet) {
+    BlockTreeTaskPool task_pool(1, 8, "UnconfiguredCopyDeviceTest");
+    StagedCopyScratchPool scratch_pool(1, {}, {64 * 1024 * 1024, 4096});
+    DeviceHostTransferExecutor executor(task_pool, scratch_pool, 8);
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const auto buffer = host_pool_->blockBuffer(host_block);
+    const HostBufferView host{buffer.addr, buffer.payload_bytes, buffer.stride_bytes};
+    const auto descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    EXPECT_EQ(executor.executeBatch({host}, {descriptor}, {group_set_.get()}), TransferStatus::INVALID_ARGS);
+    releasePoolBlock(*host_pool_, host_block);
+}
+
 TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissionRejection) {
     BlockTreeTaskPool task_pool(1, 8, "DeviceHostExecutorTest");
     ASSERT_TRUE(task_pool.start());
     task_pool.stopAdmission();
     StagedCopyScratchPool scratch_pool(1, {device_pool_->deviceIndex()}, {64 * 1024 * 1024, 4096});
-    DeviceHostTransferExecutor executor(task_pool, scratch_pool, 8);
+    DeviceHostTransferExecutor executor(task_pool, scratch_pool, 8, {}, nullptr, {device_pool_->deviceIndex()});
 
     const BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -659,6 +844,11 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseShare
     EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
+    const auto streams = blocker->streams();
+    ASSERT_EQ(streams.size(), 2u);
+    EXPECT_EQ(streams[0], streams[1]);
+    EXPECT_EQ(streams[0], per_rank_transfer_engine_->device_host_executor_->streams_by_device_.at(
+                              device_pool_->deviceIndex())->d2h_stream);
 
     releasePoolBlock(*host_pool_, first_host_block);
     releasePoolBlock(*host_pool_, second_host_block);
@@ -692,6 +882,11 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseShare
     EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
+    const auto streams = blocker->streams();
+    ASSERT_EQ(streams.size(), 2u);
+    EXPECT_EQ(streams[0], streams[1]);
+    EXPECT_EQ(streams[0], per_rank_transfer_engine_->device_host_executor_->streams_by_device_.at(
+                              device_pool_->deviceIndex())->h2d_stream);
 
     releasePoolBlock(*host_pool_, first_host_block);
     releasePoolBlock(*host_pool_, second_host_block);

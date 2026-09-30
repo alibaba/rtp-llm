@@ -33,9 +33,13 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        StagedCopyScratchPool& scratch_pool,
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
-                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                       std::vector<int> allowed_devices):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
     options_(std::move(options)) {
+    for (int device_index : allowed_devices) {
+        streams_by_device_.emplace(device_index, acquireDeviceHostCopyStreams(device_index));
+    }
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>(scratch_pool));
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
@@ -64,10 +68,39 @@ TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
     if (status != TransferStatus::OK) {
         return status;
     }
+    std::vector<DeviceHostCopyExecutionContext> contexts;
+    contexts.reserve(plans.size());
     for (const auto& plan : plans) {
+        if (plan.copy_tiles.empty()) {
+            return TransferStatus::INVALID_ARGS;
+        }
+        const int device_index = plan.copy_tiles.front().device_index;
+        const auto stream_it = streams_by_device_.find(device_index);
+        if (stream_it == streams_by_device_.end()) {
+            RTP_LLM_LOG_WARNING("copy plan uses unconfigured device=%d group_set=%zu", device_index, plan.group_set_id);
+            return TransferStatus::INVALID_ARGS;
+        }
+        for (const auto& tile : plan.copy_tiles) {
+            if (tile.device_index != device_index) {
+                return TransferStatus::INVALID_ARGS;
+            }
+        }
+        const DeviceHostCopyExecutionContext context{
+            stream_it->second, plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+        if (context.owner->unsafe.load(std::memory_order_acquire)) {
+            RTP_LLM_LOG_WARNING("copy stream unsafe device=%d direction=%s stream=%p group_set=%zu",
+                                device_index, plan.device_to_host ? "D2H" : "H2D",
+                                reinterpret_cast<void*>(context.stream()), plan.group_set_id);
+            return TransferStatus::DEVICE_IO_ERROR;
+        }
+        contexts.push_back(context);
+    }
+    for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
+        const auto& plan = plans[plan_index];
+        const auto& context = contexts[plan_index];
         bool handled = false;
         for (auto& strategy : strategies_) {
-            auto result = strategy->tryExecute(plan, options_);
+            auto result = strategy->tryExecute(plan, options_, context);
             if (result.status == StrategyStatus::DONE) {
                 handled = true;
                 break;

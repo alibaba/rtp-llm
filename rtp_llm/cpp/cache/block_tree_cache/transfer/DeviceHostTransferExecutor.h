@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -19,7 +20,8 @@ public:
                                StagedCopyScratchPool&                         scratch_pool,
                                size_t                                         max_descriptors_per_batch,
                                DeviceHostCopyOptions                          options          = {},
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                               std::vector<int>                              allowed_devices = {});
     ~DeviceHostTransferExecutor() = default;
 
 private:
@@ -35,6 +37,7 @@ private:
                  const std::vector<const GroupSet*>&    group_sets) const;
 
     DeviceHostCopyOptions                                options_;
+    std::map<int, std::shared_ptr<DeviceHostCopyStreams>> streams_by_device_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;
 };
 
