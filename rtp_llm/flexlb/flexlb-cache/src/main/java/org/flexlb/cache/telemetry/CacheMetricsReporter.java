@@ -43,7 +43,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -118,7 +117,6 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
-        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
@@ -282,22 +280,17 @@ public class CacheMetricsReporter {
     /**
      * Report request-level routing cache-match token metrics for the selected worker pool.
      */
-    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
-                                                       long hitTokens,
-                                                       long totalTokens) {
-        reportRoutingCacheMatchMetrics(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
-                CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS,
-                roleType,
-                hitTokens,
-                totalTokens);
+    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType, long hitTokens) {
+        if (roleType == null) {
+            return;
+        }
+        monitor.report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
+                FlexMetricTags.of("role", roleType.name()), hitTokens);
     }
 
     /**
      * Report the request-level maximum cache match across available candidates.
      *
-     * <p>The matching input-token denominator is reported by
-     * {@link #reportRoutingSelectedCacheMatchMetrics(RoleType, long, long)}
-     * for the same successfully selected request.</p>
      */
     public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
                                                            long hitTokens) {
@@ -323,23 +316,6 @@ public class CacheMetricsReporter {
                 "engineIp", engineIp,
                 "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
-    }
-
-    private void reportRoutingCacheMatchMetrics(String hitMetric,
-                                                String totalMetric,
-                                                RoleType roleType,
-                                                long hitTokens,
-                                                long totalTokens) {
-        if (roleType == null || totalTokens <= 0L) {
-            return;
-        }
-
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
-
-        monitor.report(hitMetric, tags, hitTokens);
-        monitor.report(totalMetric, tags, totalTokens);
     }
 
     /**

@@ -32,7 +32,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -71,7 +70,6 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
-        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
     }
@@ -202,12 +200,11 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_routing_cache_match_token_metrics() {
-        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 128L, 1024L);
+        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 128L);
         reporter.reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, 256L);
 
         FlexMetricTags roleTags = FlexMetricTags.of("role", RoleType.PREFILL.name());
         verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, roleTags, 128L);
-        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, roleTags, 1024L);
         verify(monitor).report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, roleTags, 256L);
     }
 }
