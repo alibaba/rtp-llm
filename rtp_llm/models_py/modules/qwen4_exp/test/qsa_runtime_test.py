@@ -1,4 +1,5 @@
 import os
+import os
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -894,6 +895,79 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         torch.testing.assert_close(state_pool[7, 7], raw[1].float())
         torch.testing.assert_close(state_pool[8, 0], raw[2].float())
         torch.testing.assert_close(state_pool[8, 2], raw[4].float())
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for the draft writer")
+    def test_short_draft_writer_matches_reference_and_rolls_back(self):
+        device = torch.device("cuda")
+        self.D = 128
+        self.KV_TOKENS_PER_BLOCK = 128
+        self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = (
+            torch.randn(128, device=device) * 0.1
+        ).bfloat16()
+        indexer = self._decode_indexer()
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        kv_initial = torch.zeros(
+            12, 32 * 128 * 2, dtype=torch.uint8, device=device
+        )
+        state_initial = torch.randn(
+            12, 8 * 128, dtype=torch.float32, device=device
+        )
+        kv_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[5, 6], [7, 8]], dtype=torch.int32, device=device)
+        for prefixes, lengths in (
+            ([5, 127], [4, 4]),
+            ([7, 127], [1, 4]),
+            ([127, 5], [3, 2]),
+        ):
+            with self.subTest(prefixes=prefixes, lengths=lengths):
+                q = torch.randn(sum(lengths), 2, 128, dtype=torch.bfloat16, device=device)
+                raw = torch.randn(sum(lengths), 128, dtype=torch.bfloat16, device=device)
+
+                def run(fused):
+                    kv = kv_initial.clone()
+                    state = state_initial.clone()
+                    context = self._draft_incremental_context(
+                        kv,
+                        state,
+                        prefixes=prefixes,
+                        lengths=lengths,
+                        kv_table=kv_table,
+                        state_table=state_table,
+                    )
+
+                    def score(q, weight, pool, table, lengths, *, max_ctx_len, **kwargs):
+                        return torch.zeros(
+                            q.shape[0] * q.shape[1], max_ctx_len,
+                            dtype=torch.float32, device=device,
+                        )
+
+                    with patch.dict(
+                        os.environ,
+                        {"RTP_LLM_QWEN4_DRAFT_WINDOW_WRITER": "1" if fused else "0"},
+                    ), patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+                        "qsa_paged_indexer_score",
+                        side_effect=score,
+                    ):
+                        selected = context.select_draft_incremental_prefill_tokens(
+                            q, raw, indexer=indexer, rope_config=rope
+                        )
+                    return context, selected, kv, state
+
+                reference, selected_ref, kv_ref, state_ref = run(False)
+                candidate, selected, kv, state = run(True)
+                torch.testing.assert_close(selected, selected_ref, rtol=0, atol=0)
+                torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    kv.view(torch.bfloat16), kv_ref.view(torch.bfloat16),
+                    rtol=0.01, atol=0.016,
+                )
+                candidate.rollback_side_cache()
+                torch.testing.assert_close(kv, kv_initial, rtol=0, atol=0)
+                torch.testing.assert_close(state, state_initial, rtol=0, atol=0)
+                reference.finalize_side_cache()
 
     def test_draft_incremental_prefill_rejects_before_side_writer(self):
         q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
