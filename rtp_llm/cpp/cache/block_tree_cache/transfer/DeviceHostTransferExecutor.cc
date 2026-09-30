@@ -17,6 +17,9 @@ namespace rtp_llm {
 namespace {
 
 std::string_view configurableStrategyName(const DeviceHostCopyStrategy& strategy) {
+    if (dynamic_cast<const Cuda3DBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "cuda_3d_batch";
+    }
     if (dynamic_cast<const CudaBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
         return "cuda_batch";
     }
@@ -55,6 +58,8 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                 preferred);
         } else {
             std::rotate(strategies_.begin(), selected, selected + 1);
+            RTP_LLM_LOG_INFO("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY='%s'; promoting device-host copy strategy",
+                             preferred);
         }
     }
 }
