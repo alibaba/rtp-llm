@@ -12,6 +12,7 @@ class V41RoutedHardwareTest(unittest.TestCase):
     def setUp(self):
         self.assertTrue(torch.cuda.is_available(), "Routed expert gate requires CUDA")
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        torch.manual_seed(41)
 
     @staticmethod
     def weights(experts):
@@ -125,30 +126,76 @@ class V41RoutedHardwareTest(unittest.TestCase):
             for e in (0, 4, 47)
         }
 
-        def reference():
+        def check(actual, layout):
+            self.assertEqual(actual.dtype, torch.float32)
             expected = torch.zeros((4, 5120), dtype=torch.float32)
+            error_bound = torch.zeros_like(expected)
+            gpu_expected = torch.zeros_like(actual)
+            expert_x = torch.zeros((48, 128, 5120), dtype=x.dtype, device=x.device)
+            expert_weights = torch.zeros((48, 128), device=x.device)
+            counts = torch.zeros(48, dtype=torch.int32, device=x.device)
+            row_indices = {}
+            reference_outputs = {}
             for e in (0, 4, 47):
                 route = torch.where(ids == 48 + e, weights, 0).sum(1)
-                route = torch.where(valid, route, 0).cpu()
-                expected.add_(
+                route = torch.where(valid, route, 0)
+                selected = (route != 0).nonzero().flatten()
+                row_indices[e] = selected
+                n = selected.numel()
+                counts[e] = n
+                expert_x[e, :n] = x.index_select(0, selected)
+                expert_weights[e, :n] = route.index_select(0, selected)
+                ref = (
                     references[e]
                     .forward_masked(
-                        x.cpu()[None], torch.tensor([4], dtype=torch.int32), route[None]
+                        x.cpu()[None],
+                        torch.tensor([4], dtype=torch.int32),
+                        route.cpu()[None],
                     )[0]
                     .float()
                 )
-            return expected
-
-        def check(actual):
-            self.assertEqual(actual.dtype, torch.float32)
-            torch.testing.assert_close(
-                actual.cpu(), reference(), rtol=2.5e-2, atol=1.5e-2
+                reference_outputs[e] = ref
+                expected.add_(ref)
+                # Summed per-expert tolerances remain valid under cancellation.
+                error_bound.add_(1.5e-2 + 2.5e-2 * ref.abs())
+            if layout == "masked":
+                expert_out = local.experts.forward_masked(
+                    expert_x, counts, expert_weights
+                )
+            else:
+                segments = tuple(128 if n else 0 for n in counts.cpu().tolist())
+                owners = [e for e, n in enumerate(segments) if n]
+                expert_out = torch.zeros_like(expert_x)
+                if owners:
+                    compact_x = torch.cat([expert_x[e] for e in owners])
+                    compact_weights = torch.cat([expert_weights[e] for e in owners])
+                    compact_valid = torch.cat(
+                        [torch.arange(128, device=x.device) < counts[e] for e in owners]
+                    )
+                    compact_out = local.experts.forward_contiguous(
+                        compact_x, segments, compact_valid, compact_weights
+                    )
+                    for i, e in enumerate(owners):
+                        expert_out[e] = compact_out[i * 128 : (i + 1) * 128]
+            for e in (0, 4, 47):
+                selected = row_indices[e]
+                contribution = torch.zeros_like(actual)
+                contribution[selected] = expert_out[e, : selected.numel()].float()
+                torch.testing.assert_close(
+                    contribution.cpu(), reference_outputs[e], rtol=2.5e-2, atol=1.5e-2
+                )
+                gpu_expected.add_(contribution)
+            torch.testing.assert_close(actual, gpu_expected, rtol=0, atol=0)
+            self.assertTrue(
+                bool(((actual.cpu() - expected).abs() <= error_bound).all())
             )
             active = valid & (weights != 0).any(1)
             self.assertTrue(bool((actual[~active] == 0).all()))
 
-        check(local(x, weights, ids, valid_rows=valid, layout="contiguous"))
-        check(local(x, weights, ids, valid_rows=valid, layout="masked"))
+        check(
+            local(x, weights, ids, valid_rows=valid, layout="contiguous"), "contiguous"
+        )
+        check(local(x, weights, ids, valid_rows=valid, layout="masked"), "masked")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -161,10 +208,10 @@ class V41RoutedHardwareTest(unittest.TestCase):
         ids.copy_(ids.flip(1))
         weights.copy_(weights.flip(1))
         graph.replay()
-        check(output)
+        check(output, "masked")
         weights.zero_()
         graph.replay()
-        check(output)
+        check(output, "masked")
 
 
 if __name__ == "__main__":
