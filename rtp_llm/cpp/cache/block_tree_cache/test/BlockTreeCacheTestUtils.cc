@@ -67,7 +67,7 @@ ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const
     action_(action),
     barrier_(std::move(barrier)) {}
 
-std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::execute(TransferTask task) {
+std::shared_ptr<TransferAsyncContext> ControlledPerRankBlockTransferEngine::execute(TransferTask task) {
     submit_count_.fetch_add(1);
     if (barrier_ != nullptr) {
         barrier_->enterAndWait();
@@ -76,7 +76,7 @@ std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::execute(Tran
         throw std::runtime_error("injected copy failure");
     }
     if (action_ == TransferCopyAction::Fail) {
-        return std::make_shared<CompletedAsyncContext>(
+        return std::make_shared<CompletedTransferAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
     }
     return PerRankBlockTransferEngine::execute(std::move(task));
@@ -706,7 +706,7 @@ ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 
-std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::execute(TransferTask task) {
+std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::execute(TransferTask task) {
     const auto& descriptors = task.descriptors();
     bool        success     = true;
     {
@@ -726,9 +726,9 @@ std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::execute(Transf
         return PerRankBlockTransferEngine::execute(std::move(task));
     }
     if (success) {
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+        return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
     }
-    return std::make_shared<CompletedAsyncContext>(
+    return std::make_shared<CompletedTransferAsyncContext>(
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
 }
 
@@ -876,6 +876,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
+    config.task_pool_size      = options.task_pool_size;
     config.enable_device_cache = true;
     config.enable_host_cache   = true;
     config.enable_disk_cache   = options.enable_disk;
@@ -929,11 +930,14 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     if (request_refs_released_[static_cast<size_t>(group_id)]) {
         return;
     }
-    const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
-    ASSERT_EQ(path.size(), options_.path_length);
-    MultiNodeResource released_blocks = makeMultiNodeResourceForTest(
-        static_cast<size_t>(group_id), Tier::DEVICE, path, request_blocks[static_cast<size_t>(group_id)]);
-    block_tree_cache_test::releaseRequestRefsForTest(*cache, {released_blocks});
+    // Requests can outlive the cache nodes that originally published their blocks.
+    const auto& pools = groups[static_cast<size_t>(group_id)]->devicePools();
+    for (const auto& blocks : request_blocks[static_cast<size_t>(group_id)]) {
+        ASSERT_EQ(blocks.size(), pools.size());
+        for (size_t member = 0; member < pools.size(); ++member) {
+            pools[member]->decRef(blocks[member]);
+        }
+    }
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
 

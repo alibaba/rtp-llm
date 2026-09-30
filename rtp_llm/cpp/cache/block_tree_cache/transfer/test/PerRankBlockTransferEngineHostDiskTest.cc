@@ -356,20 +356,22 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
 
     const auto disk_block = poolMalloc(*direct_disk);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-    ASSERT_EQ(executor.executeBatch({HostBufferView{host_data, host_block_size_, stride}},
-                                    {TransferDescriptor::deviceToDisk(0, {0}, disk_block)},
-                                    {group.get()}),
-              TransferStatus::OK);
+    ASSERT_TRUE(executor
+                    .executeBatch({HostBufferView{host_data, host_block_size_, stride}},
+                                  {TransferDescriptor::deviceToDisk(0, {0}, disk_block)},
+                                  {group.get()})
+                    .ok());
     EXPECT_EQ(direct_io->lastWriteBytes(), stride);
 
     const BlockIdxType dst_block = poolMalloc(*host_pool_);
     ASSERT_NE(dst_block, NULL_BLOCK_IDX);
     uint8_t* dst_data = static_cast<uint8_t*>(host_pool_->blockBuffer(dst_block).addr);
     std::memset(dst_data, 0xAB, stride);
-    ASSERT_EQ(executor.executeBatch({HostBufferView{dst_data, host_block_size_, stride}},
-                                    {TransferDescriptor::diskToDevice(0, disk_block, {0})},
-                                    {group.get()}),
-              TransferStatus::OK);
+    ASSERT_TRUE(executor
+                    .executeBatch({HostBufferView{dst_data, host_block_size_, stride}},
+                                  {TransferDescriptor::diskToDevice(0, disk_block, {0})},
+                                  {group.get()})
+                    .ok());
     EXPECT_EQ(direct_io->lastReadBytes(), stride);
 
     for (size_t i = 0; i < host_block_size_; ++i) {

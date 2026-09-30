@@ -35,7 +35,7 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
@@ -66,7 +66,7 @@ public:
         for (auto& submit : pending) {
             auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
             context->waitDone();
-            submit.context->complete(context->errorInfo());
+            submit.context->complete(context->result());
         }
     }
 
@@ -110,7 +110,7 @@ static void initializeHostBlock(BlockTreeCache& cache, GroupSet& group, BlockIdx
     const auto result = cache.executeTransfer(block_transfer_engine_test::makeTransferTask(
         {TransferDescriptor::deviceToHost(group.groupSetId(), device_blocks.front(), host_block)}));
     block_tree_cache_test::unreferenceDeviceBlocksForTest(group, device_blocks);
-    ASSERT_TRUE(result.ok()) << result.ToString();
+    ASSERT_TRUE(result.ok()) << result.status.ToString();
 }
 
 static CacheConfig makeTinyHybridConfig() {
