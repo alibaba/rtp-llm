@@ -265,6 +265,60 @@ class SparsePagedGqaAttentionTest(unittest.TestCase):
         graph.replay()
         torch.testing.assert_close(output, torch.zeros_like(output))
 
+    def test_cuda_graph_replay_ragged_batch_keeps_padding_inert(self):
+        torch.manual_seed(37)
+        q = torch.randn(2, 2, 3, 64, dtype=torch.bfloat16, device=_DEVICE)
+        cache = torch.randn(7, 2, 1, 4, 64, dtype=torch.bfloat16, device=_DEVICE)
+        table = torch.tensor(
+            [[1, 2, 3], [4, 5, 6]], dtype=torch.int32, device=_DEVICE
+        )
+        lengths = torch.tensor(
+            [[4, 5, 6], [8, 9, 0]], dtype=torch.int32, device=_DEVICE
+        )
+        selected = torch.tensor(
+            [
+                [[0, 1, 2, 3], [0, 2, 3, 4], [0, 1, 4, 5]],
+                [[0, 3, 4, 7], [0, 2, 5, 8], [-1, -1, -1, -1]],
+            ],
+            dtype=torch.int32,
+            device=_DEVICE,
+        )
+        initial = sparse_paged_gqa_attn(q, cache, table, lengths, selected, page_size=4)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = sparse_paged_gqa_attn(
+                q, cache, table, lengths, selected, page_size=4, graph_capture=True
+            )
+
+        graph.replay()
+        torch.testing.assert_close(output, initial, atol=2e-2, rtol=2e-2)
+        table.copy_(
+            torch.tensor([[3, 2, 1], [6, 5, 4]], dtype=torch.int32, device=_DEVICE)
+        )
+        lengths.copy_(
+            torch.tensor([[3, 5, 6], [7, 9, 0]], dtype=torch.int32, device=_DEVICE)
+        )
+        selected.copy_(
+            torch.tensor(
+                [
+                    [[0, 1, 2, -1], [0, 2, 3, 4], [0, 2, 4, 5]],
+                    [[0, 2, 4, 6], [0, 3, 5, 8], [0, 1, 2, 3]],
+                ],
+                dtype=torch.int32,
+                device=_DEVICE,
+            )
+        )
+        graph.replay()
+        torch.testing.assert_close(
+            output,
+            _reference(q, cache, table, lengths, selected),
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        torch.testing.assert_close(output[1, :, 2], torch.zeros_like(output[1, :, 2]))
+        self.assertFalse(torch.equal(output, initial))
+
 
 if __name__ == "__main__":
     unittest.main()
