@@ -187,6 +187,7 @@ py_library(
 filegroup(
     name = "dsv41_cache_codec_sources",
     srcs = [
+        "//rtp_llm:models/dsv41_kv_cache.py",
         "modules/dsv4/v41_cache.py",
         "modules/dsv4/v41_cache_transfer.py",
         "modules/dsv4/v41_pp.py",
@@ -205,6 +206,7 @@ filegroup(
         "modules/dsv4/v41_moe.py",
         "modules/dsv4/v41_dispatch.py",
         "modules/dsv4/v41_collective.py",
+        "modules/dsv4/v41_attention.py",
         "modules/dsv4/moe/strategies/base.py",
         "modules/dsv4/moe/strategies/v41_grouped_fp4.py",
         "modules/dsv4/_v41_mxfp8_triton.py",
@@ -213,6 +215,7 @@ filegroup(
         "modules/dsv4/hc/fallback_impl.py",
         "modules/dsv4/_profiler.py",
         "modules/dsv4/fp8/_v41_cache_triton.py",
+        "modules/dsv4/fp8/_v41_attention_triton.py",
     ],
     visibility = ["//visibility:public"],
 )

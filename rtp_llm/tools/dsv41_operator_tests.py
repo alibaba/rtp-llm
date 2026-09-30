@@ -13,6 +13,7 @@ import types
 import unittest
 
 SUITES = (
+    "attention",
     "cache_codec",
     "engram_hash",
     "engram_lookup",
@@ -120,6 +121,7 @@ def main():
                 for pattern in (
                     "v41_*.py",
                     "_v41_*.py",
+                    "fp8/_v41_*.py",
                     "fp8/test/test_v41_*_hardware.py",
                 )
                 for path in (root / "rtp_llm/models_py/modules/dsv4").glob(pattern)
