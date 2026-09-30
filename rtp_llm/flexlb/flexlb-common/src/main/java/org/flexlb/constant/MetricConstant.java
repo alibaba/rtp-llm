@@ -396,16 +396,6 @@ public class MetricConstant {
             "app.cache.match.standby.fallback.qps";
 
     /**
-     * Accumulated recent cache-key hit tokens for requests in this key window.
-     */
-    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
-
-    /**
-     * Accumulated input tokens for the same recent cache-key requests.
-     */
-    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
-
-    /**
      * Cumulative theoretical cache-hit tokens reported as a gauge. Tagged by window=all.
      */
     public static final String CACHE_THEORY_HIT_COUNT = "app.cache.theory.hit.count";

@@ -90,9 +90,6 @@ public class RecentCacheKeyTraceReporter {
             return;
         }
 
-        cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
-                hitTokens,
-                inputTokens);
         cacheMetricsReporter.reportTheoryCacheHitMetrics(theorySnapshot);
     }
 
