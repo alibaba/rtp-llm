@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.config.cuda_graph import (
@@ -362,12 +363,17 @@ def get_sparse_gqa_impl(
         and (
             not bool(attn_inputs.is_prefill)
             or bool(attn_inputs.is_target_verify)
+            or os.environ.get("RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH", "0").lower()
+            in ("1", "true", "yes", "on")
         )
         and bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
     )
-    if selection_mode != CudaGraphSelectionMode.EAGER and not exact_decode_or_target_graph:
+    if (
+        selection_mode != CudaGraphSelectionMode.EAGER
+        and not exact_decode_or_target_graph
+    ):
         raise RuntimeError(
-            "qwen4_exp sparse GQA only supports exact-batch decode/target CUDA Graph "
+            "qwen4_exp sparse GQA requires exact-batch decode/target or opted-in draft CUDA Graph "
             f"(selection mode: {selection_mode.value}, "
             f"prefill={attn_inputs.is_prefill}, "
             f"target_verify={attn_inputs.is_target_verify}, "

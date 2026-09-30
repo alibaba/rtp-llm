@@ -1,5 +1,6 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
+import os
 from typing import Optional
 
 import torch
@@ -7,11 +8,13 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
+from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.modules import LinearFactory
 from rtp_llm.models_py.modules.qwen4_exp.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
 
@@ -93,9 +96,75 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
     def supports_cuda_graph_draft_prefill(self) -> bool:
-        # Draft incremental prefill uses data-dependent prefix and sparse-cache
-        # plans. Keep this role eager until those plans have fixed-shape kernels.
-        return False
+        return os.environ.get("RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
+        groups = get_attention_inputs_value(inputs)
+        if (
+            not is_cuda_graph
+            or not groups
+            or not next(iter(groups.values())).is_prefill
+        ):
+            return impls
+        from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+            INDEXER_KV_TAG,
+            INDEXER_STATE_TAG,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+            DraftPrefillGraphReplay,
+        )
+
+        bounds = []
+        for layer_idx, layer in enumerate(self.layers):
+            tag = self._attention_tag(layer_idx)
+            cache = self.kv_cache.get_layer_cache(layer_idx, tag)
+            bounds.append(
+                (
+                    tag,
+                    int(cache.kv_cache_base.shape[0]),
+                    int(impls[tag].attn_configs.kernel_tokens_per_block),
+                    False,
+                )
+            )
+            for side_tag in (INDEXER_KV_TAG, INDEXER_STATE_TAG):
+                cache = self.kv_cache.get_layer_cache(layer_idx, side_tag)
+                page = int(cache.seq_size_per_block)
+                bounds.append(
+                    (
+                        side_tag,
+                        int(cache.kv_cache_base.shape[0]),
+                        page // 4 if side_tag == INDEXER_KV_TAG else page,
+                        side_tag == INDEXER_KV_TAG,
+                    )
+                )
+        for impl in impls.values():
+            impl.set_mtp_draft_mode(True)
+        return DraftPrefillGraphReplay(
+            impls,
+            bounds,
+            self.cuda_graph_position_id_len_factor(),
+            int(inputs.input_ids.numel()),
+        )
+
+    def _build_attn_meta(self, inputs, device, is_cuda_graph=False):
+        groups = get_attention_inputs_value(inputs)
+        if is_cuda_graph and next(iter(groups.values())).is_prefill:
+            if any(
+                layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers
+            ):
+                raise RuntimeError(
+                    "Qwen4 MTP draft Graph requires full-attention layers"
+                )
+            # The one-layer draft has no GDN convolution. Its dynamic metadata
+            # builder is unnecessary and performs capture-unsafe host copies.
+            return Qwen3NextMetadata(is_cuda_graph=True)
+        return super()._build_attn_meta(inputs, device, is_cuda_graph)
 
     def cuda_graph_position_id_len_factor(self) -> int:
         # The draft uses Base RoPE but its QSA indexer consumes the engine's

@@ -89,11 +89,20 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp sparse GQA target verification must use context-style prefill"
             )
-        graph_paged = bool(
-            inputs.is_cuda_graph and (not self.is_prefill or self.is_target_verify)
+        graph_draft = bool(
+            inputs.is_cuda_graph and self.is_prefill and not self.is_target_verify
         )
+        if graph_draft and os.environ.get(
+            "RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH", "0"
+        ).lower() not in ("1", "true", "yes", "on"):
+            raise RuntimeError(
+                "qwen4_exp sparse GQA draft prefill Graph requires explicit opt-in"
+            )
+        graph_paged = bool(inputs.is_cuda_graph)
         if inputs.is_cuda_graph and not graph_paged:
-            raise RuntimeError("qwen4_exp sparse GQA prefill CUDA Graph is not supported")
+            raise RuntimeError(
+                "qwen4_exp sparse GQA prefill CUDA Graph is not supported"
+            )
         if graph_paged and not bool(
             getattr(inputs, "is_exact_cuda_graph_batch", False)
         ):
@@ -187,13 +196,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp QSA paged sequence metadata has invalid geometry"
             )
         if graph_capture and (
-            sequence_bases.device.type != "cpu"
-            or query_lengths.device.type != "cpu"
+            sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu"
         ):
             raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
-        invalid_lengths = bool(torch.any(sequence_bases < 0).item()) or bool(
-            torch.any(query_lengths <= 0).item()
-        ) if graph_capture else False
+        invalid_lengths = (
+            bool(torch.any(sequence_bases < 0).item())
+            or bool(torch.any(query_lengths <= 0).item())
+            if graph_capture
+            else False
+        )
         if not graph_capture:
             sequence_bases = sequence_bases.to(
                 device=device, dtype=torch.int32, non_blocking=True
@@ -269,7 +280,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
             )
 
-        if not graph_capture and block_table.numel() and int(block_table.max().item()) >= cache_blocks:
+        if (
+            not graph_capture
+            and block_table.numel()
+            and int(block_table.max().item()) >= cache_blocks
+        ):
             raise RuntimeError(
                 "qwen4_exp QSA paged main block table contains an "
                 "out-of-range physical block"
@@ -303,6 +318,16 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """Validate side and main paged geometry before either cache is written."""
         if self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
+        if self._is_draft_graph():
+            if (
+                not qsa_runtime.is_mtp_draft
+                or hidden_states.shape[0]
+                != self.attn_inputs.input_lengths_device.numel() * 4
+            ):
+                raise RuntimeError(
+                    "qwen4_exp draft Graph requires explicit fixed-capacity MTP inputs"
+                )
+            return
         qsa_runtime.validate_before_projection(
             indexer=indexer,
             token_count=int(hidden_states.shape[0]),
@@ -450,7 +475,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if graph_paged and lengths_source.device.type != "cpu":
             raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
         if graph_paged and bool(torch.any(lengths_source < 0).item()):
-            raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
+            raise ValueError(
+                "qwen4_exp sparse GQA sequence lengths must be non-negative"
+            )
         sequence_lengths = lengths_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
@@ -528,8 +555,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
         exceeds_capacity = (
-            bool(torch.any((lengths_source + query_len + page_size - 1) // page_size
-                           > int(block_table.shape[1])).item())
+            bool(
+                torch.any(
+                    (lengths_source + query_len + page_size - 1) // page_size
+                    > int(block_table.shape[1])
+                ).item()
+            )
             if graph_paged
             else bool(torch.any(required_columns > int(block_table.shape[1])).item())
         )
@@ -726,17 +757,75 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and attn_configs.use_sparse_gqa_fmha
         )
 
+    def _is_draft_graph(self) -> bool:
+        return bool(
+            self.attn_inputs.is_cuda_graph
+            and self.is_prefill
+            and not self.is_target_verify
+            and self._is_mtp_draft
+        )
+
+    def _forward_draft_graph(self, qkv, kv_cache, selected_indices):
+        from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+            draft_graph_rows,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import (
+            sparse_paged_gqa_attn,
+        )
+
+        if kv_cache is None or kv_cache.kv_cache_base.dtype != torch.bfloat16:
+            raise RuntimeError("qwen4_exp draft Graph requires BF16 main KV cache")
+        tokens = int(qkv.shape[0])
+        batch = int(self.attn_inputs.input_lengths_device.numel())
+        if (
+            tokens != batch * 4
+            or selected_indices.ndim != 2
+            or selected_indices.shape[0] != tokens
+            or selected_indices.dtype != torch.int32
+        ):
+            raise RuntimeError("qwen4_exp draft Graph query/selection capacity changed")
+        sources, inverse, valid, _, visible = draft_graph_rows(self.attn_inputs, tokens)
+        self._qsa_main_cache_mutation_started = True
+        qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        query = (
+            qkv[:, : self.q_width]
+            .index_select(0, sources)
+            .view(batch, 4, self.head_num, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        selected = selected_indices.index_select(0, sources).view(batch, 4, -1)
+        selected = torch.where(visible.unsqueeze(-1) > 0, selected, -1)
+        output = sparse_paged_gqa_attn(
+            query,
+            kv_cache.kv_cache_base,
+            self.attn_inputs.kv_cache_kernel_block_id_device,
+            visible.contiguous(),
+            selected.contiguous(),
+            page_size=int(self.attn_configs.kernel_tokens_per_block),
+            kv_head_num=self.kv_head_num,
+            graph_capture=True,
+        )
+        output = (
+            output.transpose(1, 2)
+            .reshape(tokens, self.q_width)
+            .index_select(0, inverse)
+        )
+        return torch.where(valid.unsqueeze(1), output, 0)
+
     def support_cuda_graph(self) -> bool:
         return bool(
             self.attn_inputs.is_cuda_graph
-            and (not self.is_prefill or self.is_target_verify)
+            and (not self.is_prefill or self.is_target_verify or self._is_draft_graph())
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh the captured RoPE page offsets for this replay's block table."""
         if not self.support_cuda_graph():
-            raise RuntimeError("qwen4_exp sparse GQA graph prepare requires a graph role")
-        if self.is_target_verify:
+            raise RuntimeError(
+                "qwen4_exp sparse GQA graph prepare requires a graph role"
+            )
+        if self.is_target_verify or self._is_draft_graph():
             offset = self.rope_kvcache_impl.prepare_kv_cache_offset(attn_inputs)
         else:
             # Decode also refreshes its stable sequence-length buffer.
@@ -778,6 +867,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "the attention module must run the indexer and pass it in"
             )
 
+        if self._is_draft_graph():
+            output = self._forward_draft_graph(qkv, kv_cache, selected_indices)
+            if uses_stored_selection:
+                self._selected_indices = None
+            return output
         is_incremental_prefill = self._is_prefix_reuse_prefill()
 
         paged_plan = None
@@ -1006,9 +1100,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
             )
-            return output.transpose(1, 2).reshape(
-                len(requests) * max_rows, self.q_width
-            ).index_select(0, packed_positions)
+            return (
+                output.transpose(1, 2)
+                .reshape(len(requests) * max_rows, self.q_width)
+                .index_select(0, packed_positions)
+            )
 
         outputs = []
         for request_idx, request in enumerate(requests):

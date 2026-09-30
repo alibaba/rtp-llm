@@ -242,14 +242,13 @@ def _validate_required_blocks(
     # the rare error path, where the extra synchronizations do not affect TPOT.
     if bool(
         (
-            negative_columns
-            | uncovered_columns
-            | invalid_required
-            | invalid_physical
+            negative_columns | uncovered_columns | invalid_required | invalid_physical
         ).item()
     ):
         if bool(negative_columns.item()):
-            raise RuntimeError(f"QSA cache {tag!r} has a negative required-column count")
+            raise RuntimeError(
+                f"QSA cache {tag!r} has a negative required-column count"
+            )
         if bool(uncovered_columns.item()):
             raise RuntimeError(
                 f"QSA cache {tag!r} block table does not cover the target-verify tail"
@@ -367,9 +366,7 @@ class Qwen4ExpQSARuntimeContext:
             if graph_mode and not bool(
                 getattr(inputs, "is_exact_cuda_graph_batch", False)
             ):
-                raise RuntimeError(
-                    "qwen4_exp QSA Graph requires an exact batch graph"
-                )
+                raise RuntimeError("qwen4_exp QSA Graph requires an exact batch graph")
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
             if inputs.cache_store_inputs is not None:
@@ -861,7 +858,10 @@ class Qwen4ExpQSARuntimeContext:
             cu_kv_seqlens.dtype != torch.int32
             or cu_kv_seqlens.device != device
             or tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
-            or (not graph_target and not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)))
+            or (
+                not graph_target
+                and not bool(torch.equal(cu_kv_seqlens, expected_cu_kv))
+            )
         ):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
@@ -942,7 +942,9 @@ class Qwen4ExpQSARuntimeContext:
             compressed_lengths[:, -1] + kv_entries_per_block - 1
         ) // kv_entries_per_block
         if graph_target:
-            required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
+            required_host = (
+                max_ctx_len + kv_entries_per_block - 1
+            ) // kv_entries_per_block
             if required_host > int(kv_table.shape[1]):
                 raise RuntimeError(
                     "QSA cache 'indexer_kv' block table does not cover target verification"
@@ -959,7 +961,9 @@ class Qwen4ExpQSARuntimeContext:
         # absolute logical-page columns (including sentinel holes). Validate the
         # small committed-tail + candidate window explicitly before any write.
         state_table_width = int(state_table.shape[1])
-        for request_idx, prefix in enumerate(prefixes.tolist() if graph_target else prefixes_device.tolist()):
+        for request_idx, prefix in enumerate(
+            prefixes.tolist() if graph_target else prefixes_device.tolist()
+        ):
             first_needed = max(0, prefix - (prefix % ratio))
             logical_blocks = {
                 position // state_tokens_per_block
@@ -1193,6 +1197,163 @@ class Qwen4ExpQSARuntimeContext:
         )
         return lengths, rope_cos, rope_sin, result
 
+    def select_draft_graph_tokens(
+        self, q: torch.Tensor, raw_keys: torch.Tensor, *, indexer: Any, rope_config: Any
+    ) -> torch.Tensor:
+        """Capture a fixed four-lane draft plan; replay validates live host mirrors."""
+        from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+            draft_graph_rows,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+            write_draft_window_with_undo_,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score import (
+            qsa_paged_indexer_score,
+        )
+
+        inputs = self.main_inputs
+        if (
+            not self.is_mtp_draft
+            or not inputs.is_cuda_graph
+            or not inputs.is_prefill
+            or inputs.is_target_verify
+        ):
+            raise RuntimeError(
+                "QSA draft graph requires an explicit MTP draft prefill context"
+            )
+        if int(indexer.compress_ratio) != 4 or int(indexer.head_dim) != 128:
+            raise RuntimeError(
+                "QSA draft graph requires ratio 4 and head dimension 128"
+            )
+        if (
+            not q.is_cuda
+            or q.dtype != torch.bfloat16
+            or raw_keys.dtype != q.dtype
+            or raw_keys.device != q.device
+        ):
+            raise RuntimeError("QSA draft graph requires device-local BF16 projections")
+        tokens, heads, dim = q.shape
+        batch = inputs.input_lengths_device.numel()
+        if tuple(raw_keys.shape) != (tokens, dim) or tokens != batch * 4:
+            raise RuntimeError(
+                "QSA draft graph projection must use four-token batch capacity"
+            )
+        for tagged in (
+            self.main_inputs,
+            self.indexer_kv_inputs,
+            self.indexer_state_inputs,
+        ):
+            if (
+                not tagged.is_cuda_graph
+                or not tagged.is_prefill
+                or tagged.is_target_verify
+                or tagged.context_parallel_info is not None
+                or tagged.cache_store_inputs is not None
+            ):
+                raise RuntimeError("QSA draft graph cache-region modes disagree")
+            for name in (
+                "input_lengths_device",
+                "prefix_lengths_device",
+                "cu_seqlens_device",
+            ):
+                if not _same_tensor_metadata(
+                    getattr(inputs, name), getattr(tagged, name)
+                ):
+                    raise RuntimeError("QSA draft graph cache-region metadata disagree")
+        if (
+            self.indexer_kv_cache.seq_size_per_block != 128
+            or self.indexer_state_cache.seq_size_per_block != 128
+        ):
+            raise RuntimeError("QSA draft graph requires 128-token side pages")
+        kv_pool = _typed_2d_pool(
+            self.indexer_kv_cache,
+            tag=INDEXER_KV_TAG,
+            storage_dtype=torch.uint8,
+            payload_dtype=torch.bfloat16,
+            entries=32,
+            width=128,
+        )
+        state_pool = _typed_2d_pool(
+            self.indexer_state_cache,
+            tag=INDEXER_STATE_TAG,
+            storage_dtype=torch.float32,
+            payload_dtype=torch.float32,
+            entries=8,
+            width=128,
+        )
+        kv_table = _block_table(
+            self.indexer_kv_inputs,
+            "kv_cache_kernel_block_id_device",
+            tag=INDEXER_KV_TAG,
+            batch_size=batch,
+            device=q.device,
+        )
+        state_table = _block_table(
+            self.indexer_state_inputs,
+            "kv_cache_block_id_device",
+            tag=INDEXER_STATE_TAG,
+            batch_size=batch,
+            device=q.device,
+        )
+        sources, inverse, valid, positions, visible = draft_graph_rows(inputs, tokens)
+        cos, sin = build_qsa_rope_from_logical_positions(
+            positions, rope_config, token_count=tokens, dtype=q.dtype, device=q.device
+        )
+        block_starts = positions - positions.remainder(4)
+        block_cos, block_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=tokens,
+            dtype=q.dtype,
+            device=q.device,
+        )
+        if self._side_cache_undo is not None:
+            raise RuntimeError(
+                "QSA draft graph side-cache transaction is already active"
+            )
+        undo = write_draft_window_with_undo_(
+            raw_keys,
+            inputs.cu_seqlens_device,
+            inputs.prefix_lengths_device,
+            inputs.input_lengths_device,
+            block_cos,
+            block_sin,
+            indexer.k_norm_gamma,
+            kv_pool,
+            kv_table,
+            state_pool,
+            state_table,
+            norm_eps=float(indexer.norm_eps),
+        )
+        object.__setattr__(self, "_side_cache_undo", undo)
+        rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
+        padded = rotated.index_select(0, sources).reshape(batch, 4, heads, dim)
+        weights = torch.full(
+            (batch * 4, heads),
+            1.0 / math.sqrt(dim),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        logits = qsa_paged_indexer_score(
+            padded.contiguous(),
+            weights,
+            kv_pool.flatten(0, 1),
+            kv_table,
+            visible // 4,
+            block_size=32,
+            max_ctx_len=int(kv_table.shape[1]) * 32,
+            validate_block_table=False,
+        )
+        selected = select_qsa_paged_tokens(
+            logits,
+            visible.reshape(-1),
+            compress_ratio=4,
+            token_budget=int(indexer.token_budget),
+            validate_lengths=False,
+        )
+        packed = selected.index_select(0, inverse)
+        return torch.where(valid.unsqueeze(1), packed, -1)
+
     def select_draft_incremental_prefill_tokens(
         self,
         q: torch.Tensor,
@@ -1317,7 +1478,9 @@ class Qwen4ExpQSARuntimeContext:
             )
 
             if self._side_cache_undo is not None:
-                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
             undo = write_draft_window_with_undo_(
                 raw_keys,
                 plan["cu_seqlens"],
@@ -1638,7 +1801,9 @@ class Qwen4ExpQSARuntimeContext:
             )
         if fused_writer:
             if self._side_cache_undo is not None:
-                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
             undo = write_decode_key_with_undo_(
                 raw_keys,
                 sequence_lengths,
@@ -1669,9 +1834,7 @@ class Qwen4ExpQSARuntimeContext:
                 state_table,
                 ratio=ratio,
                 kv_tokens_per_block=kv_tokens_per_block,
-                state_tokens_per_block=int(
-                    self.indexer_state_cache.seq_size_per_block
-                ),
+                state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
                 norm_eps=float(indexer.norm_eps),
                 rope_is_token_aligned=True,
             )
@@ -1801,7 +1964,9 @@ class Qwen4ExpQSARuntimeContext:
             )
 
             if self._side_cache_undo is not None:
-                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
             undo = write_target_window_with_undo_(
                 raw_keys,
                 plan["prefixes"],
