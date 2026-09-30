@@ -8,6 +8,8 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels i
     gather_fp8_prefix, gather_fp8_prefix_slice, quantize_fp8,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_qkv_fp8_quant import quantize_qkv_fp8
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fused_fp8_epilogue import fused_mla_fp8_epilogue
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_fp8_kernels
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_prefix_chunk_plan import plan_prefix_chunks
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_state_merge import merge_mla_states_in_place
 from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
@@ -128,6 +130,53 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             projected[..., :left], k_pe.view(-1, 1, middle)
         )
         return key, projected[..., left:]
+
+    def forward_with_cache_insert(
+        self, q, compressed_kv, k_pe, kv_cache, layer_id,
+        slot_mapping, cache_scale, cache_scale_value,
+    ):
+        """Fuse ordinary FP8 MLA operand conversion with current KV insertion.
+
+        Prefix reuse and a nonunit cache scale keep their existing paths.
+        The caller performs the PD cache-store handoff after this method.
+        """
+        if (self.kv_cache_type != KvCacheDataType.FP8 or kv_cache is None
+                or cache_scale_value != 1.0 or self._prefix_plan.chunked
+                or any(self._prefix_lens) or mla_fp8_kernels._FP8_DIAGNOSTICS
+                or compressed_kv.shape[0] != q.shape[0]
+                or slot_mapping.dtype != torch.int64
+                or kv_cache.kv_cache_base.dtype != torch.float8_e4m3fn
+                or not kv_cache.kv_cache_base.is_contiguous()):
+            return None
+
+        left, middle, right = (
+            self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim
+        )
+        projection = self._make_kv_b_proj(layer_id)
+        head_splits = (left, middle, right)
+        if projection.supports_skip_head_mid(compressed_kv, head_splits):
+            projected = projection.forward_skip_head_mid(
+                compressed_kv, head_splits
+            ).view(-1, self.num_heads, left + middle + right)
+            k_nope, value = projected[..., :left], projected[..., -right:]
+        else:
+            projected = projection(compressed_kv).view(
+                -1, self.num_heads, left + right
+            )
+            k_nope, value = projected[..., :left], projected[..., left:]
+
+        cache = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + middle
+        )
+        with torch.profiler.record_function("RTP::attention.mla.fused_fp8_epilogue"):
+            q_fp8, k_fp8, v_fp8 = fused_mla_fp8_epilogue(
+                q, k_nope, k_pe.view(-1, middle), compressed_kv, value,
+                cache, slot_mapping, cache_scale, cache_scale,
+                cache_scale, cache_scale, assume_unit_scales=True,
+            )
+        return self.prefill_wrapper.run(q_fp8, k_fp8, v_fp8).view(
+            -1, self.num_heads, self.v_head_dim
+        )
 
     def _forward_fp8_chunked(self, q, compressed_kv, k_pe, kv_cache, layer_id):
         if kv_cache is None or self.reuse_cache_page_indice is None:

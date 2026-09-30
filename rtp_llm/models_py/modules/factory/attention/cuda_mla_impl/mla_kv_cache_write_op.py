@@ -29,6 +29,7 @@ class MlaKVCacheWriteOp:
         )
         if fp8_compute:
             self.kv_cache_type = "fp8"
+        self.scale_value = float(kv_scale)
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.full((), kv_scale, dtype=torch.float32, device="cuda")
 
