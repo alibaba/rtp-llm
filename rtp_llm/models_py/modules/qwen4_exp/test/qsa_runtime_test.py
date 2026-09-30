@@ -1,5 +1,4 @@
 import os
-import os
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -105,12 +104,10 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             required_blocks_are_valid,
         )
 
-        table = torch.tensor(
-            [[1, 2, 3], [1, 2, 3]], dtype=torch.int32, device="cuda"
-        ).T
-        required = torch.tensor(
-            [2, 0, 2, 0, 2, 0], dtype=torch.int32, device="cuda"
-        )[::2]
+        table = torch.tensor([[1, 2, 3], [1, 2, 3]], dtype=torch.int32, device="cuda").T
+        required = torch.tensor([2, 0, 2, 0, 2, 0], dtype=torch.int32, device="cuda")[
+            ::2
+        ]
         self.assertTrue(is_supported(table, required))
         self.assertTrue(required_blocks_are_valid(table, required, pool_blocks=4))
         with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_CACHE_VALIDATE": "1"}):
@@ -671,7 +668,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         observed = {}
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
@@ -760,7 +764,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         q_len = self.RATIO
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
@@ -853,7 +864,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         observed = []
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             observed.append((q.shape, lengths.clone(), table.clone(), max_ctx_len))
@@ -880,7 +898,9 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         self.assertEqual(observed[0][0], (2, self.RATIO, 2, self.D))
         torch.testing.assert_close(
             observed[0][1],
-            torch.tensor([[2, 0, 0, 0], [2, 2, 2, 2]], dtype=torch.int32, device=device),
+            torch.tensor(
+                [[2, 0, 0, 0], [2, 2, 2, 2]], dtype=torch.int32, device=device
+            ),
         )
         visible_lengths = [8, 8, 9, 10, 11]
         for row, visible in enumerate(visible_lengths):
@@ -902,18 +922,12 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         self.D = 128
         self.KV_TOKENS_PER_BLOCK = 128
         self.STATE_TOKENS_PER_BLOCK = 128
-        self.indexer.k_norm_gamma = (
-            torch.randn(128, device=device) * 0.1
-        ).bfloat16()
+        self.indexer.k_norm_gamma = (torch.randn(128, device=device) * 0.1).bfloat16()
         indexer = self._decode_indexer()
         rope = self._base_rope_config(3)
         rope.dim = 64
-        kv_initial = torch.zeros(
-            12, 32 * 128 * 2, dtype=torch.uint8, device=device
-        )
-        state_initial = torch.randn(
-            12, 8 * 128, dtype=torch.float32, device=device
-        )
+        kv_initial = torch.zeros(12, 32 * 128 * 2, dtype=torch.uint8, device=device)
+        state_initial = torch.randn(12, 8 * 128, dtype=torch.float32, device=device)
         kv_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device=device)
         state_table = torch.tensor([[5, 6], [7, 8]], dtype=torch.int32, device=device)
         for prefixes, lengths in (
@@ -922,8 +936,12 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             ([127, 5], [3, 2]),
         ):
             with self.subTest(prefixes=prefixes, lengths=lengths):
-                q = torch.randn(sum(lengths), 2, 128, dtype=torch.bfloat16, device=device)
-                raw = torch.randn(sum(lengths), 128, dtype=torch.bfloat16, device=device)
+                q = torch.randn(
+                    sum(lengths), 2, 128, dtype=torch.bfloat16, device=device
+                )
+                raw = torch.randn(
+                    sum(lengths), 128, dtype=torch.bfloat16, device=device
+                )
 
                 def run(fused):
                     kv = kv_initial.clone()
@@ -937,10 +955,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                         state_table=state_table,
                     )
 
-                    def score(q, weight, pool, table, lengths, *, max_ctx_len, **kwargs):
+                    def score(
+                        q, weight, pool, table, lengths, *, max_ctx_len, **kwargs
+                    ):
                         return torch.zeros(
-                            q.shape[0] * q.shape[1], max_ctx_len,
-                            dtype=torch.float32, device=device,
+                            q.shape[0] * q.shape[1],
+                            max_ctx_len,
+                            dtype=torch.float32,
+                            device=device,
                         )
 
                     with patch.dict(
@@ -961,13 +983,127 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 torch.testing.assert_close(selected, selected_ref, rtol=0, atol=0)
                 torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
                 torch.testing.assert_close(
-                    kv.view(torch.bfloat16), kv_ref.view(torch.bfloat16),
-                    rtol=0.01, atol=0.016,
+                    kv.view(torch.bfloat16),
+                    kv_ref.view(torch.bfloat16),
+                    rtol=0.01,
+                    atol=0.016,
                 )
                 candidate.rollback_side_cache()
                 torch.testing.assert_close(kv, kv_initial, rtol=0, atol=0)
                 torch.testing.assert_close(state, state_initial, rtol=0, atol=0)
                 reference.finalize_side_cache()
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for draft graph replay")
+    def test_draft_graph_replays_ragged_lengths_and_new_pages(self):
+        device = torch.device("cuda")
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.randn(128, device=device).bfloat16()
+        indexer = self._decode_indexer()
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        kv_initial = torch.randn(
+            12, 32 * 128, device=device, dtype=torch.bfloat16
+        ).view(torch.uint8)
+        state_initial = torch.randn(12, 8 * 128, device=device)
+        kv = kv_initial.clone()
+        state = state_initial.clone()
+        kv_table = torch.tensor([[1, 2], [3, 4]], device=device, dtype=torch.int32)
+        state_table = torch.tensor([[5, 6], [7, 8]], device=device, dtype=torch.int32)
+        ctx = self._draft_incremental_context(
+            kv,
+            state,
+            prefixes=[5, 127],
+            lengths=[4, 4],
+            kv_table=kv_table,
+            state_table=state_table,
+        )
+        for inputs in (
+            ctx.main_inputs,
+            ctx.indexer_kv_inputs,
+            ctx.indexer_state_inputs,
+        ):
+            inputs.is_cuda_graph = True
+            inputs.is_s_padded = True
+            inputs.input_lengths_device = inputs.input_lengths
+            inputs.prefix_lengths_device = inputs.prefix_lengths
+        q = torch.randn(8, 2, 128, device=device, dtype=torch.bfloat16)
+        raw = torch.randn(8, 128, device=device, dtype=torch.bfloat16)
+
+        def forward():
+            result = ctx.select_draft_graph_tokens(
+                q, raw, indexer=indexer, rope_config=rope
+            )
+            ctx.finalize_side_cache()
+            return result
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                forward()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            selected = forward()
+        for prefixes, lengths, swap in (
+            ([7, 127], [1, 4], False),
+            ([125, 5], [3, 2], True),
+            ([127, 127], [4, 4], False),
+        ):
+            with self.subTest(prefixes=prefixes, lengths=lengths):
+                kv.copy_(kv_initial)
+                state.copy_(state_initial)
+                q.normal_()
+                raw.normal_()
+                ctx.main_inputs.input_lengths.copy_(
+                    torch.tensor(lengths, device=device, dtype=torch.int32)
+                )
+                ctx.main_inputs.prefix_lengths.copy_(
+                    torch.tensor(prefixes, device=device, dtype=torch.int32)
+                )
+                ctx.main_inputs.cu_seqlens_device.copy_(
+                    torch.tensor(
+                        [0, lengths[0], sum(lengths)], device=device, dtype=torch.int32
+                    )
+                )
+                kv_table.copy_(
+                    torch.tensor(
+                        [[3, 4], [1, 2]] if swap else [[1, 2], [3, 4]],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                )
+                state_table.copy_(
+                    torch.tensor(
+                        [[7, 8], [5, 6]] if swap else [[5, 6], [7, 8]],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                )
+                ref_kv, ref_state = kv_initial.clone(), state_initial.clone()
+                ref = self._draft_incremental_context(
+                    ref_kv,
+                    ref_state,
+                    prefixes=prefixes,
+                    lengths=lengths,
+                    kv_table=kv_table,
+                    state_table=state_table,
+                )
+                expected = ref.select_draft_incremental_prefill_tokens(
+                    q[: sum(lengths)],
+                    raw[: sum(lengths)],
+                    indexer=indexer,
+                    rope_config=rope,
+                )
+                ref.finalize_side_cache()
+                graph.replay()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    selected[: sum(lengths)], expected, rtol=0, atol=0
+                )
+                self.assertTrue(torch.all(selected[sum(lengths) :] == -1).item())
+                torch.testing.assert_close(state, ref_state, rtol=0, atol=0)
+                torch.testing.assert_close(kv, ref_kv, rtol=0, atol=0)
 
     def test_draft_incremental_prefill_rejects_before_side_writer(self):
         q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
@@ -1077,13 +1213,19 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         state_pool[4, :3].copy_(raw[:3].float())
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
             return torch.zeros(
-                q.shape[0] * q.shape[1], max_ctx_len,
-                dtype=torch.float32, device=device
+                q.shape[0] * q.shape[1], max_ctx_len, dtype=torch.float32, device=device
             )
 
         with patch(
@@ -1162,13 +1304,19 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         raw = torch.randn(12, self.D, dtype=torch.bfloat16, device=device)
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
             return torch.zeros(
-                q.shape[0] * q.shape[1], max_ctx_len,
-                dtype=torch.float32, device=device
+                q.shape[0] * q.shape[1], max_ctx_len, dtype=torch.float32, device=device
             )
 
         with patch(
@@ -1267,7 +1415,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         observed = {}
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
@@ -1370,7 +1525,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
@@ -1461,7 +1623,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         rotated_queries = []
 
         def _score(
-            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
@@ -1674,21 +1843,30 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             select_qsa_paged_tokens(
-                logits, lengths, compress_ratio=4, token_budget=8,
+                logits,
+                lengths,
+                compress_ratio=4,
+                token_budget=8,
                 validate_lengths=False,
             )
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             replayed = select_qsa_paged_tokens(
-                logits, lengths, compress_ratio=4, token_budget=8,
+                logits,
+                lengths,
+                compress_ratio=4,
+                token_budget=8,
                 validate_lengths=False,
             )
         logits.copy_(torch.tensor([[3.0, 0.5, 2.0]], device=device))
         lengths.copy_(torch.tensor([12], dtype=torch.int32, device=device))
         graph.replay()
         expected = select_qsa_paged_tokens(
-            logits, lengths, compress_ratio=4, token_budget=8,
+            logits,
+            lengths,
+            compress_ratio=4,
+            token_budget=8,
         )
         torch.testing.assert_close(replayed, expected)
 

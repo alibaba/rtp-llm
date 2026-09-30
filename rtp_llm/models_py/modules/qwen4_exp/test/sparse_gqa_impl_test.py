@@ -227,6 +227,74 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             return SparseGqaFmhaImpl(attn_configs, attn_inputs)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_draft_graph_replays_ragged_lengths_and_main_pages(self):
+        configs, inputs = _configs()
+        inputs.is_cuda_graph = inputs.is_exact_cuda_graph_batch = inputs.is_s_padded = (
+            True
+        )
+        inputs.input_lengths_device = torch.tensor(
+            [4, 4], device=_DEV, dtype=torch.int32
+        )
+        inputs.prefix_lengths_device = torch.tensor(
+            [5, 7], device=_DEV, dtype=torch.int32
+        )
+        inputs.cu_seqlens_device = torch.tensor(
+            [0, 4, 8], device=_DEV, dtype=torch.int32
+        )
+        table = torch.tensor([[1, 2, 3], [4, 5, 6]], device=_DEV, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id_device = table
+        with (
+            patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": "1"}),
+            patch.object(
+                sparse_gqa_impl,
+                "FusedRopeKVCachePrefillOpQKVOut",
+                self._IdentityRopeWriter,
+            ),
+        ):
+            impl = SparseGqaFmhaImpl(configs, inputs)
+        impl.set_mtp_draft_mode(True)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.randn(
+                7, 2, _H_KV, 4, _D, device=_DEV, dtype=torch.bfloat16
+            )
+        )
+        qkv = torch.randn(8, (_H_Q + 2 * _H_KV) * _D, device=_DEV, dtype=torch.bfloat16)
+        selected = torch.tensor([[0, 2, 4, -1]] * 8, device=_DEV, dtype=torch.int32)
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            for _ in range(3):
+                impl.forward(qkv, cache, selected_indices=selected)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = impl.forward(qkv, cache, selected_indices=selected)
+        for lengths, prefixes in (([1, 4], [7, 5]), ([3, 2], [5, 7]), ([4, 0], [7, 0])):
+            inputs.input_lengths_device.copy_(
+                torch.tensor(lengths, device=_DEV, dtype=torch.int32)
+            )
+            inputs.prefix_lengths_device.copy_(
+                torch.tensor(prefixes, device=_DEV, dtype=torch.int32)
+            )
+            inputs.cu_seqlens_device.copy_(
+                torch.tensor(
+                    [0, lengths[0], sum(lengths)], device=_DEV, dtype=torch.int32
+                )
+            )
+            table.copy_(table.flip(0))
+            qkv.normal_()
+            graph.replay()
+            expected = _ragged_paged_reference(
+                qkv[: sum(lengths)],
+                cache.kv_cache_base,
+                table,
+                torch.tensor(prefixes),
+                torch.tensor(lengths),
+                selected[: sum(lengths)],
+            )
+            torch.testing.assert_close(
+                output[: sum(lengths)], expected, rtol=0.02, atol=0.03
+            )
+            self.assertTrue(torch.all(output[sum(lengths) :] == 0).item())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_decode_graph_replays_updated_lengths_pages_and_selection(self):
         impl = self._decode_impl(batch=1, graph=True)
         self.assertTrue(impl.support_cuda_graph())
@@ -235,9 +303,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 4, 2, _H_KV, 4, _D, dtype=torch.bfloat16, device=_DEV
             )
         )
-        qkv = torch.randn(
-            1, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV
-        )
+        qkv = torch.randn(1, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV)
         selected = torch.tensor([[[0, 2, 4, -1]]], dtype=torch.int32, device=_DEV)
         with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
             impl.forward(qkv, cache, selected_indices=selected)
@@ -291,9 +357,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 4, 2, _H_KV, 4, _D, dtype=torch.bfloat16, device=_DEV
             )
         )
-        qkv = torch.randn(
-            4, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV
-        )
+        qkv = torch.randn(4, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV)
         selected = torch.tensor(
             [[[0, 4, 8, -1], [0, 4, 8, 9], [0, 4, 8, 10], [0, 4, 8, 11]]],
             dtype=torch.int32,
@@ -704,14 +768,14 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
             self.assertEqual(
                 calls,
-                [
-                    ((1, _H_Q, 3, _D), [[4, 5, 6]], (1, 3, 6)),
-                    ((1, _H_Q, 2, _D), [[8, 9]], (1, 2, 6)),
-                ]
-                if batch_rows == "0"
-                else [
-                    ((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))
-                ],
+                (
+                    [
+                        ((1, _H_Q, 3, _D), [[4, 5, 6]], (1, 3, 6)),
+                        ((1, _H_Q, 2, _D), [[8, 9]], (1, 2, 6)),
+                    ]
+                    if batch_rows == "0"
+                    else [((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))]
+                ),
             )
 
     def test_nonzero_prefix_requires_the_paged_bridge_not_local_prefill(self):

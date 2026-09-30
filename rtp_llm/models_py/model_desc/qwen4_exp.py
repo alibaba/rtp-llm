@@ -189,6 +189,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
             )
+        if self.is_mtp_draft and bool(qsa_runtime.main_inputs.is_cuda_graph):
+            return qsa_runtime.select_draft_graph_tokens(
+                q, raw_keys, indexer=self.qsa_indexer, rope_config=self.qsa_rope_config
+            )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
         has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
         if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
@@ -722,7 +726,9 @@ class Qwen4ExpModel(Qwen35Model):
         blocks = table[rows_l, pages_l]
         if bool((blocks >= pool_rows).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(device=device, dtype=torch.long), (blocks > 0).to(device=device)
+        return blocks.to(device=device, dtype=torch.long), (blocks > 0).to(
+            device=device
+        )
 
     def _validate_ple_mode(
         self,
@@ -986,7 +992,9 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError("PLE target graph stage was not finalized")
         self._ple_target_transaction = transaction
 
-    def _release_ple_target_transaction(self, transaction: _PLETargetTransaction) -> None:
+    def _release_ple_target_transaction(
+        self, transaction: _PLETargetTransaction
+    ) -> None:
         if transaction.graph_key is not None:
             transaction.prepared_writes = None
             transaction.commit_started = False

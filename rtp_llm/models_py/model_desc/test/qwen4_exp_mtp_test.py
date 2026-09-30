@@ -1,5 +1,7 @@
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -9,6 +11,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
     Qwen4ExpMTPModel,
 )
+from rtp_llm.ops import HybridAttentionType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
@@ -31,22 +34,38 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
-    def test_draft_prefill_graph_stays_disabled(self):
-        self.assertFalse(
-            Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(SimpleNamespace())
+    def test_draft_prefill_graph_requires_explicit_opt_in(self):
+        for value, expected in (("0", False), ("1", True)):
+            with patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": value}):
+                self.assertEqual(
+                    Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(
+                        SimpleNamespace()
+                    ),
+                    expected,
+                )
+
+    def test_draft_graph_does_not_prepare_unused_gdn_metadata(self):
+        model = SimpleNamespace(
+            layers=[SimpleNamespace(layer_type=HybridAttentionType.NONE)]
         )
+        inputs = SimpleNamespace()
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_mtp.get_attention_inputs_value",
+            return_value={"full": SimpleNamespace(is_prefill=True)},
+        ):
+            meta = Qwen4ExpMTPModel._build_attn_meta(
+                model, inputs, torch.device("cuda"), True
+            )
+        self.assertTrue(meta.is_cuda_graph)
+        self.assertIsNone(meta.prefill_conv1d_meta)
 
     def test_graph_captures_explicit_base_rope_positions(self):
         draft = SimpleNamespace(
             config=SimpleNamespace(
-                attn_config=SimpleNamespace(
-                    rope_config=SimpleNamespace(index_factor=3)
-                )
+                attn_config=SimpleNamespace(rope_config=SimpleNamespace(index_factor=3))
             )
         )
-        self.assertEqual(
-            Qwen4ExpMTPModel.cuda_graph_position_id_len_factor(draft), 3
-        )
+        self.assertEqual(Qwen4ExpMTPModel.cuda_graph_position_id_len_factor(draft), 3)
 
     def test_target_forward_exports_precollapse_rows_to_graph_output(self):
         inputs = PyModelInputs()
@@ -68,9 +87,7 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         outputs = Qwen4ExpModel.forward(model, inputs, object())
         torch.testing.assert_close(outputs.hidden_states, embedding)
         torch.testing.assert_close(outputs.mtp_target_hidden_states, wide)
-        self.assertEqual(
-            outputs.mtp_target_hidden_states.data_ptr(), wide.data_ptr()
-        )
+        self.assertEqual(outputs.mtp_target_hidden_states.data_ptr(), wide.data_ptr())
 
         model._capture_mtp_target_hidden = False
         outputs = Qwen4ExpModel.forward(model, inputs, object())
