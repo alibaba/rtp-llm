@@ -1334,6 +1334,29 @@ class Qwen4ExpModel(Qwen35Model):
                 else:
                     state = None
                     context = ids.new_full((1, context_len), eos)
+                bulk_enabled = os.environ.get(
+                    "RTP_LLM_QWEN4_PLE_BULK_PREFILL", "0"
+                ).lower()
+                if bulk_enabled in ("1", "true", "on") and length >= 2 * page_size:
+                    request_ids = ids[offset : offset + length].view(1, length)
+                    history = torch.cat((context, request_ids), dim=1)
+                    output, snapshots = ple.prefill_page_snapshots(
+                        hyper_states[offset : offset + length].view(1, length, -1),
+                        history,
+                        page_size,
+                        state,
+                    )
+                    for end, snapshot in zip(
+                        range(page_size, length + page_size, page_size), snapshots
+                    ):
+                        end = min(end, length)
+                        write_rows.append(idx)
+                        write_pages.append((prefix + end - 1) // page_size)
+                        write_states.append(snapshot.squeeze(0))
+                        write_contexts.append(history[0, end : end + context_len])
+                    outputs.append(output.squeeze(0))
+                    offset += length
+                    continue
                 chunk_outputs = []
                 start = 0
                 while start < length:

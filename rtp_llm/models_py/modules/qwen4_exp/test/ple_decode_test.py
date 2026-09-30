@@ -47,6 +47,90 @@ def _make_layer():
 
 
 class PleDecodeEquivalenceTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_bulk_bf16_cuda_matches_paged_prefill_with_prefix_state(self):
+        layer = _make_layer()
+        for name in (
+            "key_proj",
+            "value_proj",
+            "conv_weight",
+            "norm_key",
+            "norm_query",
+            "norm_conv",
+        ):
+            setattr(layer, name, getattr(layer, name).cuda().bfloat16())
+        embedding = layer.ple_embedding
+        embedding.shards = [x.cuda().bfloat16() for x in embedding.shards]
+        for name in ("vocab_sizes", "offsets", "multipliers"):
+            setattr(embedding, name, getattr(embedding, name).cuda())
+        length, page = 257, 128
+        hyper = torch.randn(
+            2, length, _HC * _HIDDEN, device="cuda", dtype=torch.bfloat16
+        )
+        tokens = torch.randint(0, 40, (2, length + _CONTEXT), device="cuda")
+        initial = torch.randn(
+            2, _STATE_LEN, _HC * _HIDDEN, device="cuda", dtype=torch.bfloat16
+        )
+        for state in (None, initial):
+            with self.subTest(reused=state is not None):
+                output, snapshots = layer.prefill_page_snapshots(
+                    hyper, tokens, page, state
+                )
+                outputs, states = [], []
+                for start in range(0, length, page):
+                    end = min(start + page, length)
+                    if state is None:
+                        chunk, state = layer.prefill(
+                            hyper[:, start:end], tokens[:, start : end + _CONTEXT]
+                        )
+                    else:
+                        chunk, state = layer.prefill_with_state(
+                            hyper[:, start:end],
+                            tokens[:, start : end + _CONTEXT],
+                            state,
+                        )
+                    outputs.append(chunk)
+                    states.append(state)
+                torch.testing.assert_close(
+                    output, torch.cat(outputs, dim=1), atol=0, rtol=0
+                )
+                for actual, expected in zip(snapshots, states):
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_bulk_prefill_preserves_all_page_snapshots_and_prefix_state(self):
+        layer = _make_layer()
+        for length in (1, 7, 8, 9, 17, 67):
+            for reused in (False, True):
+                with self.subTest(length=length, reused=reused):
+                    hyper = torch.randn(2, length, _HC * _HIDDEN)
+                    tokens = torch.randint(0, 40, (2, length))
+                    context = torch.randint(0, 40, (2, _CONTEXT))
+                    state = (
+                        torch.randn(2, _STATE_LEN, _HC * _HIDDEN) if reused else None
+                    )
+                    history = torch.cat((context, tokens), dim=1)
+                    output, snapshots = layer.prefill_page_snapshots(
+                        hyper, history, 8, state
+                    )
+                    outputs, states = [], []
+                    for start in range(0, length, 8):
+                        end = min(start + 8, length)
+                        chunk_history = history[:, start : end + _CONTEXT]
+                        if state is None:
+                            chunk, state = layer.prefill(
+                                hyper[:, start:end], chunk_history
+                            )
+                        else:
+                            chunk, state = layer.prefill_with_state(
+                                hyper[:, start:end], chunk_history, state
+                            )
+                        outputs.append(chunk)
+                        states.append(state)
+                    torch.testing.assert_close(output, torch.cat(outputs, dim=1))
+                    self.assertEqual(len(snapshots), len(states))
+                    for actual, expected in zip(snapshots, states):
+                        torch.testing.assert_close(actual, expected)
+
     def test_decode_chunk_matches_ordered_decode_steps(self):
         layer = _make_layer()
         hc_hidden = _HC * _HIDDEN
