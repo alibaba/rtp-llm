@@ -201,6 +201,7 @@ filegroup(
         "modules/dsv4/_v41_engram_inject_triton.py",
         "modules/dsv4/v41_mxfp8.py",
         "modules/dsv4/v41_expert.py",
+        "modules/dsv4/v41_routed.py",
         "modules/dsv4/_v41_mxfp8_triton.py",
         "modules/dsv4/hc/delayed.py",
         "modules/dsv4/hc/base.py",
