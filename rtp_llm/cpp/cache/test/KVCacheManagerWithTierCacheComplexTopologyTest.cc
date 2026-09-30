@@ -59,8 +59,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
                 EXPECT_FALSE(cp_mapper->blockRoundRobinGroup(cache_config_, tag));
                 EXPECT_TRUE(cp_mapper->compactLastRankGroup(cache_config_, tag));
             }
-            const auto position =
-                cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
+            const auto position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             ASSERT_LT(*position, seed.blocks_by_group.at(tag).size());
             EXPECT_FALSE(isNullBlockIdx(seed.blocks_by_group.at(tag)[*position]));
@@ -112,8 +111,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
         BlockIndicesType   expected_blocks;
         for (const auto& tag : group_set->groupTags()) {
-            const std::optional<size_t> position =
-                cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
+            const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             expected_blocks.push_back(seed.blocks_by_group.at(tag)[*position]);
         }
@@ -204,7 +202,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
         ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const auto& tag = group_set->groupTags()[member_index];
+            const auto&                 tag      = group_set->groupTags()[member_index];
             const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             const BlockIndicesType& blocks = load_resource->blocks(0, tag);
@@ -536,27 +534,19 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                 EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
                 EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
 
-                const auto quarantined = snapshotPathResources(*cache, seed.cache_keys);
-                ASSERT_TRUE(quarantined.has_value());
-                ASSERT_EQ(quarantined->size(), 3u);
+                // The failed lower suffix is removed; the ready DEVICE prefix
+                // is retained and the public retry below must reuse it.
+                EXPECT_FALSE(snapshotPathResources(*cache, seed.cache_keys).has_value());
+                ASSERT_TRUE(snapshotPathResources(*cache, {seed.cache_keys.front()}).has_value());
                 for (const auto& group_set : cache->groupSets()) {
-                    const size_t group_set_id = group_set->groupSetId();
-                    const size_t reuse_begin  = 3 - group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-                    for (size_t path = std::max(size_t{1}, reuse_begin); path < 3; ++path) {
-                        const auto& source = (*quarantined)[path][group_set_id];
-                        EXPECT_TRUE(source.integrity_quarantined);
-                        EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
-                        EXPECT_FALSE(source.hasTier(Tier::DEVICE));
-                        if (path == 1) {
-                            EXPECT_EQ(source.host_block, host_sources[group_set_id]);
-                            EXPECT_EQ(group_set->hostPool()->treeRefCount(source.host_block), 1u);
-                            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-                        } else {
-                            EXPECT_EQ(source.disk_block, disk_sources[group_set_id]);
-                            EXPECT_EQ(group_set->diskPool()->treeRefCount(source.disk_block), 1u);
-                            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-                        }
+                    const size_t id = group_set->groupSetId();
+                    const size_t reuse_begin = 3 - group_set->computeReuseBlockCount(3);
+                    if (reuse_begin <= 1) {
+                        EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[id]));
                     }
+                    EXPECT_FALSE(group_set->diskPool()->isAllocated(disk_sources[id]));
+                    EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+                    EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
                 }
             } else {
                 ASSERT_EQ(second_schedule.value().size(), 1u);
@@ -575,8 +565,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
                     const size_t reuse_begin = 3 - reuse_count;
                     for (const auto& tag : group_set->groupTags()) {
-                        const BlockIndicesType& blocks =
-                            prefill_stream->streamCacheResource().kvCache().blocks(0, tag);
+                        const BlockIndicesType& blocks = prefill_stream->streamCacheResource().kvCache().blocks(0, tag);
                         for (size_t path = reuse_begin; path < 3; ++path) {
                             ASSERT_LT(path, blocks.size());
                             EXPECT_FALSE(isNullBlockIdx(blocks[path]));
@@ -613,7 +602,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                 EXPECT_EQ(retry_resource->cacheResource(0).diskReuseBlockNum(), 0u);
                 EXPECT_EQ(engine->submittedDescriptorCount(), descriptors_before_retry);
                 ASSERT_TRUE(requestReusesExpectedPath(
-                    *cache, cache_config_, seed.cache_keys, retry_resource, /*logical_reuse_blocks=*/1));
+                    *cache, cache_config_, CacheKeysType{seed.cache_keys.front()}, retry_resource, /*logical_reuse_blocks=*/1));
                 manager_->free(FreeInfo{retry_resource, retry_tokens});
             } else {
                 prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
@@ -673,11 +662,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     }
                     for (const auto& tag : group_set->groupTags()) {
 
-                        const BlockIndicesType& blocks   = load_resource->blocks(0, tag);
+                        const BlockIndicesType& blocks = load_resource->blocks(0, tag);
                         ASSERT_GE(blocks.size(), 3u);
                         ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                        ASSERT_TRUE(fillGroupBlockPayload(
-                            manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
+                        ASSERT_TRUE(
+                            fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
                     }
                 }
             }
@@ -870,7 +859,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
         for (const auto& tag : group_set->groupTags()) {
 
-            const BlockIndicesType& blocks   = resource->blocks(0, tag);
+            const BlockIndicesType& blocks = resource->blocks(0, tag);
             ASSERT_EQ(blocks.size(), static_cast<size_t>(logical_blocks + 1));
             for (size_t path_index = reuse_begin; path_index < static_cast<size_t>(logical_blocks); ++path_index) {
                 ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));

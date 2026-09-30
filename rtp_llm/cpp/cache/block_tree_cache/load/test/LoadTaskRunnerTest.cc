@@ -23,7 +23,7 @@
 namespace rtp_llm {
 namespace {
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -41,7 +41,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
     return makeTestGroupSet(
-        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
+        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool), enable_crc);
 }
 
 LoadTaskRunner::TaskPtr makeLoadTask(std::vector<TransferDescriptor> descriptors) {
@@ -95,6 +95,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             batches_.push_back(task.descriptors());
+            completion_requirements_.push_back(task.requiresConfirmedCompletion());
             contexts_.push_back(context);
             released = released_;
         }
@@ -124,6 +125,7 @@ public:
     }
 
     std::vector<std::vector<TransferDescriptor>>            batches_;
+    std::vector<bool>                                       completion_requirements_;
     std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts_;
 
 private:
@@ -190,6 +192,81 @@ TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     EXPECT_EQ(task->host_to_device_task.descriptors().front().source_tier, Tier::HOST);
     ASSERT_EQ(task->disk_to_device_task.descriptors().size(), 1u);
     EXPECT_EQ(task->disk_to_device_task.descriptors().front().source_tier, Tier::DISK);
+}
+
+TEST(LoadTaskRunnerTest, MixedLoadCompletionRequirementSurvivesHostDiskStages) {
+    const std::vector<GroupSetPtr> groups{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1, true)};
+    LoadTaskRunner                 runner(groups, 30'000, 30'000);
+    BlockTreeCacheMetricsReporter  metrics{nullptr};
+    const auto coordinator = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
+                                                                      LoadContextCoordinator::AbortCallback{});
+    for (const bool crc_on_host : {false, true}) {
+        SCOPED_TRACE(crc_on_host);
+        const auto context = coordinator->create({TransferDescriptor::hostToDevice(crc_on_host ? 1 : 0, 1, {1}),
+                                                  TransferDescriptor::diskToDevice(crc_on_host ? 0 : 1, 1, {1})},
+                                                 {false, false},
+                                                 2);
+        auto       task    = runner.createTask(context);
+        ASSERT_NE(task, nullptr);
+        EXPECT_TRUE(task->host_to_device_task.requiresConfirmedCompletion());
+        EXPECT_TRUE(task->disk_to_device_task.requiresConfirmedCompletion());
+        auto                     engine = std::make_shared<PendingPerRankEngine>();
+        BlockTransferDispatcher  dispatcher(engine);
+        std::optional<ErrorInfo> result;
+        runner.runTransfer(task, dispatcher, metrics, [&](ErrorInfo error) { result.emplace(std::move(error)); });
+        EXPECT_EQ(engine->completion_requirements_, (std::vector<bool>{true}));
+        ASSERT_EQ(engine->contexts_.size(), 1u);
+        auto first = engine->contexts_.front();
+        first->complete(ErrorInfo::OkStatus());
+        EXPECT_EQ(engine->completion_requirements_, (std::vector<bool>{true, true}));
+        EXPECT_FALSE(result.has_value());
+        engine->completeAll();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->ok());
+    }
+}
+
+TEST(LoadTaskRunnerTest, JoinedProtectedSiblingMarksOrdinaryOwnedTransfers) {
+    const std::vector<GroupSetPtr> groups{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1, true)};
+    LoadTaskRunner                 runner(groups, 30'000, 30'000);
+    BlockTreeCacheMetricsReporter  metrics{nullptr};
+    const auto coordinator = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
+                                                                      LoadContextCoordinator::AbortCallback{});
+    for (const Tier source : {Tier::HOST, Tier::DISK, Tier::DEVICE}) {
+        SCOPED_TRACE(static_cast<int>(source));
+        auto sibling        = TransferDescriptor::hostToDevice(1, 1, {1});
+        sibling.source_tier = source;
+        const auto context =
+            coordinator->create({TransferDescriptor::hostToDevice(0, 1, {1}), sibling}, {false, true}, 2);
+        auto task = runner.createTask(context);
+        ASSERT_NE(task, nullptr);
+        ASSERT_EQ(task->load_descs.size(), 1u);
+        EXPECT_EQ(task->load_descs.front().group_set_id, 0u);
+        const bool requires_confirmation = source != Tier::DEVICE;
+        EXPECT_EQ(task->host_to_device_task.requiresConfirmedCompletion(), requires_confirmation);
+        auto                     engine = std::make_shared<PendingPerRankEngine>();
+        BlockTransferDispatcher  dispatcher(engine);
+        std::optional<ErrorInfo> result;
+        runner.runTransfer(task, dispatcher, metrics, [&](ErrorInfo error) { result.emplace(std::move(error)); });
+        EXPECT_EQ(engine->completion_requirements_, std::vector<bool>{requires_confirmation});
+        EXPECT_FALSE(result.has_value());
+        engine->completeAll();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->ok());
+    }
+}
+
+TEST(LoadTaskRunnerTest, OrdinaryLoadInMixedCacheKeepsDefaultCompletionPolicy) {
+    const std::vector<GroupSetPtr> groups{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1, true)};
+    LoadTaskRunner                 runner(groups, 30'000, 30'000);
+    const auto coordinator = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
+                                                                      LoadContextCoordinator::AbortCallback{});
+    const auto context     = coordinator->create(
+        {TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {1})}, {false, false}, 2);
+    auto task = runner.createTask(context);
+    ASSERT_NE(task, nullptr);
+    EXPECT_FALSE(task->host_to_device_task.requiresConfirmedCompletion());
+    EXPECT_FALSE(task->disk_to_device_task.requiresConfirmedCompletion());
 }
 
 TEST(LoadTaskRunnerTest, CreateTaskAssignsIndependentHostAndDiskTimeouts) {

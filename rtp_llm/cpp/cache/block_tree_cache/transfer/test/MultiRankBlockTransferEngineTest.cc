@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <sys/resource.h>
 #include <thread>
 
@@ -40,6 +41,9 @@ struct MultiRankBlockTransferRpcConfig {
     std::shared_ptr<MultiRankBlockTransferRpcState> state{nullptr};
     int                                             sleep_millis{0};
     std::shared_future<void>                        response_release{};
+    std::optional<MemoryOperationResponsePB::Code>  protected_mem_response_code{};
+    std::optional<grpc::Status>                     protected_rpc_status{};
+    std::shared_future<void>                        ordinary_response_release{};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -48,6 +52,8 @@ public:
 
     grpc::Status
     ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request, FunctionResponsePB* response) override {
+        const bool protected_request =
+            request->has_mem_request() && static_cast<int>(request->mem_request().copy_direction()) >= 6;
         if (config_.state != nullptr && request->has_mem_request()) {
             {
                 std::lock_guard<std::mutex> lock(config_.state->mutex);
@@ -59,13 +65,19 @@ public:
             && config_.response_release.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test response release timed out");
         }
+        if (!protected_request && config_.ordinary_response_release.valid()
+            && config_.ordinary_response_release.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test ordinary response release timed out");
+        }
         if (config_.sleep_millis > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.sleep_millis));
         }
         if (config_.has_mem_response) {
-            response->mutable_mem_response()->set_code(config_.mem_response_code);
+            response->mutable_mem_response()->set_code(protected_request && config_.protected_mem_response_code ?
+                                                           *config_.protected_mem_response_code :
+                                                           config_.mem_response_code);
         }
-        return config_.rpc_status;
+        return protected_request && config_.protected_rpc_status ? *config_.protected_rpc_status : config_.rpc_status;
     }
 
 private:
@@ -127,13 +139,16 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
     return broadcast_manager;
 }
 
-static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
+static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager,
+                                                          bool                                     enable_crc = false) {
     DeviceBlockPoolPtr            device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
     std::shared_ptr<FullGroupSet> full =
-        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, makeHostPool(256, 8), nullptr);
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool},
+                                       block_transfer_engine_test::makeHostPool(256, 8, enable_crc),
+                                       nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, topology->groupTags());
+    full->initialize(0, topology, topology->groupTags(), 0, enable_crc);
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -223,6 +238,16 @@ TEST(MultiRankBlockTransferEngineDeadlineTest, ExpiredTaskReturnsDeadlineBeforeE
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+}
+
+TEST(MultiRankBlockTransferEngineDeadlineTest, NullGroupSetReturnsInvalidParamsBeforeBroadcast) {
+    MultiRankBlockTransferEngine engine({nullptr}, nullptr);
+    auto                         context =
+        engine.execute(TransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}, std::chrono::seconds(30)));
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
 }
 
 class MultiRankBlockTransferEngineTest: public ::testing::Test {};
@@ -1050,6 +1075,242 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDe
     EXPECT_EQ(request.copy_items(1).mem_block(), 5);
     EXPECT_EQ(request.copy_items(1).disk_block(), 6);
     EXPECT_EQ(request.copy_items(1).group_tags(0), "group1");
+}
+
+static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {
+    auto ordinary        = makeBroadcastGroup("broadcast_ordinary", block_transfer_engine_test::makeHostPool(256, 8));
+    auto protected_group = makeBroadcastGroup("broadcast_crc", block_transfer_engine_test::makeHostPool(256, 8, true));
+    initializeBroadcastGroups({ordinary, protected_group});
+    protected_group->initialize(1, protected_group->topologyPtr(), protected_group->groupTags(), 0, true);
+    return {ordinary, protected_group};
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityBatchKeepsEachGroupModeOnWire) {
+    auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    const auto                   groups = makeMixedIntegrityBroadcastGroups();
+    MultiRankBlockTransferEngine engine(groups, manager);
+    auto                         context = engine.execute(
+        TransferTask({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
+                     std::chrono::seconds(5)));
+    context->waitDone();
+    ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
+    size_t                      ordinary_requests = 0, protected_requests = 0;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ASSERT_EQ(state->requests.size(), 4u);
+    for (const auto& request : state->requests) {
+        ASSERT_EQ(request.copy_items_size(), 1);
+        std::vector<TransferDescriptor> decoded;
+        ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
+        ASSERT_EQ(decoded.size(), 1u);
+        if (request.copy_direction() == MemoryOperationRequestPB::CRC_H2D) {
+            ++protected_requests;
+            EXPECT_EQ(decoded.front().group_set_id, 1u);
+            EXPECT_EQ(decoded.front().source_blocks, (std::vector<BlockIdxType>{3}));
+            EXPECT_EQ(decoded.front().target_blocks, (std::vector<BlockIdxType>{4}));
+        } else {
+            ++ordinary_requests;
+            EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
+            EXPECT_EQ(decoded.front().group_set_id, 0u);
+            EXPECT_EQ(decoded.front().source_blocks, (std::vector<BlockIdxType>{1}));
+            EXPECT_EQ(decoded.front().target_blocks, (std::vector<BlockIdxType>{2}));
+        }
+    }
+    EXPECT_EQ(ordinary_requests, 2u);
+    EXPECT_EQ(protected_requests, 2u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityBatchPrioritizesProtectedFailureOverOrdinaryFailure) {
+    MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::FAILED, grpc::Status::OK};
+    config.protected_mem_response_code = MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR;
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager({config}, servers);
+    ASSERT_NE(manager, nullptr);
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
+    auto                         context = engine.execute(
+        TransferTask({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
+                     std::chrono::seconds(5)));
+    context->waitDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    size_t callbacks = 0;
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        ++callbacks;
+    });
+    EXPECT_EQ(callbacks, 1u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityBatchRejectsMixedDirectionsBeforeAnyDispatch) {
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), nullptr);
+    auto                         context = engine.execute(
+        TransferTask({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::deviceToHost(1, {4}, 3)},
+                     std::chrono::seconds(5)));
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityFailureWaitsForOrdinaryCompletionAfterContextRelease) {
+    auto                            state   = std::make_shared<MultiRankBlockTransferRpcState>();
+    auto                            release = std::make_shared<std::promise<void>>();
+    ScopedRpcResponseRelease        release_guard(release);
+    MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
+    config.protected_mem_response_code = MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR;
+    config.ordinary_response_release   = release->get_future().share();
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager({config}, servers);
+    ASSERT_NE(manager, nullptr);
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
+    auto                         context = engine.execute(
+        TransferTask({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
+                     std::chrono::seconds(5)));
+    auto completion = std::make_shared<std::promise<ErrorInfo>>();
+    auto finished   = completion->get_future();
+    context->onDone([completion](ErrorInfo error) { completion->set_value(std::move(error)); });
+    ASSERT_TRUE(waitForRpcRequests(state, 2, std::chrono::seconds(2)));
+    EXPECT_FALSE(context->done());
+    context.reset();
+    EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    release_guard.release();
+    ASSERT_EQ(finished.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(finished.get().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, StandaloneOrdinaryRpcFailureKeepsLegacyPolicyInMixedCache) {
+    auto                            state = std::make_shared<MultiRankBlockTransferRpcState>();
+    MultiRankBlockTransferRpcConfig config{
+        true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "ordinary failure"), state};
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager({config}, servers);
+    ASSERT_NE(manager, nullptr);
+    const bool previous_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
+    auto context = engine.execute(TransferTask({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(5)));
+    context->waitDone();
+    StaticConfig::user_ft_core_dump_on_exception = previous_dump;
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ASSERT_EQ(state->requests.size(), 1u);
+    EXPECT_EQ(state->requests.front().copy_direction(), MemoryOperationRequestPB::H2D);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, ExpiredOrdinaryChildNeedsNoRemoteCompletionAcknowledgement) {
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), nullptr);
+    TransferTask                 task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::milliseconds(0));
+    task.requireConfirmedCompletion();
+    auto context = engine.execute(std::move(task));
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+}
+
+static void mixedOrdinaryBroadcastLosesCompletion(bool through_dispatcher) {
+    MultiRankBlockTransferRpcConfig config{
+        true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "ordinary completion lost")};
+    config.protected_rpc_status = grpc::Status::OK;
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager({config}, servers);
+    ASSERT_NE(manager, nullptr);
+    auto engine = std::make_shared<MultiRankBlockTransferEngine>(makeMixedIntegrityBroadcastGroups(), manager);
+    disableCoreDump();
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    std::fprintf(stderr, "mixed protected parent; ordinary child loses completion\n");
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
+                      std::chrono::seconds(5));
+    if (through_dispatcher) {
+        BlockTransferDispatcher dispatcher(nullptr, engine);
+        std::promise<ErrorInfo> completion;
+        auto                    finished = completion.get_future();
+        dispatcher.runTransfer(std::move(task), [&](ErrorInfo error) { completion.set_value(std::move(error)); });
+        (void)finished.get();
+    } else {
+        engine->execute(std::move(task))->waitDone();
+    }
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MixedOrdinaryChildFailStopsWhenRpcCompletionIsLost) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    EXPECT_EXIT(mixedOrdinaryBroadcastLosesCompletion(false),
+                ::testing::KilledBySignal(SIGABRT),
+                "mixed protected parent; ordinary child loses completion");
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesProtectedParentPolicyAcrossGroupSplitting) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    EXPECT_EXIT(mixedOrdinaryBroadcastLosesCompletion(true),
+                ::testing::KilledBySignal(SIGABRT),
+                "mixed protected parent; ordinary child loses completion");
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, IntegrityFailureDominatesGenericRankAndWaitsForSlowRank) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/300},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    auto       cache   = makeBroadcastCache(broadcast_manager);
+    const auto start   = std::chrono::steady_clock::now();
+    auto       context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(5000)));
+    ASSERT_NE(context, nullptr);
+    context->waitDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count(),
+              250);
+    size_t callbacks = 0;
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        ++callbacks;
+    });
+    EXPECT_EQ(callbacks, 1u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferFailsClosedWhenOldWorkerRejectsDirection) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {false, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache   = makeBroadcastCache(manager, /*enable_crc=*/true);
+    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(5000)));
+    ASSERT_NE(context, nullptr);
+    context->waitDone();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+}
+
+static void protectedBroadcastLosesCompletion() {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "lost completion")},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache = makeBroadcastCache(manager, /*enable_crc=*/true);
+    disableCoreDump();
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    std::fprintf(stderr, "protected broadcast setup complete; losing completion\n");
+    (void)executeAndWait(*cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), 5000);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferFailStopsWithoutDumpOptionOnAmbiguousCompletion) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    EXPECT_EXIT(protectedBroadcastLosesCompletion(),
+                ::testing::KilledBySignal(SIGABRT),
+                "protected broadcast setup complete; losing completion");
 }
 
 }  // namespace

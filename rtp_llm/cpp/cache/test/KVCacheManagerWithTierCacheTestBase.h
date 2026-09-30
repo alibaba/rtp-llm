@@ -1634,17 +1634,10 @@ protected:
         }
     }
 
-    void expectQuarantinedPrefixMissAndRecompute(const CacheKeysType&                                    keys,
+    void expectDiscardedPrefixMissAndRecompute(const CacheKeysType&                                    keys,
                                                  const std::shared_ptr<PausableRecordingTransferEngine>& engine) {
         auto       cache       = manager_->blockTreeCache();
-        const auto quarantined = snapshotPathResources(*cache, keys);
-        ASSERT_TRUE(quarantined.has_value());
-        for (const auto& path : *quarantined) {
-            for (const auto& resource : path) {
-                EXPECT_TRUE(resource.integrity_quarantined);
-                EXPECT_FALSE(resource.isMatchUsable());
-            }
-        }
+        EXPECT_FALSE(snapshotPathResources(*cache, keys).has_value());
         const auto   device_before  = snapshotDevicePools(manager_);
         const auto   lower_before   = snapshotLowerPools(*cache, GetParam());
         const size_t submits_before = engine->submittedDescriptorCount();
@@ -1668,17 +1661,16 @@ protected:
         // A new request can recompute into its allocated device blocks without
         // loading or trusting any of the quarantined lower-tier records.
         for (const auto& group : cache->groupSets()) {
-            for (const size_t raw_group_id : group->groupIds()) {
-                const int   group_id = static_cast<int>(raw_group_id);
-                const auto& blocks   = resource->blocks(0, group_id);
-                size_t      written  = 0;
+            for (const auto& tag : group->groupTags()) {
+                const auto& blocks  = resource->blocks(0, tag);
+                size_t      written = 0;
                 for (size_t path = 0; path < blocks.size(); ++path) {
                     if (isNullBlockIdx(blocks[path])) {
                         continue;
                     }
                     ASSERT_TRUE(
-                        fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/false));
-                    EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, blocks[path], path));
+                        fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/false));
+                    EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, tag, blocks[path], path));
                     ++written;
                 }
                 EXPECT_GT(written, 0u);
@@ -1858,21 +1850,27 @@ protected:
         }
 
         auto maybe_failed = snapshotPathResources(*cache, seed.cache_keys);
-        ASSERT_TRUE(maybe_failed.has_value());
+        ASSERT_EQ(maybe_failed.has_value(), !protected_load);
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
             const auto& group_set = cache->groupSets()[group_set_id];
-            const auto& resource  = (*maybe_failed)[0][group_set_id];
-            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-            EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-            EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
-            EXPECT_EQ(resource.integrity_quarantined, protected_load);
-            EXPECT_EQ(resource.isMatchUsable(), !protected_load);
-            if (source_tiers[group_set_id] == Tier::HOST) {
-                EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+            if (protected_load) {
+                auto source_pool = lowerPoolForTier(group_set, source_tiers[group_set_id]);
+                EXPECT_FALSE(source_pool->isAllocated(source_blocks[group_set_id]));
+                EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
             } else {
-                EXPECT_EQ(resource.disk_block, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 1u);
+                const auto& resource  = (*maybe_failed)[0][group_set_id];
+                EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+                EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
+                EXPECT_EQ(resource.integrity_quarantined, protected_load);
+                EXPECT_EQ(resource.isMatchUsable(), !protected_load);
+                if (source_tiers[group_set_id] == Tier::HOST) {
+                    EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
+                    EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+                } else {
+                    EXPECT_EQ(resource.disk_block, source_blocks[group_set_id]);
+                    EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 1u);
+                }
             }
             ASSERT_EQ(group_set->devicePools().size(), failed_targets[group_set_id].size());
             for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {
@@ -1881,16 +1879,18 @@ protected:
                     1u);
             }
         }
-        expectPoolSnapshotsEq(lower_before_failure, snapshotLowerPools(*cache, GetParam()));
-        const auto stats_after_failure = cache->getStats();
-        EXPECT_EQ(stats_after_failure.tree_node_count, stats_before_failure.tree_node_count);
-        EXPECT_EQ(stats_after_failure.device_heap_total_size, stats_before_failure.device_heap_total_size);
-        EXPECT_EQ(stats_after_failure.host_heap_total_size, stats_before_failure.host_heap_total_size);
-        EXPECT_EQ(stats_after_failure.disk_heap_total_size, stats_before_failure.disk_heap_total_size);
+        expectPoolSnapshotsEq(protected_load ? initial_lower : lower_before_failure, snapshotLowerPools(*cache, GetParam()));
+        if (!protected_load) {
+            const auto stats_after_failure = cache->getStats();
+            EXPECT_EQ(stats_after_failure.tree_node_count, stats_before_failure.tree_node_count);
+            EXPECT_EQ(stats_after_failure.device_heap_total_size, stats_before_failure.device_heap_total_size);
+            EXPECT_EQ(stats_after_failure.host_heap_total_size, stats_before_failure.host_heap_total_size);
+            EXPECT_EQ(stats_after_failure.disk_heap_total_size, stats_before_failure.disk_heap_total_size);
+        }
 
         manager_->free(FreeInfo{failed_resource, failed_token_ids});
         expectPoolSnapshotsEq(device_before_failure, snapshotDevicePools(manager_));
-        expectPoolSnapshotsEq(lower_before_failure, snapshotLowerPools(*cache, GetParam()));
+        expectPoolSnapshotsEq(protected_load ? initial_lower : lower_before_failure, snapshotLowerPools(*cache, GetParam()));
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
             const GroupSetPtr& group_set = cache->groupSets()[group_set_id];
             ASSERT_EQ(group_set->devicePools().size(), failed_targets[group_set_id].size());
@@ -1901,7 +1901,7 @@ protected:
         }
 
         if (protected_load) {
-            ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, pausable_engine));
+            ASSERT_NO_FATAL_FAILURE(expectDiscardedPrefixMissAndRecompute(seed.cache_keys, pausable_engine));
             ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
             return;
         }
@@ -2206,18 +2206,23 @@ protected:
             EXPECT_EQ(first_result.async_context->errorInfo().code(), expected_error);
             EXPECT_EQ(second_result.async_context->errorInfo().code(), expected_error);
             auto maybe_failed = snapshotPathResources(*cache, seed.cache_keys);
-            ASSERT_TRUE(maybe_failed.has_value());
+            ASSERT_EQ(maybe_failed.has_value(), !protected_load);
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
                 const auto& group_set   = cache->groupSets()[group_set_id];
-                const auto& resource    = (*maybe_failed)[0][group_set_id];
                 const auto  source_pool = lowerPoolForTier(group_set, source_tier);
                 ASSERT_NE(source_pool, nullptr);
-                EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-                ASSERT_TRUE(resource.hasTier(source_tier));
-                EXPECT_EQ(resource.integrity_quarantined, protected_load);
-                EXPECT_EQ(resource.isMatchUsable(), !protected_load);
-                EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
-                EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 1u);
+                if (protected_load) {
+                    EXPECT_FALSE(source_pool->isAllocated(lower_sources[group_set_id]));
+                    EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+                } else {
+                    const auto& resource = (*maybe_failed)[0][group_set_id];
+                    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                    ASSERT_TRUE(resource.hasTier(source_tier));
+                    EXPECT_EQ(resource.integrity_quarantined, protected_load);
+                    EXPECT_EQ(resource.isMatchUsable(), !protected_load);
+                    EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
+                    EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 1u);
+                }
                 ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
                 for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {
                     EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(
@@ -2228,7 +2233,7 @@ protected:
                               0u);
                 }
             }
-            expectPoolSnapshotsEq(lower_before_load, snapshotLowerPools(*cache, GetParam()));
+            expectPoolSnapshotsEq(protected_load ? initial_lower : lower_before_load, snapshotLowerPools(*cache, GetParam()));
             manager_->free(FreeInfo{first_resource, first_tokens});
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
                 const GroupSetPtr& group_set = cache->groupSets()[group_set_id];
@@ -2242,7 +2247,7 @@ protected:
             expectPoolSnapshotsEq(device_before_load, snapshotDevicePools(manager_));
 
             if (protected_load) {
-                ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, engine));
+                ASSERT_NO_FATAL_FAILURE(expectDiscardedPrefixMissAndRecompute(seed.cache_keys, engine));
                 ASSERT_NO_FATAL_FAILURE(
                     reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
                 return;

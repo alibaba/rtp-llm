@@ -5,12 +5,15 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -26,6 +29,125 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+
+class ReadFailureBackend final: public StorageBackend {
+public:
+    ~ReadFailureBackend() override {
+        shutdown();
+    }
+
+    std::atomic<size_t> read_calls{0};
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.keys->size(), nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        ++read_calls;
+        throw std::runtime_error("injected remote read failure");
+    }
+    void writeImpl(const StorageRequest&) override {}
+};
+
+TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+
+    // Only the ordinary group needs a HOST restore. The CRC-capable group's
+    // existing DEVICE value participates in the same match without any CRC I/O.
+    using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
+    ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
+    Peer::waitForTaskPoolIdleForTest(*environment->cache);
+    auto resources = environment->resourcesForPathNode(0);
+    ASSERT_TRUE(resources[0].hasTier(Tier::DEVICE));
+    ASSERT_TRUE(resources[1].hasTier(Tier::HOST));
+    environment->groups[0]->enable_crc_ = true;
+
+    auto                       backend = std::make_shared<ReadFailureBackend>();
+    StorageBackend::PoolsByTag pools;
+    for (const auto& group : environment->groups) {
+        for (size_t member = 0; member < group->groupTags().size(); ++member) {
+            pools.emplace(group->groupTags()[member], group->devicePools()[member]);
+        }
+    }
+    ASSERT_TRUE(backend->init(
+        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    environment->cache->loader_.storage_backend_ = backend;
+    CacheKeysType keys                           = environment->keys;
+    keys.push_back(keys.back() + 1);
+    auto result  = environment->cache->match(keys);
+    auto context = result.async_context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->needBackendMatch());
+    ASSERT_EQ(context->loadDescs().size(), 2u);
+    EXPECT_EQ(context->loadDescs()[0].source_tier, Tier::DEVICE);
+    EXPECT_EQ(context->loadDescs()[1].source_tier, Tier::HOST);
+
+    // Keep each allocation's request reference until the backend and loader
+    // have both completed. DEVICE descriptors already own their reuse refs.
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_refs;
+    for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+        const auto&               desc    = context->loadDescs()[i];
+        const auto&               group   = environment->groups[desc.group_set_id];
+        std::vector<BlockIdxType> targets = desc.source_blocks;
+        if (desc.source_tier != Tier::DEVICE) {
+            targets.clear();
+            for (const auto& pool : group->devicePools()) {
+                const auto blocks = pool->malloc(1).value();
+                pool->incRef(blocks);
+                targets.push_back(blocks.front());
+            }
+        }
+        for (size_t member = 0; member < targets.size(); ++member) {
+            request_refs.emplace_back(group->devicePools()[member], targets[member]);
+        }
+        context->setTargetBlocks(i, std::move(targets));
+    }
+    for (size_t handle = 0; handle < context->backendHandles()[1].size(); ++handle) {
+        const auto& pool   = pools.at(context->backendHandles()[1][handle].tag);
+        const auto  blocks = pool->malloc(1).value();
+        pool->incRef(blocks);
+        request_refs.emplace_back(pool, blocks.front());
+        context->setBackendTargetBlock(1, handle, blocks.front());
+    }
+    context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 2u);
+        return current.commit();
+    });
+    context->startBackendMatch();
+    context->waitDone();
+    backend->shutdown();
+    EXPECT_EQ(backend->read_calls.load(), 1u);
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    resources = environment->resourcesForPathNode(0);
+    EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(resources[1].hasTier(Tier::HOST));
+    EXPECT_FALSE(resources[1].hasTier(Tier::DEVICE));
+    for (const auto& resource : resources) {
+        EXPECT_FALSE(resource.integrity_quarantined);
+        EXPECT_TRUE(resource.isMatchUsable());
+    }
+
+    result.async_context.reset();
+    context.reset();
+    for (const auto& [pool, block] : request_refs) {
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+    }
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     if (!cudaAvailable()) {
@@ -138,13 +260,12 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     auto  entered_future  = entered_promise->get_future();
     auto* task_pool       = environment->cache->task_pool_.get();
     for (size_t worker = 0; worker < worker_count; ++worker) {
-        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND,
-                               [release_future, entered_count, entered_promise]() {
-                                   if (entered_count->fetch_add(1) + 1 == worker_count) {
-                                       entered_promise->set_value();
-                                   }
-                                   release_future.wait();
-                               })) {
+        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND, [release_future, entered_count, entered_promise]() {
+                if (entered_count->fetch_add(1) + 1 == worker_count) {
+                    entered_promise->set_value();
+                }
+                release_future.wait();
+            })) {
             FAIL() << "failed to submit background task";
         }
     }
@@ -198,7 +319,6 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     environment->expectFullyReclaimed();
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
 }
-
 
 TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     constexpr size_t path_length = 4;
@@ -393,6 +513,186 @@ TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferStat
     resource.transfer_state = GroupSetTransferState::IDLE;
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+class GatedLoadFailureEngine final: public PerRankBlockTransferEngine {
+public:
+    GatedLoadFailureEngine(const std::vector<GroupSetPtr>& groups,
+                           std::shared_future<void>        release,
+                           ErrorCode                       error_code):
+        PerRankBlockTransferEngine(groups), release_(std::move(release)), error_code_(error_code) {}
+    std::shared_ptr<AsyncContext> execute(TransferTask) override {
+        release_.wait();
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo(error_code_, "injected backing load failure"));
+    }
+
+private:
+    std::shared_future<void> release_;
+    ErrorCode                error_code_;
+};
+
+void expectQuarantinedOwnerAndJoiners(Tier source_tier, bool protected_load, ErrorCode injected_error) {
+    if (!cudaAvailable())
+        GTEST_SKIP() << "CUDA not available";
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    options.enable_disk = true;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    environment->demoteAll(Tier::DEVICE);
+    if (source_tier == Tier::DISK) {
+        environment->demoteAll(Tier::HOST);
+    }
+    ASSERT_TRUE(environment->allResourcesAtTier(source_tier));
+
+    auto release = std::make_shared<std::promise<void>>();
+    auto once    = std::make_shared<std::once_flag>();
+    auto unblock = [release, once] { std::call_once(*once, [&] { release->set_value(); }); };
+    block_tree_cache_detail::ScopeRollback release_guard(unblock);
+    environment->cache->transfer_dispatcher_->per_rank_engine_ =
+        std::make_shared<GatedLoadFailureEngine>(environment->groups, release->get_future().share(), injected_error);
+    // Inject the loader policy after creating the ordinary fixture and fake
+    // engine. It fails before reading a backing, including on CUDA12 builds.
+    for (const auto& group : environment->groups) {
+        group->enable_crc_ = protected_load;
+    }
+    auto result = environment->cache->match(environment->keys);
+    auto owner  = result.async_context;
+    ASSERT_NE(owner, nullptr);
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> targets;
+    for (size_t i = 0; i < owner->loadDescs().size(); ++i) {
+        const auto&               desc = owner->loadDescs()[i];
+        std::vector<BlockIdxType> blocks;
+        for (const auto& pool : environment->groups[desc.group_set_id]->devicePools()) {
+            const auto ids = pool->malloc(1).value();
+            pool->incRef(ids);
+            blocks.push_back(ids.front());
+            targets.emplace_back(pool, ids.front());
+        }
+        owner->setTargetBlocks(i, std::move(blocks));
+    }
+    ASSERT_TRUE(owner->commit());
+    std::vector<std::shared_ptr<LoadAsyncContext>> joiners;
+    for (int i = 0; i < 2; ++i) {
+        auto joined = environment->cache->match(environment->keys).async_context;
+        ASSERT_NE(joined, nullptr);
+        ASSERT_TRUE(std::all_of(joined->joinedLoads().begin(), joined->joinedLoads().end(), [](bool x) { return x; }));
+        if (i == 0) {
+            ASSERT_TRUE(joined->commit());
+        }
+        joiners.push_back(joined);
+    }
+    EXPECT_FALSE(owner->done());
+    for (const auto& joined : joiners)
+        EXPECT_FALSE(joined->done());
+    for (const auto& entry : targets)
+        EXPECT_EQ(entry.first->refCount(entry.second), 4u);
+    unblock();
+    owner->waitDone();
+    // The second joiner submits after quarantine cleanup removed its nodes.
+    ASSERT_TRUE(joiners.back()->commit());
+    for (const auto& joined : joiners) {
+        joined->waitDone();
+        EXPECT_EQ(joined->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        EXPECT_FALSE(joined->success());
+    }
+    EXPECT_EQ(owner->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    for (const auto& entry : targets)
+        EXPECT_EQ(entry.first->refCount(entry.second), 3u);
+    // The corrupt FULL prefix is reclaimed without a watermark or a manual
+    // eviction request, while request-owned targets remain alive for callers.
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    EXPECT_TRUE(environment->cache->tree()->findNode(environment->keys).empty());
+    auto retry = environment->cache->match(environment->keys);
+    EXPECT_EQ(retry.matched_device_blocks, 0u);
+    EXPECT_TRUE(retry.async_context == nullptr || retry.async_context->empty());
+
+    for (const auto& entry : targets) {
+        entry.first->decRef(entry.second);  // owner request
+        entry.first->decRef(entry.second);  // first joiner request
+        entry.first->decRef(entry.second);  // second joiner request
+    }
+    joiners.clear();
+    owner.reset();
+    result.async_context.reset();
+    // Recomputed content can be cached under the same keys immediately.
+    environment->request_blocks.clear();
+    environment->insertRequestPath();
+    auto recomputed = environment->cache->match(environment->keys);
+    EXPECT_EQ(recomputed.matched_device_blocks, options.path_length);
+    environment->releaseMatch(recomputed);
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+TEST(BlockTreeLoaderTest, ProtectedQueueExpiryKeepsUnreadHostAndDiskSourcesReusable) {
+    if (!cudaAvailable())
+        GTEST_SKIP() << "CUDA not available";
+    for (Tier source : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(source));
+        FullSWAEnvironmentOptions options;
+        options.path_length = 1;
+        auto environment = FullSWAEnvironment::create(options);
+        ASSERT_NE(environment, nullptr);
+        environment->insertRequestPath();
+        environment->releaseRequestRefs();
+        environment->demoteAll(Tier::DEVICE);
+        if (source == Tier::DISK)
+            environment->demoteAll(Tier::HOST);
+        for (auto& group : environment->groups)
+            group->enable_crc_ = true;
+        const auto copies = environment->scripted_per_rank_transfer_engine->submittedBatchCount();
+        environment->cache->loader_.load_task_runner_.host_timeout_ms_ = -1;
+        environment->cache->loader_.load_task_runner_.disk_timeout_ms_ = -1;
+        auto result = environment->cache->match(environment->keys);
+        auto context = result.async_context;
+        ASSERT_NE(context, nullptr);
+        std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> targets;
+        for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+            std::vector<BlockIdxType> blocks;
+            for (const auto& pool : environment->groups[context->loadDescs()[i].group_set_id]->devicePools()) {
+                const auto ids = pool->malloc(1).value();
+                pool->incRef(ids);
+                blocks.push_back(ids.front());
+                targets.emplace_back(pool, ids.front());
+            }
+            context->setTargetBlocks(i, std::move(blocks));
+        }
+        ASSERT_TRUE(context->commit());
+        context->waitDone();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), copies);
+        for (const auto& resource : environment->resourcesForPathNode(0)) {
+            EXPECT_FALSE(resource.integrity_quarantined);
+            EXPECT_TRUE(resource.isMatchUsable());
+            EXPECT_TRUE(resource.hasTier(source));
+        }
+        auto retry = environment->cache->match(environment->keys);
+        ASSERT_NE(retry.async_context, nullptr);
+        EXPECT_EQ(retry.async_context->loadDescs().size(), context->loadDescs().size());
+        EXPECT_TRUE(retry.async_context->abortPending());
+        for (const auto& [pool, block] : targets) {
+            EXPECT_EQ(pool->refCount(block), 1u);
+            pool->decRef(block);
+        }
+        environment->reclaimAll();
+        environment->expectFullyReclaimed();
+    }
+}
+
+TEST(BlockTreeLoaderTest, IntegrityFailureQuarantinesSourcesAndFailsOwnerAndTwoJoiners) {
+    expectQuarantinedOwnerAndJoiners(Tier::HOST, false, ErrorCode::CACHE_INTEGRITY_ERROR);
+}
+
+TEST(BlockTreeLoaderTest, ProtectedHostLoadExecutionFailureStillFailsOwnerAndTwoJoinersClosed) {
+    expectQuarantinedOwnerAndJoiners(Tier::HOST, true, ErrorCode::EXECUTION_EXCEPTION);
+}
+
+TEST(BlockTreeLoaderTest, ProtectedDiskLoadExecutionFailureStillFailsOwnerAndTwoJoinersClosed) {
+    expectQuarantinedOwnerAndJoiners(Tier::DISK, true, ErrorCode::EXECUTION_EXCEPTION);
 }
 
 }  // namespace

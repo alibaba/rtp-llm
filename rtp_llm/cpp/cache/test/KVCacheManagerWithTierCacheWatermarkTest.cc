@@ -678,6 +678,22 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesO
             EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources_before_failure[descriptor.group_set_id]);
         }
 
+        recording_engine->clearScriptedResults();
+        if (protected_records) {
+            EXPECT_FALSE(snapshotPathResources(*cache, seed.cache_keys).has_value());
+            expectPoolSnapshotsEq(initial_lower, snapshotLowerPools(*cache, GetParam()));
+            for (size_t id = 0; id < cache->groupSets().size(); ++id) {
+                EXPECT_FALSE(cache->groupSets()[id]->hostPool()->isAllocated(host_sources_before_failure[id]));
+                EXPECT_EQ(cache->groupSets()[id]->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+                EXPECT_EQ(cache->groupSets()[id]->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+            }
+            ASSERT_NO_FATAL_FAILURE(expectDiscardedPrefixMissAndRecompute(seed.cache_keys, recording_engine));
+            const auto submits_before_reclaim = recording_engine->submittedDescriptorCount();
+            ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
+            EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before_reclaim);
+            return;
+        }
+
         auto after_host_failure = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(after_host_failure.has_value());
         ASSERT_EQ(after_host_failure->size(), 1u);
@@ -698,15 +714,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesO
             EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
-
-        recording_engine->clearScriptedResults();
-        if (protected_records) {
-            ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, recording_engine));
-            const auto submits_before_reclaim = recording_engine->submittedDescriptorCount();
-            ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
-            EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before_reclaim);
-            return;
-        }
 
         // Without CRC, the preserved HOST copy remains manager-serviceable
         // before the demotion retry. A successful load consumes that HOST copy,

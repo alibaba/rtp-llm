@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
@@ -19,11 +20,13 @@
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
@@ -711,6 +714,8 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     EXPECT_TRUE(group_set->usesPhysicalPayloadGeometry());
     EXPECT_EQ(group_set->payloadBytes(), 160u);
     EXPECT_EQ(group_set->hostPool()->payloadBytes(), 160u);
+    EXPECT_EQ(group_set->crcEnabled(), CrcBlockCopyBatch::available());
+    EXPECT_EQ(group_set->storageBytes(), CrcBlockCopyBatch::available() ? 176u : 160u);
 
     for (int layer = 0; layer < 3; ++layer) {
         const auto resolved = backend->resolve(layer, "default", src);
@@ -734,6 +739,24 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
         expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
                             bytes[static_cast<size_t>(layer)],
                             patterns[static_cast<size_t>(layer)]);
+    }
+
+    if (CrcBlockCopyBatch::available()) {
+        // This byte lies beyond the logical 32-byte stride of the target tag.
+        // Its corruption must reject the entire MTP backing before any scatter.
+        auto* host_data = static_cast<uint8_t*>(group_set->hostPool()->blockBuffer(*host_block).addr);
+        host_data[159] ^= 1;
+        for (int layer = 0; layer < 3; ++layer) {
+            writeDevicePattern(
+                allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0xa5);
+        }
+        const auto status = cache->executeTransferWithError(block_transfer_engine_test::makeTransferTask(
+            {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}));
+        EXPECT_EQ(status.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        for (int layer = 0; layer < 3; ++layer) {
+            expectDevicePattern(
+                allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0xa5);
+        }
     }
 
     group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::STORE);
@@ -2165,6 +2188,11 @@ TEST_F(BlockTreeCacheFactoryTest, DerivesEachLocalTierFromItsOwnSwitch) {
                     ASSERT_NE(group_set, nullptr);
                     EXPECT_EQ(group_set->hostPool() != nullptr, host_on);
                     EXPECT_EQ(group_set->diskPool() != nullptr, disk_on);
+                    const bool expected_crc = CrcBlockCopyBatch::available() && (host_on || disk_on);
+                    EXPECT_EQ(group_set->crcEnabled(), expected_crc);
+                    EXPECT_EQ(group_set->storageBytes(),
+                              expected_crc ? CrcBlockCopyBatch::encodedBytes(group_set->payloadBytes()) :
+                                             group_set->payloadBytes());
                 }
             }
         }
@@ -2336,6 +2364,402 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
         group->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);
         group->diskPool()->decTreeRef(disk_block, BlockTreeRefType::STORE);
+    }
+}
+
+void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& expected_crc, bool with_disk = false, int expected_device = -1) {
+    auto groups                                  = config.groups();
+    groups.front().policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
+    groups.front().policy.charge_to_paged_budget = false;
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_residency");
+    KVCacheConfig                            options;
+    options.enable_memory_cache    = true;
+    options.memory_cache_size_mb   = 1;
+    options.enable_disk_cache      = with_disk;
+    options.disk_cache_size_mb     = 1;
+    options.disk_cache_paths       = disk_dir.path;
+    options.disk_cache_buffered_io = true;
+#if USING_CUDA
+    const auto expect_device = [&] {
+        if (expected_device >= 0) {
+            int current = -1;
+            ASSERT_EQ(cudaGetDevice(&current), cudaSuccess);
+            ASSERT_EQ(current, expected_device);
+        }
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_device());
+#endif
+    auto cache                     = createBlockTreeCache(config, options, allocator);
+#if USING_CUDA
+    // Workspace construction selects its CRC GPU. This catches accidentally
+    // creating the pure-CPU backing's workspace on device zero.
+    ASSERT_NO_FATAL_FAILURE(expect_device());
+#endif
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), expected_crc.size());
+    std::vector<block_tree_cache_test::MultiNodeBlocks> blocks;
+    std::vector<BlockIdxType>                           host_blocks;
+    std::vector<TransferDescriptor>                     stores, loads;
+    for (size_t index = 0; index < cache->groupSets().size(); ++index) {
+        const auto& group = cache->groupSets()[index];
+        EXPECT_EQ(group->crcEnabled(), expected_crc[index]);
+        EXPECT_EQ(group->storageBytes(),
+                  expected_crc[index] ? CrcBlockCopyBatch::encodedBytes(group->payloadBytes()) : group->payloadBytes());
+        blocks.push_back(block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1));
+        ASSERT_EQ(blocks.back().size(), 1u);
+        host_blocks.push_back(group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::STORE));
+        ASSERT_NE(host_blocks.back(), NULL_BLOCK_IDX);
+        stores.push_back(TransferDescriptor::deviceToHost(index, blocks.back().front(), host_blocks.back()));
+        loads.push_back(TransferDescriptor::hostToDevice(index, host_blocks.back(), blocks.back().front()));
+    }
+    const auto visit = [&](auto operation, int fill_pattern, size_t only_group = std::numeric_limits<size_t>::max()) {
+        for (size_t index = 0; index < cache->groupSets().size(); ++index) {
+            if (only_group != std::numeric_limits<size_t>::max() && index != only_group)
+                continue;
+            const auto& group = cache->groupSets()[index];
+            for (size_t member = 0; member < group->devicePools().size(); ++member) {
+                const auto& pool        = group->devicePools()[member];
+                const auto  layer_count = group->topologyPtr()->layerIdsForGroup(group->groupTags()[member]).size();
+                for (size_t layer = 0; layer < layer_count; ++layer) {
+                    const auto buffers =
+                        pool->convertIndexToBuffer(static_cast<int>(layer), blocks[index].front()[member]);
+                    for (size_t kind = 0; kind < buffers.size(); ++kind) {
+                        const uint8_t pattern =
+                            fill_pattern >= 0 ? fill_pattern : 0x31 + index * 47 + member * 19 + layer * 7 + kind * 3;
+                        operation(buffers[kind], pattern);
+                    }
+                }
+            }
+        }
+    };
+    const auto fill = [](const BlockInfo& buffer, uint8_t pattern) {
+        if (buffer.is_cuda) {
+            writeDevicePattern(buffer.addr, buffer.size_bytes, pattern);
+        } else {
+            std::memset(buffer.addr, pattern, buffer.size_bytes);
+        }
+    };
+    const auto expect = [](const BlockInfo& buffer, uint8_t pattern) {
+        if (buffer.is_cuda) {
+            expectDevicePattern(buffer.addr, buffer.size_bytes, pattern);
+        } else {
+            const auto* data = static_cast<const uint8_t*>(buffer.addr);
+            EXPECT_TRUE(
+                std::all_of(data, data + buffer.size_bytes, [pattern](uint8_t byte) { return byte == pattern; }));
+        }
+    };
+    ASSERT_NO_FATAL_FAILURE(visit(fill, -1));
+    ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(stores)));
+    ASSERT_NO_FATAL_FAILURE(visit(fill, 0));
+    ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(loads)));
+    ASSERT_NO_FATAL_FAILURE(visit(expect, -1));
+
+    if (with_disk) {
+        std::vector<BlockIdxType> disk_blocks;
+        for (size_t index = 0; index < cache->groupSets().size(); ++index) {
+            const auto& group = cache->groupSets()[index];
+            disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::STORE));
+            ASSERT_NE(disk_blocks.back(), NULL_BLOCK_IDX);
+            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                {TransferDescriptor::hostToDisk(index, host_blocks[index], disk_blocks.back())})));
+        }
+        ASSERT_NO_FATAL_FAILURE(visit(fill, 0));
+        for (size_t index = 0; index < cache->groupSets().size(); ++index) {
+            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                {TransferDescriptor::diskToDevice(index, disk_blocks[index], blocks[index].front())})));
+            cache->groupSets()[index]->releaseSingleBlock(Tier::DISK, disk_blocks[index], BlockTreeRefType::STORE);
+        }
+        ASSERT_NO_FATAL_FAILURE(visit(expect, -1));
+    }
+
+    for (size_t index = 0; index < expected_crc.size(); ++index) {
+        if (!expected_crc[index])
+            continue;
+        const auto& group = cache->groupSets()[index];
+        auto* record = static_cast<uint8_t*>(group->hostPool()->blockBuffer(host_blocks[index]).addr);
+        std::vector<size_t> corrupt_offsets{group->storageBytes() - sizeof(uint32_t)};
+        visitDeviceHostCopyTiles(*group, blocks[index].front(), [&](const BlockInfo&, size_t offset, size_t, size_t) {
+            corrupt_offsets.push_back(offset);
+        });
+        for (size_t offset : corrupt_offsets) {
+            SCOPED_TRACE("group=" + std::to_string(index) + " corrupt_offset=" + std::to_string(offset));
+            record[offset] ^= 1;
+            ASSERT_NO_FATAL_FAILURE(visit(fill, 0xa5, index));
+            const auto error = cache->executeTransferWithError(block_transfer_engine_test::makeTransferTask({loads[index]}));
+            EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+            ASSERT_NO_FATAL_FAILURE(visit(expect, 0xa5, index));
+            record[offset] ^= 1;
+            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({loads[index]})));
+            ASSERT_NO_FATAL_FAILURE(visit(expect, -1, index));
+        }
+    }
+    for (size_t index = 0; index < cache->groupSets().size(); ++index) {
+        const auto& group = cache->groupSets()[index];
+        group->releaseSingleBlock(Tier::HOST, host_blocks[index], BlockTreeRefType::STORE);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, blocks[index]);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HostResidentBackingUsesDefaultCrcProtection) {
+    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeSingleConfig(), {CrcBlockCopyBatch::available()}, true));
+}
+
+#if USING_CUDA
+TEST_F(BlockTreeCacheFactoryTest, HostResidentCrcCapturesNonzeroConstructionDevice) {
+    int devices = 0;
+    ASSERT_EQ(cudaGetDeviceCount(&devices), cudaSuccess);
+    if (!CrcBlockCopyBatch::available() || devices < 2)
+        GTEST_SKIP() << "requires CUDA13 and two visible GPUs";
+    int original = 0;
+    ASSERT_EQ(cudaGetDevice(&original), cudaSuccess);
+    struct RestoreDevice {
+        int device;
+        ~RestoreDevice() { cudaSetDevice(device); }
+    } restore{original};
+    ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
+    // Factory workspaces capture GPU 1; task workers start on GPU 0.
+    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeSingleConfig(), {true}, true, 1));
+}
+#endif
+
+TEST_F(BlockTreeCacheFactoryTest, MixedResidencyBackingKeepsOneProtectedRecord) {
+    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeCompatibleFullGroupsConfig(), {CrcBlockCopyBatch::available()}, true));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HostAndGpuGroupsBothUseDefaultCrcProtection) {
+    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeHybridConfig(), {CrcBlockCopyBatch::available(), CrcBlockCopyBatch::available()}));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, LastOfNineCorruptBackingsFailsLoadAndReleasesEveryBatch) {
+    if (!CrcBlockCopyBatch::available())
+        GTEST_SKIP() << "CUDA13 CRC backend unavailable";
+    for (Tier source : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(source));
+        auto config = test::makeSimpleMhaCacheConfig(2, 32, 4, DataType::TYPE_FP16, 1, 8);
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("crc_nine_backings");
+        KVCacheConfig options;
+        options.enable_device_cache = true;
+        options.enable_memory_cache = true;
+        options.memory_cache_size_mb = 1;
+        options.memory_cache_max_descriptors_per_transfer_batch = 8;
+        options.enable_disk_cache = source == Tier::DISK;
+        options.disk_cache_size_mb = 1;
+        options.disk_cache_paths = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        options.disk_cache_staging_block_count = 16;
+        auto cache = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        const auto& group = cache->groupSets().front();
+        ASSERT_TRUE(group->crcEnabled());
+        using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
+        for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK})
+            Peer::setTierWatermarkForTest(*cache, tier, 0.9, 1.0);
+        std::vector<size_t> initial_used;
+        for (const auto& pool : group->devicePools())
+            initial_used.push_back(pool->usedBlocksNum());
+        auto seeds = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 9);
+        ASSERT_EQ(seeds.size(), 9u);
+        auto lower = group->allocateBlocks(9, source, BlockTreeRefType::CACHE);
+        ASSERT_TRUE(lower.has_value());
+        CacheKeysType keys;
+        std::vector<std::vector<GroupSetResource>> resources(9, std::vector<GroupSetResource>(1));
+        std::vector<TransferDescriptor> stores;
+        for (size_t i = 0; i < 9; ++i) {
+            keys.push_back(100 + i);
+            visitDeviceHostCopyTiles(*group, seeds[i], [&](const BlockInfo& buffer, size_t, size_t, size_t) {
+                writeDevicePattern(buffer.addr, buffer.size_bytes, uint8_t(17 + i));
+            });
+            resources[i][0].setBlocks(source, {(*lower)[i]});
+            stores.push_back(source == Tier::HOST ? TransferDescriptor::deviceToHost(0, seeds[i], (*lower)[i]) :
+                                                   TransferDescriptor::deviceToDisk(0, seeds[i], (*lower)[i]));
+        }
+        if (source == Tier::DISK) {
+            // DEVICE->DISK intentionally accepts one descriptor per task.
+            // Seed records individually; the restore below still uses 8 + 1.
+            for (const auto& store : stores) {
+                ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({store})));
+            }
+        } else {
+            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(stores)));
+        }
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, seeds);
+        if (source == Tier::HOST) {
+            auto* data = static_cast<uint8_t*>(group->hostPool()->blockBuffer(lower->back()).addr);
+            data[0] ^= 1;
+        } else {
+            std::vector<uint8_t> data(group->diskPool()->strideBytes());
+            ASSERT_EQ(group->diskPool()->read({lower->back()}, {data.data()}, data.size()), BlockIOStatus::OK);
+            data[0] ^= 1;
+            ASSERT_EQ(group->diskPool()->write({lower->back()}, {data.data()}, data.size()), BlockIOStatus::OK);
+        }
+        ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, keys, resources));
+        auto result = cache->match(keys);
+        auto context = result.async_context;
+        ASSERT_NE(context, nullptr);
+        ASSERT_EQ(context->loadDescs().size(), 9u);
+        auto targets = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 9);
+        ASSERT_EQ(targets.size(), 9u);
+        for (size_t i = 0; i < 9; ++i)
+            context->setTargetBlocks(i, targets[i]);
+        ASSERT_TRUE(context->commit());
+        context->waitDone();
+        Peer::waitForTaskPoolIdleForTest(*cache);
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        // A previous batch can have copied bytes, but no part of this failed
+        // request may publish a DEVICE entry. Quarantine cleanup is automatic.
+        EXPECT_TRUE(cache->tree()->findNode(keys).empty());
+        for (const auto& blocks : targets)
+            for (size_t member = 0; member < blocks.size(); ++member) {
+                EXPECT_EQ(group->devicePools()[member]->refCount(blocks[member]), 1u);
+                EXPECT_EQ(group->devicePools()[member]->treeRefCount(blocks[member]), 0u);
+            }
+        for (BlockIdxType block : *lower)
+            EXPECT_FALSE(source == Tier::HOST ? group->hostPool()->isAllocated(block) : group->diskPool()->isAllocated(block));
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, targets);
+        for (size_t member = 0; member < group->devicePools().size(); ++member)
+            EXPECT_EQ(group->devicePools()[member]->usedBlocksNum(), initial_used[member]);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLocalTierBudgets) {
+    const auto config        = test::makeSimpleMhaCacheConfig(2, 8, 64, DataType::TYPE_FP16, 1, 8);
+    const bool crc_available = CrcBlockCopyBatch::available();
+    for (const auto& tiers : {std::pair<bool, bool>{true, false}, {false, true}, {true, true}}) {
+        const auto [host_on, disk_on] = tiers;
+        SCOPED_TRACE("host=" + std::to_string(host_on) + " disk=" + std::to_string(disk_on));
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_budget");
+        KVCacheConfig                            options;
+        options.enable_memory_cache    = host_on;
+        options.memory_cache_size_mb   = 1;
+        options.enable_disk_cache      = disk_on;
+        options.disk_cache_size_mb     = 1;
+        options.disk_cache_paths       = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        auto cache                     = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto& group = cache->groupSets().front();
+        ASSERT_EQ(group->payloadBytes(), 4096u);
+        EXPECT_EQ(group->crcEnabled(), crc_available);
+        EXPECT_EQ(group->storageBytes(), crc_available ? 4112u : 4096u);
+        const size_t expected_stride = crc_available ? 8192u : 4096u;
+        // Each lower tier has its own 1 MiB budget, including one reserved block.
+        const size_t expected_usable = (1024u * 1024u) / expected_stride - 1;
+        ASSERT_EQ(group->hostPool() != nullptr, host_on);
+        ASSERT_EQ(group->diskPool() != nullptr, disk_on);
+        if (host_on) {
+            EXPECT_EQ(group->hostPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->hostPool()->strideBytes(), expected_stride);
+            EXPECT_EQ(group->hostPool()->totalBlocksNum(), expected_usable);
+            EXPECT_EQ(group->hostPool()->freeBlocksNum(), expected_usable);
+        }
+        if (disk_on) {
+            EXPECT_EQ(group->diskPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->diskPool()->strideBytes(), expected_stride);
+            EXPECT_EQ(group->diskPool()->totalBlocksNum(), expected_usable);
+            EXPECT_EQ(group->diskPool()->freeBlocksNum(), expected_usable);
+        }
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrityProtection) {
+    const auto config        = makeSingleConfig();
+    const bool crc_available = CrcBlockCopyBatch::available();
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tier == Tier::HOST ? "host-only" : "disk-only");
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_transfer");
+        KVCacheConfig                            options;
+        options.enable_memory_cache    = tier == Tier::HOST;
+        options.memory_cache_size_mb   = 1;
+        options.enable_disk_cache      = tier == Tier::DISK;
+        options.disk_cache_size_mb     = 1;
+        options.disk_cache_paths       = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        auto cache                     = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto& group = cache->groupSets().front();
+        EXPECT_EQ(group->crcEnabled(), crc_available);
+        const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+        ASSERT_EQ(device_blocks.size(), 1u);
+        ASSERT_EQ(device_blocks.front().size(), 1u);
+        const BlockIdxType lower_block = group->allocateSingleBlock(tier, BlockTreeRefType::STORE);
+        ASSERT_NE(lower_block, NULL_BLOCK_IDX);
+        const auto   device_block = device_blocks.front().front();
+        const auto   target_group = allocator->cacheGroups().front();
+        const size_t layer_bytes  = target_group->config().kvBlockStrideBytes();
+        auto*        first_layer  = static_cast<uint8_t*>(target_group->convertIndexToAddr(0, device_block).kv_addr);
+        auto*        second_layer = static_cast<uint8_t*>(target_group->convertIndexToAddr(1, device_block).kv_addr);
+        writeDevicePattern(first_layer, layer_bytes, 0x35);
+        writeDevicePattern(second_layer, layer_bytes, 0x79);
+        const auto store =
+            tier == Tier::HOST ?
+                TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.front(), lower_block) :
+                TransferDescriptor::deviceToDisk(group->groupSetId(), device_blocks.front(), lower_block);
+        const auto load =
+            tier == Tier::HOST ?
+                TransferDescriptor::hostToDevice(group->groupSetId(), lower_block, device_blocks.front()) :
+                TransferDescriptor::diskToDevice(group->groupSetId(), lower_block, device_blocks.front());
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({store})));
+
+        std::vector<uint8_t> record(group->storageBytes());
+        if (tier == Tier::HOST) {
+            std::memcpy(record.data(), group->hostPool()->blockBuffer(lower_block).addr, record.size());
+        } else {
+            ASSERT_EQ(group->diskPool()->read(lower_block, record.data(), record.size()), BlockIOStatus::OK);
+        }
+        ASSERT_EQ(record.front(), 0x35);
+        record.front() ^= 0xff;
+        const auto writeRecord = [&] {
+            if (tier == Tier::HOST) {
+                std::memcpy(group->hostPool()->blockBuffer(lower_block).addr, record.data(), record.size());
+            } else {
+                ASSERT_EQ(group->diskPool()->write(lower_block, record.data(), record.size()), BlockIOStatus::OK);
+            }
+        };
+        ASSERT_NO_FATAL_FAILURE(writeRecord());
+        writeDevicePattern(first_layer, layer_bytes, 0);
+        writeDevicePattern(second_layer, layer_bytes, 0);
+        const auto result = cache->executeTransferWithError(block_transfer_engine_test::makeTransferTask({load}));
+        if (crc_available) {
+            EXPECT_EQ(result.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+            expectDevicePattern(first_layer, layer_bytes, 0);
+            expectDevicePattern(second_layer, layer_bytes, 0);
+        } else {
+            // Unsupported builds retain the ordinary copy path and do not interpret a footer.
+            EXPECT_TRUE(result.ok());
+            expectDevicePattern(first_layer, 1, 0xca);
+            expectDevicePattern(first_layer + 1, layer_bytes - 1, 0x35);
+            expectDevicePattern(second_layer, layer_bytes, 0x79);
+        }
+        record.front() ^= 0xff;
+        ASSERT_NO_FATAL_FAILURE(writeRecord());
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load})));
+        expectDevicePattern(first_layer, layer_bytes, 0x35);
+        expectDevicePattern(second_layer, layer_bytes, 0x79);
+        group->releaseSingleBlock(tier, lower_block, BlockTreeRefType::STORE);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DeviceOnlyDoesNotCreateEncodedStorage) {
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig options;
+    options.enable_memory_cache = false;
+    options.enable_disk_cache   = false;
+    auto cache                  = createBlockTreeCache(config, options, allocator);
+    ASSERT_NE(cache, nullptr);
+    for (const auto& group : cache->groupSets()) {
+        EXPECT_FALSE(group->crcEnabled());
+        EXPECT_EQ(group->storageBytes(), group->payloadBytes());
+        EXPECT_EQ(group->hostPool(), nullptr);
+        EXPECT_EQ(group->diskPool(), nullptr);
     }
 }
 
