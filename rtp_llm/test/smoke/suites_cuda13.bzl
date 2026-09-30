@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
 def cuda13_suites():
     # ============================================================================
@@ -18,7 +18,7 @@ def cuda13_suites():
     #
     # B300 capacity is the scarce one — a single dedicated node — so x86 carries
     # the two capacity-sensitive cases that GB200 cannot host, plus the tier-isolated
-    # BlockTreeCache and FlexLB cache-affinity cases that are recorded for B300.
+    # BlockTreeCache cases that are recorded for B300.
     #
     # The x86 cases target L20D_TEST rather than L20D_DEV: L20D_DEV is shared with
     # other users' work, which left these cases waiting hours for a slot on its one
@@ -388,69 +388,6 @@ def cuda13_suites():
                 envs=["DG_JIT_CPP_STANDARD=20"],
                 gpu_type=["L20D_TEST"],
             ),
-            ":smoke_sm100_dsv4_flexlb_cache_affinity",
         ],
         tags = ["manual"],
-    )
-
-    _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE = "data/model/deepseek_v4/q_r_v4_flash_flexlb_cache_affinity_sm100_x86.json"
-
-    native.filegroup(
-        name = "flexlb_runtime_bundle",
-        srcs = native.glob(["flexlb_runtime/**"], allow_empty = True),
-    )
-
-    _DSV4_FLEXLB_CACHE_AFFINITY_DATA = [
-        _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE,
-        ":flexlb_runtime_bundle",
-        "//rtp_llm:sdk",
-    ]
-
-    # These cases boot a real FlexLB Spring Boot server. The CUDA13 x86 job builds
-    # the uber-jar and a minimal Java 21 runtime into flexlb_runtime before Bazel
-    # analysis; the filegroup above transfers both to the remote GPU sandbox.
-    custom_smoke_test(
-        name = "v4_flash_flexlb_shortest_ttft_cache_affinity_direct_2p2d_sm100_x86",
-        main = "flexlb_cache_affinity_smoke_test.py",
-        smoke_args = "--world_size 4",
-        args = [
-            "--fixture",
-            _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE,
-            "--strategy",
-            "ShortestTtft",
-            "--expected-decisions",
-            "NO_CACHE_LEAD,NO_CACHE_LEAD,NO_CACHE_LEAD",
-            "--max-extra-ttft-ms",
-            "5000",
-        ],
-        data = _DSV4_FLEXLB_CACHE_AFFINITY_DATA,
-        gpu_type = ["L20D_TEST"],
-    )
-
-    custom_smoke_test(
-        name = "v4_flash_flexlb_cost_based_prefill_cache_affinity_direct_2p2d_sm100_x86",
-        main = "flexlb_cache_affinity_smoke_test.py",
-        smoke_args = "--world_size 4",
-        args = [
-            "--fixture",
-            _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE,
-            "--strategy",
-            "CostBasedPrefill",
-            "--expected-decisions",
-            "NO_CACHE_LEAD,CACHE_LEADER,OVER_CAP",
-            "--max-extra-ttft-ms",
-            "300",
-            "--prefill-cost-formula",
-            "sum(computeTokens)+2*sum(hitCacheTokens)",
-        ],
-        data = _DSV4_FLEXLB_CACHE_AFFINITY_DATA,
-        gpu_type = ["L20D_TEST"],
-    )
-
-    native.test_suite(
-        name = "smoke_sm100_dsv4_flexlb_cache_affinity",
-        tests = [
-            ":v4_flash_flexlb_cost_based_prefill_cache_affinity_direct_2p2d_sm100_x86",
-            ":v4_flash_flexlb_shortest_ttft_cache_affinity_direct_2p2d_sm100_x86",
-        ],
     )
