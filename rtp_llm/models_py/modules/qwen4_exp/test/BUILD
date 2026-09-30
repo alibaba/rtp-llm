@@ -106,6 +106,13 @@ py_test(
 )
 
 py_test(
+    name = "qsa_topk_triton_test",
+    srcs = ["qsa_topk_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "qsa_decode_graph_test",
     srcs = ["qsa_decode_graph_test.py"],
     deps = ["//rtp_llm:testlib"],
