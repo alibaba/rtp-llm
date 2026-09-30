@@ -391,16 +391,3 @@ def cuda13_suites():
         ],
         tags = ["manual"],
     )
-
-    _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE = "data/model/deepseek_v4/q_r_v4_flash_flexlb_cache_affinity_sm100_x86.json"
-
-    native.filegroup(
-        name = "flexlb_runtime_bundle",
-        srcs = native.glob(["flexlb_runtime/**"], allow_empty = True),
-    )
-
-    _DSV4_FLEXLB_CACHE_AFFINITY_DATA = [
-        _DSV4_FLEXLB_CACHE_AFFINITY_FIXTURE,
-        ":flexlb_runtime_bundle",
-        "//rtp_llm:sdk",
-    ]
