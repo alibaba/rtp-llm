@@ -204,6 +204,7 @@ filegroup(
         "modules/dsv4/v41_routed.py",
         "modules/dsv4/v41_moe.py",
         "modules/dsv4/v41_dispatch.py",
+        "modules/dsv4/v41_collective.py",
         "modules/dsv4/moe/strategies/base.py",
         "modules/dsv4/moe/strategies/v41_grouped_fp4.py",
         "modules/dsv4/_v41_mxfp8_triton.py",
