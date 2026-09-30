@@ -133,7 +133,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
 
     def forward_with_cache_insert(
         self, q, compressed_kv, k_pe, kv_cache, layer_id,
-        slot_mapping, cache_scale, cache_scale_value,
+        slot_mapping, cache_scale, cache_scale_value, cache_written,
     ):
         """Fuse ordinary FP8 MLA operand conversion with current KV insertion.
 
@@ -174,6 +174,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 cache, slot_mapping, cache_scale, cache_scale,
                 cache_scale, cache_scale, assume_unit_scales=True,
             )
+        cache_written()
         return self.prefill_wrapper.run(q_fp8, k_fp8, v_fp8).view(
             -1, self.num_heads, self.v_head_dim
         )

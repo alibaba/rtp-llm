@@ -292,11 +292,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 self.rope_params.slot_mapping,
                 self.kv_cache_write_op.scale,
                 self.kv_cache_write_op.scale_value,
+                lambda: common.apply_write_cache_store(
+                    self.write_cache_store_impl, self.attn_inputs, kv_cache
+                ),
             )
             if fused_result is not None:
-                common.apply_write_cache_store(
-                    self.write_cache_store_impl, self.attn_inputs, kv_cache
-                )
                 return fused_result
 
         # Write compressed KV and position-encoded K to cache
