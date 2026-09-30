@@ -141,6 +141,9 @@ class Dsv4KvCacheSpecTest(TestCase):
         loader = ModelLoader.__new__(ModelLoader)
         loader._model_weights_info = filtered
         loader._load_config = SimpleNamespace(num_layers=1, database=MagicMock())
+        loader._layer_ids = [0]
+        loader._load_embedding = True
+        loader._load_lm_head = True
         loader._global_weight_aliases = {}
         loader._task_type = TaskType.LANGUAGE_MODEL
         loader._misc_weights_info = []
