@@ -319,14 +319,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
         if self._is_draft_graph():
-            if (
-                not qsa_runtime.is_mtp_draft
-                or hidden_states.shape[0]
-                != self.attn_inputs.input_lengths_device.numel() * 4
-            ):
+            from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+                draft_graph_lanes,
+            )
+
+            if not qsa_runtime.is_mtp_draft:
                 raise RuntimeError(
                     "qwen4_exp draft Graph requires explicit fixed-capacity MTP inputs"
                 )
+            draft_graph_lanes(self.attn_inputs, int(hidden_states.shape[0]))
             return
         qsa_runtime.validate_before_projection(
             indexer=indexer,
@@ -767,6 +768,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
     def _forward_draft_graph(self, qkv, kv_cache, selected_indices):
         from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+            draft_graph_lanes,
             draft_graph_rows,
         )
         from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import (
@@ -777,9 +779,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError("qwen4_exp draft Graph requires BF16 main KV cache")
         tokens = int(qkv.shape[0])
         batch = int(self.attn_inputs.input_lengths_device.numel())
+        lanes = draft_graph_lanes(self.attn_inputs, tokens)
         if (
-            tokens != batch * 4
-            or selected_indices.ndim != 2
+            selected_indices.ndim != 2
             or selected_indices.shape[0] != tokens
             or selected_indices.dtype != torch.int32
         ):
@@ -790,11 +792,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         query = (
             qkv[:, : self.q_width]
             .index_select(0, sources)
-            .view(batch, 4, self.head_num, self.head_dim)
+            .view(batch, lanes, self.head_num, self.head_dim)
             .transpose(1, 2)
             .contiguous()
         )
-        selected = selected_indices.index_select(0, sources).view(batch, 4, -1)
+        selected = selected_indices.index_select(0, sources).view(batch, lanes, -1)
         selected = torch.where(visible.unsqueeze(-1) > 0, selected, -1)
         output = sparse_paged_gqa_attn(
             query,

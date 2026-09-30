@@ -10,6 +10,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
     DraftPrefillGraphReplay,
+    draft_graph_lanes,
     draft_graph_rows,
 )
 
@@ -34,6 +35,34 @@ class DraftPrefillGraphTest(unittest.TestCase):
             ]
             self.assertEqual(positions[valid].tolist(), expected_positions)
             self.assertTrue(torch.all(visible[inputs.input_lengths_device == 0] == 0))
+
+    def test_short_capacity_mapping_and_prewrite_bounds(self):
+        for lanes in (1, 2, 3):
+            lengths = [lanes, 1, 0]
+            inputs = SimpleNamespace(
+                input_lengths_device=torch.tensor(lengths, dtype=torch.int32),
+                prefix_lengths_device=torch.tensor([127, 5, 0], dtype=torch.int32),
+                cu_seqlens_device=torch.tensor(
+                    [0, lanes, lanes + 1, lanes + 1], dtype=torch.int32
+                ),
+            )
+            sources, inverse, valid, _, visible = draft_graph_rows(inputs, 3 * lanes)
+            packed = torch.arange(3 * lanes)
+            recovered = packed.index_select(0, sources).index_select(0, inverse)
+            torch.testing.assert_close(recovered[valid], packed[: lanes + 1])
+            self.assertEqual(visible.shape, (3, lanes))
+        inputs.input_lengths_device = torch.zeros(0, dtype=torch.int32)
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            draft_graph_lanes(inputs, 4)
+        inputs.input_lengths_device = torch.ones(3, dtype=torch.int32)
+        for bad in (0, 5, 15):
+            with self.assertRaisesRegex(RuntimeError, "capacity"):
+                draft_graph_lanes(inputs, bad)
+        hook, groups, delegate = self._replay()
+        hook.token_capacity = 6
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            hook.prepare_cuda_graph(groups)
+        delegate.prepare_cuda_graph.assert_not_called()
 
     def _replay(self, *, device="cpu"):
         lengths = torch.tensor([1, 4, 0], dtype=torch.int32)

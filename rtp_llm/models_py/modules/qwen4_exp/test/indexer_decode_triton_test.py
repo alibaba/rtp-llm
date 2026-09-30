@@ -94,67 +94,136 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         return raw, starts, cosine, sine, gamma, kv, table, state, table.clone()
 
     def test_target_window_parity_and_rollback(self):
-        for prefixes in ([5], [7], [127], [128], [5, 127]):
-            with self.subTest(prefixes=prefixes):
-                raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case(prefixes)
-                original_kv = kv.clone()
-                original_state = state.clone()
-                reference_kv = kv.clone()
-                reference_state = state.clone()
-                cu = torch.arange(
-                    0, (len(prefixes) + 1) * 4, 4, dtype=torch.int32, device=raw.device
-                )
-                write_indexer_cache(
-                    raw, cu, starts, cos, sin, gamma, reference_kv, kt,
-                    reference_state, st, ratio=4, kv_tokens_per_block=128,
-                    state_tokens_per_block=128, norm_eps=1e-6,
-                    rope_is_token_aligned=True,
-                )
-                undo = write_target_window_with_undo_(
-                    raw, starts, cos, sin, gamma, kv, kt, state, st,
-                    norm_eps=1e-6,
-                )
-                torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
-                torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
-                restore_indexer_cache(undo)
-                torch.testing.assert_close(state, original_state, rtol=0, atol=0)
-                torch.testing.assert_close(kv, original_kv, rtol=0, atol=0)
+        for query_len in (1, 2, 3, 4):
+            for prefixes in ([4], [5], [7], [127], [128], [5, 127]):
+                with self.subTest(query_len=query_len, prefixes=prefixes):
+                    raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case(
+                        prefixes
+                    )
+                    batch = len(prefixes)
+                    raw = (
+                        raw.view(batch, 4, 128)[:, :query_len]
+                        .reshape(-1, 128)
+                        .contiguous()
+                    )
+                    cos = (
+                        cos.view(batch, 4, 64)[:, :query_len]
+                        .reshape(-1, 64)
+                        .contiguous()
+                    )
+                    sin = (
+                        sin.view(batch, 4, 64)[:, :query_len]
+                        .reshape(-1, 64)
+                        .contiguous()
+                    )
+                    original_kv = kv.clone()
+                    original_state = state.clone()
+                    reference_kv = kv.clone()
+                    reference_state = state.clone()
+                    cu = torch.arange(
+                        0,
+                        (batch + 1) * query_len,
+                        query_len,
+                        dtype=torch.int32,
+                        device=raw.device,
+                    )
+                    write_indexer_cache(
+                        raw,
+                        cu,
+                        starts,
+                        cos,
+                        sin,
+                        gamma,
+                        reference_kv,
+                        kt,
+                        reference_state,
+                        st,
+                        ratio=4,
+                        kv_tokens_per_block=128,
+                        state_tokens_per_block=128,
+                        norm_eps=1e-6,
+                        rope_is_token_aligned=True,
+                    )
+                    undo = write_target_window_with_undo_(
+                        raw,
+                        starts,
+                        cos,
+                        sin,
+                        gamma,
+                        kv,
+                        kt,
+                        state,
+                        st,
+                        norm_eps=1e-6,
+                    )
+                    torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+                    torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+                    restore_indexer_cache(undo)
+                    torch.testing.assert_close(state, original_state, rtol=0, atol=0)
+                    torch.testing.assert_close(kv, original_kv, rtol=0, atol=0)
 
     def test_target_window_graph_replay_reads_updated_prefix(self):
-        raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case([5])
-        initial_kv = kv.clone()
-        initial_state = state.clone()
-        write_target_window_with_undo_(
-            raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
-        )
-        kv.copy_(initial_kv)
-        state.copy_(initial_state)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            undo = write_target_window_with_undo_(
-                raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
-            )
-        kv.copy_(initial_kv)
-        state.copy_(initial_state)
-        starts.fill_(127)
-        kt[:, 0], kt[:, 1] = kt[:, 1].clone(), kt[:, 0].clone()
-        st[:, 0], st[:, 1] = st[:, 1].clone(), st[:, 0].clone()
-        raw.copy_(torch.randn_like(raw.float()).to(torch.bfloat16))
-        graph.replay()
-        reference_kv = initial_kv.clone()
-        reference_state = initial_state.clone()
-        cu = torch.tensor([0, 4], dtype=torch.int32, device=raw.device)
-        write_indexer_cache(
-            raw, cu, starts, cos, sin, gamma, reference_kv, kt,
-            reference_state, st, ratio=4, kv_tokens_per_block=128,
-            state_tokens_per_block=128, norm_eps=1e-6,
-            rope_is_token_aligned=True,
-        )
-        torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
-        torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
-        restore_indexer_cache(undo)
-        torch.testing.assert_close(state, initial_state, rtol=0, atol=0)
-        torch.testing.assert_close(kv, initial_kv, rtol=0, atol=0)
+        for query_len in (1, 2, 3, 4):
+            with self.subTest(query_len=query_len):
+                raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case(
+                    [5, 126]
+                )
+                raw = raw.view(2, 4, 128)[:, :query_len].reshape(-1, 128).contiguous()
+                cos = cos.view(2, 4, 64)[:, :query_len].reshape(-1, 64).contiguous()
+                sin = sin.view(2, 4, 64)[:, :query_len].reshape(-1, 64).contiguous()
+                initial_kv = kv.clone()
+                initial_state = state.clone()
+                write_target_window_with_undo_(
+                    raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
+                )
+                kv.copy_(initial_kv)
+                state.copy_(initial_state)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    undo = write_target_window_with_undo_(
+                        raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
+                    )
+                for prefixes in ([127, 5], [128, 4], [125, 127]):
+                    kv.copy_(initial_kv)
+                    state.copy_(initial_state)
+                    starts.copy_(
+                        torch.tensor(prefixes, dtype=torch.int32, device=raw.device)
+                    )
+                    kt[:, 0], kt[:, 1] = kt[:, 1].clone(), kt[:, 0].clone()
+                    st[:, 0], st[:, 1] = st[:, 1].clone(), st[:, 0].clone()
+                    raw.copy_(torch.randn_like(raw.float()).to(torch.bfloat16))
+                    graph.replay()
+                    reference_kv = initial_kv.clone()
+                    reference_state = initial_state.clone()
+                    cu = torch.arange(
+                        0,
+                        3 * query_len,
+                        query_len,
+                        dtype=torch.int32,
+                        device=raw.device,
+                    )
+                    write_indexer_cache(
+                        raw,
+                        cu,
+                        starts,
+                        cos,
+                        sin,
+                        gamma,
+                        reference_kv,
+                        kt,
+                        reference_state,
+                        st,
+                        ratio=4,
+                        kv_tokens_per_block=128,
+                        state_tokens_per_block=128,
+                        norm_eps=1e-6,
+                        rope_is_token_aligned=True,
+                    )
+                    torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+                    torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+                    restore_indexer_cache(undo)
+                    torch.testing.assert_close(state, initial_state, rtol=0, atol=0)
+                    torch.testing.assert_close(kv, initial_kv, rtol=0, atol=0)
 
     def _case(self, positions):
         device = torch.device("cuda")

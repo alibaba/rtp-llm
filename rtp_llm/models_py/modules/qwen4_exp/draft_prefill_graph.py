@@ -10,13 +10,23 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 
 
+def draft_graph_lanes(inputs, token_capacity):
+    batch = inputs.input_lengths_device.numel()
+    if not batch or token_capacity % batch or not 1 <= token_capacity // batch <= 4:
+        raise RuntimeError(
+            "QSA draft graph requires one-to-four-token request capacity"
+        )
+    return token_capacity // batch
+
+
 def draft_graph_rows(inputs, token_capacity):
-    """Map packed live tokens to four lanes per request using device metadata."""
+    """Map packed live tokens to fixed request lanes using device metadata."""
     lengths = inputs.input_lengths_device
     prefixes = inputs.prefix_lengths_device
     cu = inputs.cu_seqlens_device
     batch = lengths.numel()
-    offsets = torch.arange(4, device=cu.device, dtype=torch.int64)
+    lanes = draft_graph_lanes(inputs, token_capacity)
+    offsets = torch.arange(lanes, device=cu.device, dtype=torch.int64)
     active = offsets.unsqueeze(0) < lengths.unsqueeze(1)
     sources = cu[:-1].long().unsqueeze(1) + offsets.unsqueeze(0)
     sources = torch.where(active, sources, 0).reshape(-1)
@@ -24,7 +34,7 @@ def draft_graph_rows(inputs, token_capacity):
     request = (rows.unsqueeze(1) >= cu[1:].unsqueeze(0)).sum(1).clamp(max=batch - 1)
     local = rows - cu.long().index_select(0, request)
     packed_valid = rows < cu[-1]
-    inverse = torch.where(packed_valid, request * 4 + local, 0)
+    inverse = torch.where(packed_valid, request * lanes + local, 0)
     positions = prefixes.long().index_select(0, request) + local
     positions = torch.where(packed_valid, positions, 0)
     visible = prefixes.unsqueeze(1) + offsets.unsqueeze(0) + 1
@@ -71,14 +81,15 @@ class DraftPrefillGraphReplay(Mapping):
         ):
             raise RuntimeError("QSA draft graph replay has invalid length geometry")
         expected = [0]
+        lanes = draft_graph_lanes(anchor, self.token_capacity)
         padding_started = False
         positions = []
         for length, prefix in zip(lengths, prefixes):
             if length == 0:
                 padding_started = True
-            elif padding_started or not 1 <= length <= 4 or prefix <= 0:
+            elif padding_started or not 1 <= length <= lanes or prefix <= 0:
                 raise RuntimeError(
-                    "QSA draft graph requires positive live prefixes and 1..4 tokens followed by padding"
+                    "QSA draft graph requires positive live prefixes and lengths within request capacity followed by padding"
                 )
             expected.append(expected[-1] + length)
             positions.extend(range(prefix, prefix + length))

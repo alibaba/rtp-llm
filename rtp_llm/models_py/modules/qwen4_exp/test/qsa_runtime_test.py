@@ -738,15 +738,18 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         raw_keys = torch.randn(q_len, self.D, dtype=torch.bfloat16, device="cuda")
         q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device="cuda")
         original = Qwen4ExpQSARuntimeContext._target_verify_geometry
-        with patch.object(
-            Qwen4ExpQSARuntimeContext,
-            "_target_verify_geometry",
-            autospec=True,
-            side_effect=original,
-        ) as geometry, patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
-            "qsa_paged_indexer_score",
-            return_value=torch.zeros(q_len, 2, device="cuda"),
+        with (
+            patch.object(
+                Qwen4ExpQSARuntimeContext,
+                "_target_verify_geometry",
+                autospec=True,
+                side_effect=original,
+            ) as geometry,
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+                "qsa_paged_indexer_score",
+                return_value=torch.zeros(q_len, 2, device="cuda"),
+            ),
         ):
             context.validate_before_projection(
                 indexer=indexer, token_count=q_len, device=raw_keys.device
@@ -965,13 +968,20 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                             device=device,
                         )
 
-                    with patch.dict(
-                        os.environ,
-                        {"RTP_LLM_QWEN4_DRAFT_WINDOW_WRITER": "1" if fused else "0"},
-                    ), patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
-                        "qsa_paged_indexer_score",
-                        side_effect=score,
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "RTP_LLM_QWEN4_DRAFT_WINDOW_WRITER": (
+                                    "1" if fused else "0"
+                                )
+                            },
+                        ),
+                        patch(
+                            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+                            "qsa_paged_indexer_score",
+                            side_effect=score,
+                        ),
                     ):
                         selected = context.select_draft_incremental_prefill_tokens(
                             q, raw, indexer=indexer, rope_config=rope
@@ -995,6 +1005,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for draft graph replay")
     def test_draft_graph_replays_ragged_lengths_and_new_pages(self):
+        for lanes in (1, 2, 3, 4):
+            with self.subTest(lanes=lanes):
+                self._check_draft_graph_replay(lanes)
+
+    def _check_draft_graph_replay(self, lanes):
         device = torch.device("cuda")
         self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
         self.indexer.k_norm_gamma = torch.randn(128, device=device).bfloat16()
@@ -1013,7 +1028,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             kv,
             state,
             prefixes=[5, 127],
-            lengths=[4, 4],
+            lengths=[lanes, lanes],
             kv_table=kv_table,
             state_table=state_table,
         )
@@ -1026,8 +1041,8 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             inputs.is_s_padded = True
             inputs.input_lengths_device = inputs.input_lengths
             inputs.prefix_lengths_device = inputs.prefix_lengths
-        q = torch.randn(8, 2, 128, device=device, dtype=torch.bfloat16)
-        raw = torch.randn(8, 128, device=device, dtype=torch.bfloat16)
+        q = torch.randn(2 * lanes, 2, 128, device=device, dtype=torch.bfloat16)
+        raw = torch.randn(2 * lanes, 128, device=device, dtype=torch.bfloat16)
 
         def forward():
             result = ctx.select_draft_graph_tokens(
@@ -1046,9 +1061,9 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         with torch.cuda.graph(graph):
             selected = forward()
         for prefixes, lengths, swap in (
-            ([7, 127], [1, 4], False),
-            ([125, 5], [3, 2], True),
-            ([127, 127], [4, 4], False),
+            ([7, 127], [1, lanes], False),
+            ([125, 5], [min(3, lanes), min(2, lanes)], True),
+            ([127, 127], [lanes, lanes], False),
         ):
             with self.subTest(prefixes=prefixes, lengths=lengths):
                 kv.copy_(kv_initial)
@@ -1158,9 +1173,13 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             ),
         )
         for expected, context, case_q, case_raw in cases:
-            with self.subTest(expected=expected), patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime." "write_indexer_cache"
-            ) as writer:
+            with (
+                self.subTest(expected=expected),
+                patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime."
+                    "write_indexer_cache"
+                ) as writer,
+            ):
                 kv_before = context.indexer_kv_cache.kv_cache_base.clone()
                 state_before = context.indexer_state_cache.kv_cache_base.clone()
                 with self.assertRaisesRegex(RuntimeError, expected):
