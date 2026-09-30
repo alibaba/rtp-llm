@@ -1120,7 +1120,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFallback) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
     auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -1152,8 +1152,13 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     const BlockIdList target_blocks{20};
     device_pool->incRef(target_blocks);
     context->setTargetBlocks(0, target_blocks);
-    EXPECT_FALSE(context->commit());
+    // Accept the context so the caller can recover from the failed cache load.
+    EXPECT_TRUE(context->commit());
+    context->waitDone();
     EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
+    EXPECT_NE(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
     path = cache->tree()->findNode({100, 200});

@@ -1878,6 +1878,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForEmptyMemoryRequest
     EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+    EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::INVALID_REQUEST);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestType) {
@@ -1906,11 +1907,16 @@ public:
     std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         ++submitted_batch_count;
         submitted_descriptor_count += task.descriptors().size();
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+        for (size_t i = 0; i < copy_errors.size(); ++i) {
+            task.descriptors().at(i).markCopyError(copy_errors[i]);
+        }
+        return std::make_shared<CompletedAsyncContext>(completion_error);
     }
 
     size_t submitted_batch_count{0};
     size_t submitted_descriptor_count{0};
+    std::vector<CacheCopyError> copy_errors;
+    ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
@@ -1931,6 +1937,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
         FunctionResponsePB response;
         EXPECT_TRUE(manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::INVALID_REQUEST);
         EXPECT_EQ(engine->submitted_batch_count, 0u);
     }
     size_t submitted = 0;
@@ -1939,6 +1946,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
         FunctionResponsePB response;
         EXPECT_TRUE(manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::NONE);
         EXPECT_EQ(engine->submitted_batch_count, ++submitted);
     }
 }
@@ -1982,6 +1990,39 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
     EXPECT_EQ(engine->submitted_batch_count, 1u);
     EXPECT_EQ(engine->submitted_descriptor_count, 2u);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIndices) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine              = std::make_shared<RecordingBatchTransferEngine>();
+    engine->completion_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure");
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    FunctionRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        *request.mutable_mem_request(),
+        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
+                     std::chrono::seconds(30)),
+        manager->blockTreeCache()->groupSets()));
+
+    engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::CRC_COMPUTE_FAILED};
+    FunctionResponsePB response;
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+    EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
+
+    engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::CRC_COMPUTE_FAILED};
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::CRC_MISMATCH);
+
+    engine->copy_errors.clear();
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().copy_error(), MemoryOperationResponsePB::COPY_FAILED);
+    EXPECT_EQ(engine->submitted_batch_count, 3u);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOutOfRangeGroupedItems) {

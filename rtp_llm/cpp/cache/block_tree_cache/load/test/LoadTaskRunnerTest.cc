@@ -23,7 +23,7 @@
 namespace rtp_llm {
 namespace {
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -41,7 +41,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
     return makeTestGroupSet(
-        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
+        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool), enable_crc);
 }
 
 LoadTaskRunner::TaskPtr makeLoadTask(std::vector<TransferDescriptor> descriptors) {

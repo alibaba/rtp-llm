@@ -883,7 +883,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
     EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_latency_us + metrics.load_prepare_latency_us);
 }
 
-TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
+TEST_F(StreamCacheResourceTest, testCacheLoadFailureClearsReuseMetrics) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     StreamCacheResource&         resource = stream_->streamCacheResource();
     kmonitor::MetricsTags        kmon_tags;
@@ -906,10 +906,10 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.allocator_load_context_ = load_context;
     ASSERT_TRUE(resource.loadCacheDone());
 
-    EXPECT_EQ(stream_->reuseLength(), 2);
-    EXPECT_EQ(stream_->initialReuseLength(), 2);
-    EXPECT_EQ(stream_->localReuseLength(), 2);
-    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->deviceReuseLength(), 0);
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
 
@@ -917,16 +917,16 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
     EXPECT_EQ(metrics.block_aligned_input_length, 6);
-    EXPECT_EQ(metrics.kv_cache_reuse_length, 2);
-    EXPECT_EQ(metrics.device_reuse_length, 2);
+    EXPECT_EQ(metrics.kv_cache_reuse_length, 0);
+    EXPECT_EQ(metrics.device_reuse_length, 0);
     EXPECT_EQ(metrics.host_reuse_length, 0);
     EXPECT_EQ(metrics.disk_reuse_length, 0);
     EXPECT_FALSE(metrics.report_hit_rates);
     RtpLLMCacheReuseMetricsCollector hit_metrics;
     ASSERT_TRUE(cache_manager_->collectCacheHitRates(cache_manager_->cache_hit_window_start_ + std::chrono::minutes(1),
                                                      hit_metrics));
-    EXPECT_FLOAT_EQ(hit_metrics.kv_cache_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.device_hit_rate, 100.0f / 3.0f);
+    EXPECT_FLOAT_EQ(hit_metrics.kv_cache_hit_rate, 0.0f);
+    EXPECT_FLOAT_EQ(hit_metrics.device_hit_rate, 0.0f);
     EXPECT_FLOAT_EQ(hit_metrics.host_hit_rate, 0.0f);
     EXPECT_FLOAT_EQ(hit_metrics.disk_hit_rate, 0.0f);
     EXPECT_TRUE(metrics.report_reuse_metrics);
@@ -1174,7 +1174,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     EXPECT_EQ(stream_->diskReuseLength(), 0);
 }
 
-TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyReuse) {
+TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureRestartsWithoutReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setReuseLength(2);
@@ -1185,10 +1185,10 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
 
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
-    EXPECT_EQ(stream_->reuseLength(), 2);
-    EXPECT_EQ(stream_->initialReuseLength(), 2);
-    EXPECT_EQ(stream_->localReuseLength(), 2);
-    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->deviceReuseLength(), 0);
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
     EXPECT_FALSE(stream_->hasError());
@@ -1334,7 +1334,7 @@ TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
     coordinator->shutdown();
 }
 
-TEST_F(StreamCacheResourceTest, testPrefillWaitForAllocatorLoadFailureKeepsDeviceReadyReuse) {
+TEST_F(StreamCacheResourceTest, testPrefillWaitForAllocatorLoadFailureRestartsWithoutReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setReuseLength(2);
@@ -1345,13 +1345,14 @@ TEST_F(StreamCacheResourceTest, testPrefillWaitForAllocatorLoadFailureKeepsDevic
 
     EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
-    EXPECT_EQ(stream_->reuseLength(), 2);
-    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->deviceReuseLength(), 0);
     EXPECT_FALSE(stream_->hasError());
 }
 
-TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
-    prepareResource(/*reuse_cache=*/true);
+TEST_F(StreamCacheResourceTest, AlreadyAdmittedDecodeLoadFailureIsTerminal) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
     auto& resource = stream_->streamCacheResource();
     stream_->setReuseLength(2);
     stream_->setMtpTokenIndex(2);
@@ -1437,6 +1438,98 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
     ASSERT_TRUE(status.has_value());
     EXPECT_TRUE(status->ok());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
+}
+
+TEST_F(StreamCacheResourceTest, PrefillLoadFailureAllocatesPrivateTargetsAndClearsAllReuse) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    auto& old_resource     = resource.kvCacheMutable().cacheResource(0);
+    auto  shared_reference = cache_manager_->incrKVCacheRef(old_resource, old_resource.cacheKeys(), false);
+    ASSERT_NE(shared_reference, nullptr);
+    const auto shared_blocks = shared_reference->blocks("default");
+    ASSERT_FALSE(shared_blocks.empty());
+    old_resource.setDeviceReuseBlockNum(1);
+    old_resource.setMemoryReuseBlockNum(1);
+    old_resource.setDiskReuseBlockNum(1);
+    old_resource.setStorageBackendReuseBlockNum(1);
+    resource.publishReuseLengths(8, 2, 2, 2);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+
+    const auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    ASSERT_TRUE(status->ok()) << status->ToString();
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+    EXPECT_EQ(stream_->deviceReuseLength(), 0);
+    EXPECT_EQ(stream_->hostReuseLength(), 0);
+    EXPECT_EQ(stream_->diskReuseLength(), 0);
+    EXPECT_FALSE(resource.enableCacheLookup());
+    EXPECT_TRUE(resource.reuseCache());
+    EXPECT_EQ(shared_reference->blocks("default"), shared_blocks);
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        const auto& current = resource.kvCache().cacheResource(batch);
+        EXPECT_EQ(current.reuseBlockNum(), 0u);
+        for (const auto block : current.blocks("default")) {
+            EXPECT_EQ(std::count(shared_blocks.begin(), shared_blocks.end(), block), 0);
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LoadFailureKeepsPrivateAllocationAcrossCapacityRetries) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto& previous         = resource.kvCache().cacheResource(0);
+    auto        shared_reference = cache_manager_->incrKVCacheRef(previous, previous.cacheKeys(), false);
+    ASSERT_NE(shared_reference, nullptr);
+    const auto shared_blocks = shared_reference->blocks("default");
+    const auto pool          = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    const auto held          = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+
+    const auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    EXPECT_TRUE(absl::IsUnavailable(*status)) << status->ToString();
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_FALSE(resource.enableCacheLookup());
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    pool->decRef(*held);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(resource.enableCacheLookup());
+    EXPECT_FALSE(resource.asyncLoadCache());
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    for (const auto block : resource.kvCache().blocks(0, "default")) {
+        EXPECT_EQ(std::count(shared_blocks.begin(), shared_blocks.end(), block), 0);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, DecodeInitialLoadFailurePreparesFullPrefillHandoff) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    resource.publishReuseLengths(4, 2, 0, 0);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+
+    const auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    ASSERT_TRUE(status->ok()) << status->ToString();
+    EXPECT_GT(resource.curBlocksNum(), 0);
+    // DecodeRpcServer acknowledges allocation only after this returns, then
+    // uses reuseBlockSize() as the start offset for its P/D transfer.
+    EXPECT_EQ(stream_->reuseBlockSize(), 0);
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(resource.enableCacheLookup());
 }
 
 }  // namespace rtp_llm

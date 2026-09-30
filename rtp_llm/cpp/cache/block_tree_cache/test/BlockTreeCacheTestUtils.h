@@ -198,6 +198,7 @@ private:
 };
 
 struct FullSWAEnvironmentOptions {
+    size_t task_pool_size{8};
     size_t path_length{4};
     size_t usable_device_blocks{16};
     size_t usable_host_blocks{16};

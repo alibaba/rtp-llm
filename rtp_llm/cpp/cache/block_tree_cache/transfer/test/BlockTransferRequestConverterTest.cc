@@ -71,6 +71,17 @@ const std::vector<GroupSetPtr>& groupSets() {
     return group_sets;
 }
 
+std::vector<GroupSetPtr> protectedGroupSets() {
+    auto groups = makeGroupSets();
+    for (const auto& group : groups) {
+        group->initialize(group->groupSetId(),
+                          group->topologyPtr(),
+                          group->groupTags(),
+                          block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
+    }
+    return groups;
+}
+
 TransferTask makeTransferTask(std::vector<TransferDescriptor> descriptors) {
     return TransferTask(std::move(descriptors), std::chrono::seconds(30));
 }
@@ -515,6 +526,178 @@ TEST(BlockTransferRequestConverterTest, RejectsMixedDirections) {
     };
 
     EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask(descriptors), groupSets()));
+}
+
+TEST(BlockTransferRequestConverterTest, CrcTransfersUseOrdinaryDirections) {
+    auto                                  protected_groups = protectedGroupSets();
+    const std::vector<TransferDescriptor> inputs{
+        TransferDescriptor::hostToDevice(0, 2, {1}),
+        TransferDescriptor::deviceToHost(0, {1}, 2),
+        TransferDescriptor::hostToDisk(0, 1, 2),
+        TransferDescriptor::diskToHost(0, 1, 2),
+        TransferDescriptor::deviceToDisk(0, {1}, 2),
+        TransferDescriptor::diskToDevice(0, 2, {1}),
+    };
+    for (size_t index = 0; index < inputs.size(); ++index) {
+        MemoryOperationRequestPB request;
+        ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+            request, makeTransferTask({inputs[index]}), protected_groups));
+        EXPECT_EQ(static_cast<int>(request.copy_direction()), index);
+        std::vector<TransferDescriptor> decoded;
+        ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, protected_groups));
+        ASSERT_EQ(decoded.size(), 1);
+        EXPECT_EQ(decoded.front().source_tier, inputs[index].source_tier);
+        EXPECT_EQ(decoded.front().target_tier, inputs[index].target_tier);
+        MemoryOperationRequestPB ordinary_request;
+        ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+            ordinary_request, makeTransferTask({inputs[index]}), groupSets()));
+        EXPECT_EQ(request.copy_direction(), ordinary_request.copy_direction());
+        EXPECT_EQ(request.copy_items(0).SerializeAsString(), ordinary_request.copy_items(0).SerializeAsString());
+    }
+}
+
+TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByTag) {
+    auto        sender_groups = protectedGroupSets();
+    const auto& source        = sender_groups[2];
+    auto        receiver      = makeTestGroupSet(0,
+                                     source->topologyPtr(),
+                                                 {"group4", "group3"},
+                                                 {source->devicePools()[1], source->devicePools()[0]},
+                                     source->hostPool(),
+                                     source->diskPool());
+    receiver->initialize(0,
+                         receiver->topologyPtr(),
+                         receiver->groupTags(),
+                         block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
+    const std::vector<TransferDescriptor> inputs{
+        TransferDescriptor::deviceToHost(2, {11, 12}, 21),
+        TransferDescriptor::hostToDevice(2, 21, {11, 12}),
+        TransferDescriptor::deviceToDisk(2, {11, 12}, 21),
+        TransferDescriptor::diskToDevice(2, 21, {11, 12}),
+    };
+    for (const auto& input : inputs) {
+        MemoryOperationRequestPB request;
+        ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({input}), sender_groups));
+        EXPECT_EQ(request.copy_items(0).deprecated_group_set_id(), 0u);
+        request.mutable_copy_items(0)->mutable_group_tags()->SwapElements(0, 1);
+        request.mutable_copy_items(0)->mutable_group_blocks()->SwapElements(0, 1);
+        std::string serialized;
+        ASSERT_TRUE(request.SerializeToString(&serialized));
+        MemoryOperationRequestPB parsed;
+        ASSERT_TRUE(parsed.ParseFromString(serialized));
+
+        std::vector<TransferDescriptor> decoded;
+        ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(parsed, decoded, {receiver}));
+        ASSERT_EQ(decoded.size(), 1u);
+        EXPECT_EQ(decoded.front().group_set_id, 0u);
+        EXPECT_EQ(decoded.front().source_tier, input.source_tier);
+        EXPECT_EQ(decoded.front().target_tier, input.target_tier);
+        EXPECT_EQ(decoded.front().blocksAt(Tier::DEVICE), (BlockIndicesType{12, 11}));
+    }
+}
+
+TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPublishingFirstItem) {
+    auto                     protected_groups = protectedGroupSets();
+    MemoryOperationRequestPB valid;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        valid,
+        makeTransferTask(
+            {TransferDescriptor::hostToDevice(0, 21, {11}), TransferDescriptor::hostToDevice(2, 22, {12, 13})}),
+        protected_groups));
+    const auto sentinel = TransferDescriptor::hostToDisk(4, 41, 51);
+    for (int corruption = 0; corruption < 4; ++corruption) {
+        SCOPED_TRACE(corruption);
+        MemoryOperationRequestPB malformed = valid;
+        auto*                    item      = malformed.mutable_copy_items(1);
+        switch (corruption) {
+            case 0:
+                item->set_group_tags(0, "unknown");
+                break;
+            case 1:
+                item->mutable_group_blocks(1)->set_tag(item->group_blocks(0).tag());
+                break;
+            case 2:
+                item->mutable_group_blocks()->RemoveLast();
+                break;
+            case 3:
+                item->mutable_group_blocks(0)->set_block_id(128);
+                break;
+        }
+        std::vector<TransferDescriptor> decoded{sentinel};
+        EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(malformed, decoded, protected_groups));
+        ASSERT_EQ(decoded.size(), 1u);
+        EXPECT_EQ(decoded.front().group_set_id, sentinel.group_set_id);
+        EXPECT_EQ(decoded.front().source_blocks, sentinel.source_blocks);
+        EXPECT_EQ(decoded.front().target_blocks, sentinel.target_blocks);
+    }
+}
+
+TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
+    auto        groups   = protectedGroupSets();
+    const auto& ordinary = groups[2];
+    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
+    const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(
+        BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({first, second}), groups));
+    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
+    std::vector<TransferDescriptor> decoded;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
+    ASSERT_EQ(decoded.size(), 2u);
+    EXPECT_EQ(decoded[0].group_set_id, 0u);
+    EXPECT_EQ(decoded[1].group_set_id, 2u);
+    EXPECT_EQ(decoded[0].source_blocks, first.source_blocks);
+    EXPECT_EQ(decoded[0].target_blocks, first.target_blocks);
+    EXPECT_EQ(decoded[1].source_blocks, second.source_blocks);
+    EXPECT_EQ(decoded[1].target_blocks, second.target_blocks);
+    EXPECT_TRUE(groups[decoded[0].group_set_id]->crcEnabled());
+    EXPECT_FALSE(groups[decoded[1].group_set_id]->crcEnabled());
+}
+
+TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntireBatch) {
+    const ErrorInfo                 failure(ErrorCode::EXECUTION_EXCEPTION, "batch failed");
+    std::vector<TransferDescriptor> descriptors{
+        TransferDescriptor::diskToDevice(0, 1, {1}),
+        TransferDescriptor::diskToDevice(0, 2, {2}),
+        TransferDescriptor::diskToDevice(0, 3, {3}),
+    };
+    EXPECT_EQ(BlockTransferRequestConverter::encodeCopyError(ErrorInfo::OkStatus(), descriptors),
+              MemoryOperationResponsePB::NONE);
+    EXPECT_EQ(BlockTransferRequestConverter::encodeCopyError(failure, descriptors),
+              MemoryOperationResponsePB::COPY_FAILED);
+    descriptors[0].markCopyError(CacheCopyError::IO_FAILED);
+    descriptors[2].markCrcComputeFailed();
+    MemoryOperationResponsePB response;
+    response.set_code(MemoryOperationResponsePB::FAILED);
+    response.set_copy_error(BlockTransferRequestConverter::encodeCopyError(failure, descriptors));
+    MemoryOperationResponsePB received;
+    ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
+    EXPECT_EQ(received.code(), MemoryOperationResponsePB::FAILED);
+    EXPECT_EQ(BlockTransferRequestConverter::decodeCopyError(received.copy_error()),
+              CacheCopyError::CRC_COMPUTE_FAILED);
+    for (const auto& descriptor : descriptors) {
+        EXPECT_FALSE(descriptor.corrupted());
+    }
+    descriptors[1].markCorrupted();
+    EXPECT_EQ(BlockTransferRequestConverter::encodeCopyError(failure, descriptors),
+              MemoryOperationResponsePB::CRC_MISMATCH);
+}
+
+TEST(BlockTransferRequestConverterTest, EncodeRejectsEmptyTaskAndNullGroupSets) {
+    MemoryOperationRequestPB empty;
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(empty, makeTransferTask({}), groupSets()));
+    auto groups = makeGroupSets();
+    groups[0].reset();
+    MemoryOperationRequestPB first_null;
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(
+        first_null, makeTransferTask({TransferDescriptor::deviceToHost(0, {11}, 21)}), groups));
+    MemoryOperationRequestPB second_null;
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(
+        second_null,
+        makeTransferTask(
+            {TransferDescriptor::deviceToHost(2, {12, 13}, 22), TransferDescriptor::deviceToHost(0, {11}, 21)}),
+        groups));
 }
 
 }  // namespace

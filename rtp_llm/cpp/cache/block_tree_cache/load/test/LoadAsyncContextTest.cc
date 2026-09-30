@@ -912,5 +912,243 @@ TEST(LoadAsyncContextTest, CoordinatorShutdownWaitsForDeferredAllocatorCallback)
     EXPECT_EQ(aborts, 1u);
 }
 
+TEST(LoadAsyncContextTest, FailureWaitsForBackendAndPropagatesToTwoJoiners) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto owner        = coordinator->create({local, local}, {false, false}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(owner));
+    owner->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    std::vector<std::shared_ptr<LoadAsyncContext>> joiners;
+    size_t                                         joined_callbacks = 0;
+    for (int i = 0; i < 2; ++i) {
+        auto joined = coordinator->create({local}, {true}, 0);
+        ASSERT_TRUE(coordinator->registerContext(joined));
+        joined->startJoinWait(1);
+        ASSERT_TRUE(joined->commit());
+        joined->onDone([&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
+            ++joined_callbacks;
+        });
+        joiners.push_back(joined);
+    }
+    size_t settlements = 0;
+    owner->setSettlementReadyCallback([&](const std::shared_ptr<LoadAsyncContext>& current) {
+        ++settlements;
+        EXPECT_FALSE(backend->readPending());
+        EXPECT_EQ(pool->refCount(block), 1u);
+        for (const auto& joined : joiners) {
+            bool    complete = false;
+            int64_t latency  = 0;
+            EXPECT_TRUE(joined->completeJoinedOne(current->aggregateSuccess(), complete, latency));
+            EXPECT_TRUE(complete);
+        }
+        EXPECT_TRUE(current->settle(false));
+    });
+    owner->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    ASSERT_EQ(pool->refCount(block), 2u);
+    EXPECT_TRUE(owner->completeTransfers(1, false));
+    EXPECT_TRUE(owner->completeTransfers(1, false));
+    EXPECT_FALSE(owner->done());
+    EXPECT_EQ(settlements, 0u);
+    EXPECT_EQ(joined_callbacks, 0u);
+    EXPECT_EQ(pool->refCount(block), 2u);
+    for (const auto& joined : joiners)
+        EXPECT_FALSE(joined->done());
+    backend->completeRead();
+    EXPECT_EQ(settlements, 1u);
+    EXPECT_EQ(joined_callbacks, 2u);
+    EXPECT_EQ(owner->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_TRUE(owner->done());
+    EXPECT_FALSE(owner->success());
+    size_t late_callbacks = 0;
+    owner->onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
+        ++late_callbacks;
+    });
+    EXPECT_EQ(late_callbacks, 1u);
+    for (const auto& joined : joiners) {
+        EXPECT_FALSE(joined->success());
+        EXPECT_EQ(joined->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    }
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, LoadFailureWaitsForOtherTransfers) {
+    size_t             commits     = 0;
+    size_t             aborts      = 0;
+    auto               coordinator = makeCoordinator(commits, aborts);
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto context      = coordinator->create({local, local}, {false, false}, 0);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    ASSERT_TRUE(context->commit());
+    EXPECT_TRUE(context->completeTransfers(1, false));
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeTransfers(1, true));
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_FALSE(context->success());
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BackendFailureBeforeCommitIsPreserved) {
+    size_t     commits     = 0;
+    size_t     aborts      = 0;
+    auto       coordinator = makeCoordinator(commits, aborts);
+    auto       backend     = std::make_shared<ManualBackend>();
+    auto       pool        = std::make_shared<TestBlockPool>();
+    const auto block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return true;  // Deliberately postpone commit until after backend completion.
+    });
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    backend->failNextRead();
+    backend->completeRead();
+    EXPECT_FALSE(context->done());
+    ASSERT_TRUE(context->commit());
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    context->onDone([](ErrorInfo error) { EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION); });
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, SettlementFailurePublishesError) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   context     = coordinator->create({}, {}, 0);
+    context->setSettlementReadyCallback([](const auto& ready) { EXPECT_TRUE(ready->settle(false)); });
+    ASSERT_TRUE(coordinator->registerContext(context));
+    ASSERT_TRUE(context->commit());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    context->onDone([](ErrorInfo error) { EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION); });
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, CommitRacingPendingCancellationWaitsForReferenceCleanup) {
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto               released    = release.get_future().share();
+    auto               coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const auto&) {
+            ADD_FAILURE() << "cancelled load was submitted";
+            return false;
+        },
+        [&](auto&) {
+            entered.set_value();
+            released.wait();
+        });
+    auto context = coordinator->create({}, {}, 0);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    auto abort = std::async(std::launch::async, [&] { return context->abortPending(); });
+    entered.get_future().wait();
+    EXPECT_TRUE(context->commit());
+    EXPECT_FALSE(context->done());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    release.set_value();
+    EXPECT_TRUE(abort.get());
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, ShutdownRejectsCommitOfAbortedPendingContext) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   context     = coordinator->create({}, {}, 0);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    coordinator->shutdown();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->commit());
+    EXPECT_FALSE(context->commit());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+}
+
+TEST(LoadAsyncContextTest, CancelledContextOnlyFallsBackWhileCoordinatorIsOpen) {
+    size_t commits        = 0;
+    size_t aborts         = 0;
+    auto   coordinator    = makeCoordinator(commits, aborts);
+    auto   live_context   = coordinator->create({}, {}, 0);
+    auto   closed_context = coordinator->create({}, {}, 0);
+    ASSERT_TRUE(coordinator->registerContext(live_context));
+    ASSERT_TRUE(coordinator->registerContext(closed_context));
+    ASSERT_TRUE(live_context->abortPending());
+    ASSERT_TRUE(closed_context->abortPending());
+
+    EXPECT_TRUE(live_context->commit());
+    EXPECT_TRUE(live_context->done());
+    EXPECT_FALSE(live_context->success());
+    EXPECT_EQ(live_context->mallocStatus(), MallocStatus::NONE);
+
+    coordinator->shutdown();
+
+    EXPECT_FALSE(closed_context->commit());
+    EXPECT_TRUE(closed_context->done());
+    EXPECT_FALSE(closed_context->success());
+    EXPECT_EQ(closed_context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 2u);
+}
+
+TEST(LoadAsyncContextTest, ShutdownRejectsCommitBeforeAbortCleanupFinishes) {
+    using namespace std::chrono_literals;
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto               released    = release.get_future().share();
+    auto               coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const auto&) {
+            ADD_FAILURE() << "shutdown load was submitted";
+            return false;
+        },
+        [&](auto&) {
+            entered.set_value();
+            released.wait();
+        });
+    auto context = coordinator->create({}, {}, 0);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    std::future<void>                      shutdown;
+    block_tree_cache_detail::ScopeRollback release_guard([&] { release.set_value(); });
+    shutdown = std::async(std::launch::async, [&] { coordinator->shutdown(); });
+    ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+
+    EXPECT_FALSE(context->commit());
+    EXPECT_FALSE(context->done());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    release_guard.run();
+    shutdown.get();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+}
+
 }  // namespace
 }  // namespace rtp_llm
