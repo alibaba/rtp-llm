@@ -210,6 +210,35 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
             replayed.float(), reference.float(), atol=0.016, rtol=0.01
         )
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_fused_inject_matches_torch_and_replays(self):
+        for rows in (1, 8, 17):
+            with self.subTest(rows=rows):
+                hyper = torch.randn(
+                    rows, 4 * 2560, device="cuda", dtype=torch.bfloat16
+                )
+                sublayer = torch.randn(
+                    rows, 2560, device="cuda", dtype=torch.bfloat16
+                )
+                weights = torch.rand(rows, 4, device="cuda", dtype=torch.bfloat16)
+                with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_INJECT": "0"}):
+                    reference = inject_into_residual(hyper, sublayer, weights)
+                with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_INJECT": "1"}):
+                    actual = inject_into_residual(hyper, sublayer, weights)
+                torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
+        graph = torch.cuda.CUDAGraph()
+        with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_INJECT": "1"}):
+            with torch.cuda.graph(graph):
+                replayed = inject_into_residual(hyper, sublayer, weights)
+        hyper.copy_(torch.randn_like(hyper))
+        sublayer.copy_(torch.randn_like(sublayer))
+        weights.copy_(torch.rand_like(weights))
+        with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_INJECT": "0"}):
+            reference = inject_into_residual(hyper, sublayer, weights)
+        graph.replay()
+        torch.testing.assert_close(replayed, reference, atol=0, rtol=0)
+
 
 if __name__ == "__main__":
     unittest.main()
