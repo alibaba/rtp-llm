@@ -12,8 +12,8 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.pv.PvLogData;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -260,7 +260,7 @@ class SchedulingErrorCodeMatrixTest {
             config.getDispatcher().setMaxInflightPerPrefillWorker(prefillCapacity);
             harness = new AutoTpmE2EHarness(61_500, 1, 1, "1", 1.0, true,
                     false, decision, true, config);
-            service = new RouteService(harness.scheduler, mock(RecentCacheKeyTraceReporter.class));
+            service = new RouteService(harness.scheduler, mock(TheoryCacheHitReporter.class));
         }
 
         BalanceContext context() { return harness.context(REQUEST_ID, 50); }

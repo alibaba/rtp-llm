@@ -2,7 +2,6 @@ package org.flexlb.cache.telemetry;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -317,27 +316,14 @@ public class CacheMetricsReporter {
     /**
      * Report cumulative theory cache-hit token counters.
      */
-    public void reportTheoryCacheHitMetrics(CacheHitTheoryStats.Snapshot snapshot) {
-        if (snapshot == null) {
+    public void reportTheoryCacheHitMetrics(TheoryCacheHitStats.Snapshot snapshot) {
+        if (snapshot.getAllTotalCount() == 0L) {
             return;
         }
-        reportTheoryWindow("all", 0L,
-                snapshot.getAllHitCount(),
-                snapshot.getAllTotalCount(),
-                snapshot.getAllHitRatio());
-    }
-
-    private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
-        if (totalCount <= 0L) {
-            return;
-        }
-        FlexMetricTags tags = FlexMetricTags.of(
-                "window", window,
-                "windowMs", String.valueOf(windowMs)
-        );
-        monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitCount);
-        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, totalCount);
-        monitor.report(CACHE_THEORY_HIT_RATIO, tags, hitRatio);
+        FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
+        monitor.report(CACHE_THEORY_HIT_COUNT, tags, snapshot.getAllHitCount());
+        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, snapshot.getAllTotalCount());
+        monitor.report(CACHE_THEORY_HIT_RATIO, tags, snapshot.getAllHitRatio());
     }
 
     /**

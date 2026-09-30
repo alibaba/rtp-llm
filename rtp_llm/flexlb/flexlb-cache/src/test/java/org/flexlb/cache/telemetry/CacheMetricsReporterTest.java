@@ -1,7 +1,6 @@
 package org.flexlb.cache.telemetry;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -93,7 +92,7 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_zero_hit_token_request_as_visible_data_point() {
-        reporter.reportTheoryCacheHitMetrics(new CacheHitTheoryStats().record(0L, 300L));
+        reporter.reportTheoryCacheHitMetrics(new TheoryCacheHitStats().record(0L, 300L));
 
         FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
         verify(monitor).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
@@ -158,7 +157,7 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_skip_empty_token_request() {
-        reporter.reportTheoryCacheHitMetrics(new CacheHitTheoryStats().record(0L, 0L));
+        reporter.reportTheoryCacheHitMetrics(new TheoryCacheHitStats().record(0L, 0L));
 
         FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
         verify(monitor, never()).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
@@ -167,7 +166,7 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_theory_cache_hit_metrics() {
-        CacheHitTheoryStats stats = new CacheHitTheoryStats();
+        TheoryCacheHitStats stats = new TheoryCacheHitStats();
         reporter.init();
         reporter.reportTheoryCacheHitMetrics(stats.record(2L, 4L));
         reporter.reportTheoryCacheHitMetrics(stats.record(0L, 16L));
