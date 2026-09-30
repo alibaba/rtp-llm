@@ -156,15 +156,23 @@ _JIT_CACHE_SRCS = [
 ]
 
 py_library(
+    name = "safetensors_header",
+    srcs = ["utils/safetensors_header.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + [
         "utils/warmup.py",
+        "utils/safetensors_header.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     deps = [
+        ":safetensors_header",
         ":torch",
         ":safetensors",
         #":decord",
