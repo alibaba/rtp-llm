@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -70,6 +71,25 @@ class FakeRawRequest(object):
 
 
 class FrontendServerTest(TestCase):
+    def test_long_prompt_is_client_error_and_internal_error_stays_500(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        request = {request_id_field_name: 1}
+        long_prompt = FtRuntimeException(
+            ExceptionType.LONG_PROMPT_ERROR, "prompt exceeds model capacity"
+        )
+        long_prompt.aux_info = {"input_len": 10252, "output_len": 0}
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(request, long_prompt)
+            self.assertEqual(response.status_code, 400)
+            body = json.loads(response.body)
+            self.assertEqual(body["error_code"], 511)
+            self.assertEqual(body["aux_info"], long_prompt.aux_info)
+            response = self.frontend_server._handle_exception(
+                request, RuntimeError("backend failed")
+            )
+            self.assertEqual(response.status_code, 500)
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         # Create PyEnvConfigs with default values for testing

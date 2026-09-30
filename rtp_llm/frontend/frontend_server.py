@@ -12,6 +12,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionType
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -592,7 +593,12 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e, exception_json)
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        status_code = (
+            400
+            if exception_json.get("error_code") == int(ExceptionType.LONG_PROMPT_ERROR)
+            else 500
+        )
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(
