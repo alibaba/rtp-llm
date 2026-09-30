@@ -487,7 +487,7 @@ class Qwen4ExpModel(Qwen35Model):
         return initialized
 
     def requires_exact_cuda_graph_batch(self) -> bool:
-        """Side-cache writes have no padded-row mask in the current graph ABI."""
+        """Decode side-cache writes need exact batches; draft prefill masks rows."""
         return bool(self.ple_layers) or bool(
             getattr(self.config, "enable_qwen4_qsa", False)
         )
