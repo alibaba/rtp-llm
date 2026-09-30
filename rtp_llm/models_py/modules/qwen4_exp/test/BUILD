@@ -160,3 +160,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "indexer_prefill_score_test",
+    srcs = ["indexer_prefill_score_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
