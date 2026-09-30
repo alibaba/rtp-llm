@@ -3938,3 +3938,7 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via -r deps/requirements_base.txt
+
+torch-memory-saver==0.0.9.post1 \
+    --hash=sha256:b4e560fcd88a0641efb21ac530bb79a6e78fc0b31c9a654fa3b5eb7c3629e555
+    # via sleep/wake CUDA allocation regions

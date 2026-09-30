@@ -368,6 +368,32 @@ class TestProcessManager(unittest.TestCase):
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.failure_detected)
 
+    def test_collective_timeout_exit_stops_peers_and_fails_parent(self):
+        timed_out = multiprocessing.Process(target=os._exit, args=(124,))
+        peer = multiprocessing.Process(target=dummy_worker, args=(10,))
+        self.manager.add_processes([timed_out, peer])
+        self.manager.monitor_interval = 0.01
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
+        timed_out.start()
+        peer.start()
+        timed_out.join(timeout=2)
+        self.assertEqual(timed_out.exitcode, 124)
+
+        with (
+            patch("logging.error") as error,
+            patch("os._exit", side_effect=SystemExit(1)),
+        ):
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
+        self.assertFalse(peer.is_alive())
+        self.assertTrue(self.manager.failure_detected)
+        error.assert_any_call(
+            "Process %s (%s) died unexpectedly with exit code %s",
+            timed_out.pid,
+            timed_out.name,
+            124,
+        )
+
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
         proc = multiprocessing.Process(target=dummy_worker, args=(5,))
@@ -485,16 +511,20 @@ class TestProcessManager(unittest.TestCase):
         monitor_thread = threading.Thread(
             target=self.manager.monitor_and_release_processes
         )
-        monitor_thread.start()
+        with patch("os._exit") as exit_process:
+            monitor_thread.start()
 
-        # Give it a moment
-        time.sleep(0.1)
+            # Give it a moment
+            time.sleep(0.1)
 
-        # Request shutdown (mirrors SIGTERM handler — flag-only, not failure)
-        self.manager.shutdown_requested = True
+            # Intent is not failure, but these uncooperative children require
+            # SIGKILL; the launcher must not report that as graceful success.
+            self.manager.shutdown_requested = True
 
-        # Wait for monitoring to complete
-        monitor_thread.join()
+            monitor_thread.join(timeout=15)
+            self.assertFalse(monitor_thread.is_alive())
+            exit_process.assert_called_once_with(1)
+        self.assertTrue(self.manager.failure_detected)
 
         # Process should be terminated
         self.assertFalse(proc1.is_alive())
@@ -1812,6 +1842,131 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.manager.failure_detected,
             "graceful path should not flip failure_detected",
         )
+
+
+def final_exit_rank(ready, exit_code):
+    """Owned CPU child: stop acknowledgement deliberately succeeds or fails."""
+
+    def finish(_signum, _frame):
+        os._exit(exit_code)
+
+    signal.signal(signal.SIGTERM, finish)
+    signal.signal(signal.SIGINT, finish)
+    ready.send("ready")
+    ready.close()
+    while True:
+        signal.pause()
+
+
+def final_exit_parent(ready, exit_code):
+    """A real launcher, not a mock of the failure_detected result."""
+    os.setsid()
+    manager = ProcessManager(shutdown_timeout=1, monitor_interval=0.01)
+    manager.POST_KILL_REAP_WINDOW = 0.01
+    ctx = multiprocessing.get_context("fork")
+    reader, writer = ctx.Pipe(duplex=False)
+    child = ctx.Process(target=final_exit_rank, args=(writer, exit_code))
+    child.start()
+    writer.close()
+    try:
+        if not reader.poll(5) or reader.recv() != "ready":
+            raise RuntimeError("owned rank failed to start")
+        manager.add_process(child, shutdown_group="backend")
+        ready.send("ready")
+        ready.close()
+        manager.monitor_and_release_processes()
+    finally:
+        reader.close()
+        if child.is_alive():
+            child.kill()
+        child.join(2)
+
+
+class TestProcessManagerFinalExitStatus(unittest.TestCase):
+    def setUp(self):
+        self.old_signals = {
+            sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
+        }
+
+    def tearDown(self):
+        for sig, handler in self.old_signals.items():
+            signal.signal(sig, handler)
+
+    def test_actual_sigterm_child_failure_reaches_launcher(self):
+        self.assert_launcher_exit(1, 1)
+
+    def test_actual_sigterm_clean_child_keeps_launcher_success(self):
+        self.assert_launcher_exit(0, 0)
+
+    def assert_launcher_exit(self, child_code, expected_code):
+        ctx = multiprocessing.get_context("fork")
+        reader, writer = ctx.Pipe(duplex=False)
+        parent = ctx.Process(target=final_exit_parent, args=(writer, child_code))
+        parent.start()
+        writer.close()
+        try:
+            self.assertTrue(reader.poll(5), "owned launcher startup timed out")
+            self.assertEqual(reader.recv(), "ready")
+            os.kill(parent.pid, signal.SIGTERM)
+            parent.join(8)
+            self.assertFalse(parent.is_alive(), "owned launcher failed to exit")
+            self.assertEqual(parent.exitcode, expected_code)
+        finally:
+            reader.close()
+            if parent.is_alive():
+                # This child established its own session before reporting ready.
+                # Kill only its owned process group, never a shared test worker.
+                if os.getsid(parent.pid) == parent.pid:
+                    os.killpg(parent.pid, signal.SIGKILL)
+                else:
+                    parent.kill()
+            parent.join(2)
+
+    def final_check(self, code, shutdown=True, alive=False):
+        manager = ProcessManager(shutdown_timeout=1, monitor_interval=0.01)
+        manager.shutdown_requested = shutdown
+        proc = Mock(name="owned-child")
+        proc.name = "owned-child"
+        proc.exitcode = code
+        proc.is_alive.return_value = alive
+        manager.processes = [proc]
+        with (
+            patch.object(manager, "_monitor_processes_health"),
+            patch.object(manager, "_join_all_processes"),
+            patch("os._exit") as exit_process,
+        ):
+            manager.monitor_and_release_processes()
+        return manager.failure_detected, exit_process.call_args_list
+
+    def test_already_exited_failure_after_shutdown_is_not_lost(self):
+        failed, calls = self.final_check(1)
+        self.assertTrue(failed)
+        self.assertEqual([call.args for call in calls], [(1,)])
+
+    def test_expected_legacy_stop_signals_remain_success(self):
+        for code in (0, -signal.SIGTERM, -signal.SIGINT):
+            with self.subTest(code=code):
+                self.assertEqual(self.final_check(code), (False, []))
+
+    def test_unexpected_signal_or_forced_kill_cannot_claim_success(self):
+        for code in (-signal.SIGSEGV, -signal.SIGABRT, -signal.SIGKILL):
+            with self.subTest(code=code):
+                failed, calls = self.final_check(code)
+                self.assertTrue(failed)
+                self.assertEqual([call.args for call in calls], [(1,)])
+
+    def test_expected_signal_without_shutdown_is_still_failure(self):
+        failed, calls = self.final_check(-signal.SIGTERM, shutdown=False)
+        self.assertTrue(failed)
+        self.assertEqual([call.args for call in calls], [(1,)])
+
+    def test_unstarted_child_is_not_fabricated_as_failure(self):
+        self.assertEqual(self.final_check(None), (False, []))
+
+    def test_survivor_after_bounded_join_is_not_success(self):
+        failed, calls = self.final_check(None, alive=True)
+        self.assertTrue(failed)
+        self.assertEqual([call.args for call in calls], [(1,)])
 
 
 if __name__ == "__main__":

@@ -498,6 +498,10 @@ void LoadContextCoordinator::retireActiveCallback() {
 }
 
 void LoadContextCoordinator::shutdown() {
+    (void)shutdownUntil(std::chrono::steady_clock::time_point::max());
+}
+
+bool LoadContextCoordinator::shutdownUntil(std::chrono::steady_clock::time_point deadline) {
     std::vector<std::shared_ptr<LoadAsyncContext>> contexts;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -513,9 +517,12 @@ void LoadContextCoordinator::shutdown() {
     }
 
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_contexts_.empty() && active_callbacks_ == 0; });
+    if (!cv_.wait_until(lock, deadline, [this] { return pending_contexts_.empty() && active_callbacks_ == 0; })) {
+        return false;
+    }
     commit_callback_ = {};
     abort_callback_  = {};
+    return true;
 }
 
 }  // namespace rtp_llm

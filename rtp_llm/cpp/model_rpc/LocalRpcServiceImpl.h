@@ -18,14 +18,14 @@ public:
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine) {
-        local_server_ = std::make_shared<LocalRpcServer>();
+        local_server_ = makeGilSafeRpcServer<LocalRpcServer>();
         return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             weight_manager,
                       py::object                                             mm_process_engine) {
-        local_server_ = std::make_shared<LocalRpcServer>();
+        local_server_ = makeGilSafeRpcServer<LocalRpcServer>();
         return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
@@ -134,6 +134,32 @@ public:
 
     ::grpc::Status SetRestart(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
         return local_server_->SetRestart(context, request, response);
+    }
+
+    ::grpc::Status
+    SleepServing(::grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response) override {
+        return local_server_->SleepServing(context, request, response);
+    }
+
+    ::grpc::Status
+    WakeUpServing(::grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response) override {
+        return local_server_->WakeUpServing(context, request, response);
+    }
+
+    ::grpc::Status QuiesceSleep(::grpc::ServerContext*       context,
+                                const SleepQuiesceRequestPB* request,
+                                SleepQuiesceResponsePB*      response) override {
+        return local_server_->QuiesceSleep(context, request, response);
+    }
+
+    ::grpc::Status
+    IsSleeping(::grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response) override {
+        return local_server_->IsSleeping(context, request, response);
+    }
+
+    ::grpc::Status
+    GetSleepStatus(::grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response) override {
+        return local_server_->GetSleepStatus(context, request, response);
     }
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {

@@ -34,10 +34,8 @@ torch.concat = custom_concat
 # backend (frameworks/_torch.py:broadcast) calls ``dist.broadcast`` to
 # reshuffle weights across ranks during multi-rank checkpoint loading,
 # and that shuffles UE8M0 weight scales (DSv4-Flash etc).  Scatter is
-# not exercised by fastsafetensors -- both ``ParallelLoader`` and
-# RTP-LLM's ``PerExpertParallelLoader`` route every UE8M0 transfer
-# through ``pg.broadcast`` (dim=-1 in fastsafetensors / per-expert
-# broadcast in PerExpertParallelLoader); only the broadcast wrapper is
+# not exercised by fastsafetensors -- ``AutoLoader`` routes UE8M0
+# transfers through ``pg.broadcast``; only the broadcast wrapper is
 # needed.
 #
 # Workaround: view the tensor as uint8 (zero-copy reinterpret -- same

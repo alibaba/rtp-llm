@@ -194,18 +194,18 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
 
 TEST(BlockTransferDispatcherTest, DrainWaitsForCallbackReturnNotOnlyContextReadiness) {
     auto pending = std::make_shared<TransferBatchAsyncContext>();
-    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
+    auto engine  = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
     BlockTransferDispatcher dispatcher(engine);
-    std::promise<void> entered;
-    auto entered_future = entered.get_future();
-    std::promise<void> release;
-    auto released = release.get_future().share();
+    std::promise<void>      entered;
+    auto                    entered_future = entered.get_future();
+    std::promise<void>      release;
+    auto                    released = release.get_future().share();
     dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo error) {
         EXPECT_TRUE(error.ok());
         entered.set_value();
         released.wait();
     });
-    auto complete = std::async(std::launch::async, [&] { pending->complete(ErrorInfo::OkStatus()); });
+    auto       complete       = std::async(std::launch::async, [&] { pending->complete(ErrorInfo::OkStatus()); });
     const auto entered_status = entered_future.wait_for(std::chrono::seconds(5));
     EXPECT_EQ(entered_status, std::future_status::ready);
     EXPECT_TRUE(pending->done());
@@ -217,15 +217,14 @@ TEST(BlockTransferDispatcherTest, DrainWaitsForCallbackReturnNotOnlyContextReadi
 }
 
 TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
-    auto first = std::make_shared<TransferBatchAsyncContext>();
+    auto first  = std::make_shared<TransferBatchAsyncContext>();
     auto second = std::make_shared<TransferBatchAsyncContext>();
     auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{first, second});
     BlockTransferDispatcher dispatcher(engine);
-    bool settled = false;
+    bool                    settled = false;
     dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
-        dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
-            settled = true;
-        });
+        dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)),
+                               [&](ErrorInfo) { settled = true; });
     });
     auto drain = std::async(std::launch::async, [&] { dispatcher.drainTransfers(); });
     first->complete(ErrorInfo::OkStatus());
@@ -235,8 +234,29 @@ TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
     EXPECT_TRUE(settled);
 }
 
+TEST(BlockTransferDispatcherTest, BoundedDrainRetainsTimedOutTransfersAndNextStages) {
+    auto first  = std::make_shared<TransferBatchAsyncContext>();
+    auto second = std::make_shared<TransferBatchAsyncContext>();
+    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{first, second});
+    BlockTransferDispatcher dispatcher(engine);
+    bool                    settled = false;
+    dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
+        dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)),
+                               [&](ErrorInfo) { settled = true; });
+    });
+    EXPECT_EQ(dispatcher.activeTransferCount(), 1u);
+    EXPECT_FALSE(dispatcher.drainTransfersUntil(std::chrono::steady_clock::now()));
+    first->complete(ErrorInfo::OkStatus());
+    EXPECT_EQ(dispatcher.activeTransferCount(), 1u);
+    EXPECT_FALSE(dispatcher.drainTransfersUntil(std::chrono::steady_clock::now()));
+    second->complete(ErrorInfo::OkStatus());
+    EXPECT_TRUE(dispatcher.drainTransfersUntil(std::chrono::steady_clock::now()));
+    EXPECT_EQ(dispatcher.activeTransferCount(), 0u);
+    EXPECT_TRUE(settled);
+}
+
 TEST(BlockTransferDispatcherTest, ThrowingCallbackDoesNotLeaveDrainPending) {
-    auto engine = std::make_shared<ScriptedPerRankEngine>();
+    auto                    engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher dispatcher(engine);
     EXPECT_THROW(dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)),
                                         [](ErrorInfo) { throw std::runtime_error("callback"); }),
@@ -263,25 +283,24 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
 }
 
 TEST(BlockTransferDispatcherTest, AllDirectionsUseTheConfiguredBatchLimit) {
-    const std::vector<TransferDescriptor> directions{
-        TransferDescriptor::hostToDevice(0, 1, {1}),
-        TransferDescriptor::deviceToHost(0, {1}, 1),
-        TransferDescriptor::hostToDisk(0, 1, 1),
-        TransferDescriptor::diskToHost(0, 1, 1),
-        TransferDescriptor::diskToDevice(0, 1, {1}),
-        TransferDescriptor::deviceToDisk(0, {1}, 1)};
+    const std::vector<TransferDescriptor> directions{TransferDescriptor::hostToDevice(0, 1, {1}),
+                                                     TransferDescriptor::deviceToHost(0, {1}, 1),
+                                                     TransferDescriptor::hostToDisk(0, 1, 1),
+                                                     TransferDescriptor::diskToHost(0, 1, 1),
+                                                     TransferDescriptor::diskToDevice(0, 1, {1}),
+                                                     TransferDescriptor::deviceToDisk(0, {1}, 1)};
     for (const auto& direction : directions) {
         for (const size_t limit : {2u, 8u, 16u}) {
-            auto engine = std::make_shared<ScriptedPerRankEngine>();
+            auto                    engine = std::make_shared<ScriptedPerRankEngine>();
             BlockTransferDispatcher dispatcher(engine, nullptr, limit);
-            size_t callback_count = 0;
+            size_t                  callback_count = 0;
             dispatcher.runTransfer(
                 TransferTask(std::vector<TransferDescriptor>(100, direction), std::chrono::seconds(30)),
                 [&](ErrorInfo error) {
                     EXPECT_TRUE(error.ok());
                     ++callback_count;
                 });
-            const auto& batches = engine->submittedBatches();
+            const auto&  batches        = engine->submittedBatches();
             const size_t expected_count = limit == 2 ? 50 : (limit == 8 ? 13 : 7);
             ASSERT_EQ(batches.size(), expected_count);
             size_t total = 0;

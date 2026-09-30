@@ -23,8 +23,8 @@ RemoteStoreTaskImpl::~RemoteStoreTaskImpl() {}
 // 2. 失败: 目前实现中, 一个请求失败后, 不会再触发新的请求, 因为没有意义;
 // 3. 成功: 正常退出, 所有block都成功传输完成, 并且没有取消
 void RemoteStoreTaskImpl::waitDone() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto                         once_time_ms = 5;
+    std::unique_lock<std::shared_mutex> lock(buffers_mutex_);
+    auto                                once_time_ms = 5;
     while (true) {
         if (check_cancel_func_ != nullptr && check_cancel_func_()) {
             auto error_code = ErrorCode::CANCELLED;
@@ -45,6 +45,7 @@ void RemoteStoreTaskImpl::waitDone() {
 }
 
 bool RemoteStoreTaskImpl::success() const {
+    std::shared_lock<std::shared_mutex> lock(buffers_mutex_);
     return done_ && all_success_;
 }
 
@@ -187,6 +188,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
 
 void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::string>& block_keys, bool success) {
     RTP_LLM_PROFILE_FUNCTION();
+    bool notify_done = false;
     {
         std::lock_guard<std::shared_mutex> lock(buffers_mutex_);
         if (done_) {
@@ -215,8 +217,9 @@ void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::str
         } else {
             done_ = done_buffers_.size() == expect_done_buffer_count_;
         }
+        notify_done = done_;
     }
-    if (done_) {
+    if (notify_done) {
         collector_->markEnd(all_success_);
         cond_.notify_all();
     }

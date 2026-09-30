@@ -342,6 +342,12 @@ message GenerateOutputsPB {
 message ErrorDetailsPB {
     int64 error_code = 1;
     string error_message = 2;
+    // M4 AdmissionGate (ENGINE_UNAVAILABLE) context: lets the frontend retry-route
+    // away from a sleeping or transitioning instance.
+    string error_code_str = 3;
+    string instance_id = 4;
+    int64 sleep_epoch = 5;
+    string state = 6;        // RUNNING|DRAINING|SUSPENDING|SLEEPING|WAKING_UP|ERROR
 }
 
 enum ErrorCodePB {
@@ -898,6 +904,75 @@ message CancelResponsePB {
     CancelStatusPB status = 1;
 }
 
+// Engine sleep/wake_up (distinct from SetPause/SetRestart semantics).
+message SleepRequestPB {
+    int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights + disk restore (fixed at startup by sleep_mode_level).
+    string mode = 2;              // "wait" (default) | "abort"; "keep" is unsupported.
+    int64 timeout_ms = 3;
+    string reason = 4;
+    repeated string tags = 5;     // reserved for partial release; non-empty tags are rejected.
+    bool prepare_only = 6;        // close admission + drain; do not release GPU
+    bool commit_only = 7;         // release GPU after all ranks prepared/drained
+    bool drain_only = 8;          // prepare without stopping the executor; coordinator only
+    string quiesce_token = 9;     // fences drain/quiesce/commit for one instance operation
+    string expected_incarnation = 10; // initial drain must target the probed worker
+    int64 expected_sleep_epoch = 11;  // initial drain must target the probed epoch
+}
+
+// Host-only control RPC. Freeze ACK must not wait for GPU work or acquire the GIL.
+message SleepQuiesceRequestPB {
+    string token = 1;
+    bool freeze_only = 2;         // snapshot admitted rounds, allowing existing work to finish
+    reserved 3;
+    reserved "target_round";     // execution rounds are backend-owned since protocol 2
+    int64 timeout_ms = 4;
+    int32 protocol = 5;          // must be 2; reject old callers before entering the CPU group
+}
+
+message SleepQuiesceResponsePB {
+    reserved 1;
+    reserved "frozen_round";
+}
+
+message WakeUpRequestPB {
+    bool prepare_only = 1;        // restore/register resources; keep admission closed
+    bool commit_only = 2;         // restart engine after all ranks prepared
+    string cancel_quiesce_token = 3; // rollback only this uncommitted drain; never restore sleeping resources
+    bool resume_metrics_only = 4; // coordinator: every rank has successfully reached RUNNING
+    string expected_incarnation = 5;
+    int64 expected_sleep_epoch = 6;
+}
+
+message SleepStatusResponsePB {
+    string state = 1;             // RUNNING|DRAINING|SUSPENDING|SLEEPING|WAKING_UP|ERROR
+    int64 sleep_epoch = 2;
+    string kv_memory_state = 3;   // ACTIVE|PAUSING|PAUSED|WAKING_UP
+    bool device_kv_cache_valid = 4;
+    int64 active_request_count = 5;
+    int64 active_cache_transfer_count = 6;
+    string gpu_resource_state = 7;
+    string last_error = 8;
+    bool sleep_mode_enabled = 9;
+    bool effective = 10;          // false means control plane should fall back to normal offline.
+    repeated int32 supported_levels = 11;
+    repeated string supported_modes = 12;
+    string disabled_reason = 13;
+    int32 quiesce_protocol = 14;  // 2 = backend CPU round coordination; 1 = legacy frontend round coordination
+    string worker_incarnation = 15;
+    bool wake_prepared = 16;      // restore/MR/non-forward health completed for this incarnation + sleep_epoch
+    int32 wake_prepare_protocol = 17; // 1 = explicit wake preparation completion; 0 = unsupported older backend
+}
+
+message IsSleepingResponsePB {
+    bool is_sleeping = 1;
+    bool sleep_mode_enabled = 2;
+    bool effective = 3;
+    repeated int32 supported_levels = 4;
+    repeated string supported_modes = 5;
+    string state = 6;
+    string disabled_reason = 7;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -912,6 +987,11 @@ service RpcService {
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc SleepServing(SleepRequestPB) returns (EmptyPB);
+    rpc QuiesceSleep(SleepQuiesceRequestPB) returns (SleepQuiesceResponsePB);
+    rpc WakeUpServing(WakeUpRequestPB) returns (EmptyPB);
+    rpc IsSleeping(EmptyPB) returns (IsSleepingResponsePB);
+    rpc GetSleepStatus(EmptyPB) returns (SleepStatusResponsePB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
