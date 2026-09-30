@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 #include <sstream>
-#include <algorithm>
 #include <string_view>
 #include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
@@ -62,12 +61,6 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
-    if (generate_input->generate_config->max_new_tokens > 0) {
-        const size_t request_max_token_num = static_cast<size_t>(seq_length_)
-                                             + generate_input->generate_config->max_new_tokens
-                                             + extra_reserve_token_num;
-        max_token_num = std::min(max_token_num, request_max_token_num);
-    }
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
     for (int i = 0; i < max_batch_size_; ++i) {
@@ -293,7 +286,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int32_t) * num_new_tokens);
         } else if (is_beam_search) {
             // Sampler batches may be padded to another request's sequence
-            // length; do not overflow this request's bounded history buffer.
+            // length; copy only this request's token history.
             memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * (seq_length_ + num_new_tokens));
         } else {
             if (batch_size_ != new_batch_size && i > 0) {
