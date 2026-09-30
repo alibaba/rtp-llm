@@ -24,6 +24,15 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_cache_transfer_test",
+    srcs = ["dsv41_cache_transfer_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_cache_transfer_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "dsv41_cache_triton_test",
     srcs = ["dsv41_cache_triton_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_cache_triton_test.py",

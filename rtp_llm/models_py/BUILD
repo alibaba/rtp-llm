@@ -182,6 +182,7 @@ filegroup(
     name = "dsv41_cache_codec_sources",
     srcs = [
         "modules/dsv4/v41_cache.py",
+        "modules/dsv4/v41_cache_transfer.py",
         "modules/dsv4/fp8/_v41_cache_triton.py",
     ],
     visibility = ["//visibility:public"],
