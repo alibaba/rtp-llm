@@ -1,10 +1,45 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <torch/torch.h>
 #include <vector>
 
 namespace rtp_llm {
+
+enum class DeviceHostCopyDirection {
+    H2D,
+    D2H
+};
+
+// CUDA owns dedicated non-blocking streams; other backends use their default
+// copy implementation. The CUDA implementation shares a pair per device and
+// primary context among all live executors. Callers must not reset that device
+// or switch its CUDA context while a pair is alive.
+struct DeviceHostCopyStreams {
+    DeviceHostCopyStreams(int device, uintptr_t h2d, uintptr_t d2h):
+        device_index(device), h2d_stream(h2d), d2h_stream(d2h) {}
+    virtual ~DeviceHostCopyStreams() = default;
+
+    const int       device_index;
+    const uintptr_t h2d_stream;
+    const uintptr_t d2h_stream;
+};
+
+struct DeviceHostCopyExecutionContext {
+    std::shared_ptr<DeviceHostCopyStreams> owner;
+    DeviceHostCopyDirection                direction;
+
+    int deviceIndex() const {
+        return owner->device_index;
+    }
+    uintptr_t stream() const {
+        return direction == DeviceHostCopyDirection::H2D ? owner->h2d_stream : owner->d2h_stream;
+    }
+};
+
+std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index);
 
 struct MultiCopyParams {
     std::vector<torch::Tensor> multi_dst;
@@ -26,6 +61,7 @@ struct BatchedMemoryCopyTile {
 struct BatchedMemoryCopyParams {
     std::vector<BatchedMemoryCopyTile> tiles;
     int                                device_index = -1;
+    DeviceHostCopyDirection            direction    = DeviceHostCopyDirection::H2D;
 };
 
 enum class BatchedMemoryCopyStatus {
@@ -77,12 +113,14 @@ struct StagedMemoryCopyScratch {
 // ROCm: plain tensor copy_.
 // Other devices: not supported (will abort).
 void execNoBlockCopy(const MultiCopyParams& params);
+void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutionContext& context);
 
 // One CUDA runtime call copy executor for regular host/device pointers.
 // CUDA 12.8+ uses cudaMemcpyBatchAsync to avoid per-tile cudaMemcpyAsync launches.
 // Only NOT_SUPPORTED permits the caller to fall back to another strategy;
 // EXECUTION_FAILED means a CUDA call was attempted and failed.
-BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&        params,
+                                              const DeviceHostCopyExecutionContext& context);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.

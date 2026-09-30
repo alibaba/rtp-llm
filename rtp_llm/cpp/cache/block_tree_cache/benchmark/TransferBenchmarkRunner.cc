@@ -59,9 +59,11 @@ public:
                                     BenchmarkDeviceHostCopyStats*           stats):
         delegate_(std::move(delegate)), completed_(completed), stats_(stats) {}
 
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override {
+    StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                              const DeviceHostCopyOptions&          options,
+                              const DeviceHostCopyExecutionContext& context) override {
         const auto start   = Clock::now();
-        auto       result  = delegate_->tryExecute(plan, options);
+        auto       result  = delegate_->tryExecute(plan, options, context);
         const auto elapsed = elapsedNs(start, Clock::now());
         if (result.status == StrategyStatus::DONE) {
             completed_->fetch_add(1, std::memory_order_relaxed);

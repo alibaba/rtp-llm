@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -35,7 +36,6 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(transfer_worker_count > 0);
     transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
-    RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
         *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
     host_disk_executor_ =
@@ -49,6 +49,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                              max_descriptors_per_batch,
                                                                              std::move(metrics_reporter));
     }
+    RTP_LLM_CHECK(transfer_task_pool_->start());
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {

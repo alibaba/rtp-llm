@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <string_view>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -63,10 +65,37 @@ TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
     if (status != TransferStatus::OK) {
         return status;
     }
+    std::vector<DeviceHostCopyExecutionContext> contexts;
+    contexts.reserve(plans.size());
     for (const auto& plan : plans) {
+        if (plan.copy_tiles.empty()) {
+            return TransferStatus::INVALID_ARGS;
+        }
+        const int device_index = plan.copy_tiles.front().device_index;
+        for (const auto& tile : plan.copy_tiles) {
+            if (tile.device_index != device_index) {
+                return TransferStatus::INVALID_ARGS;
+            }
+        }
+        std::call_once(copy_streams_once_,
+                       [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });
+        if (copy_streams_->device_index != device_index) {
+            RTP_LLM_LOG_WARNING("copy plan device=%d differs from executor device=%d group_set=%zu",
+                                device_index,
+                                copy_streams_->device_index,
+                                plan.group_set_id);
+            return TransferStatus::INVALID_ARGS;
+        }
+        const DeviceHostCopyExecutionContext context{
+            copy_streams_, plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+        contexts.push_back(context);
+    }
+    for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
+        const auto& plan    = plans[plan_index];
+        const auto& context = contexts[plan_index];
         bool handled = false;
         for (auto& strategy : strategies_) {
-            auto result = strategy->tryExecute(plan, options_);
+            auto result = strategy->tryExecute(plan, options_, context);
             if (result.status == StrategyStatus::DONE) {
                 handled = true;
                 break;
@@ -87,6 +116,9 @@ std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
 DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     hosts,
                                          const std::vector<TransferDescriptor>& descriptors,
                                          const std::vector<const GroupSet*>&    group_sets) const {
+    RTP_LLM_CHECK_WITH_INFO(!descriptors.empty() && hosts.size() == descriptors.size()
+                                && group_sets.size() == descriptors.size(),
+                            "invalid device-host batch dimensions");
     const bool                        device_to_host = descriptors.front().target_tier != Tier::DEVICE;
     std::map<int, DeviceHostCopyPlan> plans_by_device;
     for (size_t descriptor_index = 0; descriptor_index < descriptors.size(); ++descriptor_index) {
@@ -110,6 +142,10 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                 const size_t kv_bytes        = group_base.kv_block_stride_bytes;
                 const size_t scale_bytes     = group_base.kv_scale_stride_bytes;
                 const size_t layer_bytes     = kv_bytes + scale_bytes;
+                RTP_LLM_CHECK_WITH_INFO(host_offset <= host.payload_bytes
+                                            && layer_bytes <= host.payload_bytes - host_offset,
+                                        "device-host layer exceeds host payload: offset=%zu bytes=%zu payload=%zu",
+                                        host_offset, layer_bytes, host.payload_bytes);
                 auto*        layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
                 const auto   buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),
                                                                       device_blocks[member_group_id]);
@@ -117,6 +153,18 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                     if (logical_bytes == 0) {
                         return;
                     }
+                    const auto& buffer   = buffers[buffer_index];
+                    const auto  addr     = reinterpret_cast<uintptr_t>(buffer.addr);
+                    const auto  base     = reinterpret_cast<uintptr_t>(device_pool.getBaseAddress());
+                    const auto  capacity = device_pool.getTotalSizeBytes();
+                    // A logical group may use only a prefix of the physical buffer.
+                    RTP_LLM_CHECK_WITH_INFO(buffer.addr != nullptr && logical_bytes <= buffer.size_bytes
+                                                && buffer.is_cuda == (device_pool.deviceIndex() >= 0)
+                                                && (!buffer.is_cuda || buffer.device_index == device_pool.deviceIndex())
+                                                && base <= UINTPTR_MAX - capacity && addr >= base
+                                                && addr - base <= capacity && buffer.size_bytes <= capacity - (addr - base),
+                                            "invalid device-host buffer: member=%zu layer=%zu copy=%zu buffer=%zu",
+                                            member_group_id, local_layer_index, logical_bytes, buffer.size_bytes);
                     auto& plan = plans_by_device[device_pool.deviceIndex()];
                     if (plan.copy_tiles.empty()) {
                         plan.device_to_host = device_to_host;
@@ -136,6 +184,8 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                 host_offset += layer_bytes;
             }
         }
+        RTP_LLM_CHECK_WITH_INFO(host_offset == required_host_bytes,
+                                "device-host payload mismatch: copied=%zu required=%zu", host_offset, required_host_bytes);
     }
 
     if (plans_by_device.empty()) {

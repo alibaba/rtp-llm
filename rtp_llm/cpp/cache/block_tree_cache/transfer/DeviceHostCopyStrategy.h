@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 
@@ -56,14 +57,18 @@ struct StrategyResult {
 class DeviceHostCopyStrategy {
 public:
     virtual ~DeviceHostCopyStrategy()                                                                       = default;
-    virtual StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) = 0;
+    virtual StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                                      const DeviceHostCopyOptions&          options,
+                                      const DeviceHostCopyExecutionContext& context)                        = 0;
 };
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
     ~StagedSmDeviceHostCopyStrategy() override;
 
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
+    StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                              const DeviceHostCopyOptions&          options,
+                              const DeviceHostCopyExecutionContext& context) override;
 
 private:
     std::mutex                                              scratch_mutex_;
@@ -72,12 +77,16 @@ private:
 
 class CudaBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
+    StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                              const DeviceHostCopyOptions&          options,
+                              const DeviceHostCopyExecutionContext& context) override;
 };
 
 class GenericMultiCopyDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
+    StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                              const DeviceHostCopyOptions&          options,
+                              const DeviceHostCopyExecutionContext& context) override;
 };
 
 }  // namespace rtp_llm
