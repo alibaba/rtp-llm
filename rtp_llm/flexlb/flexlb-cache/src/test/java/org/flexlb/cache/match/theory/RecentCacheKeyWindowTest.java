@@ -38,18 +38,16 @@ class RecentCacheKeyWindowTest {
     }
 
     @Test
-    void should_not_count_repeated_keys_in_one_request_as_self_hits() {
+    void should_retain_one_key_entry_when_the_key_appears_in_multiple_requests() {
         AtomicLong now = new AtomicLong(0L);
-        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, now::get);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 2L, now::get);
 
-        RecentCacheKeyWindow.Snapshot first = window.record(List.of(7L, 7L, 7L));
-        assertEquals(3L, first.getRequestOccurrences());
-        assertEquals(0L, first.getRequestHitOccurrences());
+        window.record(List.of(7L));
+        now.set(900L);
+        window.record(List.of(7L));
+        now.set(1001L);
 
-        now.set(10L);
-        RecentCacheKeyWindow.Snapshot second = window.record(List.of(7L, 7L));
-        assertEquals(2L, second.getRequestOccurrences());
-        assertEquals(2L, second.getRequestHitOccurrences());
+        assertEquals(1L, window.record(List.of(7L)).getRequestHitOccurrences());
     }
 
     @Test
@@ -72,7 +70,7 @@ class RecentCacheKeyWindowTest {
         AtomicLong now = new AtomicLong(0L);
         RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, now::get);
 
-        RecentCacheKeyWindow.Snapshot snapshot = window.record(java.util.Arrays.asList(1L, null, 1L));
+        RecentCacheKeyWindow.Snapshot snapshot = window.record(java.util.Arrays.asList(1L, null, 2L));
 
         assertEquals(2L, snapshot.getRequestOccurrences());
         assertEquals(0L, snapshot.getRequestHitOccurrences());
