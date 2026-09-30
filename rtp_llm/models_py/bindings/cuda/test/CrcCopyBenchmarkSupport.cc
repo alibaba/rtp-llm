@@ -195,12 +195,14 @@ uintptr_t FrameworkCopyPlan::touchMetadata() const {
 }
 
 struct FrameworkCopies::Impl {
-    CudaBatchDeviceHostCopyStrategy              batch;
-    StagedSmDeviceHostCopyStrategy               staged;
+    std::shared_ptr<DeviceHostCopyStreams>        copy_streams;
+    CudaBatchDeviceHostCopyStrategy               batch;
+    StagedSmDeviceHostCopyStrategy                staged;
     main_baseline::StagedSmDeviceHostCopyStrategy main_staged;
-    at::cuda::CUDAStream                         stream;
+    at::cuda::CUDAStream                          stream;
 
-    explicit Impl(int device): stream(at::cuda::getStreamFromPool(false, device)) {}
+    explicit Impl(int device):
+        copy_streams(acquireDeviceHostCopyStreams(device)), stream(at::cuda::getStreamFromPool(false, device)) {}
 };
 
 FrameworkCopies::FrameworkCopies(int device) {
@@ -211,13 +213,18 @@ FrameworkCopies::FrameworkCopies(int device) {
 FrameworkCopies::~FrameworkCopies() = default;
 
 void FrameworkCopies::copyBatch(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->batch.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
+    const DeviceHostCopyExecutionContext context{impl_->copy_streams,
+                                                 store ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+    requireDone(impl_->batch.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}, context),
                 "CUDA 1D batch");
 }
 
 void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
-                "rebased production staged without CRC");
+    const DeviceHostCopyExecutionContext context{impl_->copy_streams,
+                                                 store ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+    requireDone(
+        impl_->staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}, context),
+        "rebased production staged without CRC");
 }
 
 void FrameworkCopies::copyMainStaged(const FrameworkCopyPlan& plan, bool store) {
