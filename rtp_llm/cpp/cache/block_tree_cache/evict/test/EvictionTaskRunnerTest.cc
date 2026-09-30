@@ -61,7 +61,7 @@ class BatchCountingTransferEngine: public ScriptedTransferEngine {
 public:
     using ScriptedTransferEngine::ScriptedTransferEngine;
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         if (on_submit_) {
@@ -93,7 +93,7 @@ class DeferredTransferEngine final: public PerRankBlockTransferEngine {
 public:
     explicit DeferredTransferEngine(const std::vector<GroupSetPtr>& groups): PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         auto context = std::make_shared<TransferBatchAsyncContext>();

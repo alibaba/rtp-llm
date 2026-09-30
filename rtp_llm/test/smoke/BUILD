@@ -59,6 +59,27 @@ exports_files([
     "data/prompt_candidates.json",
 ])
 
+cc_binary(
+    name = "libcrc_failure_injector.so",
+    testonly = True,
+    srcs = ["CrcFailureInjector.cc"],
+    linkshared = True,
+    linkopts = ["-ldl"],
+    deps = ["//rtp_llm/models_py/bindings:crc_block_copy_hdr"],
+    tags = ["manual"],
+)
+
+custom_smoke_test(
+    name = "crc_failure_smoke",
+    main = "crc_failure_smoke_test.py",
+    smoke_args = "--load_method fastsafetensors --max_seq_len 4096 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --cache_store_rdma_mode 0 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --memory_cache_sync_timeout_ms 120000 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --think_mode 0 --enable_fp32_lm_head 0",
+    gpu_type = ["L20D_TEST"],
+    data = [
+        ":libcrc_failure_injector.so",
+        "//rtp_llm:sdk",
+    ],
+)
+
 filegroup(
     name = "smoke_model_configs",
     srcs = glob(["data/model/**/*.json"]),

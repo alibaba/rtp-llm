@@ -89,7 +89,7 @@ public:
         throw_on_submit_(throw_on_submit),
         succeed_(succeed) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors  = task.descriptors();
         size_t      submit_index = 0;
         {
@@ -109,7 +109,7 @@ public:
             throw std::runtime_error("injected transfer failure");
         }
         if (!succeed_) {
-            return std::make_shared<CompletedAsyncContext>(
+            return std::make_shared<CompletedTransferAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
         return PerRankBlockTransferEngine::execute(std::move(task));
@@ -185,9 +185,9 @@ private:
     std::shared_ptr<PausablePerRankBlockTransferEngine> transfer_engine_;
 };
 
-class ManuallyCompletedAsyncContext final: public AsyncContext {
+class ManuallyCompletedAsyncContext final: public TransferAsyncContext {
 public:
-    bool completeIfPending(ErrorInfo error) {
+    bool completeIfPending(TransferResult error) {
         std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -211,7 +211,7 @@ public:
     }
 
     void onDone(DoneCallback callback) override {
-        ErrorInfo error;
+        TransferResult error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!done_) {
@@ -233,7 +233,7 @@ public:
         return done_ && error_.ok();
     }
 
-    ErrorInfo errorInfo() const override {
+    TransferResult result() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return error_;
     }
@@ -242,7 +242,7 @@ private:
     mutable std::mutex        mutex_;
     std::condition_variable   cv_;
     bool                      done_{false};
-    ErrorInfo                 error_;
+    TransferResult            error_;
     std::vector<DoneCallback> callbacks_;
 };
 
@@ -251,14 +251,14 @@ public:
     ManuallyCompletedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache):
         PerRankBlockTransferEngine(groups, enable_disk_cache) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!manual_completion_enabled_) {
             lock.unlock();
             return PerRankBlockTransferEngine::execute(std::move(task));
         }
         if (cleanup_requested_) {
-            return std::make_shared<CompletedAsyncContext>(
+            return std::make_shared<CompletedTransferAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
         }
         auto        context     = std::make_shared<ManuallyCompletedAsyncContext>();
@@ -338,7 +338,7 @@ TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
     auto transfer_engine =
         std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, false);
     transfer_engine->enableManualCompletion();
-    const std::shared_ptr<AsyncContext> pending =
+    const std::shared_ptr<TransferAsyncContext> pending =
         transfer_engine->execute(TransferTask({TransferDescriptor{}}, std::chrono::seconds(30)));
     ASSERT_NE(pending, nullptr);
     ASSERT_FALSE(pending->done());
@@ -347,7 +347,7 @@ TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
 
     EXPECT_TRUE(pending->done());
     EXPECT_FALSE(pending->success());
-    const std::shared_ptr<AsyncContext> future =
+    const std::shared_ptr<TransferAsyncContext> future =
         transfer_engine->execute(TransferTask({TransferDescriptor{}}, std::chrono::seconds(30)));
     ASSERT_NE(future, nullptr);
     EXPECT_TRUE(future->done());
@@ -359,7 +359,7 @@ public:
     ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache):
         PerRankBlockTransferEngine(groups, enable_disk_cache) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         if (!throw_enabled_) {
             return PerRankBlockTransferEngine::execute(std::move(task));
         }
@@ -1120,7 +1120,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFallback) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
     auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -1152,19 +1152,25 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     const BlockIdList target_blocks{20};
     device_pool->incRef(target_blocks);
     context->setTargetBlocks(0, target_blocks);
-    EXPECT_FALSE(context->commit());
+    // Accept the context so the caller can recover from the failed cache load.
+    EXPECT_TRUE(context->commit());
+    context->waitDone();
     EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
+    EXPECT_NE(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), path);
+    for (TreeNode* node : path) {
+        EXPECT_TRUE(node->group_set_resources[0].is_empty());
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    }
+    EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();
     releaseDeviceBlocks(*cache, device_pool, target_blocks);
+    EXPECT_FALSE(device_pool->isAllocated(target_blocks.front()));
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
@@ -1220,12 +1226,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
 
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), path);
+    for (TreeNode* node : path) {
+        EXPECT_TRUE(node->group_set_resources[0].is_empty());
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    }
     EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();
