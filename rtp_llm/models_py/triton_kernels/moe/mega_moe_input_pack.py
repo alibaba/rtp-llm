@@ -110,41 +110,44 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        ASSUME_FINITE: tl.constexpr,
+        INDEX_64: tl.constexpr,
     ):
-        pid_m_blk = tl.program_id(0).to(tl.int64)
+        pid_m_blk = tl.program_id(0)
         pid_blk = tl.program_id(1)
 
-        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
-        offs_32 = tl.arange(0, 32)
+        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M)
+        if INDEX_64:
+            offs_m = offs_m.to(tl.int64)
+        offs_128 = tl.arange(0, 128)
         row_mask = offs_m < M
-        packed = tl.zeros((BLOCK_M,), dtype=tl.int32)
+        cols = pid_blk * 128 + offs_128
+        mask = row_mask[:, None] & (cols[None, :] < N)
+        x = tl.load(
+            x_ptr + offs_m[:, None] * x_stride_m + cols[None, :],
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        if not ASSUME_FINITE:
+            x = tl.where(tl.abs(x) < float("inf"), x, 0.0)
 
-        for pack_idx in tl.static_range(4):
-            cols = pid_blk * 128 + pack_idx * 32 + offs_32
-            mask = row_mask[:, None] & (cols[None, :] < N)
-            x = tl.load(
-                x_ptr + offs_m[:, None] * x_stride_m + cols[None, :],
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
-            x_is_finite = tl.abs(x) < float("inf")
-            x = tl.where(x_is_finite, x, 0.0)
-
-            block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
-            scale_raw = block_absmax / fp8_max
-            scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
-            exp = tl.minimum(tl.maximum(exp, 1), 254)
-            scale_bits = exp << 23
-            scale = scale_bits.to(tl.float32, bitcast=True)
-
-            q = tl.clamp(x / scale[:, None], -fp8_max, fp8_max).to(tl.float8e4nv)
-            tl.store(
-                out_fp8_ptr + offs_m[:, None] * out_stride_m + cols[None, :],
-                q,
-                mask=mask,
-            )
-            packed = packed | (exp << (pack_idx * 8))
+        # Quantize four E8M0 groups together. This keeps the scale and FP8
+        # stores vectorized across the complete 128-column dispatch tile.
+        groups = tl.reshape(x, (BLOCK_M, 4, 32))
+        block_absmax = tl.maximum(tl.max(tl.abs(groups), axis=2), eps)
+        scale_raw = block_absmax / fp8_max
+        scale_raw_bits = scale_raw.to(tl.uint32, bitcast=True)
+        exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+        exp = tl.minimum(tl.maximum(exp, 1), 254)
+        scale = (exp << 23).to(tl.float32, bitcast=True)
+        q = tl.reshape(groups * (1.0 / scale)[:, :, None], (BLOCK_M, 128))
+        tl.store(
+            out_fp8_ptr + offs_m[:, None] * out_stride_m + cols[None, :],
+            q.to(tl.float8e4nv),
+            mask=mask,
+        )
+        scale_offsets = tl.arange(0, 4)
+        packed = tl.sum(exp << (scale_offsets[None, :] * 8), axis=1).to(tl.int32)
 
         tl.store(
             out_sf_ptr + offs_m * sf_stride_m + pid_blk,
@@ -545,7 +548,10 @@ def fused_pack_mega_moe_inputs_optimized(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    assume_finite: bool = False,
 ) -> None:
+    """Stage FP8 MegaMoE inputs; skip NaN/Inf sanitization only when explicit."""
     T, D, topk = _validate_inputs(
         x, weights, indices, out_fp8, out_sf, out_indices, out_weights
     )
@@ -582,6 +588,8 @@ def fused_pack_mega_moe_inputs_optimized(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        ASSUME_FINITE=assume_finite,
+        INDEX_64=T * D >= (1 << 31),
         num_warps=4,
     )
 
@@ -604,8 +612,16 @@ def fused_pack_mega_moe_inputs(
         return fused_pack_mega_moe_inputs_optimized(
             x, weights, indices, out_fp8, out_sf, out_indices, out_weights
         )
+    if impl == "fast_finite":
+        # General opt-in for callers that guarantee finite BF16 activations.
+        # The safe optimized path remains the default for other models.
+        return fused_pack_mega_moe_inputs_optimized(
+            x, weights, indices, out_fp8, out_sf, out_indices, out_weights,
+            assume_finite=True,
+        )
     raise ValueError(
-        f"invalid MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; expected legacy|optimized"
+        f"invalid MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; "
+        "expected legacy|optimized|fast_finite"
     )
 
 
