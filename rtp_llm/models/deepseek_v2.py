@@ -240,7 +240,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             )
                         ],
                         transpose,
-                        data_type=torch.float32,
                     ),
                 ]
             )
