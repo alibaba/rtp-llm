@@ -66,6 +66,7 @@ cc_test(
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
     ],
     env = {},
 )

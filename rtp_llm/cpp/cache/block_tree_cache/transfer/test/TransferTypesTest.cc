@@ -89,5 +89,17 @@ TEST(TransferTaskTest, SubtaskPreservesAbsoluteDeadline) {
     EXPECT_EQ(subtask.descriptors().front().group_set_id, 1u);
 }
 
+TEST(TransferTaskTest, SubtaskInheritsCompletionRequirementWithoutChangingParentDefault) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 3, {1})}, std::chrono::seconds(1));
+    EXPECT_FALSE(task.requiresConfirmedCompletion());
+    EXPECT_FALSE(task.subtask({TransferDescriptor::hostToDevice(1, 4, {2})}).requiresConfirmedCompletion());
+    task.requireConfirmedCompletion();
+    auto child  = task.subtask({TransferDescriptor::hostToDevice(1, 4, {2})});
+    auto nested = child.subtask({TransferDescriptor::hostToDevice(2, 5, {3})});
+    EXPECT_TRUE(child.requiresConfirmedCompletion());
+    EXPECT_TRUE(nested.requiresConfirmedCompletion());
+    EXPECT_EQ(nested.deadline(), task.deadline());
+}
+
 }  // namespace
 }  // namespace rtp_llm

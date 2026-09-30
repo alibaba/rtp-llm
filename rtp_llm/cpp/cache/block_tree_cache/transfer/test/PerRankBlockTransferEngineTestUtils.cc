@@ -87,7 +87,9 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool,
-                             BlockTreeDiskBlockPoolPtr            disk_pool) {
+                             BlockTreeDiskBlockPoolPtr            disk_pool,
+                             bool                                 enable_crc,
+                             size_t                               physical_payload_bytes) {
     RTP_LLM_CHECK(topology != nullptr);
     RTP_LLM_CHECK(!group_tags.empty());
     const auto& first = topology->group(group_tags.front());
@@ -109,7 +111,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             break;
     }
     RTP_LLM_CHECK(group_set != nullptr);
-    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags));
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_tags), physical_payload_bytes, enable_crc);
     return group_set;
 }
 
@@ -156,13 +158,14 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     return pool;
 }
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_crc) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "per_rank_transfer_engine_host";
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = ((payload_bytes + 4095) / 4096) * 4096;
+    const size_t storage_bytes   = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
+    config->stride_bytes         = ((storage_bytes + 4095) / 4096) * 4096;
     config->alignment            = 4096;
 
     auto pool = std::make_shared<HostBlockPool>(config);
@@ -181,8 +184,10 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io,
                                                      const std::string&           pool_name,
-                                                     bool                         buffered_io) {
-    const size_t stride_bytes = ((payload_bytes + 4095) / 4096) * 4096;
+                                                     bool                         buffered_io,
+                                                     bool                         enable_crc) {
+    const size_t storage_bytes = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
+    const size_t stride_bytes  = ((storage_bytes + 4095) / 4096) * 4096;
 
     auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;

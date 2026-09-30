@@ -59,8 +59,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
                 EXPECT_FALSE(cp_mapper->blockRoundRobinGroup(cache_config_, tag));
                 EXPECT_TRUE(cp_mapper->compactLastRankGroup(cache_config_, tag));
             }
-            const auto position =
-                cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
+            const auto position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             ASSERT_LT(*position, seed.blocks_by_group.at(tag).size());
             EXPECT_FALSE(isNullBlockIdx(seed.blocks_by_group.at(tag)[*position]));
@@ -112,8 +111,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
         BlockIndicesType   expected_blocks;
         for (const auto& tag : group_set->groupTags()) {
-            const std::optional<size_t> position =
-                cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
+            const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             expected_blocks.push_back(seed.blocks_by_group.at(tag)[*position]);
         }
@@ -204,7 +202,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
         ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const auto& tag = group_set->groupTags()[member_index];
+            const auto&                 tag      = group_set->groupTags()[member_index];
             const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             const BlockIndicesType& blocks = load_resource->blocks(0, tag);
@@ -575,8 +573,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
                     const size_t reuse_begin = 3 - reuse_count;
                     for (const auto& tag : group_set->groupTags()) {
-                        const BlockIndicesType& blocks =
-                            prefill_stream->streamCacheResource().kvCache().blocks(0, tag);
+                        const BlockIndicesType& blocks = prefill_stream->streamCacheResource().kvCache().blocks(0, tag);
                         for (size_t path = reuse_begin; path < 3; ++path) {
                             ASSERT_LT(path, blocks.size());
                             EXPECT_FALSE(isNullBlockIdx(blocks[path]));
@@ -673,11 +670,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     }
                     for (const auto& tag : group_set->groupTags()) {
 
-                        const BlockIndicesType& blocks   = load_resource->blocks(0, tag);
+                        const BlockIndicesType& blocks = load_resource->blocks(0, tag);
                         ASSERT_GE(blocks.size(), 3u);
                         ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                        ASSERT_TRUE(fillGroupBlockPayload(
-                            manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
+                        ASSERT_TRUE(
+                            fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
                     }
                 }
             }
@@ -870,7 +867,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
         for (const auto& tag : group_set->groupTags()) {
 
-            const BlockIndicesType& blocks   = resource->blocks(0, tag);
+            const BlockIndicesType& blocks = resource->blocks(0, tag);
             ASSERT_EQ(blocks.size(), static_cast<size_t>(logical_blocks + 1));
             for (size_t path_index = reuse_begin; path_index < static_cast<size_t>(logical_blocks); ++path_index) {
                 ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));

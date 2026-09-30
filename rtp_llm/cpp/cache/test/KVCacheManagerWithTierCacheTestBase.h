@@ -1668,17 +1668,16 @@ protected:
         // A new request can recompute into its allocated device blocks without
         // loading or trusting any of the quarantined lower-tier records.
         for (const auto& group : cache->groupSets()) {
-            for (const size_t raw_group_id : group->groupIds()) {
-                const int   group_id = static_cast<int>(raw_group_id);
-                const auto& blocks   = resource->blocks(0, group_id);
-                size_t      written  = 0;
+            for (const auto& tag : group->groupTags()) {
+                const auto& blocks  = resource->blocks(0, tag);
+                size_t      written = 0;
                 for (size_t path = 0; path < blocks.size(); ++path) {
                     if (isNullBlockIdx(blocks[path])) {
                         continue;
                     }
                     ASSERT_TRUE(
-                        fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/false));
-                    EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, blocks[path], path));
+                        fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/false));
+                    EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, tag, blocks[path], path));
                     ++written;
                 }
                 EXPECT_GT(written, 0u);

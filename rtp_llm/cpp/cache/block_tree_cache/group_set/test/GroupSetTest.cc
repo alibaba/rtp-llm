@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -40,6 +41,54 @@ TEST(GroupSetTest, StoresOrderedTagMembershipAndLogicalPayload) {
     EXPECT_EQ(group_set->devicePools(), (std::vector<DeviceBlockPoolPtr>{pool_b, pool_a}));
     EXPECT_EQ(group_set->payloadBytes(), 3u * (64u + 16u));
     EXPECT_EQ(group_set->groupType(), CacheGroupType::FULL);
+}
+
+TEST(GroupSetTest, ExplicitPhysicalPayloadAndCrcFlagKeepSeparateArgumentSemantics) {
+    const auto topology = makeTestTopology({makeGroupBase({0, 1})});
+    auto       group    = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, nullptr);
+    // The fourth argument remains a byte count after adding the fifth CRC flag.
+    group->initialize(0, topology, {"group0"}, 4096, true);
+    EXPECT_TRUE(group->usesPhysicalPayloadGeometry());
+    EXPECT_TRUE(group->crcEnabled());
+    EXPECT_EQ(group->payloadBytes(), 4096u);
+    EXPECT_EQ(group->storageBytes(), 4112u);
+
+    group->initialize(0, topology, {"group0"}, 0, true);
+    EXPECT_FALSE(group->usesPhysicalPayloadGeometry());
+    EXPECT_TRUE(group->crcEnabled());
+    EXPECT_EQ(group->payloadBytes(), 160u);
+    EXPECT_EQ(group->storageBytes(), 176u);
+
+    group->initialize(0, topology, {"group0"}, 4096);
+    EXPECT_TRUE(group->usesPhysicalPayloadGeometry());
+    EXPECT_FALSE(group->crcEnabled());
+    EXPECT_EQ(group->storageBytes(), 4096u);
+}
+
+TEST(GroupSetTest, CopyGeometryPreservesPhysicalLayersAndLogicalPaddingContract) {
+    const auto          topology = makeTestTopology({makeGroupBase({0, 2}), makeGroupBase({1})});
+    const auto          pool     = makeTestDevicePool({{80, 16}, {96, 24}}, 4, "group_set_copy_geometry");
+    auto                group    = makeTestGroupSet(0, topology, {"group0"}, {pool});
+    std::vector<size_t> sizes, offsets, layers;
+    const auto          collect = [&](const BlockInfo& buffer, size_t offset, size_t member, size_t layer) {
+        EXPECT_EQ(member, 0u);
+        sizes.push_back(buffer.size_bytes);
+        offsets.push_back(offset);
+        layers.push_back(layer);
+    };
+    EXPECT_EQ(visitDeviceHostCopyTiles(*group, {1}, collect), 4u);
+    EXPECT_EQ(sizes, (std::vector<size_t>{64, 16, 64, 16}));
+    EXPECT_EQ(offsets, (std::vector<size_t>{0, 64, 80, 144}));
+    EXPECT_EQ(layers, (std::vector<size_t>{0, 0, 1, 1}));
+
+    sizes.clear();
+    offsets.clear();
+    layers.clear();
+    group->initialize(0, topology, {"group0"}, 216, true);
+    EXPECT_EQ(visitDeviceHostCopyTiles(*group, {1}, collect), 4u);
+    EXPECT_EQ(sizes, (std::vector<size_t>{80, 16, 96, 24}));
+    EXPECT_EQ(offsets, (std::vector<size_t>{0, 80, 96, 192}));
+    EXPECT_EQ(layers, (std::vector<size_t>{0, 0, 1, 1}));
 }
 
 TEST(GroupSetTest, KeepsTopologyAliveAfterCallerReleasesOwnership) {

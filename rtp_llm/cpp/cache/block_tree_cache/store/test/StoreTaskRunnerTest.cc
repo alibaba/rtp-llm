@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <new>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -18,6 +19,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
+class StoreTaskRunnerTestPeer {
+public:
+    static void setBeforeBatch(StoreTaskRunner& runner, std::function<void(size_t, bool)> callback) {
+        runner.before_batch_for_test_ = std::move(callback);
+    }
+};
 namespace {
 
 using namespace block_transfer_engine_test;
@@ -142,14 +149,142 @@ public:
     std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches.push_back(descriptors);
+        completion_requirements.push_back(task.requiresConfirmedCompletion());
         auto context = std::make_shared<TransferBatchAsyncContext>();
         contexts.push_back(context);
         return context;
     }
 
     std::vector<std::vector<TransferDescriptor>>            batches;
+    std::vector<bool>                                       completion_requirements;
     std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
 };
+
+TEST(StoreTaskRunnerTest, DiskSubmissionPreservesMixedParentCompletionPolicy) {
+    const auto                     group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
+    const auto                     topology = makeTestTopology({group});
+    const std::vector<GroupSetPtr> group_sets{makeTestGroupSet(0, topology, {"group0"}, {}),
+                                              makeTestGroupSet(1, topology, {"group0"}, {}, nullptr, nullptr, true)};
+    StoreTaskRunner                runner(group_sets);
+    BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
+
+    for (const bool mixed_parent : {false, true}) {
+        SCOPED_TRACE(mixed_parent ? "mixed parent" : "standalone ordinary parent");
+        auto                    engine = std::make_shared<PendingStoreTransferEngine>();
+        BlockTransferDispatcher dispatcher(engine);
+        auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
+        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, 1));
+        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {2}, 2));
+        if (mixed_parent) {
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(1, {3}, 3));
+        }
+        std::optional<ErrorInfo> result;
+        runner.runTransfer(
+            task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });
+        EXPECT_EQ(task->transfer_task.requiresConfirmedCompletion(), mixed_parent);
+        EXPECT_EQ(engine->batches.size(), mixed_parent ? 3u : 2u);
+        EXPECT_EQ(engine->completion_requirements, std::vector<bool>(mixed_parent ? 3u : 2u, mixed_parent));
+        for (const auto& batch : engine->batches) {
+            EXPECT_EQ(batch.size(), 1u);
+        }
+        EXPECT_FALSE(result.has_value());
+        // A protected failure must still wait for the ordinary children whose
+        // requests carry the same completion requirement.
+        if (mixed_parent && !engine->contexts.empty()) {
+            engine->contexts.back()->complete(ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "injected CRC failure"));
+            EXPECT_FALSE(result.has_value());
+        }
+        for (const auto& context : engine->contexts) {
+            context->complete(ErrorInfo::OkStatus());
+        }
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->code(), mixed_parent ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::NONE_ERROR);
+    }
+}
+
+TEST(StoreTaskRunnerTest, DiskSubmissionAllocationFailureDrainsEarlierBatchesAndPreservesIntegrityPriority) {
+    const auto                     group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
+    const auto                     topology = makeTestTopology({group});
+    const std::vector<GroupSetPtr> groups{makeTestGroupSet(0, topology, {"group0"}, {}),
+                                          makeTestGroupSet(1, topology, {"group0"}, {}, nullptr, nullptr, true)};
+    BlockTreeCacheMetricsReporter  metrics{nullptr};
+    for (const bool after_token : {false, true}) {
+        for (const bool prior_integrity_error : {false, true}) {
+            SCOPED_TRACE(after_token);
+            SCOPED_TRACE(prior_integrity_error);
+            StoreTaskRunner runner(groups);
+            StoreTaskRunnerTestPeer::setBeforeBatch(runner, [after_token](size_t index, bool registered) {
+                if (index == 2 && registered == after_token) {
+                    throw std::bad_alloc();
+                }
+            });
+            auto                    engine = std::make_shared<PendingStoreTransferEngine>();
+            BlockTransferDispatcher dispatcher(engine);
+            auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, 1));
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(1, {2}, 2));
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {3}, 3));
+            std::weak_ptr<StoreTaskRunner::Task> weak_task = task;
+            std::optional<ErrorInfo>             result;
+            size_t                               callbacks = 0;
+            runner.runTransfer(task, dispatcher, metrics, [&](ErrorInfo error) {
+                ++callbacks;
+                result.emplace(std::move(error));
+            });
+            EXPECT_FALSE(result.has_value());
+            EXPECT_EQ(task->phase, StoreTaskRunner::Task::Phase::TRANSFERRING);
+            EXPECT_EQ(engine->contexts.size(), 2u);
+            EXPECT_EQ(engine->completion_requirements, (std::vector<bool>{true, true}));
+            task.reset();
+            EXPECT_FALSE(weak_task.expired());
+            if (engine->contexts.size() != 2) {
+                for (const auto& context : engine->contexts)
+                    context->complete(ErrorInfo::OkStatus());
+                continue;
+            }
+            engine->contexts[1]->complete(prior_integrity_error ?
+                                              ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "injected CRC failure") :
+                                              ErrorInfo::OkStatus());
+            EXPECT_FALSE(result.has_value());
+            engine->contexts[0]->complete(ErrorInfo::OkStatus());
+            ASSERT_TRUE(result.has_value());
+            EXPECT_EQ(callbacks, 1u);
+            EXPECT_EQ(result->code(),
+                      prior_integrity_error ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::EXECUTION_EXCEPTION);
+            EXPECT_TRUE(weak_task.expired());
+        }
+    }
+}
+
+TEST(StoreTaskRunnerTest, DiskAllocationFailureBeforeFirstSubmissionCompletesWithoutPendingWrites) {
+    const auto                     group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
+    const auto                     topology = makeTestTopology({group});
+    const std::vector<GroupSetPtr> groups{makeTestGroupSet(0, topology, {"group0"}, {}, nullptr, nullptr, true)};
+    BlockTreeCacheMetricsReporter  metrics{nullptr};
+    for (const bool after_token : {false, true}) {
+        SCOPED_TRACE(after_token);
+        StoreTaskRunner runner(groups);
+        StoreTaskRunnerTestPeer::setBeforeBatch(runner, [after_token](size_t index, bool registered) {
+            if (index == 0 && registered == after_token)
+                throw std::bad_alloc();
+        });
+        auto                    engine = std::make_shared<PendingStoreTransferEngine>();
+        BlockTransferDispatcher dispatcher(engine);
+        auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
+        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, 1));
+        std::optional<ErrorInfo> result;
+        size_t                   callbacks = 0;
+        runner.runTransfer(task, dispatcher, metrics, [&](ErrorInfo error) {
+            ++callbacks;
+            result.emplace(std::move(error));
+        });
+        EXPECT_TRUE(engine->contexts.empty());
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(callbacks, 1u);
+        EXPECT_EQ(result->code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(task->phase, StoreTaskRunner::Task::Phase::FINISHED);
+    }
+}
 
 TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
