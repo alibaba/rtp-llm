@@ -413,6 +413,26 @@ void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
+void BlockTreeCacheMetricsReporter::reportCopyError(Tier                                   source_tier,
+                                                    Tier                                   target_tier,
+                                                    const ErrorInfo&                       error,
+                                                    const std::vector<TransferDescriptor>& descriptors) const {
+    if (!metrics_reporter_ || error.ok()) {
+        return;
+    }
+    auto diagnostic =
+        error.code() == ErrorCode::INVALID_PARAMS ? CacheCopyError::INVALID_REQUEST : CacheCopyError::COPY_FAILED;
+    for (const auto& descriptor : descriptors) {
+        diagnostic = std::max(diagnostic, descriptor.copyError());
+    }
+    RtpLLMCacheCopyErrorMetricsCollector collector;
+    collector.error_type = cacheCopyErrorName(diagnostic);
+    collector.copy_direction = source_tier == Tier::DEVICE ? "FROM_GPU" :
+                               target_tier == Tier::DEVICE ? "TO_GPU" :
+                               target_tier == Tier::DISK   ? "TO_DISK" : "FROM_DISK";
+    metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
+}
+
 int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,
                                                              Tier                   source_tier,
                                                              Tier                   target_tier) {

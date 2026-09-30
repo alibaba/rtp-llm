@@ -736,18 +736,21 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     if (!BlockTransferRequestConverter::decodeTransfer(
             request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
+        memory_response->set_copy_error(MemoryOperationResponsePB::INVALID_REQUEST);
         return true;
     }
 
     const int64_t timeout_ms = request.mem_request().timeout_ms();
     if (timeout_ms > std::numeric_limits<int>::max()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
+        memory_response->set_copy_error(MemoryOperationResponsePB::INVALID_REQUEST);
         return true;
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
-    if (!transfer_success) {
+    const auto status = block_tree_cache_->executeTransfer(TransferTask(descriptors, timeout));
+    memory_response->set_copy_error(BlockTransferRequestConverter::encodeCopyError(status, descriptors));
+    if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }

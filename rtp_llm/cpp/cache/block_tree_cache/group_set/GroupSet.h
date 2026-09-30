@@ -31,6 +31,53 @@ public:
     virtual bool validate(const GroupSetResource& resource) = 0;
 };
 
+// Layout of one packed HOST/DISK record for one GroupSet block on this rank.
+// The payload combines one block from each member pool, including all of that
+// member's layer buffers (KV and any scales). Factory computes this plan once
+// and shares it with GroupSet, pool creation and memory/disk capacity budgeting.
+// All sizes below are bytes per record, not the size of the whole pool.
+//
+// payload_bytes: Packed bytes before CRC; 0 derives logical sizes from topology, otherwise uses exact physical sizes.
+// storage_bytes: Record bytes (payload or alignUp(payload_bytes + 4, 16) with CRC); 0 uses the resolved payload size.
+// pool_stride: Distance between HOST/DISK slots, aligned to 4096 for direct disk I/O or 16 otherwise.
+// crc_enabled: Whether transfers encode and verify a CRC32C checksum for each record.
+//
+// Example: member A contributes 2048 bytes and member B contributes 2048 bytes.
+// Packing their buffers produces a 4096-byte payload (diagrams not to scale).
+//
+// Field order: {payload_bytes, storage_bytes, pool_stride, crc_enabled}.
+// CRC off: BackingLayout{4096, 4096, 4096, false}
+//   0                          2048                       4096
+//   +--------------------------+--------------------------+ next record
+//   |     member A: 2048 B     |     member B: 2048 B     |
+//   +--------------------------+--------------------------+
+//   payload_bytes = storage_bytes = pool_stride = 4096
+//
+// CRC on, HOST only or buffered disk I/O: BackingLayout{4096, 4112, 4112, true}
+//   0                     4096          4108        4112
+//   +---------------------+-------------+-----------+
+//   |   payload: 4096 B   |  pad: 12 B  |  CRC: 4 B | next record
+//   +---------------------+-------------+-----------+
+//   |<-- payload_bytes -->|
+//   |<-------- storage_bytes = pool_stride -------->|
+//
+// CRC on, direct disk I/O (both HOST/DISK slots): BackingLayout{4096, 4112, 8192, true}
+//   0                     4096          4108        4112                    8192
+//   +---------------------+-------------+-----------+-----------------------+
+//   |   payload: 4096 B   |  pad: 12 B  |  CRC: 4 B |  pool padding: 4080 B | next record
+//   +---------------------+-------------+-----------+-----------------------+
+//   |<-- payload_bytes -->|
+//   |<--------------- storage_bytes --------------->|
+//   |<---------------------------- pool_stride ---------------------------->|
+// CRC32C covers only the payload. The 4-byte checksum is stored at the END of
+// the 16-byte-aligned encoded record; pool padding lies outside that record.
+struct BackingLayout {
+    size_t payload_bytes{0};
+    size_t storage_bytes{0};
+    size_t pool_stride{0};
+    bool   crc_enabled{false};
+};
+
 class GroupSet {
 public:
     GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
@@ -42,7 +89,7 @@ public:
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
                     std::vector<std::string>             group_tags,
-                    size_t                               physical_payload_bytes = 0);
+                    BackingLayout                        backing_layout = {});
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -62,6 +109,13 @@ public:
     bool usesPhysicalPayloadGeometry() const {
         return uses_physical_payload_geometry_;
     }
+    // Storage adds a per-backing footer after the physical payload.
+    size_t storageBytes() const {
+        return storage_bytes_;
+    }
+    bool crcEnabled() const {
+        return enable_crc_;
+    }
     CacheGroupType groupType() const {
         return group(groupTags().front()).policy.group_type;
     }
@@ -78,8 +132,6 @@ public:
     std::shared_ptr<BlockTreeDiskBlockPool> diskPool() const {
         return disk_pool_;
     }
-
-    bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
     void referenceBlocks(const MultiNodeResource& resource) const;
     void unreferenceBlocks(const MultiNodeResource& resource) const;
@@ -99,6 +151,8 @@ private:
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<std::string>                group_tags_;
     size_t                                  payload_bytes_{0};
+    size_t                                  storage_bytes_{0};
+    bool                                    enable_crc_{false};
     bool                                    uses_physical_payload_geometry_{false};
 };
 

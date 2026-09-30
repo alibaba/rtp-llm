@@ -112,7 +112,7 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
-    loader_.shutdown();
+    shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
@@ -134,14 +134,19 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
-bool BlockTreeCache::executeTransfer(TransferTask task) {
+void BlockTreeCache::shutdownLoads() {
+    loader_.shutdown();
+}
+
+ErrorInfo BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
     if (!context->success()) {
         RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
-        return false;
+        const auto error = context->errorInfo();
+        return error.ok() ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "per-rank block transfer failed") : error;
     }
-    return true;
+    return ErrorInfo::OkStatus();
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
@@ -296,6 +301,11 @@ bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {
+    if (evictor_.takePendingLoadCancellation()) {
+        // Load and eviction failures use the same cleanup. Cancellation must run
+        // after unlocking because backend-match callbacks can acquire this mutex.
+        task_pool_->submitCompletion([this] { loader_.cancelInvalidatedPendingLoads(); });
+    }
     if (tree_data_mutated) {
         ++mutation_version_;
     }

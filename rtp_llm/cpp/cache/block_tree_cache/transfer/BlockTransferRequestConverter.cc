@@ -110,6 +110,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     }
     request.set_timeout_ms(remaining->count());
     const auto&                             descriptors = task.descriptors();
+    if (descriptors.empty()) {
+        return false;
+    }
     const TransferDescriptor&               first       = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
@@ -118,10 +121,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     request.set_copy_direction(request_direction);
 
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
-            return false;
-        }
-        if (descriptor.group_set_id >= group_sets.size() || !group_sets[descriptor.group_set_id]) {
+        if (!descriptor.isExecutable() || descriptor.group_set_id >= group_sets.size()
+            || !group_sets[descriptor.group_set_id] || descriptor.source_tier != first.source_tier
+            || descriptor.target_tier != first.target_tier) {
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
@@ -235,6 +237,48 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     descriptors.insert(
         descriptors.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
     return true;
+}
+
+MemoryOperationResponsePB::CopyError
+BlockTransferRequestConverter::encodeCopyError(const ErrorInfo&                       status,
+                                               const std::vector<TransferDescriptor>& descriptors) {
+    auto error = status.ok()                                ? CacheCopyError::NONE :
+                 status.code() == ErrorCode::INVALID_PARAMS ? CacheCopyError::INVALID_REQUEST :
+                                                              CacheCopyError::COPY_FAILED;
+    for (const auto& descriptor : descriptors) {
+        error = std::max(error, descriptor.copyError());
+    }
+    switch (error) {
+        case CacheCopyError::NONE:
+            return MemoryOperationResponsePB::NONE;
+        case CacheCopyError::INVALID_REQUEST:
+            return MemoryOperationResponsePB::INVALID_REQUEST;
+        case CacheCopyError::IO_FAILED:
+            return MemoryOperationResponsePB::IO_FAILED;
+        case CacheCopyError::CRC_COMPUTE_FAILED:
+            return MemoryOperationResponsePB::CRC_COMPUTE_FAILED;
+        case CacheCopyError::CRC_MISMATCH:
+            return MemoryOperationResponsePB::CRC_MISMATCH;
+        default:
+            return MemoryOperationResponsePB::COPY_FAILED;
+    }
+}
+
+CacheCopyError BlockTransferRequestConverter::decodeCopyError(MemoryOperationResponsePB::CopyError error) {
+    switch (error) {
+        case MemoryOperationResponsePB::NONE:
+            return CacheCopyError::NONE;
+        case MemoryOperationResponsePB::INVALID_REQUEST:
+            return CacheCopyError::INVALID_REQUEST;
+        case MemoryOperationResponsePB::IO_FAILED:
+            return CacheCopyError::IO_FAILED;
+        case MemoryOperationResponsePB::CRC_COMPUTE_FAILED:
+            return CacheCopyError::CRC_COMPUTE_FAILED;
+        case MemoryOperationResponsePB::CRC_MISMATCH:
+            return CacheCopyError::CRC_MISMATCH;
+        default:
+            return CacheCopyError::COPY_FAILED;
+    }
 }
 
 }  // namespace rtp_llm

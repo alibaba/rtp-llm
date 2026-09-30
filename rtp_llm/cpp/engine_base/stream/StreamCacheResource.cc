@@ -199,7 +199,9 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
-    recordCacheReuseMallocResult(result);
+    if (!skip_cache_lookup_) {
+        recordCacheReuseMallocResult(result);
+    }
     if (!result.success) {
         malloc_failed_times_++;
         switch (result.status) {
@@ -234,6 +236,13 @@ void StreamCacheResource::clearCacheReuseState() {
     stream_->setDiskReuseLength(0);
     stream_->setLocalReuseLength(0);
     stream_->setRemoteReuseLength(0);
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        auto& resource = batch_kv_cache_resource_->cacheResource(batch);
+        resource.setDeviceReuseBlockNum(0);
+        resource.setMemoryReuseBlockNum(0);
+        resource.setDiskReuseBlockNum(0);
+        resource.setStorageBackendReuseBlockNum(0);
+    }
 }
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
@@ -299,9 +308,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
         publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
-    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
-        stream_->setHostReuseLength(0);
-        stream_->setDiskReuseLength(0);
     } else {
         clearCacheReuseState();
     }
@@ -328,8 +334,21 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     if (malloc_status == MallocStatus::INTERNAL_ERROR) {
         return absl::InternalError("allocator load materialization failed");
     }
-    if (resource_context_.role_type == RoleType::PREFILL) {
-        return absl::OkStatus();
+    const bool can_reload = resource_context_.role_type == RoleType::DECODE ?
+                                !stream_->hasEventWithoutLock(StreamEvents::LoadInitiated) :
+                                stream_->isContextStream();
+    if (can_reload) {
+        // Settlement has drained every copy before done() becomes true. Drop
+        // this request's old references: DEVICE hits and joined targets may
+        // still be used by other requests and must never be recomputed in place.
+        skip_cache_lookup_ = true;
+        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
+        free_info.request_id = stream_->streamId();
+        resource_context_.cache_manager->free(free_info);
+        block_update_mapping_.clear();
+        // On DECODE this runs before the allocation acknowledgement. With
+        // reuse=0 the subsequent P/D handoff fills the complete prefix.
+        return initKVBlock();
     }
     const std::string error_text = error.ToString();
     return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
@@ -423,13 +442,17 @@ bool StreamCacheResource::loadCacheDone() {
         }
         const ErrorInfo error   = allocator_load_context_->errorInfo();
         const bool      success = allocator_load_context_->success();
+        const int       failures_before = malloc_failed_times_;
         const auto      status  = finalizeAllocatorLoad();
         if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
         }
         if (absl::IsUnavailable(status)) {
-            ++malloc_failed_times_;
+            // A private fallback allocation already records its own failure.
+            if (malloc_failed_times_ == failures_before) {
+                ++malloc_failed_times_;
+            }
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();
         } else if (!status.ok()) {
@@ -525,7 +548,7 @@ bool StreamCacheResource::enableDiskCache() const {
 bool StreamCacheResource::enableCacheLookup() const {
     const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
                                  || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
-    return reuseCache() && any_global_tier;
+    return !skip_cache_lookup_ && reuseCache() && any_global_tier;
 }
 
 Tier StreamCacheResource::storeTarget() const {

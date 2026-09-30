@@ -723,13 +723,13 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     ASSERT_TRUE(host_block.has_value());
     group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)})));
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)})).ok());
     for (int layer = 0; layer < 3; ++layer) {
         writeDevicePattern(
             allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
     }
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})})));
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})})).ok());
     for (int layer = 0; layer < 3; ++layer) {
         expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
                             bytes[static_cast<size_t>(layer)],
@@ -1003,11 +1003,11 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)})));
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)})).ok());
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})})));
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})})).ok());
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1205,7 +1205,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         }
     }
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)})));
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)})).ok());
     for (size_t member = 0; member < cache_groups.size(); ++member) {
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
@@ -1216,7 +1216,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         }
     }
     EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])})));
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])})).ok());
     for (size_t member = 0; member < cache_groups.size(); ++member) {
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
@@ -2329,9 +2329,9 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         const BlockIdxType disk_block = *disk_block_result;
 
         EXPECT_TRUE(factory_cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)})));
+            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)})).ok());
         EXPECT_TRUE(factory_cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)})));
+            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)})).ok());
 
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
         group->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);

@@ -583,6 +583,7 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(transfer_qps_metric, "rtp_llm_kv_cache_transfer_qps");
     REGISTER_QPS_MUTABLE_METRIC(transfer_failed_qps_metric, "rtp_llm_kv_cache_transfer_failed_qps");
+    REGISTER_QPS_MUTABLE_METRIC(memory_cache_copy_error_qps_metric, "rtp_llm_kv_cache_memory_cache_copy_error_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(descriptors_per_transfer_metric, "rtp_llm_kv_cache_descriptors_per_transfer");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_descriptor_count_compat_metric,
                                   "rtp_llm_kv_cache_transfer_descriptor_count");
@@ -597,6 +598,14 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
     return true;
+}
+
+void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*          tags,
+                                        RtpLLMCacheCopyErrorMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tags = tags ? *tags : kmonitor::MetricsTags{};
+    copy_tags.AddTag("copy_direction", collector->copy_direction);
+    copy_tags.AddTag("error_type", collector->error_type);
+    memory_cache_copy_error_qps_metric->Report(&copy_tags, 1);
 }
 
 void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tags,

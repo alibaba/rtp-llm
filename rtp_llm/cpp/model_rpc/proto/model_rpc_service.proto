@@ -682,8 +682,21 @@ message MemoryOperationResponsePB {
         CODE_UNSPECIFIED = 0;
         OK = 1;
         FAILED = 2;
+        reserved 3;
     }
     Code code = 1;
+    reserved 2, 3, 4;
+    // Highest-priority error for this rank's entire transfer batch.
+    // CRC_MISMATCH invalidates the batch's cached sources on the coordinator.
+    enum CopyError {
+        NONE = 0;
+        COPY_FAILED = 1;
+        INVALID_REQUEST = 2;
+        IO_FAILED = 3;
+        CRC_COMPUTE_FAILED = 4;
+        CRC_MISMATCH = 5;
+    }
+    CopyError copy_error = 5;
 }
 
 message TPWorkerInfoPB {

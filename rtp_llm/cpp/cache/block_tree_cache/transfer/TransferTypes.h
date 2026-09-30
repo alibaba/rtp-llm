@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +24,42 @@ enum class TransferStatus {
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
+    CRC_MISMATCH,
 };
+
+// Diagnostic categories for the existing cache-copy metric. They do not change
+// the business error or recovery policy. Higher values take precedence when a
+// logical copy contains multiple failures; confirmed CRC evidence survives RPC
+// failures on other ranks.
+enum class CacheCopyError : uint8_t {
+    NONE,
+    COPY_FAILED,
+    INVALID_REQUEST,
+    IO_FAILED,
+    RPC_FAILED,
+    CRC_COMPUTE_FAILED,
+    CRC_MISMATCH,
+};
+
+inline const char* cacheCopyErrorName(CacheCopyError error) {
+    switch (error) {
+        case CacheCopyError::NONE:
+            return "NONE";
+        case CacheCopyError::COPY_FAILED:
+            return "COPY_FAILED";
+        case CacheCopyError::INVALID_REQUEST:
+            return "INVALID_REQUEST";
+        case CacheCopyError::IO_FAILED:
+            return "IO_FAILED";
+        case CacheCopyError::RPC_FAILED:
+            return "RPC_FAILED";
+        case CacheCopyError::CRC_COMPUTE_FAILED:
+            return "CRC_COMPUTE_FAILED";
+        case CacheCopyError::CRC_MISMATCH:
+            return "CRC_MISMATCH";
+    }
+    return "COPY_FAILED";
+}
 
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
@@ -152,6 +189,35 @@ struct TransferDescriptor {
                + blocksDebugString(source_blocks) + "], target_blocks=[" + blocksDebugString(target_blocks) + "]}";
     }
 
+    void markCorrupted() const {
+        markCopyError(CacheCopyError::CRC_MISMATCH);
+    }
+    bool corrupted() const {
+        return hasCopyError(CacheCopyError::CRC_MISMATCH);
+    }
+
+    void markCrcComputeFailed() const {
+        markCopyError(CacheCopyError::CRC_COMPUTE_FAILED);
+    }
+    bool crcComputeFailed() const {
+        return hasCopyError(CacheCopyError::CRC_COMPUTE_FAILED);
+    }
+
+    void markCopyError(CacheCopyError error) const {
+        if (error != CacheCopyError::NONE) {
+            diagnostic_flags_->fetch_or(uint8_t{1} << static_cast<uint8_t>(error), std::memory_order_release);
+        }
+    }
+    CacheCopyError copyError() const {
+        const auto flags = diagnostic_flags_->load(std::memory_order_acquire);
+        for (uint8_t value = static_cast<uint8_t>(CacheCopyError::CRC_MISMATCH); value != 0; --value) {
+            if (flags & (uint8_t{1} << value)) {
+                return static_cast<CacheCopyError>(value);
+            }
+        }
+        return CacheCopyError::NONE;
+    }
+
     // Null for node-independent descriptors, including DEVICE-source reuse
     // whose blocks may outlive eviction of the originating tree node.
     TreeNode*                 node{nullptr};
@@ -163,6 +229,12 @@ struct TransferDescriptor {
     std::vector<BlockIdxType> target_blocks;
 
 private:
+    bool hasCopyError(CacheCopyError error) const {
+        return diagnostic_flags_->load(std::memory_order_acquire) & (uint8_t{1} << static_cast<uint8_t>(error));
+    }
+    // Copies across batches and disk staging refer to the same source record.
+    std::shared_ptr<std::atomic<uint8_t>> diagnostic_flags_{std::make_shared<std::atomic<uint8_t>>(0)};
+
     static bool endpointResolved(Tier tier, const std::vector<BlockIdxType>& blocks) {
         if (tier != Tier::DEVICE && tier != Tier::HOST && tier != Tier::DISK) {
             return false;
@@ -181,6 +253,20 @@ private:
         return result;
     }
 };
+
+inline void recordTransferError(const std::vector<TransferDescriptor>& descriptors, TransferStatus status) {
+    if (status == TransferStatus::OK) {
+        return;
+    }
+    const auto error = status == TransferStatus::INVALID_ARGS  ? CacheCopyError::INVALID_REQUEST :
+                       status == TransferStatus::DISK_IO_ERROR ? CacheCopyError::IO_FAILED :
+                                                                 CacheCopyError::COPY_FAILED;
+    for (const auto& descriptor : descriptors) {
+        // The CRC service identifies the individual bad records. A batch-level
+        // failure must never mark all its otherwise healthy records corrupted.
+        descriptor.markCopyError(error);
+    }
+}
 
 class TransferTask {
 public:
@@ -216,6 +302,16 @@ public:
 
     bool expired() const {
         return !remainingTimeout().has_value();
+    }
+
+    std::vector<TransferDescriptor> corruptedDescriptors() const {
+        std::vector<TransferDescriptor> result;
+        for (const auto& descriptor : descriptors_) {
+            if (descriptor.corrupted()) {
+                result.push_back(descriptor);
+            }
+        }
+        return result;
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {

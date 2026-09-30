@@ -34,7 +34,9 @@ public:
 
 public:
     explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
-        worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {}
+        worker_contexts_(worker_rpc_contexts),
+        finished_(worker_rpc_contexts.size(), false),
+        rpc_succeeded_(worker_rpc_contexts.size(), false) {}
     ~BroadcastResult() = default;
 
 public:
@@ -66,6 +68,11 @@ public:
 
     bool success() const {
         return all_request_success_.load(std::memory_order_acquire);
+    }
+
+    bool rpcSucceeded(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return rank < rpc_succeeded_.size() && rpc_succeeded_[rank];
     }
 
     void onDone(DoneCallback callback) {
@@ -112,6 +119,7 @@ public:
                 finished_[rank] = true;
                 ++finished_count_;
                 const auto& ctx = worker_contexts_[rank];
+                rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
                 if (!cq_event_ok) {
                     fatal_error_ = "broadcast rpc cq event failed, rank=" + std::to_string(rank)
                                    + " addr=" + ctx->server_addr;
@@ -151,6 +159,7 @@ private:
 
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
+    std::vector<bool>                              rpc_succeeded_;
     int                                            finished_count_{0};
     std::atomic<bool>                              already_done_{false};
     std::atomic<bool>                              all_request_success_{false};

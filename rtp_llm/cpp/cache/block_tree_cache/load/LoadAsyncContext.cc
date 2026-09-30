@@ -220,6 +220,12 @@ bool LoadAsyncContext::commit() {
         return false;
     }
     if (!coordinator_->commit(context_id_)) {
+        if (cancelled_before_commit_.load(std::memory_order_acquire)) {
+            // Allocation can finish while cancellation returns its source holds.
+            // Preserve the failed load for ordinary fallback after markAborted().
+            // Shutdown also cancels pending contexts, but must reject new commits.
+            return coordinator_->accepting();
+        }
         // The coordinator can reject before resolving the weak context. Make
         // that path terminal as well; failCommit is idempotent if a rejected
         // callback already invoked it.
@@ -299,6 +305,15 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
     return true;
 }
 
+void LoadAsyncContext::cancelUnsubmittedTransfers() {
+    // Called only before commit, after removing reservations and join registrations.
+    // Already delivered join completions need not be counted a second time.
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(!committed_);
+    has_failure_              = true;
+    remaining_transfer_count_ = 0;
+}
+
 bool LoadAsyncContext::aggregateSuccess() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return settlement_ready_ && !has_failure_;
@@ -373,7 +388,7 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
         if (done()) {
             run_now = true;
             if (!success()) {
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+                error = errorLocked();
             }
         } else {
             callbacks_.push_back(std::move(callback));
@@ -390,7 +405,7 @@ void LoadAsyncContext::notifyCompletion() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!success()) {
-            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+            error = errorLocked();
         }
         callbacks.swap(callbacks_);
     }
@@ -407,6 +422,17 @@ bool LoadAsyncContext::done() const {
 
 bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
+}
+
+ErrorInfo LoadAsyncContext::errorLocked() const {
+    return has_failure_ || state_.load() == State::FAILED ?
+               ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed") :
+               ErrorInfo::OkStatus();
+}
+
+ErrorInfo LoadAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return errorLocked();
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {
@@ -453,6 +479,11 @@ bool LoadContextCoordinator::beginActiveCallback() {
     return true;
 }
 
+bool LoadContextCoordinator::accepting() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return accepting_;
+}
+
 bool LoadContextCoordinator::commit(uint64_t context_id) {
     std::shared_ptr<LoadAsyncContext> context;
     {
@@ -481,6 +512,7 @@ bool LoadContextCoordinator::abort(LoadAsyncContext& context) noexcept {
         if (pending == pending_contexts_.end()) {
             return false;
         }
+        context.cancelled_before_commit_.store(true, std::memory_order_release);
         pending_contexts_.erase(pending);
         ++active_callbacks_;
     }
@@ -495,6 +527,19 @@ void LoadContextCoordinator::retireActiveCallback() {
     if (active_callbacks_ == 0 || pending_contexts_.empty()) {
         cv_.notify_all();
     }
+}
+
+std::vector<std::shared_ptr<LoadAsyncContext>> LoadContextCoordinator::pendingContexts() {
+    std::vector<std::shared_ptr<LoadAsyncContext>> contexts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [_, weak] : pending_contexts_) {
+            if (auto context = weak.lock()) {
+                contexts.push_back(std::move(context));
+            }
+        }
+    }
+    return contexts;
 }
 
 void LoadContextCoordinator::shutdown() {

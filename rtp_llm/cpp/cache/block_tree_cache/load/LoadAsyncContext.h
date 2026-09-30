@@ -76,6 +76,8 @@ public:
     void         startJoinWait(int64_t start_time_us);
     bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
+    void         cancelUnsubmittedTransfers();
+    ErrorInfo    errorInfo() const override;
     bool         aggregateSuccess() const;
     bool         settle(bool success);
     bool         onTaskFail();
@@ -86,6 +88,7 @@ public:
     MallocStatus mallocStatus() const;
 
 private:
+    ErrorInfo errorLocked() const;
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
@@ -112,6 +115,7 @@ private:
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
     std::atomic<bool>               commit_started_{false};
+    std::atomic<bool>               cancelled_before_commit_{false};
     bool                            committed_{false};
 
     std::mutex backend_match_mutex_;
@@ -146,6 +150,7 @@ public:
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
+    std::vector<std::shared_ptr<LoadAsyncContext>> pendingContexts();
     void                              shutdown();
 
 private:
@@ -153,6 +158,7 @@ private:
 
     void retireActiveCallback();
     bool beginActiveCallback();
+    bool accepting();
 
     friend class LoadAsyncContext;
 
