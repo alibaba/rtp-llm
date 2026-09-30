@@ -19,11 +19,12 @@ class ScrVipTest(unittest.TestCase):
             "model-rank-1": {"ip": "22.0.1.3", "real_ip": "10.0.0.3"},
         }
         self.path.write_text(json.dumps(self.rows))
+        path = patch.object(scr_vip, "GANG_INFO_PATH", self.path)
+        path.start()
+        self.addCleanup(path.stop)
         env = patch.dict(
             os.environ,
             {
-                "RTP_LLM_SCR_GANG_INFO": str(self.path),
-                "RTP_LLM_SCR_VIP_INTERFACE": "scr_vxlan0",
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "checkpoint",
                 "RANK_SIZE": "2",
@@ -72,11 +73,81 @@ class ScrVipTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     scr_vip.read_topology(4, 2)
 
-    def test_normal_and_single_node_do_not_read_vip(self):
-        with patch.dict(os.environ, {"SCR_PHASE": "normal"}):
-            self.assertEqual(scr_vip.internal_ip(self.pc, "10.0.0.3"), "10.0.0.3")
-        self.pc.local_world_size = 4
-        self.assertFalse(scr_vip.enabled(self.pc))
+    def test_only_scr_template_multinode_uses_vip(self):
+        for switch in (None, "", "0", "false", "1", "true", "yes", "on"):
+            for phase in (None, "normal", "checkpoint", "restore"):
+                for local_size in (2, 4):
+                    with self.subTest(
+                        switch=switch, phase=phase, local_size=local_size
+                    ):
+                        env = {"SCR_ENABLE": "1"}
+                        if switch is not None:
+                            env["RTPLLM_ENABLE_SCR"] = switch
+                        if phase is not None:
+                            env["SCR_PHASE"] = phase
+                        self.pc.local_world_size = local_size
+                        expected = (
+                            switch in {"1", "true", "yes", "on"}
+                            and phase in {"checkpoint", "restore"}
+                            and local_size == 2
+                        )
+                        with patch.dict(os.environ, env, clear=True), patch.object(
+                            scr_vip,
+                            "topology",
+                            return_value={0: "22.0.1.2", 1: "22.0.1.3"},
+                        ) as topology:
+                            self.assertEqual(scr_vip.enabled(self.pc), expected)
+                            self.assertEqual(
+                                scr_vip.internal_ip(self.pc, "10.0.0.3"),
+                                "22.0.1.3" if expected else "10.0.0.3",
+                            )
+                            if expected:
+                                topology.assert_called_once_with(self.pc, wait=True)
+                            else:
+                                topology.assert_not_called()
+
+    def test_missing_or_invalid_platform_map_never_falls_back(self):
+        for content, error in ((None, FileNotFoundError), ("{}", ValueError)):
+            with self.subTest(content=content):
+                if content is None:
+                    self.path.unlink()
+                else:
+                    self.path.write_text(content)
+                with patch.object(
+                    scr_vip.time, "monotonic", side_effect=[0, 121]
+                ), patch.object(scr_vip, "validate_device") as device:
+                    with self.assertRaises(error):
+                        scr_vip.internal_ip(self.pc, "10.0.0.3")
+                    device.assert_not_called()
+
+    def test_unready_network_never_falls_back(self):
+        with patch.object(
+            scr_vip.time, "monotonic", side_effect=[0, 121]
+        ), patch.object(
+            scr_vip, "validate_device", side_effect=RuntimeError("network not ready")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "network not ready"):
+                scr_vip.internal_ip(self.pc, "10.0.0.3")
+
+    def test_platform_network_contract(self):
+        addresses = json.dumps([{"addr_info": [{"local": "22.0.1.3"}]}])
+        with patch.object(
+            scr_vip.subprocess, "check_output", return_value=addresses
+        ) as command, patch.object(
+            scr_vip.Path, "is_socket", autospec=True, return_value=True
+        ) as ready, patch.object(
+            scr_vip.socket, "socket"
+        ) as socket:
+            scr_vip.validate_device("22.0.1.3")
+            command.assert_called_once_with(
+                ["ip", "-j", "-4", "address", "show", "dev", "scr_vxlan0"],
+                text=True,
+                timeout=5,
+            )
+            ready.assert_called_once_with(Path("/scr-share/snm/daemon.sock"))
+            socket.return_value.__enter__.return_value.bind.assert_called_once_with(
+                ("22.0.1.3", 0)
+            )
 
     def test_missing_interface_address_fails(self):
         with patch.object(scr_vip.subprocess, "check_output", return_value="[]"):

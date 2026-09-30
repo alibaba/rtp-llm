@@ -67,7 +67,6 @@ class ScrVipIntegrationTest(unittest.TestCase):
                     {
                         "RTPLLM_ENABLE_SCR": "1",
                         "SCR_PHASE": "checkpoint",
-                        "RTP_LLM_SCR_VIP_INTERFACE": "scr_vxlan0",
                     },
                     clear=True,
                 ), patch.object(

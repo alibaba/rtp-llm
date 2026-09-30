@@ -1,8 +1,10 @@
 """Stable, controller-owned intra-gang addresses for multi-node SCR.
 
-Opt in with RTP_LLM_SCR_VIP_INTERFACE. The controller must project the complete
-C2 gang map into RTP_LLM_SCR_GANG_INFO (default /etc/c2/ganginfo). No address
-range is assigned by RTP. External service advertisements still use Pod IPs.
+RTPLLM_ENABLE_SCR selects this path for multi-node checkpoint/restore phases.
+The platform provides scr_vxlan0, /etc/c2/ganginfo and the network-manager
+readiness socket. Missing or invalid platform state fails startup; it never
+falls back to Pod IPs. RTP does not assign an address range. External service
+advertisements still use Pod IPs.
 """
 
 import ipaddress
@@ -14,15 +16,15 @@ import subprocess
 import time
 from pathlib import Path
 
+VIP_INTERFACE = "scr_vxlan0"
+GANG_INFO_PATH = Path("/etc/c2/ganginfo")
+NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
+
 
 def enabled(pc) -> bool:
     from rtp_llm.utils.scr_template_lifecycle import template_phase_active
 
-    return (
-        bool(os.environ.get("RTP_LLM_SCR_VIP_INTERFACE"))
-        and template_phase_active()
-        and pc.world_size > pc.local_world_size
-    )
+    return template_phase_active() and pc.world_size > pc.local_world_size
 
 
 def read_topology(
@@ -30,7 +32,7 @@ def read_topology(
 ) -> dict[int, str]:
     if local_world_size <= 0 or world_size % local_world_size:
         raise ValueError("SCR VIP requires equally sized nodes")
-    raw = Path(os.environ.get("RTP_LLM_SCR_GANG_INFO", "/etc/c2/ganginfo")).read_text()
+    raw = GANG_INFO_PATH.read_text()
     rows = json.loads(raw)
     if not isinstance(rows, dict):
         raise ValueError("SCR gang info must be an object")
@@ -59,7 +61,7 @@ def read_topology(
 
 
 def validate_device(address: str) -> None:
-    device = os.environ["RTP_LLM_SCR_VIP_INTERFACE"]
+    device = VIP_INTERFACE
     rows = json.loads(
         subprocess.check_output(
             ["ip", "-j", "-4", "address", "show", "dev", device],
@@ -73,9 +75,7 @@ def validate_device(address: str) -> None:
         for item in row.get("addr_info", [])
     ):
         raise RuntimeError(f"SCR interface {device} does not own {address}")
-    ready_socket = Path(
-        os.environ.get("RTP_LLM_SCR_NETWORK_READY_SOCKET", "/scr-share/snm/daemon.sock")
-    )
+    ready_socket = NETWORK_READY_SOCKET
     if not ready_socket.is_socket():
         raise RuntimeError(
             f"SCR network manager has not published readiness socket {ready_socket}"
