@@ -13,6 +13,8 @@
 
 固定 vLLM `3df4ae153` 的四层 PD 配置把 AG/GEMM 和 GEMM/RS 分开执行。形状 trace 确认其 KDA/MLA 输入投影实际为 BF16 `aten::linear`，AG/RS 也传 BF16，因此它不是等精度 FP8 GEMM 候选；可用来核对真实服务的分离路径。rank 1 单次形状 trace 中，第 1、2 层 KDA 输入 AG 分别约 1.433、1.323 ms，后续 BF16 GEMM 分别约 2.714、2.799 ms。该单 rank 样本不能与上表八 rank 中位直接相减。vLLM 的 MLA QKV/cache epilogue 与 MXFP4 MoE 已分别按相同形状做算子 A/B；详见个人 artifact `fp8-prefill-operator-selection-ledger-20260930.md` 中逐模块记录。比较融合段时必须把通信与 GEMM 放在一个关键路径窗口内，同时保留子 kernel 归因。
 
+同一份 vLLM 真实 PD 形状 trace 的八个 rank 均有四层投影事件。逐 rank 合计四层后取中位，分离的 BF16 AG→输入 GEMM 窗口为 **17.754 ms**，输出 GEMM→BF16 RS 窗口为 **8.172 ms**。原始逐层、逐 rank 时间在个人 artifact `vllm-fourlayer-separate-ag-gemm-rs-allrank-20261001.json`。它只有一次已采集请求，且投影精度与两版 RTP 的 FP8 融合路径不同；这些数字说明应该比较完整通信加投影阶段，不能据此给单个 GEMM 核或等精度加速比下结论。
+
 当前选择保留集成版的通用 FP8 AG＋GEMM 和 GEMM＋BF16 RS。feat 的融合算法已接入，没有发现迁移其模型专用包装层可带来新的核收益。四层 flow 为 11/11，独立审计 `checked=11, errors=[]`。随后使用上述候选重新编译并运行完整 93 层 FP8 双机 PD capped smoke：121 条实际执行请求通过，独立审计 `passed=true, checked=121, errors=[]`；原最后三条长输出 repeat 与三条已知超时请求按约定跳过，合计六条均不计通过。逐 case、审计和服务日志在个人 artifact `smoke-93layer-fp8-fusion-c8-114115-20261001/`。本次验证了回答文本、重复吐字、乱码、截断、MTP 执行及 PD 状态交接。
 
 此提交固定性能阶段的代码与证据。它只证明四层融合候选和 93 层 smoke 正确性；还没有完成三方完整 93 层热态 64K 对照，也没有证明集成版每个算子都比两个候选快。峰值激活改动将从此锚点继续，以另一个提交保存。`skip-head-mid` 和历史 FP8 KV 默认 6 GiB 分块已在祖先提交 `4dcde8045e3f1c143cb1328179ebb1bcb151b329` 中存在，后续针对这两项做验证与显存测量，不重复迁移。

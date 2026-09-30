@@ -25,6 +25,15 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_mla_buffer_lifetime_test",
+    srcs = ["kimi_k3_mla_buffer_lifetime_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
+)
+
+py_test(
     name = "kimi_k3_dense_gate_up_test",
     srcs = ["kimi_k3_dense_gate_up_test.py"],
     deps = py_test_deps + [
