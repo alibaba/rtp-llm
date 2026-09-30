@@ -44,6 +44,16 @@ class MoeCfg:
     stage_context: Optional[object] = dataclass_field(
         default=None, compare=False, repr=False
     )
+    # None preserves the V4 numerical contract. An explicit immutable recipe
+    # participates in configuration equality and must enter derived workspace keys.
+    expert_recipe: Optional[object] = None
+
+    def __post_init__(self):
+        if self.expert_recipe is not None:
+            from rtp_llm.models_py.modules.dsv4.v41_expert import V41ExpertRecipe
+
+            if type(self.expert_recipe) is not V41ExpertRecipe:
+                raise ValueError("Unsupported MoE expert numerical recipe")
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -86,6 +96,7 @@ class RoutedExpertsStrategy(nn.Module):
     # shared-expert executor and the ``combine_routed_and_shared`` add. Only
     # Mega variants that fuse the shared expert set this True.
     routed_includes_shared: ClassVar[bool] = False
+    expert_recipe: ClassVar[Optional[object]] = None
 
     # Collective strategies whose ranks may receive different prefill token
     # counts must make the outer MoE chunk schedule identical on every rank.
@@ -94,6 +105,10 @@ class RoutedExpertsStrategy(nn.Module):
 
     def __init__(self, cfg: MoeCfg):
         super().__init__()
+        if getattr(cfg, "expert_recipe", None) != self.expert_recipe:
+            raise ValueError(
+                f"{self.name} does not implement the requested expert recipe"
+            )
         self.cfg = cfg
 
     def setup_weights(self, layer_weights: Dict) -> None:
@@ -294,6 +309,18 @@ def select_strategy(
     ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
     When False (legacy env toggle), fall through silently to auto-pick.
     """
+    recipe = getattr(cfg, "expert_recipe", None)
+    if recipe is not None:
+        for cls in _STRATEGY_PRIORITY:
+            if cls.expert_recipe != recipe or forced not in (None, cls.name):
+                continue
+            if cls.can_handle(cfg):
+                return cls
+        raise RuntimeError(
+            "No MoE strategy implements the requested expert recipe and topology "
+            f"(strategy={forced!r}, layer_id={cfg.layer_id}, ep_size={cfg.ep_size}); "
+            "V4.1 requires an explicitly compatible provider and transport"
+        )
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
 

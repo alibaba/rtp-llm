@@ -25,6 +25,7 @@ from .nccl_ep_mxfp8 import (  # noqa: F401  CP4EP4PP2 stage-local NCCL MXFP8
 )
 from .sm120_decode import Sm120DecodeStrategy  # noqa: F401 explicit DP/EP decode
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .v41_grouped_fp4 import V41GroupedFP4Strategy  # noqa: F401 explicit V4.1 recipe
 
 __all__ = [
     "MoeCfg",

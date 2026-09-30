@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
 from rtp_llm.models_py.modules.dsv4.v41_routed import V41RoutedExperts
 
 
@@ -103,6 +104,67 @@ class V41RoutedHardwareTest(unittest.TestCase):
             graph.replay()
             self.assert_output(op, tensors, x, counts, route, out)
             del graph, op, tensors, x, out, contiguous, masked
+
+    def test_local_routing_fp32_combine_and_graph_route_updates(self):
+        tensors = self.weights(48)
+        local = V41LocalMoE(V41RoutedExperts(tensors), expert_start_id=48)
+        x = torch.randn(4, 5120, device="cuda", dtype=torch.bfloat16)
+        ids = torch.tensor([[95, 48, 52]], device="cuda", dtype=torch.int64).repeat(
+            4, 1
+        )
+        weights = torch.tensor(
+            [[0.37, 0.25, 0.5]], device="cuda", dtype=torch.float32
+        ).repeat(4, 1)
+        valid = torch.tensor([True, False, True, True], device="cuda")
+        x[~valid] = float("nan")
+        references = {
+            e: V41RoutedExperts(
+                {name: tensor[e : e + 1].cpu() for name, tensor in tensors.items()},
+                backend="eager",
+            )
+            for e in (0, 4, 47)
+        }
+
+        def reference():
+            expected = torch.zeros((4, 5120), dtype=torch.float32)
+            for e in (0, 4, 47):
+                route = torch.where(ids == 48 + e, weights, 0).sum(1)
+                route = torch.where(valid, route, 0).cpu()
+                expected.add_(
+                    references[e]
+                    .forward_masked(
+                        x.cpu()[None], torch.tensor([4], dtype=torch.int32), route[None]
+                    )[0]
+                    .float()
+                )
+            return expected
+
+        def check(actual):
+            self.assertEqual(actual.dtype, torch.float32)
+            torch.testing.assert_close(
+                actual.cpu(), reference(), rtol=2.5e-2, atol=1.5e-2
+            )
+            active = valid & (weights != 0).any(1)
+            self.assertTrue(bool((actual[~active] == 0).all()))
+
+        check(local(x, weights, ids, valid_rows=valid, layout="contiguous"))
+        check(local(x, weights, ids, valid_rows=valid, layout="masked"))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                local(x, weights, ids, valid_rows=valid, layout="masked")
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = local(x, weights, ids, valid_rows=valid, layout="masked")
+        ids.copy_(ids.flip(1))
+        weights.copy_(weights.flip(1))
+        graph.replay()
+        check(output)
+        weights.zero_()
+        graph.replay()
+        check(output)
 
 
 if __name__ == "__main__":
