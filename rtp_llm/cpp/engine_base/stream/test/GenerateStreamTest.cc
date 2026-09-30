@@ -310,7 +310,7 @@ TEST_F(GenerateStreamTest, testBatchSizeWithBeamSearch) {
     EXPECT_FALSE(stream->needTilingForSampling());
 }
 
-TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesRequestBoundAndInitializesAllRows) {
+TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesModelCapacityAndInitializesAllRows) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
@@ -327,7 +327,7 @@ TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesRequestBoundAndInitializesAll
 
     auto token_ids = stream->completeTokenIds();
     ASSERT_EQ(2, token_ids.size(0));
-    ASSERT_EQ(7, token_ids.size(1));
+    ASSERT_EQ(128, token_ids.size(1));
     EXPECT_TRUE(torch::equal(token_ids[0].narrow(0, 0, 3), generate_input->input_ids));
     EXPECT_TRUE(torch::equal(token_ids[1].narrow(0, 0, 3), generate_input->input_ids));
 }
@@ -339,7 +339,7 @@ TEST_F(GenerateStreamTest, CompactBeamTokensReorderHistoryAndReexpandAfterCollap
     input->generate_config->max_new_tokens = 6;
     CompleteTokenIds ids(1, 3, 128, 4);
     ids.init(input, 1);
-    EXPECT_EQ(ids.tokenDim(), 12);
+    EXPECT_EQ(ids.tokenDim(), 129);
     int error_token = 0;
 
     ASSERT_TRUE(ids.update(torch::tensor({10, 20}, torch::kInt32).reshape({2, 1}),
@@ -391,7 +391,7 @@ TEST_F(GenerateStreamTest, CompactBeamTokensReorderHistoryAndReexpandAfterCollap
     }
 }
 
-TEST_F(GenerateStreamTest, BoundedTokenHistoryClipsUpdatesWithoutChangingInputStride) {
+TEST_F(GenerateStreamTest, TokenHistoryClipsUpdatesWithoutChangingInputStride) {
     auto input                             = std::make_shared<GenerateInput>();
     input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
     input->generate_config                 = std::make_shared<GenerateConfig>();
@@ -400,7 +400,7 @@ TEST_F(GenerateStreamTest, BoundedTokenHistoryClipsUpdatesWithoutChangingInputSt
     for (bool beam : {false, true}) {
         CompleteTokenIds ids(1, 2, 128, 4);
         ids.init(input);
-        ASSERT_EQ(ids.tokenDim(), 3);
+        ASSERT_EQ(ids.tokenDim(), 128);
         int error_token = 0;
         ASSERT_TRUE(ids.update(tokens,
                                0,
@@ -423,16 +423,6 @@ TEST_F(GenerateStreamTest, BoundedTokenHistoryClipsUpdatesWithoutChangingInputSt
     ASSERT_TRUE(legacy.update(padded_history, 0, 1, 2, 3, 100, true, 0, error_token));
     EXPECT_EQ(legacy.completeTokenIdsVec(0), (std::vector<int>{1, 2, 10}));
     EXPECT_EQ(legacy.completeTokenIdsVec(1), (std::vector<int>{1, 2, 20}));
-}
-
-TEST_F(GenerateStreamTest, TokenHistoryWithoutRequestLimitUsesModelCapacity) {
-    auto input                             = std::make_shared<GenerateInput>();
-    input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
-    input->generate_config                 = std::make_shared<GenerateConfig>();
-    input->generate_config->max_new_tokens = 0;
-    CompleteTokenIds ids(1, 2, 16, 4);
-    ids.init(input, 2);
-    EXPECT_EQ(ids.tokenDim(), 18);
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
