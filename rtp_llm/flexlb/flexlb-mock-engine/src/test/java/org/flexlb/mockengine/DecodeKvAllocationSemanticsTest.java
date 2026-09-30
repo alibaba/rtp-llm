@@ -80,7 +80,7 @@ class DecodeKvAllocationSemanticsTest {
     private static final int BASE_PORT = 64100;
 
     private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"(?:,engine_incarnation=\"[^\"]+\")?\\}\\s+(\\d+)");
 
     @TempDir
     Path tempDir;

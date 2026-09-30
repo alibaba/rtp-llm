@@ -56,7 +56,7 @@ class CacheKeyHitMetricsTest {
 
     /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
     private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"(?:,engine_incarnation=\"[^\"]+\")?\\}\\s+(\\d+)");
 
     /** {@code metric_name{role="..."} value} */
     private static final Pattern ROLE_METRIC_PATTERN = Pattern.compile(

@@ -499,6 +499,10 @@ master-side curves are indistinguishable from production:
   / self-routed topologies (no resolvable DECODE in role_addrs) reserve
   nothing; the D engine is located from role_addrs exactly as `startDecode`
   does (mock routing parity: same resolver, same target).
+  The Decode-side holding states have different jobs: `decodeAllocationInProgress`
+  guards a concurrent ALLOCATE, `decodeWaitingForKv` owns blocks while waiting
+  for Prefill handoff, and `decodePendingQueue` waits for an execution slot
+  after handoff. Only the last is a scheduling queue.
 - **Flag rename + semantics change**: the pool-block overrides are
   `--prefill-kv-pool-blocks` / `--decode-kv-pool-blocks` (default `0` = derive
   from token capacity). The old names `--prefill-cache-blocks` /

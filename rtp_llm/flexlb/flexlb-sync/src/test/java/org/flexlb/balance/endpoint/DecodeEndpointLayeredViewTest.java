@@ -244,6 +244,21 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1, endpoint.getInflightCount());
     }
 
+    @Test
+    void earlyEngineAllocationReplacesItsMasterShadowReservation() {
+        reserve(1L, 500, 508, 30);
+        assertEquals(19_500, endpoint.realKvAvailable(),
+                "before ALLOCATE is observed, Master reserves the D capacity");
+
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 500)),
+                null, 19_500);
+
+        assertEquals(0, endpoint.routingView().inflightHardKv());
+        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(19_500, endpoint.realKvAvailable(),
+                "after ALLOCATE, reported D usage replaces the shadow instead of stacking on it");
+    }
+
     // ==================== token-fenced weak-ACK preemption ====================
 
     @Test

@@ -2505,16 +2505,11 @@ public final class JavaMockEngineCluster {
                 if (removed != null) {
                     cancelledPhase = removed.getPhase();
                     pendingRequests.decrementAndGet();
-                    releaseBlockLease(requestId);
-                    // P-enqueue decode-KV pre-alignment (20260903): a prefill
-                    // member cancelled mid-prefill still holds its D-side
-                    // decode reservation — release it in the same atomic
-                    // section (cancel-loop closure; the completion callback's
-                    // alreadyCancelled release is idempotent against this).
-                    releaseReservedDecode(requestId);
                 }
             }
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                // Also covers cancellation before the task reached runningTasks.
+                // Both release helpers are idempotent across racing completions.
                 releaseBlockLease(requestId);
                 releaseReservedDecode(requestId);
             }
@@ -5765,11 +5760,6 @@ public final class JavaMockEngineCluster {
                 decodeRunning.clear();
                 decodeStepScheduled = false;
                 pendingStepDelayMs = 0;
-            }
-            // Un-acked completion backlog dies too: finished-but-unreported
-            // work is lost, the master's poller will never see it again.
-            synchronized (completionLock) {
-                completions.clear();
             }
             memoryReads.keySet().forEach(this::releaseMemoryRead);
             memoryWrites.keySet().forEach(this::abortMemoryCopies);
