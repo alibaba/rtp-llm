@@ -48,8 +48,8 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -360,7 +360,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         RouteService routeService = new RouteService(
                 scheduler,
-                new RecentCacheKeyTraceReporter());
+                new TheoryCacheHitReporter());
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();

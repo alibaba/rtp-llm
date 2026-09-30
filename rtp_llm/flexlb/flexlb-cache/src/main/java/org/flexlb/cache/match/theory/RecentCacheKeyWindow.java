@@ -1,8 +1,7 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.theory;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.config.ConfigService;
 
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -13,9 +12,6 @@ import java.util.function.LongSupplier;
 @Slf4j
 public class RecentCacheKeyWindow {
 
-    public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
-    public static final long DEFAULT_MAX_CACHE_KEYS = 10_000_000L;
-    private static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8;
     private static final int MIN_HASH_TABLE_SIZE = 16;
     private static final double HASH_LOAD_FACTOR = 0.67D;
     private static final byte EMPTY = 0;
@@ -41,8 +37,8 @@ public class RecentCacheKeyWindow {
     private int uniqueSize;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
-        this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
-        this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
+        this.timeWindowMs = timeWindowMs;
+        this.maxCacheKeys = Math.toIntExact(maxCacheKeys);
         this.nowSupplier = nowSupplier;
 
         int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
@@ -62,10 +58,7 @@ public class RecentCacheKeyWindow {
     }
 
     public Snapshot record(List<Long> cacheKeys) {
-        return record(cacheKeys, nowSupplier.getAsLong());
-    }
-
-    Snapshot record(List<Long> cacheKeys, long nowMs) {
+        long nowMs = nowSupplier.getAsLong();
         long requestOccurrences;
         long requestHitOccurrences;
         synchronized (this) {
@@ -263,44 +256,6 @@ public class RecentCacheKeyWindow {
                 entrySize,
                 maxCacheKeys,
                 timeWindowMs);
-    }
-
-    static long resolveTimeWindowMs(ConfigService configService) {
-        if (configService == null || configService.loadBalanceConfig() == null) {
-            return DEFAULT_TIME_WINDOW_MS;
-        }
-        return configService.loadBalanceConfig().getObservability().getCacheHit()
-                .getRecentKeyWindow().getDurationMs();
-    }
-
-    static long resolveMaxCacheKeys(ConfigService configService) {
-        if (configService == null || configService.loadBalanceConfig() == null) {
-            return DEFAULT_MAX_CACHE_KEYS;
-        }
-        return configService.loadBalanceConfig().getObservability().getCacheHit()
-                .getRecentKeyWindow().getMaxKeyOccurrences();
-    }
-
-    private static long normalizeTimeWindowMs(long candidateMs) {
-        if (candidateMs > 0L) {
-            return candidateMs;
-        }
-        log.warn("Invalid cacheHitTimeWindowMs: {}, fallback to default: {}", candidateMs, DEFAULT_TIME_WINDOW_MS);
-        return DEFAULT_TIME_WINDOW_MS;
-    }
-
-    private static int normalizeCapacity(long candidate) {
-        if (candidate <= 0L) {
-            log.warn("Invalid cacheHitMaxCacheKeys: {}, fallback to default: {}", candidate, DEFAULT_MAX_CACHE_KEYS);
-            return (int) DEFAULT_MAX_CACHE_KEYS;
-        }
-        if (candidate > MAX_ARRAY_SIZE) {
-            log.warn("cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
-                    candidate,
-                    MAX_ARRAY_SIZE);
-            return MAX_ARRAY_SIZE;
-        }
-        return (int) candidate;
     }
 
     private static int hashTableCapacityFor(int maxCacheKeys) {

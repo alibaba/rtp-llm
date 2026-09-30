@@ -171,7 +171,17 @@ UniConfig / Nacos 的 v1 部分更新示例：
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
-- `observability.cacheHit`：recent-key window、指标和理论命中日志。
+- `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
+  指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
+  后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
+  等待队列最多容纳 256 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
+  `recentKeyWindow.maxKeyOccurrences` 默认 `1000000`，限制保留的 key 出现次数（包含重复 key）；
+  `durationMs` 默认 `1800000`。实际容量取配置上限与 `10 × Prefill 数量 × (单台总 KV Token / blockSize)`
+  的较小值。Prefill 的最大 KV Cache 和 blockSize 相同，只读取第一台的容量；该台上报容量后，
+  后台线程才分配历史池；容量尚未产生时不记录样本。历史池使用固定数组，不存储 KV 内容；
+  默认上限对应约 49 MiB JVM 堆，容量估算较小时实际占用更低。
+  配置上限和窗口时长在 Master 初始化时读取，池容量在首次分配时确定；修改 Nacos 配置或
+  Prefill 规模后重启 Master 重新计算容量。
   理论命中监控使用 `app.cache.theory.hit.count`、`app.cache.theory.total.count` 与
   `app.cache.theory.hit.ratio`，以 Gauge 上报当前 Master 已记录请求的累计命中 Tokens、
   累计输入 Tokens 与两者比值。历史记录过期不扣减累计值，Master 重启后重新累计。
