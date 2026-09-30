@@ -96,6 +96,46 @@ class FlashAttn3GraphGeometryTest(unittest.TestCase):
 
 
 class FlashAttn3CudaGraphPrepareTest(unittest.TestCase):
+    def test_chunk_forward_uses_prefix_plus_new_tokens(self) -> None:
+        impl = object.__new__(FlashAttn3PagedShortGraphImpl)
+        impl.attn_configs = SimpleNamespace(
+            head_num=2,
+            kv_head_num=1,
+            size_per_head=128,
+            kernel_tokens_per_block=64,
+            is_causal=True,
+        )
+        impl.attn_inputs = SimpleNamespace(
+            prefix_lengths_device=torch.tensor([64], device="cuda", dtype=torch.int32),
+            input_lengths_device=torch.tensor([8], device="cuda", dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.tensor([[0, 1]], device="cuda", dtype=torch.int32),
+        )
+        impl.batch_size = 1
+        impl.query_width = 8
+        impl.num_splits = 1
+        impl.softmax_scale = 128**-0.5
+        impl.cache_sequence_lengths = torch.empty(1, device="cuda", dtype=torch.int32)
+        impl.rope_kvcache_impl = mock.Mock()
+        impl.rope_kvcache_impl.forward.return_value = torch.zeros((8, 256), device="cuda")
+        impl.rope_params = mock.Mock()
+        impl.write_cache_store_impl = None
+        cache = SimpleNamespace(
+            kv_cache_base=torch.zeros((2, 2, 1, 64, 128), device="cuda")
+        )
+        with (
+            mock.patch.object(flash_attn_3.common, "apply_write_cache_store"),
+            mock.patch.object(
+                flash_attn_3,
+                "flash_attn_with_kvcache",
+                return_value=torch.zeros((1, 8, 2, 128), device="cuda"),
+            ) as kernel,
+        ):
+            output = impl.forward(torch.empty(0, device="cuda"), cache)
+
+        self.assertEqual(output.shape, (8, 256))
+        self.assertEqual(kernel.call_args.kwargs["cache_seqlens"].tolist(), [72])
+        self.assertEqual(kernel.call_args.args[0].shape, (1, 8, 2, 128))
+
     def test_device_only_offset_helper_is_a_real_operator_contract(self) -> None:
         impl = object.__new__(FusedRopeKVCachePrefillOpQOut)
         block_ids = torch.tensor([[3, 7]], dtype=torch.int32)
