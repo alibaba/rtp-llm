@@ -176,9 +176,7 @@ def _sparse_prefill_online_kernel(
         next_max = tl.maximum(max_score, tl.max(score, axis=0))
         # All-masked chunks have next_max=-inf. Avoid -inf - -inf and keep
         # their numerator and denominator exactly zero.
-        rescale = tl.where(
-            next_max == float("-inf"), 0.0, tl.exp(max_score - next_max)
-        )
+        rescale = tl.where(next_max == float("-inf"), 0.0, tl.exp(max_score - next_max))
         weights = tl.where(valid, tl.exp(score - next_max), 0.0)
         v_offsets = idx[:, None] * stride_v_t + rd[None, :]
         v_chunk = tl.load(v_base + v_offsets, mask=valid[:, None], other=0.0).to(
@@ -192,6 +190,92 @@ def _sparse_prefill_online_kernel(
     tl.store(
         out_ptr + pid_b * stride_q_b + pid_h * stride_q_h + pid_s * stride_q_s + rd,
         out.to(q_ptr.dtype.element_ty),
+    )
+
+
+@triton.jit
+def _sparse_prefill_grouped_kernel(
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    idx_ptr,
+    out_ptr,
+    stride_q_b,
+    stride_q_h,
+    stride_q_s,
+    stride_k_b,
+    stride_k_h,
+    stride_k_t,
+    stride_v_b,
+    stride_v_h,
+    stride_v_t,
+    stride_idx_b,
+    stride_idx_s,
+    K,
+    T,
+    D: tl.constexpr,
+    SCALE: tl.constexpr,
+    q_per_kv: tl.constexpr,
+    MAX_BLKS: tl.constexpr,
+    BLK_K: tl.constexpr,
+    BLK_H: tl.constexpr,
+):
+    """Share selected K/V across GQA heads and use tensor-core reductions."""
+    pid_b = tl.program_id(0)
+    pid_kv = tl.program_id(1)
+    pid_s = tl.program_id(2)
+    rh = tl.arange(0, BLK_H)
+    rd = tl.arange(0, D)
+    q = tl.load(
+        q_ptr
+        + pid_b * stride_q_b
+        + (pid_kv * q_per_kv + rh[:, None]) * stride_q_h
+        + pid_s * stride_q_s
+        + rd[None, :],
+        mask=rh[:, None] < q_per_kv,
+        other=0.0,
+    )
+    idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
+    k_base = k_ptr + pid_b * stride_k_b + pid_kv * stride_k_h
+    v_base = v_ptr + pid_b * stride_v_b + pid_kv * stride_v_h
+    max_score = tl.full((BLK_H,), float("-inf"), tl.float32)
+    sum_exp = tl.zeros((BLK_H,), tl.float32)
+    acc = tl.zeros((BLK_H, D), tl.float32)
+    for blk in range(MAX_BLKS):
+        tr = blk * BLK_K + tl.arange(0, BLK_K)
+        idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
+        valid = (tr < K) & (idx >= 0) & (idx < T)
+        k = tl.load(
+            k_base + idx[:, None] * stride_k_t + rd[None, :],
+            mask=valid[:, None],
+            other=0.0,
+        )
+        score = tl.dot(q, tl.trans(k)) * SCALE
+        score = tl.where(valid[None, :], score, float("-inf"))
+        next_max = tl.maximum(max_score, tl.max(score, axis=1))
+        rescale = tl.where(next_max == float("-inf"), 0.0, tl.exp(max_score - next_max))
+        weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
+        v = tl.load(
+            v_base + idx[:, None] * stride_v_t + rd[None, :],
+            mask=valid[:, None],
+            other=0.0,
+        )
+        # Keep softmax probabilities in FP32. tf32x3 avoids the BF16
+        # probability rounding of a single BF16 tensor-core PV product.
+        acc = acc * rescale[:, None] + tl.dot(
+            weights, v.to(tl.float32), input_precision="tf32x3"
+        )
+        sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
+        max_score = next_max
+    out = tl.where(sum_exp[:, None] > 0, acc / sum_exp[:, None], 0.0)
+    tl.store(
+        out_ptr
+        + pid_b * stride_q_b
+        + (pid_kv * q_per_kv + rh[:, None]) * stride_q_h
+        + pid_s * stride_q_s
+        + rd[None, :],
+        out.to(q_ptr.dtype.element_ty),
+        mask=rh[:, None] < q_per_kv,
     )
 
 
@@ -265,11 +349,37 @@ def sparse_prefill_attn(
 
     grid = (B, H_q, S)
     online = os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE", "1").strip().lower()
-    kernel = (
-        _sparse_prefill_online_kernel
-        if online in ("1", "true", "on")
-        else _sparse_prefill_kernel
+    grouped_mode = (
+        os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED", "0").strip().lower()
     )
+    grouped = (
+        (
+            grouped_mode in ("1", "true", "on")
+            or (grouped_mode == "auto" and S >= 128 and K >= 256 and q_per_kv >= 3)
+        )
+        and D >= 32
+        and blk_k >= 32
+        and q_per_kv <= 16
+    )
+    if grouped:
+        grouped = (
+            torch.version.hip is None and torch.cuda.get_device_capability(dev)[0] >= 8
+        )
+    kernel = (
+        _sparse_prefill_grouped_kernel
+        if grouped
+        else (
+            _sparse_prefill_online_kernel
+            if online in ("1", "true", "on")
+            else _sparse_prefill_kernel
+        )
+    )
+    if grouped:
+        grid = (B, H_kv, S)
+        # The FP32 PV product needs three tensor-core products. A 32-key tile
+        # fits the shared-memory budget and avoids padding work for TP8's
+        # three query heads per KV head.
+        blk_k = 32
     kernel[grid](
         q,
         k,
@@ -294,6 +404,7 @@ def sparse_prefill_attn(
         q_per_kv=q_per_kv,
         MAX_BLKS=triton.cdiv(K, blk_k),
         BLK_K=blk_k,
+        **({"BLK_H": 16} if grouped else {}),
     )
     return out
 
