@@ -1,45 +1,17 @@
-package org.flexlb.cache.monitor;
-
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.LongSupplier;
+package org.flexlb.cache.telemetry;
 
 /**
  * Cumulative token counters for request-level theory cache-hit statistics.
  */
-public class CacheHitTheoryStats {
+public class TheoryCacheHitStats {
 
-    private final LongSupplier nowSupplier;
+    private long allHitCount;
+    private long allTotalCount;
 
-    private final LongAdder allHitCount = new LongAdder();
-    private final LongAdder allTotalCount = new LongAdder();
-
-    public CacheHitTheoryStats() {
-        this(System::currentTimeMillis);
-    }
-
-    CacheHitTheoryStats(LongSupplier nowSupplier) {
-        this.nowSupplier = nowSupplier == null ? System::currentTimeMillis : nowSupplier;
-    }
-
-    public Snapshot record(long hitCount, long totalCount) {
-        return record(hitCount, totalCount, nowSupplier.getAsLong());
-    }
-
-    Snapshot record(long hitCount, long totalCount, long nowMs) {
-        long normalizedHit = Math.max(0L, hitCount);
-        long normalizedTotal = Math.max(0L, totalCount);
-
-        if (normalizedTotal > 0L) {
-            allTotalCount.add(normalizedTotal);
-            allHitCount.add(normalizedHit);
-        }
-
-        return new Snapshot(
-                nowMs,
-                normalizedHit,
-                normalizedTotal,
-                allHitCount.sum(),
-                allTotalCount.sum());
+    public synchronized Snapshot record(long hitCount, long totalCount) {
+        allHitCount += hitCount;
+        allTotalCount += totalCount;
+        return new Snapshot(System.currentTimeMillis(), hitCount, totalCount, allHitCount, allTotalCount);
     }
 
     private static double ratio(long hitCount, long totalCount) {
