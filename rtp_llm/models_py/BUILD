@@ -208,6 +208,7 @@ filegroup(
         "modules/dsv4/v41_collective.py",
         "modules/dsv4/v41_attention.py",
         "modules/dsv4/v41_indexer.py",
+        "modules/dsv4/v41_compressor.py",
         "modules/dsv4/moe/strategies/base.py",
         "modules/dsv4/moe/strategies/v41_grouped_fp4.py",
         "modules/dsv4/_v41_mxfp8_triton.py",
@@ -218,6 +219,7 @@ filegroup(
         "modules/dsv4/fp8/_v41_cache_triton.py",
         "modules/dsv4/fp8/_v41_attention_triton.py",
         "modules/dsv4/fp8/_v41_indexer_triton.py",
+        "modules/dsv4/fp8/_v41_compressor_state_triton.py",
     ],
     visibility = ["//visibility:public"],
 )

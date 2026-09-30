@@ -15,6 +15,7 @@ import unittest
 SUITES = (
     "attention",
     "indexer",
+    "compressor",
     "cache_codec",
     "engram_hash",
     "engram_lookup",
