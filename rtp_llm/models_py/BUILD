@@ -54,6 +54,7 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
+        "modules/dsv4/fp8/_v41_cache_triton.LICENSE",
     ],
     deps = [
         ":utils",
@@ -177,6 +178,15 @@ py_library(
 )
 
 # Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "dsv41_cache_codec_sources",
+    srcs = [
+        "modules/dsv4/v41_cache.py",
+        "modules/dsv4/fp8/_v41_cache_triton.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "prefill_policy_source_data",
     srcs = [

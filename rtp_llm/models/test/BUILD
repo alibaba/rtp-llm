@@ -16,6 +16,23 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_cache_codec_test",
+    srcs = ["dsv41_cache_codec_test.py"],
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_cache_triton_test",
+    srcs = ["dsv41_cache_triton_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_cache_triton_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],
