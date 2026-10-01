@@ -312,13 +312,17 @@ def round_to_tf32(x: torch.Tensor) -> torch.Tensor:
     cacheable = not torch.is_grad_enabled() and not x.requires_grad
     cache_key = None
     if cacheable:
-        try:
-            version = int(x._version)
-        except RuntimeError:
-            # Weights materialized under inference_mode have no version counter.
-            # Serving weights are immutable after materialization; replacement is
-            # still detected by the tensor identity below.
+        # Inference tensors have no version counter; reading ``_version``
+        # raises on them, so branch on the metadata flag instead of paying
+        # the raise/catch (with its lazy backtrace walk) on every serving
+        # call. Replacement is still detected by the tensor identity below.
+        if torch.is_inference(x):
             version = None
+        else:
+            try:
+                version = int(x._version)
+            except RuntimeError:
+                version = None
         cache_key = (
             version,
             int(x.data_ptr()),

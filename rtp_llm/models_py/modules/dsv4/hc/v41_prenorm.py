@@ -54,10 +54,17 @@ def prepare_tf32_weight(fn: torch.Tensor) -> torch.Tensor:
     conversion cannot round those weights a second time. Inference tensors
     without version counters follow the existing immutable-weight contract.
     """
-    try:
-        version = fn._version
-    except RuntimeError:
+    # Inference tensors have no version counter; reading ``_version`` on
+    # them raises, so branch on the metadata flag instead of paying the
+    # raise/catch (with its lazy backtrace walk) on every serving call.
+    if torch.is_inference(fn):
         version = None
+    else:
+        try:
+            version = int(fn._version)
+        except RuntimeError:
+            version = None
+
     key = (version, fn.data_ptr(), tuple(fn.shape), tuple(fn.stride()), fn.device)
     cached = getattr(fn, "_dsv41_prenorm_tf32_cache", None)
     if cached is not None and cached[0] == key:
