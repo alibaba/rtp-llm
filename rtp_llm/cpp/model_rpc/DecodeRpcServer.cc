@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <condition_variable>
 #include <exception>
+#include "autil/Scope.h"
 #include <sstream>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -263,16 +264,40 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     }
     auto generate_stream = engine_->makeStream(input);
     generate_stream->streamCacheResource().setLinearPrefixLoadTokens(generate_stream->seqLength());
-    decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
+    decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+    auto finish_allocation_error = [&](grpc::StatusCode grpc_code, ErrorCode error_code, const std::string& message) {
+        const std::string error_msg = "request: [" + decode_context.request_key + "] " + message;
+        generate_stream->reportError(error_code, error_msg);
+        // The stream has not entered the scheduler. The RPC thread must commit
+        // its terminal transition and return any partially allocated blocks.
+        generate_stream->moveToNext();
+        decode_context.error_info   = ErrorInfo(error_code, error_msg);
+        decode_context.error_status = grpc::Status(grpc_code, error_msg);
+    };
+
+    // The RPC thread owns the stream until scheduler enqueue, including cache
+    // materialization. Follow main's cancellation/deadline checks during this wait.
+    while (true) {
+        const auto request_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+        if (decode_context.request_timeout_ms > 0 && request_cost_ms >= decode_context.request_timeout_ms) {
+            finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                    ErrorCode::GENERATE_TIMEOUT,
+                                    "decode allocation exceeded request timeout");
+            return;
+        }
+        if (decode_context.server_context->IsCancelled()) {
+            finish_allocation_error(
+                grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode allocation cancelled by client");
+            return;
+        }
+        if (generate_stream->hasError() || generate_stream->moveToNext() != StreamState::LOADING_CACHE) {
+            break;
+        }
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
@@ -646,31 +671,27 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.prefill_cp_size,
                                     generate_stream->forceDisableSpRun()};
 
-    // Connection establishment can race with the first PD wave for both the
-    // single-rank path and multi-rank Projection-KTP fan-in.  Apply the same
-    // configured retry policy to the complete distributed load plan.  A
-    // failed async attempt has already collected every Decode worker response
-    // before returning, so replaying the idempotent load into the same blocks
-    // cannot overlap an earlier attempt.
-    const auto retry_times = std::max<int64_t>(0, maga_init_params_.pd_sep_config.rdma_connect_retry_times);
-    ErrorInfo  error_info  = ErrorInfo::OkStatus();
-    for (int64_t attempt = 0; attempt <= retry_times; ++attempt) {
-        if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
+    // Match main: connection retries apply to the single-rank load only.
+    // Distributed cancellation/failure ends the load stage without replaying
+    // a plan whose other workers may still be completing their transport calls.
+    if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
+        const auto retry_times = std::max<int64_t>(0, maga_init_params_.pd_sep_config.rdma_connect_retry_times);
+        ErrorInfo  error_info  = ErrorInfo::OkStatus();
+        for (int64_t attempt = 0; attempt <= retry_times; ++attempt) {
             error_info = loadCache(load_context);
-        } else {
-            error_info = loadCacheAsyncForTp(decode_context, load_context);
+            if (!isRetryableCacheStoreConnectError(error_info.code())) {
+                return error_info;
+            }
+            RTP_LLM_LOG_WARNING("[CACHE_STORE_CONNECT_RETRY] request=%s attempt=%ld/%ld error=%s",
+                                decode_context.request_key.c_str(),
+                                attempt + 1,
+                                retry_times + 1,
+                                ErrorCodeToString(error_info.code()).c_str());
         }
-        if (!isRetryableCacheStoreConnectError(error_info.code())) {
-            return error_info;
-        }
-        RTP_LLM_LOG_WARNING("[CACHE_STORE_CONNECT_RETRY] request=%s attempt=%ld/%ld error=%s",
-                            decode_context.request_key.c_str(),
-                            attempt + 1,
-                            retry_times + 1,
-                            ErrorCodeToString(error_info.code()).c_str());
+        return error_info;
     }
 
-    return error_info;
+    return loadCacheAsyncForTp(decode_context, load_context);
 }
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
@@ -686,6 +707,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         Status                            status;
         std::shared_ptr<RpcService::Stub> stub;
         std::shared_ptr<ClientContext>    client_context;
+        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader;
+        bool completed = false;
     };
 
     uint32_t                 worker_size = resource_.grpc_workers.size();
@@ -693,6 +716,28 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     uint32_t                 cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
     vector<CompletionQueue>  completion_queues(cq_size);
     vector<int>              each_finished_count(cq_size, 0);
+    struct WorkerRpcCleanup {
+        vector<WorkerRpcContext>& contexts;
+        vector<CompletionQueue>& queues;
+
+        ~WorkerRpcCleanup() {
+            for (auto& context : contexts) {
+                if (context.reader && !context.completed) {
+                    context.client_context->TryCancel();
+                }
+            }
+            for (auto& queue : queues) {
+                queue.Shutdown();
+            }
+            // Join local gRPC completions before destroying their response and
+            // status storage. Cancellation does not wait for the worker's load deadline.
+            for (auto& queue : queues) {
+                void* tag;
+                bool  ok;
+                while (queue.Next(&tag, &ok)) {}
+            }
+        }
+    } rpc_cleanup{all_context, completion_queues};
     if (worker_size == 0 || cq_size == 0) {
         RTP_LLM_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %d, cq size = %d",
                             decode_context.request_key.c_str(),
@@ -723,9 +768,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     for (int i = 0; i < worker_size; i++) {
         auto& rpc_context = all_context[i];
         ++expected_per_queue[i % cq_size];
-        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
-            rpc_context.client_context.get(), load_requests[i], &completion_queues[i % completion_queues.size()]));
-        reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
+        rpc_context.reader = rpc_context.stub->AsyncRemoteLoad(
+            rpc_context.client_context.get(), load_requests[i], &completion_queues[i % completion_queues.size()]);
+        rpc_context.reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
     }
 
     bool        all_success               = true;
@@ -735,23 +780,19 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     std::string error_msg                 = "failed to load kv cache in rank: ";
     int64_t     min_response_done_time_us = 1lu << 60;
     int64_t     max_response_done_time_us = 0;
-    ErrorInfo   caller_error = ErrorInfo::OkStatus();
     while (true) {
         RTP_LLM_LOG_DEBUG("request [%s] load cache loop step", decode_context.request_key.c_str());
         auto cost_time_ms = (currentTimeUs() - load_cache_begin_time_us) / 1000;
-        if (caller_error.ok() && cost_time_ms > total_timeout_ms) {
+        if (cost_time_ms > total_timeout_ms) {
             auto timeout_message = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
                         + "ms, "
                           "total timeout for load cache is "
                         + std::to_string(total_timeout_ms) + "ms";
-            caller_error = ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, timeout_message);
+            return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, timeout_message);
         }
-        if (caller_error.ok() && load_context.server_context->IsCancelled()) {
-            caller_error = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+        if (load_context.server_context->IsCancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
         }
-        // Do not cancel the worker RPCs: a cancelled gRPC completion does not
-        // acknowledge that the remote RDMA writes have stopped. RemoteLoad
-        // drains its transport callbacks under the original load deadline.
         auto once_deadline =
             std::chrono::system_clock::now()
             + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms);
@@ -764,20 +805,21 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             if (each_finished_count[i] == expected_per_queue[i]) {
                 continue;
             }
-            if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
-                == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            const auto next_status = completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline);
+            if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
                 RTP_LLM_LOG_DEBUG("request [%s] async next timeout", decode_context.request_key.c_str());
                 continue;
             }
-            each_finished_count[i]++;
-            if (!ok) {
-                all_success = false;
-                error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
-                error_msg += "async get next event from grpc completion queue failed, ";
-                ++finished_count;
-                continue;
+            if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "grpc completion queue shut down during cache load");
             }
-            auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
+            each_finished_count[i]++;
+            auto rank = reinterpret_cast<uintptr_t>(got_tag);
+            all_context[rank].completed = true;
+            if (!ok) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                 "async get next event from grpc completion queue failed");
+            }
             const auto& status           = all_context[rank].status;
             const auto& response         = all_context[rank].response;
             const auto& pb_error_code    = response.error_info().error_code();
@@ -802,14 +844,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         if (finished_count == worker_size) {
             break;
         }
-    }
-
-    for (auto& completion_queue : completion_queues) {
-        completion_queue.Shutdown();
-    }
-
-    if (!caller_error.ok()) {
-        return caller_error;
     }
 
     if (finished_count != worker_size) {
@@ -1368,7 +1402,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
 
     const ModelCacheLoadView main_view{&cache_config, nullptr, layer_num, maga_init_params_.model_id, "main-model"};
-    ErrorInfo                aggregate_error = ErrorInfo::OkStatus();
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         LoadBatches batches;
@@ -1415,21 +1448,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
         if (!append_status.ok()) {
-            if (aggregate_error.ok()) {
-                aggregate_error = append_status;
-            }
-            // Earlier peers may still be writing into the destination buffers.
-            // Stop dispatching, then use the existing wait loop below.
-            break;
+            logPageRRFanInFailure(append_status);
+            return append_status;
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
             RTP_LLM_LOG_WARNING("invalid peer ip to load [%s]", peer_addr.c_str());
-            if (aggregate_error.ok()) {
-                aggregate_error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
-            }
-            continue;
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
         for (const auto& batch : batches) {
@@ -1445,21 +1471,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             if (!layer_cache_load_context) {
                 RTP_LLM_LOG_WARNING("request [%s] load cache failed, layer cache load context is nullptr",
                                     request_key.c_str());
-                if (aggregate_error.ok()) {
-                    aggregate_error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
-                }
-                continue;
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
             }
             load_contexts.push_back(layer_cache_load_context);
         }
     }
 
     for (auto& layer_cache_load_context : load_contexts) {
+        // Match main's logical completion: cancellation/deadline ends this
+        // stage without waiting for all transport callbacks.
         layer_cache_load_context->waitDone();
-        // waitDone reports cancellation/deadline before the transport callback.
-        // The destination blocks have non-owning addresses, so drain outstanding
-        // writes before this request can release them or retry the same buffers.
-        layer_cache_load_context->waitForCompletion();
         if (layer_cache_load_context->success()) {
             RTP_LLM_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
         } else {
@@ -1469,13 +1490,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 request_key.c_str(),
                                 layer_cache_load_context->getErrorInfoString().c_str(),
                                 (load_done_time_us - start_load_time_us) / 1000);
-            if (aggregate_error.ok()) {
-                aggregate_error = layer_cache_load_context->getErrorInfo();
-            }
+            const auto error_info = layer_cache_load_context->getErrorInfo();
+            logPageRRFanInFailure(error_info);
+            return error_info;
         }
     }
 
-    if (page_rr_to_replicated_decode && aggregate_error.ok()) {
+    if (page_rr_to_replicated_decode) {
         RTP_LLM_LOG_INFO(
             "[K3_PD_PAGE_RR_FAN_IN] request_id=%ld source_shards=%d decode_dp_rank=%d page_owner_pages=%zu "
             "kda_partitions=%zu replica_blocks=%zu mla_fp8=%d status=ok",
@@ -1486,11 +1507,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             kda_partition_load_count,
             replica_load_count,
             static_cast<int>(maga_init_params_.model_config_.attn_config.mla_fp8_compute));
-    } else if (page_rr_to_replicated_decode) {
-        logPageRRFanInFailure(aggregate_error);
     }
 
-    return aggregate_error;
+    return ErrorInfo::OkStatus();
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
@@ -1547,6 +1566,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
+    const int uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&decode_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            decode_context.markRpcHandlingCompleted();
+        }
+    });
 
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;

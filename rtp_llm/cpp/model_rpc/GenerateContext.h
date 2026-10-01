@@ -1,5 +1,8 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -11,6 +14,8 @@ namespace rtp_llm {
 
 class GenerateContext {
 public:
+    using RequestDeadline = std::optional<std::chrono::system_clock::time_point>;
+
     GenerateContext(int64_t                               request_id,
                     int64_t                               request_timeout_ms,
                     grpc::ServerContext*                  server_context,
@@ -18,17 +23,23 @@ public:
                     std::shared_ptr<RpcServerRuntimeMeta> meta):
         request_id(request_id),
         request_key(std::to_string(request_id)),
-        request_timeout_ms(request_timeout_ms),
         server_context(server_context),
         metrics_reporter(metrics_reporter),
         meta(meta) {
         request_begin_time_us = currentTimeUs();
+        request_begin_time_   = std::chrono::system_clock::now();
+        setRequestTimeoutMs(request_timeout_ms);
     }
     virtual ~GenerateContext();
     virtual void                             reset();
     bool                                     ok() const;
     bool                                     hasError() const;
     bool                                     cancelled() const;
+    void                                     setRequestTimeoutMs(int64_t timeout_ms);
+    RequestDeadline                          streamRpcDeadline(int64_t relative_timeout_ms = 0) const;
+    bool                                     requestDeadlineExceeded() const;
+    bool                                     isRequestCancelled() const;
+    void                                     markRpcHandlingCompleted();
     int64_t                                  executeTimeMs();
     void                                     reportTime();
     void                                     collectBasicMetrics(RpcMetricsCollector& collector);
@@ -45,6 +56,7 @@ public:
     int64_t                               request_timeout_ms    = 0;
     bool                                  finished              = false;
     int64_t                               request_begin_time_us = 0;
+    RequestDeadline                       request_deadline;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
     RequestInfo                           request_info;
@@ -53,10 +65,14 @@ public:
     std::shared_ptr<RpcServerRuntimeMeta> meta;
 
 protected:
-    std::shared_ptr<GenerateStream> stream_;
+    std::shared_ptr<GenerateStream>       stream_;
+    std::chrono::system_clock::time_point request_begin_time_;
+    bool                                 rpc_handling_completed_ = false;
 
 protected:
     void stopStream();
+    void stopStreamForRetry();
+    void cancelStreamOnTeardown() noexcept;
 };
 
 #define CHECK_ERROR_STATUS(generate_context)                                                                           \
@@ -71,7 +87,7 @@ protected:
 #define CHECK_REQUEST_TIMEOUT(generate_context)                                                                        \
     {                                                                                                                  \
         auto request_cost_time_ms = (currentTimeUs() - generate_context.request_begin_time_us) / 1000;                 \
-        if (generate_context.request_timeout_ms > 0 && request_cost_time_ms >= generate_context.request_timeout_ms) {  \
+        if (generate_context.requestDeadlineExceeded()) {                                                              \
             generate_context.error_info = ErrorInfo(                                                                   \
                 ErrorCode::GENERATE_TIMEOUT,                                                                           \
                 "request cost time is " + std::to_string(request_cost_time_ms) + " ms" + ", request timeout is "       \
@@ -84,7 +100,7 @@ protected:
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context->IsCancelled()) {                                                              \
+    if (generate_context.isRequestCancelled()) {                                                                       \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, \
                                                           generate_context.request_info, \
@@ -103,7 +119,9 @@ protected:
     int64_t begin_time_us = currentTimeUs();                                                                           \
     auto    stage         = generate_context.stat_info.saveStage();                                                    \
     for (int attempt = 0; attempt <= max_retries; ++attempt) {                                                         \
+        CHECK_REQUEST_STOP(generate_context)                                                                           \
         generate_context.reset();                                                                                      \
+        CHECK_REQUEST_STOP(generate_context)                                                                           \
         generate_context.stat_info.restoreStage(stage);                                                                \
         generate_context.retry_times++;                                                                                \
         func(generate_context);                                                                                        \

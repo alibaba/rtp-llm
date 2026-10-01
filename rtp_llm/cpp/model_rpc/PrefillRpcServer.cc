@@ -1,4 +1,5 @@
 #include "autil/TimeUtility.h"
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -9,6 +10,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <strings.h>
 #include <unistd.h>
 
@@ -289,14 +291,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
-    auto    request_timeout_ms = prefill_context.request_timeout_ms;
-    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
-    if (final_timeout_ms > 0) {
-        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        prefill_context.client_context->set_deadline(deadline);
+    const auto rpc_deadline = prefill_context.streamRpcDeadline(maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    if (rpc_deadline.has_value()) {
+        prefill_context.client_context->set_deadline(*rpc_deadline);
     }
-    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -604,12 +602,19 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 
     AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
     RPCContext     rpc_context{request, writer};
-    auto           prefill_context         = PrefillGenerateContext(&this->resource(),
-                                                  rpc_context,
-                                                  request->generate_config().timeout_ms(),
-                                                  server_context,
-                                                  metrics_reporter_,
-                                                  meta_);
+    auto prefill_context = PrefillGenerateContext(&this->resource(),
+                                                 rpc_context,
+                                                 request->generate_config().timeout_ms(),
+                                                 server_context,
+                                                 metrics_reporter_,
+                                                 meta_,
+                                                 maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
+    const int uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&prefill_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            prefill_context.markRpcHandlingCompleted();
+        }
+    });
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
 

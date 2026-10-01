@@ -3,9 +3,6 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-    }
     stopStream();
     reportTime();
 }
@@ -25,6 +22,35 @@ bool GenerateContext::hasError() const {
 
 bool GenerateContext::cancelled() const {
     return error_status.error_code() == grpc::StatusCode::CANCELLED;
+}
+
+void GenerateContext::setRequestTimeoutMs(int64_t timeout_ms) {
+    request_timeout_ms = timeout_ms;
+    if (timeout_ms > 0) {
+        request_deadline = request_begin_time_ + std::chrono::milliseconds(timeout_ms);
+    } else {
+        request_deadline.reset();
+    }
+}
+
+GenerateContext::RequestDeadline GenerateContext::streamRpcDeadline(int64_t relative_timeout_ms) const {
+    auto deadline = request_deadline;
+    if (relative_timeout_ms > 0) {
+        const auto relative_deadline =
+            std::chrono::system_clock::now() + std::chrono::milliseconds(relative_timeout_ms);
+        if (!deadline.has_value() || relative_deadline < *deadline) {
+            deadline = relative_deadline;
+        }
+    }
+    return deadline;
+}
+
+bool GenerateContext::requestDeadlineExceeded() const {
+    return request_deadline.has_value() && std::chrono::system_clock::now() >= *request_deadline;
+}
+
+bool GenerateContext::isRequestCancelled() const {
+    return server_context && server_context->IsCancelled();
 }
 
 int64_t GenerateContext::executeTimeMs() {
@@ -63,23 +89,51 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 }
 
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    if (stream_ && stream_ != stream) {
+        stopStreamForRetry();
+    }
     stream_ = stream;
     if (stream) {
         meta->enqueue(request_id, stream_);
     }
 }
 
-void GenerateContext::stopStream() {
+void GenerateContext::markRpcHandlingCompleted() {
+    rpc_handling_completed_ = true;
+}
+
+void GenerateContext::cancelStreamOnTeardown() noexcept {
+    if (!stream_ || stream_->getStatus() == StreamState::FINISHED || stream_->hasError()) {
+        return;
+    }
+    if (rpc_handling_completed_ && !hasError() && !error_info.hasError() && !isRequestCancelled()) {
+        return;
+    }
+    // Report the terminal cause before RuntimeMeta snapshots the stream.
+    if (error_info.hasError()) {
+        stream_->reportError(error_info.code(), error_info.ToString());
+    } else {
+        stream_->reportError(ErrorCode::CANCELLED, "RPC handling failed, was cancelled, or exited unexpectedly");
+    }
+}
+
+void GenerateContext::stopStreamForRetry() {
     if (stream_) {
-        // if is waiting, cancel it
-        meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
+        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
             stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         }
-        // if is running, waiting util done
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
-            usleep(1000);
+        if (meta) {
+            meta->dequeue(request_id, stream_);
+        }
+        stream_.reset();
+    }
+}
+
+void GenerateContext::stopStream() {
+    cancelStreamOnTeardown();
+    if (stream_) {
+        if (meta) {
+            meta->dequeue(request_id, stream_);
         }
         stream_.reset();
     }

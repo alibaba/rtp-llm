@@ -627,6 +627,7 @@ std::string PDSepConfig::to_string() const {
         << "prefill_retry_times: " << prefill_retry_times << "\n"
         << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
         << "prefill_max_wait_timeout_ms: " << prefill_max_wait_timeout_ms << "\n"
+        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms << "\n"
         << "decode_retry_times: " << decode_retry_times << "\n"
         << "decode_retry_timeout_ms: " << decode_retry_timeout_ms << "\n"
         << "decode_retry_interval_ms: " << decode_retry_interval_ms << "\n"

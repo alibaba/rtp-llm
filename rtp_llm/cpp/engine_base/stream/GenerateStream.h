@@ -279,6 +279,7 @@ public:
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+    bool                finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
@@ -869,6 +870,7 @@ protected:
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> cv_;
+    std::shared_ptr<std::condition_variable> consumer_cv_;
 
     GenerateStreamPtr propose_stream_ = nullptr;
     GenerateStreamPtr score_stream_   = nullptr;

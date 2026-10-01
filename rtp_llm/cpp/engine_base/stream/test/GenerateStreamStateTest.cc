@@ -1,5 +1,6 @@
 
 #include "gtest/gtest.h"
+#include <future>
 
 #define private public
 #define protected public
@@ -67,6 +68,40 @@ TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
     ASSERT_FALSE(stream->isFinished());
     ASSERT_FALSE(stream->getStatus() == StreamState::RUNNING);
     ASSERT_FALSE(stream->getStatus() == StreamState::LOADING_CACHE);
+}
+
+TEST_F(GenerateStreamStateTest, testFinishOrCancelWaitsForSchedulerCommit) {
+    auto stream = createStream();
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "original timeout");
+    auto waiter = std::async(std::launch::async, [&] { return stream->finishOrCancel(1000, "cancel stream"); });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(waiter.get());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST_F(GenerateStreamStateTest, testFinishOrCancelTimeoutPreservesError) {
+    auto stream = createStream();
+    stream->reportError(ErrorCode::MALLOC_FAILED, "original allocation failure");
+    EXPECT_FALSE(stream->finishOrCancel(5, "cancel stream"));
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+}
+
+TEST_F(GenerateStreamStateTest, testFinishOrCancelZeroWaitsForSchedulerCommit) {
+    auto stream = createStream();
+    stream->reportError(ErrorCode::CANCELLED, "cancel stream");
+    auto waiter = std::async(std::launch::async, [&] { return stream->finishOrCancel(0, "cancel stream"); });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(waiter.get());
+}
+
+TEST_F(GenerateStreamStateTest, testFinishOrCancelKeepsFinishedSuccess) {
+    auto stream = createStream();
+    stream->generate_status_->status = StreamState::FINISHED;
+    EXPECT_TRUE(stream->finishOrCancel(0, "cancel stream"));
+    EXPECT_FALSE(stream->hasError());
 }
 
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {
