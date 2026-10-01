@@ -146,10 +146,13 @@ class MoeTpFusedFp8Context:
                 raise ValueError("max_numel must be positive")
             properties = torch.cuda.get_device_properties(self.device)
             identity = (socket.gethostname(), str(properties.uuid))
-            self.blocks = (
-                min(32, properties.multi_processor_count) if blocks is None else blocks
-            )
-            if not isinstance(self.blocks, int) or self.blocks < 1:
+            # Zero is an internal native sentinel: resolve from actual compiled
+            # occupancy and workspace capacity, rather than limiting large TP
+            # workloads to a fixed 32-CTA grid. Explicit benchmark grids remain.
+            self.blocks = 0 if blocks is None else blocks
+            if not isinstance(self.blocks, int) or (
+                self.blocks < 1 and blocks is not None
+            ):
                 raise ValueError("blocks must be a positive integer")
             self.rank = dist.get_rank(group)
         except Exception as exc:
@@ -179,12 +182,14 @@ class MoeTpFusedFp8Context:
                 self.native = load_native().MoeTpFusedFp8(
                     max_numel, self.device.index, self.rank, self.blocks
                 )
+                self.blocks = self.native.blocks()
                 torch.cuda.current_stream(self.device).synchronize()
                 handle = self.native.get_ipc_handle()
         except Exception as exc:
             error = repr(exc)
         try:
             _agree(error, None, group, "JIT/allocation")
+            _agree(None, self.blocks, group, "resolved resident grid")
             handles = _gather(handle, group)
             error = None
             try:

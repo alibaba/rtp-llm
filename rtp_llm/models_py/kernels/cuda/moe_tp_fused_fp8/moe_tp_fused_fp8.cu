@@ -15,6 +15,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -187,7 +188,11 @@ __global__ void local_fc2_kernel(fused::Fc2ReferenceParams fc2, __nv_bfloat16* o
     }
 }
 
-__global__ void fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat16* output) {
+// Profiling is a separate instantiation and is never used for latency samples.
+// Each CTA records [smid, packets, FC2 cycles, communication cycles, start ns, end ns].
+template<bool Profile = false>
+__global__ void
+fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat16* output, uint64_t* stats = nullptr) {
     __shared__ float warp_maxima[fused::kPacketThreads / 32];
     __shared__ int   protocol_status;
     if (threadIdx.x == 0)
@@ -195,7 +200,20 @@ __global__ void fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams 
     __syncthreads();
     if (!protocol_status)
         return;
+    uint64_t started = 0, compute_cycles = 0, communication_cycles = 0, packets_done = 0;
+    uint32_t smid = 0;
+    if constexpr (Profile) {
+        if (threadIdx.x == 0) {
+            asm volatile("mov.u32 %0, %%smid;" : "=r"(smid));
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(started));
+        }
+    }
     for (size_t packet = blockIdx.x; packet < params.packet_count; packet += gridDim.x) {
+        uint64_t before = 0;
+        if constexpr (Profile) {
+            if (threadIdx.x == 0)
+                before = clock64();
+        }
         const size_t base = packet * fused::kPacketValues;
         for (int item = threadIdx.x; item < fused::kPacketValues; item += blockDim.x) {
             const size_t index = base + item;
@@ -204,8 +222,33 @@ __global__ void fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams 
                     fc2, index / fused::kFc2ReferenceHiddenSize, index % fused::kFc2ReferenceHiddenSize);
         }
         __syncthreads();
+        if constexpr (Profile) {
+            if (threadIdx.x == 0) {
+                compute_cycles += clock64() - before;
+                before = clock64();
+            }
+        }
         if (!publish_reduce_and_ack(params, output, packet, warp_maxima, &protocol_status))
             return;
+        if constexpr (Profile) {
+            if (threadIdx.x == 0) {
+                communication_cycles += clock64() - before;
+                ++packets_done;
+            }
+        }
+    }
+    if constexpr (Profile) {
+        if (threadIdx.x == 0) {
+            uint64_t ended;
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(ended));
+            uint64_t* row = stats + blockIdx.x * 6;
+            row[0]        = smid;
+            row[1]        = packets_done;
+            row[2]        = compute_cycles;
+            row[3]        = communication_cycles;
+            row[4]        = started;
+            row[5]        = ended;
+        }
     }
 }
 
@@ -219,7 +262,7 @@ public:
         packet_capacity_(div_up(max_numel, fused::kPacketValues)) {
         TORCH_CHECK(max_numel_ > 0, "max_numel must be positive");
         TORCH_CHECK(rank_ >= 0 && rank_ < fused::kTpSize, "rank must be 0 or 1");
-        TORCH_CHECK(blocks_ > 0, "blocks must be positive");
+        TORCH_CHECK(blocks_ >= 0, "blocks must be nonnegative (zero selects the resident grid)");
         c10::cuda::CUDAGuard guard(device_);
         ensure_resident_grid();
         try {
@@ -350,7 +393,7 @@ public:
                                       output,
                                       /*require_peer=*/true);
         launch_common(output.numel(), [&](DeviceParams params, cudaStream_t stream) {
-            fused_fc2_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(params, fc2, bf16_ptr(output));
+            fused_fc2_kernel<false><<<blocks_, fused::kPacketThreads, 0, stream>>>(params, fc2, bf16_ptr(output));
             cuda_check(cudaGetLastError(), "fused_fc2_kernel launch");
         });
     }
@@ -385,6 +428,69 @@ public:
 
     int blocks() const {
         return blocks_;
+    }
+
+    py::dict launch_info() const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        cudaFuncAttributes   attributes{};
+        int                  active = 0, profile_active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaFuncGetAttributes(&attributes, fused_fc2_kernel<false>), "cudaFuncGetAttributes");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, fused_fc2_kernel<false>, fused::kPacketThreads, 0),
+            "fused occupancy");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &profile_active, fused_fc2_kernel<true>, fused::kPacketThreads, 0),
+                   "profile occupancy");
+        py::dict info;
+        info["sm_count"]                    = properties.multiProcessorCount;
+        info["max_resident_blocks"]         = active * properties.multiProcessorCount;
+        info["profile_max_resident_blocks"] = profile_active * properties.multiProcessorCount;
+        info["active_blocks_per_sm"]        = active;
+        info["regs_per_thread"]             = attributes.numRegs;
+        info["static_shared_bytes"]         = attributes.sharedSizeBytes;
+        info["threads_per_block"]           = fused::kPacketThreads;
+        info["max_threads_per_sm"]          = properties.maxThreadsPerMultiProcessor;
+        info["blocks"]                      = blocks_;
+        return info;
+    }
+
+    void profile_fc2(torch::Tensor activation_fp8,
+                     torch::Tensor activation_scale,
+                     torch::Tensor weight_fp8,
+                     torch::Tensor weight_scale,
+                     torch::Tensor route_ids,
+                     torch::Tensor route_weights,
+                     py::object    gated_shared,
+                     torch::Tensor output,
+                     torch::Tensor stats) {
+        const auto fc2 = validate_fc2(activation_fp8,
+                                      activation_scale,
+                                      weight_fp8,
+                                      weight_scale,
+                                      route_ids,
+                                      route_weights,
+                                      gated_shared,
+                                      output,
+                                      true);
+        TORCH_CHECK(stats.is_cuda() && stats.device().index() == device_ && stats.is_contiguous()
+                        && stats.scalar_type() == at::kUInt64 && stats.dim() == 2 && stats.size(0) == blocks_
+                        && stats.size(1) == 6,
+                    "stats must be uint64 [blocks,6] on the context device");
+        c10::cuda::CUDAGuard guard(device_);
+        int                  active = 0;
+        cudaDeviceProp       properties{};
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, fused_fc2_kernel<true>, fused::kPacketThreads, 0),
+            "profile occupancy");
+        TORCH_CHECK(blocks_ <= active * properties.multiProcessorCount, "profile grid exceeds resident capacity");
+        launch_common(output.numel(), [&](DeviceParams params, cudaStream_t stream) {
+            fused_fc2_kernel<true><<<blocks_, fused::kPacketThreads, 0, stream>>>(
+                params, fc2, bf16_ptr(output), stats.data_ptr<uint64_t>());
+            cuda_check(cudaGetLastError(), "profile fused_fc2_kernel launch");
+        });
     }
 
     void close() {
@@ -425,11 +531,15 @@ private:
 
     void ensure_resident_grid() {
         int active = 0;
-        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, fused_fc2_kernel, fused::kPacketThreads, 0),
-                   "cudaOccupancyMaxActiveBlocksPerMultiprocessor(fused_fc2_kernel)");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, fused_fc2_kernel<false>, fused::kPacketThreads, 0),
+            "cudaOccupancyMaxActiveBlocksPerMultiprocessor(fused_fc2_kernel)");
         cudaDeviceProp properties{};
         cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
         const int64_t limit = static_cast<int64_t>(active) * properties.multiProcessorCount;
+        TORCH_CHECK(limit > 0, "fused MoE kernel has no resident launch configuration");
+        if (blocks_ == 0)
+            blocks_ = static_cast<int>(std::min<uint64_t>(limit, packet_capacity_));
         TORCH_CHECK(blocks_ <= limit, "fused MoE blocks=", blocks_, " exceeds resident limit=", limit);
     }
 
@@ -659,5 +769,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("debug_packet_bytes", &MoeTpFusedFp8::copy_local_packets)
         .def("error_status", &MoeTpFusedFp8::error_status)
         .def("blocks", &MoeTpFusedFp8::blocks)
+        .def("launch_info", &MoeTpFusedFp8::launch_info)
+        .def("profile_fc2", &MoeTpFusedFp8::profile_fc2)
         .def("close", &MoeTpFusedFp8::close);
 }
