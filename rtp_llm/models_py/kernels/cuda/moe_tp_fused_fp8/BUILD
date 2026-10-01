@@ -3,6 +3,8 @@ py_library(
     srcs = ["__init__.py"],
     data = [
         "fc2_reference.cuh",
+        "fc2_mma.cuh",
+        "fc2_staged.cuh",
         "moe_tp_fused_fp8.cu",
         "moe_tp_fused_fp8_transport.cuh",
     ],

@@ -1,8 +1,8 @@
-"""Opt-in correctness baseline for pure-TP2 FC2 and FP8 communication fusion.
+"""Opt-in pure-TP2 FC2 and FP8 communication fusion experiments.
 
-This module is not registered in the serving model path. The scalar FC2
-baseline fixes a numerical contract before a tensor-core implementation is
-introduced. It must not be used as a performance replacement for grouped GEMM.
+The scalar reference, scalar-order shared staging and FP8 MMA variants are
+explicit benchmark APIs. None is registered in the serving model path or
+qualified as a replacement for a production grouped GEMM backend.
 """
 
 from __future__ import annotations
@@ -281,12 +281,21 @@ class MoeTpFusedFp8Context:
         *,
         fused=True,
         out=None,
+        kernel="scalar",
     ):
         import torch
 
         error = None
         shape = None
         try:
+            if kernel not in ("scalar", "mma", "staged", "mma_batch"):
+                raise ValueError("kernel must be scalar, mma, staged or mma_batch")
+            if fused and kernel != "scalar":
+                limit = self.native.launch_info()[f"{kernel}_max_resident_blocks"]
+                if self.blocks > limit:
+                    raise ValueError(
+                        "selected compute kernel needs a smaller resident grid"
+                    )
             tokens, experts = a.shape[0], w.shape[0]
             if tokens <= 0 or not 0 < experts <= 256:
                 raise ValueError("requires positive tokens and 1..256 experts")
@@ -307,16 +316,25 @@ class MoeTpFusedFp8Context:
             ((tokens, 2048), torch.bfloat16),
             ((tokens, 2048), torch.bfloat16),
         )
-        self._validate_tensors(tensors, specs, "FC2 inputs")
+        if gated_shared is None:
+            self._validate_tensors(
+                tensors[:6] + (out,), specs[:6] + (specs[-1],), "FC2 inputs"
+            )
+        else:
+            self._validate_tensors(tensors, specs, "FC2 inputs")
         error = None
         try:
             if bool((ids >= experts).any().item()):
                 raise ValueError("route ID exceeds the expert allocation")
             for tensor in (a, a_scale, w, w_scale, route_weights, gated_shared):
-                if not bool(torch.isfinite(tensor.float()).all().item()):
+                if tensor is not None and not bool(
+                    torch.isfinite(tensor.float()).all().item()
+                ):
                     raise ValueError("FC2 inputs must be finite")
             out_begin, out_end = out.data_ptr(), out.data_ptr() + out.nbytes
             for tensor in tensors[:-1]:
+                if tensor is None:
+                    continue
                 begin, end = tensor.data_ptr(), tensor.data_ptr() + tensor.nbytes
                 if max(begin, out_begin) < min(end, out_end):
                     raise ValueError("FC2 output overlaps an input allocation")
@@ -328,8 +346,16 @@ class MoeTpFusedFp8Context:
             for tensor in (ids, route_weights):
                 digest.update(tensor.cpu().view(torch.uint8).numpy().tobytes())
             route_digest = digest.hexdigest()
-        _agree(error, (bool(fused), route_digest), self.group, "FC2 route/mode")
-        return self._launch("fused_fc2" if fused else "local_fc2", tensors[:-1], out)
+        _agree(
+            error,
+            (bool(fused), kernel, gated_shared is None, route_digest),
+            self.group,
+            "FC2 route/mode",
+        )
+        method = "fused_fc2" if fused else "local_fc2"
+        if kernel != "scalar":
+            method += f"_{kernel}"
+        return self._launch(method, tensors[:-1], out)
 
     def synchronize(self):
         self.stream.synchronize()

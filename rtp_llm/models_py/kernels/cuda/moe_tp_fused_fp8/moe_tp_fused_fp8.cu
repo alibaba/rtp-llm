@@ -5,8 +5,8 @@
  * you may not use this file except in compliance with the License.
  */
 // Correctness-first TP=2 FC2/finalize plus one-shot FP8 IPC all-reduce.
-// This intentionally uses the scalar fc2_reference contract. It is a protocol
-// baseline, not an MMA implementation or a performance claim.
+// Scalar, shared-staged and FP8 MMA compute variants are explicit benchmark APIs.
+// None is registered as a serving backend.
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
@@ -23,6 +23,8 @@
 #include <type_traits>
 
 #include "fc2_reference.cuh"
+#include "fc2_mma.cuh"
+#include "fc2_staged.cuh"
 #include "moe_tp_fused_fp8_transport.cuh"
 
 namespace {
@@ -156,6 +158,107 @@ __device__ __forceinline__ bool publish_reduce_and_ack(
     return *protocol_status != 0;
 }
 
+// Keep the 496-value quantization scale unchanged, but amortize PCIe control
+// traffic over up to 32 grid-strided packets. Their quantization boundaries
+// stay unchanged. Only the first packet's flags represent the group.
+constexpr size_t kPacketBatch = 32;
+
+__device__ __forceinline__ bool publish_batch_reduce_and_ack(DeviceParams const& params,
+                                                             __nv_bfloat16*      output,
+                                                             size_t              first,
+                                                             size_t              count,
+                                                             float*              warp_maxima,
+                                                             int*                protocol_status) {
+    for (size_t offset = 0; offset < count; ++offset) {
+        const size_t packet = first + offset * gridDim.x;
+        write_packet(params.local.packets + packet, output, params.numel, packet, warp_maxima, params.local.error);
+        __syncthreads();
+    }
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0)
+        fused::store_release_sys(params.epoch, params.local.ready + first);
+    __syncthreads();
+    if (threadIdx.x == 0)
+        *protocol_status = fused::wait_epoch(params.peer.ready + first, params.epoch, kSpinLimit) ? 1 : 0;
+    __syncthreads();
+    if (!*protocol_status) {
+        if (threadIdx.x == 0)
+            set_timeout(params.local.error);
+        return false;
+    }
+    // Fetch each peer packet with coalesced 16-byte loads, independently of the
+    // scalar per-value dequantization. Staging the whole group exposes enough
+    // outstanding remote work and avoids a remote byte load per output lane.
+    __shared__ fused::Packet peer_staging[kPacketBatch];
+    constexpr size_t         vectors_per_packet = sizeof(fused::Packet) / sizeof(uint4);
+    auto*                    staged_vectors     = reinterpret_cast<uint4*>(peer_staging);
+    for (size_t vector = threadIdx.x; vector < count * vectors_per_packet; vector += blockDim.x) {
+        const size_t offset       = vector / vectors_per_packet;
+        const size_t within       = vector % vectors_per_packet;
+        const auto*  peer_vectors = reinterpret_cast<const uint4*>(params.peer.packets + first + offset * gridDim.x);
+        staged_vectors[vector]    = peer_vectors[within];
+    }
+    __syncthreads();
+    for (size_t offset = 0; offset < count; ++offset) {
+        const size_t packet       = first + offset * gridDim.x;
+        const auto*  local_packet = params.local.packets + packet;
+        const auto*  peer_packet  = peer_staging + offset;
+        const size_t base         = packet * fused::kPacketValues;
+        for (int item = threadIdx.x; item < fused::kPacketValues; item += blockDim.x) {
+            const size_t index = base + item;
+            if (index < params.numel) {
+                const float own   = local_packet->scale == 0.f ?
+                                        static_cast<float>(local_packet->values[item]) :
+                                        static_cast<float>(local_packet->values[item]) / local_packet->scale;
+                const float other = peer_packet->scale == 0.f ?
+                                        static_cast<float>(peer_packet->values[item]) :
+                                        static_cast<float>(peer_packet->values[item]) / peer_packet->scale;
+                output[index]     = __float2bfloat16_rn(params.rank == 0 ? own + other : other + own);
+                if (!isfinite(__bfloat162float(output[index])))
+                    atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                             static_cast<unsigned long long>(kErrorNumeric));
+            }
+        }
+    }
+    __syncthreads();
+    __threadfence_system();
+    if (threadIdx.x == 0)
+        fused::store_release_sys(params.epoch, params.local.ack + first);
+    __syncthreads();
+    if (threadIdx.x == 0)
+        *protocol_status = fused::wait_epoch(params.peer.ack + first, params.epoch, kSpinLimit) ? 1 : 0;
+    __syncthreads();
+    if (!*protocol_status && threadIdx.x == 0)
+        set_timeout(params.local.error);
+    return *protocol_status != 0;
+}
+
+__global__ void
+one_shot_all_reduce_batch_kernel(DeviceParams params, __nv_bfloat16 const* input, __nv_bfloat16* output) {
+    __shared__ float warp_maxima[fused::kPacketThreads / 32];
+    __shared__ int   protocol_status;
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    const size_t packets_per_cta = params.packet_count / gridDim.x;
+    const size_t batch           = packets_per_cta < 1 ? 1 : min(kPacketBatch, packets_per_cta);
+    for (size_t first = blockIdx.x; first < params.packet_count; first += gridDim.x * batch) {
+        const size_t count = min(batch, (params.packet_count - first + gridDim.x - 1) / gridDim.x);
+        for (size_t offset = 0; offset < count; ++offset) {
+            const size_t base = (first + offset * gridDim.x) * fused::kPacketValues;
+            for (int item = threadIdx.x; item < fused::kPacketValues; item += blockDim.x)
+                if (base + item < params.numel)
+                    output[base + item] = input[base + item];
+        }
+        __syncthreads();
+        if (!publish_batch_reduce_and_ack(params, output, first, count, warp_maxima, &protocol_status))
+            return;
+    }
+}
+
 __global__ void one_shot_all_reduce_kernel(DeviceParams params, __nv_bfloat16 const* input, __nv_bfloat16* output) {
     __shared__ float warp_maxima[fused::kPacketThreads / 32];
     __shared__ int   protocol_status;
@@ -188,9 +291,42 @@ __global__ void local_fc2_kernel(fused::Fc2ReferenceParams fc2, __nv_bfloat16* o
     }
 }
 
+// Packet layouts are identical between local controls and fused candidates.
+template<int Compute>
+__device__ __forceinline__ void
+compute_fc2_packet(fused::Fc2ReferenceParams fc2, __nv_bfloat16* output, size_t base, size_t numel) {
+    if constexpr (Compute == 1) {
+        fused::fc2_packet_mma(fc2, output, base, numel);
+    } else if constexpr (Compute == 2) {
+        fused::fc2_packet_staged(fc2, output, base, numel);
+    } else {
+        for (int item = threadIdx.x; item < fused::kPacketValues; item += blockDim.x) {
+            const size_t index = base + item;
+            if (index < numel)
+                output[index] = fused::fc2_token_h_reference(
+                    fc2, index / fused::kFc2ReferenceHiddenSize, index % fused::kFc2ReferenceHiddenSize);
+        }
+    }
+}
+
+template<int Compute>
+__global__ void local_fc2_packet_kernel(fused::Fc2ReferenceParams fc2, __nv_bfloat16* output, size_t numel) {
+    __shared__ int good;
+    if (threadIdx.x == 0)
+        good = !fc2.error_flags || fused::load_acquire_sys(reinterpret_cast<uint64_t const*>(fc2.error_flags)) == 0;
+    __syncthreads();
+    if (!good)
+        return;
+    const size_t packets = (numel + fused::kPacketValues - 1) / fused::kPacketValues;
+    for (size_t packet = blockIdx.x; packet < packets; packet += gridDim.x) {
+        compute_fc2_packet<Compute>(fc2, output, packet * fused::kPacketValues, numel);
+        __syncthreads();
+    }
+}
+
 // Profiling is a separate instantiation and is never used for latency samples.
 // Each CTA records [smid, packets, FC2 cycles, communication cycles, start ns, end ns].
-template<bool Profile = false>
+template<bool Profile = false, int Compute = 0>
 __global__ void
 fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat16* output, uint64_t* stats = nullptr) {
     __shared__ float warp_maxima[fused::kPacketThreads / 32];
@@ -215,12 +351,7 @@ fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat
                 before = clock64();
         }
         const size_t base = packet * fused::kPacketValues;
-        for (int item = threadIdx.x; item < fused::kPacketValues; item += blockDim.x) {
-            const size_t index = base + item;
-            if (index < params.numel)
-                output[index] = fused::fc2_token_h_reference(
-                    fc2, index / fused::kFc2ReferenceHiddenSize, index % fused::kFc2ReferenceHiddenSize);
-        }
+        compute_fc2_packet<Compute>(fc2, output, base, params.numel);
         __syncthreads();
         if constexpr (Profile) {
             if (threadIdx.x == 0) {
@@ -249,6 +380,31 @@ fused_fc2_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat
             row[4]        = started;
             row[5]        = ended;
         }
+    }
+}
+
+// The producer still computes packet by packet, but publication and retirement
+// happen once per up-to-16 KiB group. Retaining the local-MMA grid stride
+// preserves inter-CTA weight locality. Peer staging uses 16 KiB shared memory.
+__global__ void fused_fc2_batch_kernel(DeviceParams params, fused::Fc2ReferenceParams fc2, __nv_bfloat16* output) {
+    __shared__ float warp_maxima[fused::kPacketThreads / 32];
+    __shared__ int   protocol_status;
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    const size_t packets_per_cta = params.packet_count / gridDim.x;
+    const size_t batch           = packets_per_cta < 1 ? 1 : min(kPacketBatch, packets_per_cta);
+    for (size_t first = blockIdx.x; first < params.packet_count; first += gridDim.x * batch) {
+        const size_t count = min(batch, (params.packet_count - first + gridDim.x - 1) / gridDim.x);
+        for (size_t offset = 0; offset < count; ++offset) {
+            const size_t packet = first + offset * gridDim.x;
+            compute_fc2_packet<1>(fc2, output, packet * fused::kPacketValues, params.numel);
+            __syncthreads();
+        }
+        if (!publish_batch_reduce_and_ack(params, output, first, count, warp_maxima, &protocol_status))
+            return;
     }
 }
 
@@ -342,15 +498,23 @@ public:
         close_peer_impl();
     }
 
+    template<int PacketBatch = 1>
     void all_reduce(torch::Tensor input, torch::Tensor output) {
         validate_bf16_pair(input, output, "all_reduce");
+        if constexpr (PacketBatch == 32)
+            ensure_compute_resident<3>();
         launch_common(input.numel(), [&](DeviceParams params, cudaStream_t stream) {
-            one_shot_all_reduce_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
-                params, bf16_ptr(input), bf16_ptr(output));
+            if constexpr (PacketBatch == 32)
+                one_shot_all_reduce_batch_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
+                    params, bf16_ptr(input), bf16_ptr(output));
+            else
+                one_shot_all_reduce_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
+                    params, bf16_ptr(input), bf16_ptr(output));
             cuda_check(cudaGetLastError(), "one_shot_all_reduce_kernel launch");
         });
     }
 
+    template<int Compute = 0>
     void local_fc2(torch::Tensor activation_fp8,
                    torch::Tensor activation_scale,
                    torch::Tensor weight_fp8,
@@ -360,21 +524,26 @@ public:
                    py::object    gated_shared,
                    torch::Tensor output) {
         const auto   fc2   = validate_fc2(activation_fp8,
-                                          activation_scale,
-                                          weight_fp8,
-                                          weight_scale,
-                                          route_ids,
-                                          route_weights,
-                                          gated_shared,
-                                          output,
-                                          /*require_peer=*/false);
+                                      activation_scale,
+                                      weight_fp8,
+                                      weight_scale,
+                                      route_ids,
+                                      route_weights,
+                                      gated_shared,
+                                      output,
+                                      /*require_peer=*/false);
         const size_t numel = output.numel();
         bind_stream();
         c10::cuda::CUDAGuard guard(device_);
-        local_fc2_kernel<<<blocks_, fused::kPacketThreads, 0, current_stream()>>>(fc2, bf16_ptr(output), numel);
+        if constexpr (Compute == 0)
+            local_fc2_kernel<<<blocks_, fused::kPacketThreads, 0, current_stream()>>>(fc2, bf16_ptr(output), numel);
+        else
+            local_fc2_packet_kernel<Compute>
+                <<<blocks_, fused::kPacketThreads, 0, current_stream()>>>(fc2, bf16_ptr(output), numel);
         cuda_check(cudaGetLastError(), "local_fc2_kernel launch");
     }
 
+    template<int Compute = 0>
     void fused_fc2(torch::Tensor activation_fp8,
                    torch::Tensor activation_scale,
                    torch::Tensor weight_fp8,
@@ -392,8 +561,13 @@ public:
                                       gated_shared,
                                       output,
                                       /*require_peer=*/true);
+        ensure_compute_resident<Compute>();
         launch_common(output.numel(), [&](DeviceParams params, cudaStream_t stream) {
-            fused_fc2_kernel<false><<<blocks_, fused::kPacketThreads, 0, stream>>>(params, fc2, bf16_ptr(output));
+            if constexpr (Compute == 3)
+                fused_fc2_batch_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(params, fc2, bf16_ptr(output));
+            else
+                fused_fc2_kernel<false, Compute>
+                    <<<blocks_, fused::kPacketThreads, 0, stream>>>(params, fc2, bf16_ptr(output));
             cuda_check(cudaGetLastError(), "fused_fc2_kernel launch");
         });
     }
@@ -453,6 +627,9 @@ public:
         info["threads_per_block"]           = fused::kPacketThreads;
         info["max_threads_per_sm"]          = properties.maxThreadsPerMultiProcessor;
         info["blocks"]                      = blocks_;
+        append_compute_info<1>(info, "mma", properties.multiProcessorCount);
+        append_compute_info<2>(info, "staged", properties.multiProcessorCount);
+        append_compute_info<3>(info, "mma_batch", properties.multiProcessorCount);
         return info;
     }
 
@@ -527,6 +704,54 @@ private:
         cudaStreamCaptureStatus status{};
         cuda_check(cudaStreamIsCapturing(stream, &status), "cudaStreamIsCapturing");
         TORCH_CHECK(status == cudaStreamCaptureStatusNone, "MoeTpFusedFp8 does not support CUDA graph capture");
+    }
+
+    template<int Compute>
+    static const void* compute_kernel() {
+        if constexpr (Compute == 3)
+            return reinterpret_cast<const void*>(fused_fc2_batch_kernel);
+        else
+            return reinterpret_cast<const void*>(fused_fc2_kernel<false, Compute>);
+    }
+
+    template<int Compute>
+    void append_compute_info(py::dict& info, std::string const& prefix, int sm_count) const {
+        cudaFuncAttributes attributes{};
+        int                active = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, compute_kernel<Compute>()), "compute attributes");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, compute_kernel<Compute>(), fused::kPacketThreads, 0),
+            "compute occupancy");
+        if constexpr (Compute == 3) {
+            int transport_active = 0;
+            cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                           &transport_active, one_shot_all_reduce_batch_kernel, fused::kPacketThreads, 0),
+                       "batch transport occupancy");
+            active = std::min(active, transport_active);
+        }
+        info[py::str(prefix + "_max_resident_blocks")] = active * sm_count;
+        info[py::str(prefix + "_regs_per_thread")]     = attributes.numRegs;
+        info[py::str(prefix + "_static_shared_bytes")] = attributes.sharedSizeBytes;
+    }
+
+    template<int Compute>
+    void ensure_compute_resident() const {
+        c10::cuda::CUDAGuard guard(device_);
+        int                  active = 0;
+        cudaDeviceProp       properties{};
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, compute_kernel<Compute>(), fused::kPacketThreads, 0),
+            "compute occupancy");
+        if constexpr (Compute == 3) {
+            int transport_active = 0;
+            cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                           &transport_active, one_shot_all_reduce_batch_kernel, fused::kPacketThreads, 0),
+                       "batch transport occupancy");
+            active = std::min(active, transport_active);
+        }
+        TORCH_CHECK(active > 0 && blocks_ <= active * properties.multiProcessorCount,
+                    "selected FC2 compute grid exceeds resident capacity");
     }
 
     void ensure_resident_grid() {
@@ -762,9 +987,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_ipc_handle", &MoeTpFusedFp8::get_ipc_handle)
         .def("open_peer", &MoeTpFusedFp8::open_peer)
         .def("close_peer", &MoeTpFusedFp8::close_peer)
-        .def("all_reduce", &MoeTpFusedFp8::all_reduce)
-        .def("local_fc2", &MoeTpFusedFp8::local_fc2)
-        .def("fused_fc2", &MoeTpFusedFp8::fused_fc2)
+        .def("all_reduce", &MoeTpFusedFp8::all_reduce<1>)
+        .def("all_reduce_batch", &MoeTpFusedFp8::all_reduce<32>)
+        .def("local_fc2", &MoeTpFusedFp8::local_fc2<0>)
+        .def("fused_fc2", &MoeTpFusedFp8::fused_fc2<0>)
+        .def("local_fc2_mma_batch", &MoeTpFusedFp8::local_fc2<1>)
+        .def("fused_fc2_mma_batch", &MoeTpFusedFp8::fused_fc2<3>)
+        .def("local_fc2_mma", &MoeTpFusedFp8::local_fc2<1>)
+        .def("fused_fc2_mma", &MoeTpFusedFp8::fused_fc2<1>)
+        .def("local_fc2_staged", &MoeTpFusedFp8::local_fc2<2>)
+        .def("fused_fc2_staged", &MoeTpFusedFp8::fused_fc2<2>)
         .def("copy_local_packets", &MoeTpFusedFp8::copy_local_packets)
         .def("debug_packet_bytes", &MoeTpFusedFp8::copy_local_packets)
         .def("error_status", &MoeTpFusedFp8::error_status)
