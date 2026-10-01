@@ -37,6 +37,21 @@ def bf16_linear_add(input: torch.Tensor, weight: torch.Tensor,
     return result.reshape(shape)
 
 
+def bf16_linear_add_inplace(input: torch.Tensor, weight: torch.Tensor,
+                            residual: torch.Tensor) -> torch.Tensor:
+    """Consume an owned BF16 residual in an addmm epilogue."""
+    shape = (*input.shape[:-1], weight.shape[0])
+    if tuple(residual.shape) != shape:
+        raise ValueError("K3 projection residual must match the output shape")
+    if not residual.is_contiguous():
+        raise ValueError("in-place projection residual must be contiguous")
+    rows = prod(input.shape[:-1])
+    result = residual.reshape(rows, weight.shape[0]).addmm_(
+        input.reshape(rows, input.shape[-1]), weight.t()
+    )
+    return result.reshape(shape)
+
+
 class KimiK3Bf16Linear(CudaF16Linear):
     """Explicit K3 selection; deliberately absent from the public registry."""
 

@@ -15,7 +15,12 @@ from .attention import linear, profile_scope
 from .router import KimiK3RouterProjection
 from .routing import grouped_topk
 from .moe_backend import get_k3_moe_backend
-from .linear import KimiK3Bf16Linear, KimiK3LatentDownLinear, bf16_linear
+from .linear import (
+    KimiK3Bf16Linear,
+    KimiK3LatentDownLinear,
+    bf16_linear,
+    bf16_linear_add_inplace,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 
 
@@ -141,6 +146,16 @@ class KimiK3LatentMoE(nn.Module):
             # Match native K3: combine the routed projection and shared
             # output in a single addmm GEMM call.
             with profile_scope("RTP::moe.routed_up_proj_add_shared"):
+                if (
+                    routed.is_cuda
+                    and routed.ndim == 2
+                    and routed.shape[0] >= 4096
+                    and routed.dtype == self.up.weight.dtype == shared.dtype == torch.bfloat16
+                    and shared.is_contiguous()
+                    and self.up.bias is None
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    return bf16_linear_add_inplace(routed, self.up.weight, shared)
                 return self.up(routed, residual=shared)
         with profile_scope("RTP::moe.routed_up_proj"):
             routed_up = self.up(routed)
