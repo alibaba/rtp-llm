@@ -186,7 +186,7 @@ def _gather_prefix_slice(
              (col >= LATENT) & (col < LATENT + ROPE))
 
 
-def gather_fp8_prefix_slice(
+def _gather_mla_prefix_slice(
     out_ckv: torch.Tensor,
     out_rope: torch.Tensor,
     cache: torch.Tensor,
@@ -199,9 +199,11 @@ def gather_fp8_prefix_slice(
     prefix_len: int,
     scale: float,
 ) -> None:
-    """Gather only one owner's historical cache slice into BF16 staging."""
-    if cache.dtype != torch.float8_e4m3fn or cache.ndim != 3:
-        raise TypeError("MLA historical slice requires a paged E4M3 cache")
+    """Gather one historical cache slice into BF16 staging."""
+    if cache.dtype not in (torch.float8_e4m3fn, torch.bfloat16) or cache.ndim != 3:
+        raise TypeError("MLA historical slice requires a paged E4M3 or BF16 cache")
+    if cache.dtype == torch.bfloat16 and scale != 1.0:
+        raise ValueError("BF16 MLA historical slice requires unit cache scale")
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("MLA historical slice scale must be finite and positive")
     if (out_ckv.ndim != 2 or out_rope.ndim != 2
@@ -227,3 +229,27 @@ def gather_fp8_prefix_slice(
             out_ckv.shape[1], out_rope.shape[1], scale,
             triton.next_power_of_2(cache.shape[2]),
         )
+
+
+def gather_fp8_prefix_slice(
+    out_ckv, out_rope, cache, pages, batch_info, page_size, *,
+    owner, start, prefix_len, scale,
+) -> None:
+    if cache.dtype != torch.float8_e4m3fn:
+        raise TypeError("MLA historical FP8 slice requires a paged E4M3 cache")
+    _gather_mla_prefix_slice(
+        out_ckv, out_rope, cache, pages, batch_info, page_size,
+        owner=owner, start=start, prefix_len=prefix_len, scale=scale,
+    )
+
+
+def gather_bf16_prefix_slice(
+    out_ckv, out_rope, cache, pages, batch_info, page_size, *,
+    owner, start, prefix_len, scale,
+) -> None:
+    if cache.dtype != torch.bfloat16:
+        raise TypeError("MLA historical BF16 slice requires a paged BF16 cache")
+    _gather_mla_prefix_slice(
+        out_ckv, out_rope, cache, pages, batch_info, page_size,
+        owner=owner, start=start, prefix_len=prefix_len, scale=scale,
+    )

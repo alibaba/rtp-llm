@@ -47,8 +47,11 @@ def main():
     here = Path(__file__).resolve().parent
     lock = json.loads((here / "UPSTREAM.json").read_text())
     patch = here / "graph_replay_epoch.patch"
+    bf16_skip_patch = here / "bf16_skip_head_mid.patch"
     helper = here / "build_extension.py"
-    if digest(patch) != lock["patch_sha256"] or digest(helper) != lock["build_helper_sha256"]:
+    if (digest(patch) != lock["patch_sha256"]
+            or digest(bf16_skip_patch) != lock["bf16_skip_patch_sha256"]
+            or digest(helper) != lock["build_helper_sha256"]):
         raise RuntimeError("Build input checksum mismatch")
     for path in (args.archives, args.work_dir, args.output_dir):
         resolved = path.resolve()
@@ -74,6 +77,8 @@ def main():
         dependency.rename(dest)
     subprocess.run(["git", "apply", "--check", str(patch)], cwd=src, check=True)
     subprocess.run(["git", "apply", str(patch)], cwd=src, check=True)
+    subprocess.run(["git", "apply", "--unidiff-zero", "--check", str(bf16_skip_patch)], cwd=src, check=True)
+    subprocess.run(["git", "apply", "--unidiff-zero", str(bf16_skip_patch)], cwd=src, check=True)
     package = args.output_dir / "k3_native_deep_gemm"
     shutil.copytree(src / "deep_gemm", package)
     shutil.copytree(src / "third-party/cutlass/include", package / "include", dirs_exist_ok=True)

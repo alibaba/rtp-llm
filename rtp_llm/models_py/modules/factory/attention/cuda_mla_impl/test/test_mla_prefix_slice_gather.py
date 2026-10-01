@@ -5,9 +5,11 @@ from pathlib import Path
 import torch
 
 
-gather_fp8_prefix_slice = runpy.run_path(
+_kernels = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "mla_fp8_kernels.py")
-)["gather_fp8_prefix_slice"]
+)
+gather_fp8_prefix_slice = _kernels["gather_fp8_prefix_slice"]
+gather_bf16_prefix_slice = _kernels["gather_bf16_prefix_slice"]
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
@@ -42,6 +44,28 @@ class MlaPrefixSliceGatherTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds historical prefix"):
             gather_fp8_prefix_slice(c, r, cache, pages, info, 128,
                                     owner=0, start=8, prefix_len=16, scale=1.0)
+
+    def test_bf16_page_crossing_keeps_exact_cache_values(self):
+        page_size, latent, rope = 128, 16, 8
+        cache = torch.arange(
+            4 * page_size * (latent + rope), device="cuda:0",
+            dtype=torch.float32,
+        ).to(torch.bfloat16).view(4, page_size, latent + rope)
+        pages = torch.tensor([3, 1, 2], dtype=torch.int32, device="cuda:0")
+        info = torch.tensor([[0, 300, 0, 3]], dtype=torch.int32,
+                            device="cuda:0")
+        start, length = 120, 160
+        c = torch.empty(length, latent, dtype=torch.bfloat16, device="cuda:0")
+        r = torch.empty(length, rope, dtype=torch.bfloat16, device="cuda:0")
+        gather_bf16_prefix_slice(c, r, cache, pages, info, page_size,
+                                 owner=0, start=start, prefix_len=300,
+                                 scale=1.0)
+        expected = torch.stack([
+            cache[pages[i // page_size].item(), i % page_size]
+            for i in range(start, start + length)
+        ])
+        torch.testing.assert_close(c, expected[:, :latent], rtol=0, atol=0)
+        torch.testing.assert_close(r, expected[:, latent:], rtol=0, atol=0)
 
 
 if __name__ == "__main__":
