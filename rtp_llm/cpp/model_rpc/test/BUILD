@@ -62,6 +62,13 @@ test_deps = [
 # )
 
 cc_test(
+    name = "generate_context_test",
+    srcs = ["GenerateContextTest.cc"],
+    copts = test_copts,
+    deps = test_deps + cuda13_torch_link_deps,
+)
+
+cc_test(
     name = "query_converter_test",
     srcs = [
         "QueryConverterTest.cc",

@@ -70,19 +70,19 @@ PrefillGenerateContext::~PrefillGenerateContext() {
 }
 
 void PrefillGenerateContext::stopStream() {
+    cancelStreamOnTeardown();
     if (stream_) {
-        // if is waiting, cancel it
-        meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
-            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        // Failed Prefill may still be publishing KV blocks. Wait for the
+        // scheduler's terminal transition before closing its cache-store entry.
+        if (stream_->hasError() && stream_->getStatus() != StreamState::FINISHED
+            && !stream_->finishOrCancel(prefill_stop_stream_wait_timeout_ms_, "cancel prefill stream")) {
+            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
+                                prefill_stop_stream_wait_timeout_ms_,
+                                stream_->generateInput()->request_id);
         }
-        // if is running, waiting util done
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
-                              stream_->generateInput()->request_id);
-            usleep(1000);
+        if (meta) {
+            meta->dequeue(request_id, stream_);
         }
-        // stream status will only be set to finished by scheduler.
         markRequestEnd();
         stream_.reset();
     }
@@ -92,7 +92,7 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if (cancelled() && client_context) {
+    if ((cancelled() || isRequestCancelled()) && client_context) {
         client_context->TryCancel();
     }
     if (client_stream) {

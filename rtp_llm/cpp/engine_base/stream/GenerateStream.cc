@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <ATen/Generator.h>
@@ -47,6 +48,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     special_tokens_(model_config.special_tokens),
     mutex_(std::make_shared<std::mutex>()),
     cv_(std::make_shared<std::condition_variable>()),
+    consumer_cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
@@ -679,6 +681,36 @@ bool GenerateStream::isActive() const {
     return !hasError() && getStatus() != StreamState::FINISHED;
 }
 
+bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "finishOrCancel wait_timeout_ms must be non-negative");
+
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   lifecycle_finished = [this] { return getStatus() == StreamState::FINISHED; };
+    if (lifecycle_finished()) {
+        return true;
+    }
+
+    const bool successful_completion_pending =
+        generate_status_->hasEvent(StreamEvents::GenerateDone) && !generate_status_->error_info.hasError();
+    if (!successful_completion_pending) {
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
+    }
+
+    bool finished = false;
+    if (wait_timeout_ms == 0) {
+        consumer_cv_->wait(lock, lifecycle_finished);
+        finished = true;
+    } else {
+        finished = consumer_cv_->wait_for(lock, std::chrono::milliseconds(wait_timeout_ms), lifecycle_finished);
+    }
+    if (!finished && !generate_status_->error_info.hasError()) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::CANCELLED,
+                               cancel_reason + ": timed out waiting for scheduler lifecycle commit");
+    }
+    return finished;
+}
+
 void GenerateStream::setReserveStep(size_t reserve_step) {
     reserve_step_ = reserve_step;
     generate_status_->setReserveStep(reserve_step);
@@ -693,6 +725,9 @@ StreamState GenerateStream::moveToNext() {
         auto                        old_state = generate_status_->getStatus();
         state                                 = generate_status_->moveToNext();
         should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+        if (state != old_state) {
+            consumer_cv_->notify_all();
+        }
     }
 
     // notify one thread waiting for stream completion

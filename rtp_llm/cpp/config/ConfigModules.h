@@ -497,6 +497,9 @@ struct PDSepConfig {
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
 
+    // Zero keeps the scheduler terminal wait unlimited.
+    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
+
     std::string to_string() const;
 };
 

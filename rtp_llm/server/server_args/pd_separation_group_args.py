@@ -43,14 +43,22 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--prefill_stop_stream_wait_timeout_ms",
+        env_name="PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "prefill_stop_stream_wait_timeout_ms"),
+        type=int,
+        default=2000,
+        help="Prefill 收尾时等待 scheduler 提交终态的最长时间（毫秒）；0 表示无限等待",
+    )
+
+    pd_separation_group.add_argument(
         "--max_rpc_timeout_ms",
         env_name="MAX_RPC_TIMEOUT_MS",
         bind_to=(pd_separation_config, "max_rpc_timeout_ms"),
         type=int,
         default=2 * 3600 * 1000,  # 2h
-        help="RPC 调用最大超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
-        "<=0 表示不设 deadline（链路不超时）；"
-        "per-request generate_config.timeout_ms 优先级更高",
+        help="RPC 调用最大超时（毫秒），与请求剩余超时时间取较小值；"
+        "<=0 表示不限制 RPC 超时，请求自身的 deadline 仍生效",
     )
 
     pd_separation_group.add_argument(
