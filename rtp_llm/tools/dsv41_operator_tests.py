@@ -17,6 +17,7 @@ SUITES = (
     "indexer",
     "compressor",
     "projection",
+    "attention_projection",
     "cache_codec",
     "engram_hash",
     "engram_lookup",

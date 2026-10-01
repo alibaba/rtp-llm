@@ -210,6 +210,7 @@ filegroup(
         "modules/dsv4/v41_indexer.py",
         "modules/dsv4/v41_compressor.py",
         "modules/dsv4/v41_projection.py",
+        "modules/dsv4/v41_attention_projection.py",
         "modules/dsv4/rope.py",
         "modules/dsv4/moe/strategies/base.py",
         "modules/dsv4/moe/strategies/v41_grouped_fp4.py",
