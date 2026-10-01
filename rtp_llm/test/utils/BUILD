@@ -61,6 +61,16 @@ py_test(
 )
 
 py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    env = {
+        "GPU_COUNT": "0",
+        "WORLD_SIZE": "0",
+    },
+    deps = [":device_resource"],
+)
+
+py_test(
     name = "maga_server_manager_test",
     srcs = ["maga_server_manager_test.py"],
     deps = [

@@ -76,6 +76,15 @@ def w13_lora_a_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_process_func and origin_w3.lora_a_process_func
+    if isinstance(ts, (list, tuple)):
+        # peft layout: separate gate_proj/up_proj LoRA tensors; each origin
+        # applies its own process func, ranks are concatenated.
+        w1_size = len(origin_w1.weights)
+        w3_size = len(origin_w3.weights)
+        assert len(ts) == w1_size + w3_size
+        w1 = origin_w1.lora_a_process_func(ts[:w1_size])
+        w3 = origin_w3.lora_a_process_func(ts[w1_size:])
+        return torch.concat([w1, w3], dim=-1).contiguous()
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_a_process_func(w1)
     w3 = origin_w3.lora_a_process_func(w3)
@@ -86,6 +95,16 @@ def w13_lora_b_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_b_process_func and origin_w3.lora_b_process_func
+    if isinstance(ts, (list, tuple)):
+        # peft layout: per-projection LoRA B tensors; the merged w13 delta
+        # must keep each rank block on its own projection's output columns,
+        # i.e. block-diagonal rather than rank-concatenated.
+        w1_size = len(origin_w1.weights)
+        w3_size = len(origin_w3.weights)
+        assert len(ts) == w1_size + w3_size
+        w1 = origin_w1.lora_b_process_func(ts[:w1_size])
+        w3 = origin_w3.lora_b_process_func(ts[w1_size:])
+        return torch.block_diag(w1, w3).contiguous()
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_b_process_func(w1)
     w3 = origin_w3.lora_b_process_func(w3)

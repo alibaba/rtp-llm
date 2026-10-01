@@ -7,7 +7,7 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_blackwell, is_sm12x
+from rtp_llm.models_py.utils.arch import get_sm, is_blackwell, is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -313,6 +313,13 @@ def _init_prefill_cg_params(
 # ---------------------------------------------------------------------------
 
 
+def _trtllm_gen_cubin_supported() -> bool:
+    # TllmGenFmhaRunner ships cubins for sm_90a and sm_100a; other Blackwell
+    # variants (sm_103 L20D / B300, sm_120a consumer) have no binding.
+    major, minor = get_sm()
+    return (major, minor) in {(9, 0), (10, 0)}
+
+
 class FlashInferTRTLLMPrefillOp(object):
     def __init__(
         self,
@@ -332,11 +339,11 @@ class FlashInferTRTLLMPrefillOp(object):
 
     def support(self, attention_inputs: PyAttentionInputs):
         # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
-        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
-        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
-        # forward. Fall through so dispatch picks the paged
-        # PyFlashinferPagedPrefillImpl instead.
-        if is_sm12x():
+        # (Blackwell consumer, e.g. RTX 5000 Pro) and sm_103 (L20D / B300)
+        # have no binding and the runner throws "Unsupported architecture"
+        # (fmhaRunner.cuh:37) on forward. Fall through so dispatch picks the
+        # paged PyFlashinfer implementations instead.
+        if is_sm12x() or not _trtllm_gen_cubin_supported():
             return False
         return (
             is_blackwell()
@@ -448,11 +455,11 @@ class FlashInferTRTLLMDecodeOp(object):
         if not is_blackwell():
             return False
         # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
-        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
-        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
-        # the first decode forward. Fall through so dispatch picks the
-        # ragged PyFlashinferPaged path instead.
-        if is_sm12x():
+        # (Blackwell consumer, e.g. RTX 5000 Pro) and sm_103 (L20D / B300)
+        # have no binding and the runner throws "Unsupported architecture"
+        # (fmhaRunner.cuh:37) on the first decode forward. Fall through so
+        # dispatch picks the ragged PyFlashinferPaged path instead.
+        if is_sm12x() or not _trtllm_gen_cubin_supported():
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
