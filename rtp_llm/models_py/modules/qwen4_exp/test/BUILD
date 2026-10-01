@@ -181,3 +181,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "small_qk_norm_test",
+    srcs = ["small_qk_norm_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)

@@ -73,13 +73,23 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
         fused_enabled = (
             os.environ.get("RTP_LLM_QWEN4_FUSED_QK_NORM", "0").strip().lower()
         )
-        if fused_enabled in ("1", "true", "on"):
+        small_precise = (
+            os.environ.get("RTP_LLM_QWEN4_SMALL_QK_NORM", "0") == "1"
+            and 1 <= rows <= 32
+            and self.head_num == 3
+            and self.kv_head_num == 1
+            and self.size_per_head == 256
+        )
+        if small_precise or fused_enabled in ("1", "true", "on"):
             from rtp_llm.models_py.modules.qwen4_exp.norm_triton import (
                 fused_qk_rmsnorm_,
+                is_small_qk_supported,
                 is_supported,
+                small_qk_rmsnorm_,
             )
 
-            if is_supported(
+            support = is_small_qk_supported if small_precise else is_supported
+            if support(
                 hidden_states,
                 self.q_weight,
                 self.k_weight,
@@ -87,7 +97,8 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
                 self.kv_head_num,
                 self.size_per_head,
             ):
-                return fused_qk_rmsnorm_(
+                operation = small_qk_rmsnorm_ if small_precise else fused_qk_rmsnorm_
+                return operation(
                     hidden_states,
                     self.q_weight,
                     self.k_weight,
