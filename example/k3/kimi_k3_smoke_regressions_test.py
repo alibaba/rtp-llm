@@ -32,6 +32,7 @@ from example.k3.kimi_k3_smoke_runtime_evidence import (
     collect,
     verify,
 )
+from example.k3.mla_request_trace import verify_mla_traces
 
 
 def response_for(runner, content, *, owner=0, reuse=0, input_len=8193):
@@ -50,6 +51,80 @@ def response_for(runner, content, *, owner=0, reuse=0, input_len=8193):
 
 
 class RegressionTest(unittest.TestCase):
+    def test_profile_readiness_consumes_real_k3_stream_frames(self):
+        import asyncio
+
+        import torch
+
+        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.openai.api_datatype import (
+            ChatCompletionResponseStreamChoice,
+            ChatCompletionStreamResponse,
+            DeltaMessage,
+        )
+        from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
+        from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
+        from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+        renderer = object.__new__(KimiK3Renderer)
+        config = GenerateConfig(return_output_ids=True)
+        frames = []
+        for token, text in ((1, "P"), (2, "D")):
+            extra = asyncio.run(renderer._generate_extra_outputs(
+                GenerateOutput(output_ids=torch.tensor([[token]])), config,
+            ))
+            response = StreamResponseObject(
+                choices=[ChatCompletionResponseStreamChoice(index=0, delta=DeltaMessage(content=text))],
+                extra_outputs=extra,
+            )
+            frames.extend(renderer._format_stream_frames(response, False))
+        self.assertTrue(all(frame.aux_info is None for frame in frames))
+        frames.extend(renderer._format_stream_frames(StreamResponseObject(
+            choices=[ChatCompletionResponseStreamChoice(index=0, delta=DeltaMessage(), finish_reason="stop")],
+            aux_info=AuxInfo(output_len=2, iter_count=2, pd_sep=True),
+        ), False))
+        wire = b"".join(
+            b"data: " + ChatCompletionStreamResponse(
+                choices=frame.choices, aux_info=frame.aux_info, extra_outputs=frame.extra_outputs,
+            ).model_dump_json(exclude_none=True).encode() + b"\n\n"
+            for frame in frames
+        ) + b"data: [DONE]\n"
+        audit = {}
+        ready = mock.Mock()
+        result = Runner.read_profile_stream(io.BytesIO(wire), ready, audit)
+        ready.assert_called_once_with()
+        self.assertEqual(audit["decode_ready_output_ids"], [1, 2])
+        self.assertEqual(result["choices"][0]["message"]["content"], "PD")
+        self.assertEqual(result["debug_info"]["output_ids"], [[1, 2]])
+
+    def test_checkpoint_storage_accepts_3fs_and_local_disks(self):
+        script = pathlib.Path(__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        ).read_text()
+        for prefix in ("checkpoint", "sp_checkpoint"):
+            start = script.index(f'case "${{{prefix}_real}}" in')
+            end = script.index(f'[[ -f "${{{prefix}_real}}/config.json" ]]', start)
+            guard = script[start:end]
+            for path, filesystem, source, accepted in (
+                ("/data0/model", "ext4", "/dev/nvme0n1", True),
+                ("/mnt/hf3fs/3fs/models/kimi", "fuse.hf3fs", "hf3fs.cluster", True),
+                ("/data0/model", "nfs4", "server:/models", False),
+                ("/mnt/hf3fs/3fs/models/kimi", "fuse.sshfs", "server:/models", False),
+            ):
+                with self.subTest(prefix=prefix, path=path, filesystem=filesystem):
+                    result = subprocess.run(
+                        ["bash", "-c",
+                         'set -e; die() { echo "$*" >&2; exit 2; }; '
+                         f'{prefix}_real="$1"; '
+                         'storage_fs="$2"; storage_source="$3"; '
+                         'findmnt() { if [[ "$5" == FSTYPE ]]; then echo "$storage_fs"; '
+                         'else echo "$storage_source"; fi; }; '
+                         + guard,
+                         "storage-test", path, filesystem, source],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
     def test_page_rr_multi_launch_profile_requires_2k_physical_pages(self):
         script = (
             pathlib.Path(__file__)
@@ -103,7 +178,11 @@ class RegressionTest(unittest.TestCase):
         with mock.patch.object(runner, "fit_prompt", return_value=("chunk", tokens)) as fit, \
              mock.patch.object(runner, "run_stage") as stage:
             runner.run_flow()
-        self.assertEqual(fit.call_args.args[2], args.chunk_tokens + 1)
+        self.assertEqual(fit.call_args_list[0].args[2], args.chunk_tokens + 1)
+        self.assertEqual(
+            [call.args[2] for call in fit.call_args_list[1:]],
+            [runner.reuse_unit_tokens + args.block_size * (idx + 1) for idx in range(5)],
+        )
         calls = stage.call_args_list
         self.assertEqual(calls[0].args[1][0].expected_input_len, len(tokens))
         self.assertEqual([c.args[1][0].decode_owner_rank for c in calls[1:3]], [0, 1])
@@ -144,9 +223,15 @@ class RegressionTest(unittest.TestCase):
                     rf"(?ms)^apply_validated_{section}_profile\(\) \{{\n(.*?)^\}}",
                     profile,
                 ).group(1)
-                exports.extend(re.findall(r"export CONCURRENCY_LIMIT=(\d+)", body))
+                exports.extend(re.findall(r"export CONCURRENCY_LIMIT=(.+)", body))
             self.assertTrue(exports, role)
-            limits[role] = int(exports[-1])
+            value = exports[-1].strip('"')
+            variable = re.fullmatch(r"\$\{(\w+)\}", value)
+            if variable:
+                value = re.search(
+                    rf'(?m)^{variable[1]}="\$\{{[^:]+:-(\d+)\}}"$', profile,
+                )[1]
+            limits[role] = int(value)
         for name, cases in batches:
             with self.subTest(stage=name):
                 # Hold every HTTP slot until the whole submitted batch is admitted.
@@ -705,6 +790,100 @@ class RuntimeEvidenceTest(unittest.TestCase):
         self.assertEqual(physical_graph_buckets(8, 1), (4, 8))
         self.assertEqual(physical_graph_buckets(8, 7), (1, 2, 4, 8))
         self.assertEqual(physical_graph_buckets(1, 3), (1, 2, 4, 8))
+        self.assertEqual(physical_graph_buckets(4, 3, (1, 2, 4, 8, 16)), (1, 2, 4, 8, 16))
+
+    def test_mla_request_evidence_requires_correlated_work_in_both_groups(self):
+        for selector in ("AUTO", "NCCL", "CUSTOM"):
+            with self.subTest(a2a_backend=selector), tempfile.TemporaryDirectory() as tmp:
+                directory = pathlib.Path(tmp)
+                plans = {}
+                def branch_names(batch, queries, splits):
+                    if splits == 1:
+                        return ["PeerBarrier", "_merge_splits_serial", "PeerBarrier"]
+                    # Fixture H96/TP4: small T4/T1 retains NCCL; draft T16
+                    # reaches AUTO's custom range. Explicit modes override it.
+                    custom = selector == "CUSTOM" or (selector == "AUTO" and batch * queries >= 8)
+                    exchange = (["PeerBarrier", "_a2a_pull", "PeerBarrier"] if custom
+                                else ["ncclDevKernel_SendRecv"])
+                    return ["merge_local_splits", *exchange, "_combine_a2a"]
+                for stage in ("small", "large"):
+                    batch = 1 if stage == "small" else 16
+                    for rank in range(8):
+                        plans[rank, batch, 4, "torch.float8_e4m3fn"] = dict(TP=4, H=96, S=24 if batch == 1 else 1,
+                                                   mode="unfused" if batch == 1 else "fused")
+                        names = ["kernel_cutlass_split_kv_kernel_PageRRFusedMLAFP8"]
+                        names += branch_names(batch, 4, 24 if batch == 1 else 1)
+                        events = [dict(ph="X", cat="cpu_op", pid=1, tid=1, ts=10, dur=10,
+                                       name=f"cuda_graph.forward(replayDecode,B={batch},capture={batch},Q=4,T={batch*4},fake=0)"),
+                                  dict(ph="X", cat="cuda_runtime", pid=1, tid=1, ts=12, dur=1,
+                                       name="cudaGraphLaunch", args={"correlation": 7})]
+                        # GPU activity is deliberately later than the CPU scope.
+                        events += [dict(ph="X", cat="kernel", pid=0, tid=8, ts=100+i, dur=1,
+                                        name=name, args={"correlation": 7}) for i, name in enumerate(names)]
+                        for kind, queries, capture, correlation, splits in (
+                            ("replayDecode", 1, batch, 17, 32 if batch == 1 else 4),
+                            ("replayPrefill", 4, 16, 27, 1),
+                        ):
+                            plans[rank, capture, queries, "torch.bfloat16"] = dict(
+                                TP=4, H=96, S=splits, mode="fused" if splits == 1 else "unfused",
+                            )
+                            draft_names = ["kernel_cutlass_split_kv_kernel_PageRRFusedMLABF16"]
+                            draft_names += branch_names(capture, queries, splits)
+                            events += [dict(ph="X", cat="cpu_op", pid=1, tid=1, ts=correlation*10, dur=10,
+                                            name=f"cuda_graph.forward({kind},B={batch},capture={capture},Q={queries},T={batch*queries},fake=0)"),
+                                       dict(ph="X", cat="cuda_runtime", pid=1, tid=1, ts=correlation*10+2, dur=1,
+                                            name="cudaGraphLaunch", args={"correlation": correlation})]
+                            events += [dict(ph="X", cat="kernel", pid=0, tid=8, ts=1000+correlation*10+i, dur=1,
+                                            name=name, args={"correlation": correlation}) for i, name in enumerate(draft_names)]
+                        (directory / f"mla_{stage}_owner{rank//4}_wr{rank}_0.json").write_text(
+                            json.dumps({"traceEvents": events}))
+                self.assertTrue(verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)["passed"])
+                missing = directory / "mla_large_owner1_wr7_0.json"
+                original = missing.read_text()
+                full = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
+                self.assertEqual(len(full["observations"]), 48)
+                wrong_selector = "NCCL" if selector == "CUSTOM" else "CUSTOM"
+                with self.assertRaisesRegex(ValueError, "GPU A2A transport"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                      require_draft=True, a2a_backend=wrong_selector)
+                small = directory / "mla_small_owner1_wr7_0.json"
+                small_original = small.read_text()
+                # A bare copy without its completion protocol is insufficient;
+                # unrelated NCCL AllGather work cannot witness an A2A either.
+                bad = small_original.replace("PeerBarrier", "missing_barrier") if selector == "CUSTOM" else (
+                    small_original.replace("ncclDevKernel_SendRecv", "ncclDevKernel_AllGather")
+                )
+                small.write_text(bad)
+                with self.assertRaisesRegex(ValueError, "requested small"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                small.write_text(small_original)
+                # A CPU launch without recorded GPU work cannot be a witness, but
+                # must not discard the complete target/proposal/update witnesses.
+                partial = json.loads(original)
+                partial["traceEvents"] += [
+                    dict(ph="X", cat="cpu_op", pid=1, tid=1, ts=5000, dur=10,
+                         name="cuda_graph.forward(replayPrefill,B=16,capture=16,Q=4,T=64,fake=0)"),
+                    dict(ph="X", cat="cuda_runtime", pid=1, tid=1, ts=5002, dur=1,
+                         name="cudaGraphLaunch", args={"correlation": 37}),
+                ]
+                missing.write_text(json.dumps(partial))
+                retained = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
+                self.assertEqual(len(retained["observations"]), 48)
+                self.assertEqual([row["correlation"] for row in retained["incomplete_replays"]], [37])
+                missing.write_text(original.replace("PageRRFusedMLABF16", "missing_draft_kernel"))
+                with self.assertRaisesRegex(ValueError, "native MTP proposal"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
+                missing.write_text(original.replace("fake=0", "fake=1"))
+                with self.assertRaisesRegex(ValueError, "no Q4 target"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                data = json.loads(original)
+                data["traceEvents"] = [event for event in data["traceEvents"] if event["cat"] != "kernel"]
+                missing.write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError, "no GPU kernels"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                missing.unlink()
+                with self.assertRaisesRegex(ValueError, "missing="):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
 
     def test_dcp_decode_evidence_needs_every_rank_and_bucket(self):
         with tempfile.TemporaryDirectory() as tmp:

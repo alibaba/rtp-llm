@@ -204,6 +204,8 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
     # Pass the default explicitly so remote shell environments cannot select a
     # different speculative model for the two roles.
     result: dict[str, str] = {"SP_TYPE": "mtp"}
+    if role == "decode":
+        result["DECODE_CP_MLA_A2A_BACKEND"] = env_default("DECODE_CP_MLA_A2A_BACKEND") or "AUTO"
     names = (
         "SP_TYPE",
         "SP_MODEL_TYPE",
@@ -236,6 +238,11 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_ACCL_USE_NICS",
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_DECODE_Q_REPLICATED",
+        "SMOKE_DECODE_MLA_BACKEND",
+        "SMOKE_DECODE_CONCURRENCY_LIMIT",
+        "SMOKE_DECODE_CAPTURE_CONFIG",
+        "SMOKE_DECODE_OWNER_CONCURRENCY",
+        "SMOKE_MLA_PROFILE_STEPS",
         "SMOKE_DCP_PADDING_REGRESSION",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",

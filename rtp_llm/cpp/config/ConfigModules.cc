@@ -6,6 +6,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -103,6 +104,23 @@ std::string ConcurrencyConfig::to_string() const {
 
 // FMHAConfig
 std::string FMHAConfig::to_string() const {
+    static const std::unordered_map<DecodeCPMLABackend, const char*> backend_names = {
+        {DecodeCPMLABackend::TOKENSPEED, "TOKENSPEED"},
+        {DecodeCPMLABackend::FIA2A, "FIA2A"},
+    };
+    static const std::unordered_map<DecodeCPMLAFusionMode, const char*> fusion_mode_names = {
+        {DecodeCPMLAFusionMode::AUTO, "AUTO"},
+        {DecodeCPMLAFusionMode::FUSED, "FUSED"},
+        {DecodeCPMLAFusionMode::UNFUSED, "UNFUSED"},
+    };
+    static const std::unordered_map<DecodeCPMLAA2ABackend, const char*> a2a_backend_names = {
+        {DecodeCPMLAA2ABackend::AUTO, "AUTO"},
+        {DecodeCPMLAA2ABackend::NCCL, "NCCL"},
+        {DecodeCPMLAA2ABackend::CUSTOM, "CUSTOM"},
+    };
+    const auto backend = backend_names.find(decode_cp_mla_backend);
+    const auto fusion_mode = fusion_mode_names.find(decode_cp_mla_fusion_mode);
+    const auto a2a_backend = a2a_backend_names.find(decode_cp_mla_a2a_backend);
     std::ostringstream oss;
     oss << "enable_fmha: " << enable_fmha << "\n"
         << "enable_trt_fmha: " << enable_trt_fmha << "\n"
@@ -115,7 +133,12 @@ std::string FMHAConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "use_triton_pa: " << use_triton_pa << "\n"
-        << "absorb_opt_len: " << absorb_opt_len << "\n";
+        << "absorb_opt_len: " << absorb_opt_len << "\n"
+        << "decode_cp_mla_backend: " << (backend == backend_names.end() ? "UNKNOWN" : backend->second) << "\n"
+        << "decode_cp_mla_fusion_mode: "
+        << (fusion_mode == fusion_mode_names.end() ? "UNKNOWN" : fusion_mode->second) << "\n"
+        << "decode_cp_mla_a2a_backend: "
+        << (a2a_backend == a2a_backend_names.end() ? "UNKNOWN" : a2a_backend->second) << "\n";
     return oss.str();
 }
 

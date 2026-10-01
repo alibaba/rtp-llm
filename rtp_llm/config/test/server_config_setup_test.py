@@ -1,5 +1,7 @@
+import argparse
 import pickle
 import unittest
+from itertools import product
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -13,6 +15,63 @@ from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    def test_decode_cp_mla_backend_configuration(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.ops import DecodeCPMLABackend, DecodeCPMLAFusionMode, DecodeCPMLAA2ABackend, FMHAConfig
+
+        self.assertEqual(FMHAConfig().decode_cp_mla_backend, DecodeCPMLABackend.TOKENSPEED)
+        self.assertEqual(FMHAConfig().decode_cp_mla_fusion_mode, DecodeCPMLAFusionMode.AUTO)
+        self.assertEqual(FMHAConfig().decode_cp_mla_a2a_backend, DecodeCPMLAA2ABackend.AUTO)
+        for backend, mode, a2a, source in product(
+            (None, "TOKENSPEED", "FIA2A"), (None, "AUTO", "FUSED", "UNFUSED"),
+            (None, "AUTO", "NCCL", "CUSTOM"),
+            ("pure_environment", "mixed_environment", "command_line"),
+        ):
+            with self.subTest(backend=backend, mode=mode, a2a=a2a, source=source):
+                env = {"MODEL_TYPE": "fake_model"}
+                argv = ["test"]
+                if source != "pure_environment":
+                    argv += ["--model_type", "fake_model"]
+                for option, value in (("decode_cp_mla_backend", backend),
+                                      ("decode_cp_mla_fusion_mode", mode),
+                                      ("decode_cp_mla_a2a_backend", a2a)):
+                    if value is not None:
+                        if source == "command_line":
+                            env[option.upper()] = "invalid_overridden_by_cli"
+                            argv += ["--" + option, value]
+                        else:
+                            env[option.upper()] = value
+                with patch.dict("os.environ", env, clear=True), patch("sys.argv", argv):
+                    configs = setup_args()
+                    setup_default_args(configs)
+                    config = EngineConfig.create(configs).fmha_config
+                    restored = pickle.loads(pickle.dumps(config))
+                for option, enum, value in (
+                    ("decode_cp_mla_backend", DecodeCPMLABackend, backend or "TOKENSPEED"),
+                    ("decode_cp_mla_fusion_mode", DecodeCPMLAFusionMode, mode or "AUTO"),
+                    ("decode_cp_mla_a2a_backend", DecodeCPMLAA2ABackend, a2a or "AUTO"),
+                ):
+                    expected = enum.__members__[value]
+                    self.assertEqual(getattr(restored, option), expected)
+                    self.assertIn(option + ": " + expected.name, restored.to_string())
+
+        # Both env paths must reject the bad value at conversion, before setup
+        # or backend selection; mixed CLI/env must not silently keep a default.
+        for option in ("decode_cp_mla_backend", "decode_cp_mla_fusion_mode", "decode_cp_mla_a2a_backend"):
+            for source in ("pure_environment", "mixed_environment", "command_line"):
+                with self.subTest(option=option, source=source):
+                    env = {"MODEL_TYPE": "fake_model"}
+                    argv = ["test"]
+                    if source != "pure_environment":
+                        argv += ["--model_type", "fake_model"]
+                    if source == "command_line":
+                        argv += ["--" + option, "invalid"]
+                    else:
+                        env[option.upper()] = "invalid"
+                    with patch.dict("os.environ", env, clear=True), patch("sys.argv", argv):
+                        with self.assertRaises((SystemExit, argparse.ArgumentTypeError)):
+                            setup_args()
 
     def test_dcp_configuration_reaches_engine_and_spawn(self):
         from rtp_llm.config.engine_config import EngineConfig

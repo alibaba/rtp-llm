@@ -834,7 +834,13 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
 
     if (is_prefill_cuda_graph_mode_) {
         {
-            RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.forward(replayPrefill,B=%d,capture=%zu,Q=%d,T=%d,fake=%d)",
+                state.current_batch_size,
+                usesFixedCapacityMtpDraftPrefillCudaGraph() ? max_bs_ : 1,
+                num_tokens_per_bs_,
+                state.current_seq_len,
+                int(inputs.attention_inputs.is_fake_stream));
             replayPrefill(state.current_real_graph_seq_len);
         }
         outputs.hidden_states =
@@ -842,7 +848,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.current_seq_len);
     } else {
         {
-            RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.forward(replayDecode,B=%d,capture=%d,Q=%d,T=%d,fake=%d)",
+                state.current_batch_size, state.current_real_graph_bs, num_tokens_per_bs_, state.seq_len_sum,
+                int(inputs.attention_inputs.is_fake_stream));
             replayDecode(state.current_real_graph_bs);
         }
         if (inputs.ktp_common_physical_batch > 0) {

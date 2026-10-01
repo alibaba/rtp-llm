@@ -1,10 +1,9 @@
 load("//bazel:arch_select.bzl", "tokenspeed_mla_test_deps")
 
 py_test(
-    name = "page_rr_mla_decode_test",
-    srcs = ["page_rr_mla_decode_test.py"],
-    main = "page_rr_mla_decode_test.py",
-    args = ["PageRRMlaDecodeTest"],
+    name = "mla_a2a_benchmark",
+    srcs = ["mla_a2a_benchmark.py", "mla_topology_benchmark.py", "page_rr_mla_decode_test.py"],
+    main = "mla_a2a_benchmark.py",
     deps = [
         "//rtp_llm:apache-tvm-ffi",
         "//rtp_llm:nvidia-cutlass-dsl",
@@ -14,7 +13,41 @@ py_test(
     env = {"GPU_COUNT": "8"},
     tags = ["manual", "L20D"],
     exec_properties = {"gpu": "L20D", "gpu_count": "8"},
-    timeout = "long",
+    timeout = "eternal",
+)
+
+py_test(
+    name = "mla_topology_benchmark",
+    srcs = ["mla_topology_benchmark.py", "page_rr_mla_decode_test.py"],
+    main = "mla_topology_benchmark.py",
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ] + tokenspeed_mla_test_deps(),
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "L20D"],
+    exec_properties = {"gpu": "L20D", "gpu_count": "8"},
+    timeout = "eternal",
+)
+
+py_test(
+    name = "page_rr_mla_decode_test",
+    srcs = ["page_rr_mla_decode_test.py", "page_rr_mla_graph_lifecycle.py"],
+    main = "page_rr_mla_decode_test.py",
+    args = ["PageRRMlaDecodeTest"],
+    data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ] + tokenspeed_mla_test_deps(),
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "L20D"],
+    exec_properties = {"gpu": "L20D", "gpu_count": "8"},
+    timeout = "eternal",
 )
 
 py_test(

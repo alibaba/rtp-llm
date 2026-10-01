@@ -432,8 +432,40 @@ class GrammarConfig:
         ...
 
 
+class DecodeCPMLABackend:
+    TOKENSPEED: typing.ClassVar[DecodeCPMLABackend]
+    FIA2A: typing.ClassVar[DecodeCPMLABackend]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLABackend]]
+
+    @property
+    def name(self) -> str: ...
+
+
+class DecodeCPMLAFusionMode:
+    AUTO: typing.ClassVar[DecodeCPMLAFusionMode]
+    FUSED: typing.ClassVar[DecodeCPMLAFusionMode]
+    UNFUSED: typing.ClassVar[DecodeCPMLAFusionMode]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLAFusionMode]]
+
+    @property
+    def name(self) -> str: ...
+
+
+class DecodeCPMLAA2ABackend:
+    AUTO: typing.ClassVar[DecodeCPMLAA2ABackend]
+    NCCL: typing.ClassVar[DecodeCPMLAA2ABackend]
+    CUSTOM: typing.ClassVar[DecodeCPMLAA2ABackend]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLAA2ABackend]]
+
+    @property
+    def name(self) -> str: ...
+
+
 class FMHAConfig:
     absorb_opt_len: int
+    decode_cp_mla_backend: DecodeCPMLABackend
+    decode_cp_mla_fusion_mode: DecodeCPMLAFusionMode
+    decode_cp_mla_a2a_backend: DecodeCPMLAA2ABackend
     disable_flash_infer: bool
     enable_fmha: bool
     enable_open_source_fmha: bool

@@ -130,8 +130,10 @@ class GptModelBase(nn.Module):
             self.fmha_config,
             is_cuda_graph,
         )
+        key = None
         if is_cuda_graph and hasattr(fmha_impl, "cuda_graph_workspace_key"):
             key = fmha_impl.cuda_graph_workspace_key()
+        if key is not None:
             inner_impl = getattr(fmha_impl, "fmha_impl", None)
             workspace = getattr(inner_impl, "_workspace_storage", None)
             if workspace is None:

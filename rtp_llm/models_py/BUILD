@@ -1,5 +1,10 @@
 load("//bazel:arch_select.bzl", "requirement")
 
+exports_files(
+    ["modules/kimi_k3/ktp_step.py"],
+    visibility = ["//example/k3:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
@@ -62,9 +67,8 @@ py_library(
         "//rtp_llm/models_py/distributed:push_reduce_scatter",
         "//rtp_llm/models_py/distributed:custom_all_gather",
     ] + select({
-        # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
-        "@//:using_cuda13_x86": ["deep_gemm"],
-        "@//:using_cuda13_arm": ["deep_gemm"],
+        "@//:using_cuda13_x86": ["deep_gemm", "//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
+        "@//:using_cuda13_arm": ["deep_gemm", "//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [

@@ -153,6 +153,12 @@ enum class FMHAType {
     HEADWISE,
 };
 
+enum class DecodeCPMLABackend { TOKENSPEED, FIA2A };
+
+enum class DecodeCPMLAFusionMode { AUTO, FUSED, UNFUSED };
+
+enum class DecodeCPMLAA2ABackend { AUTO, NCCL, CUSTOM };
+
 struct FMHAConfig {
     bool        enable_fmha                   = true;
     bool        enable_trt_fmha               = true;
@@ -166,6 +172,9 @@ struct FMHAConfig {
     bool        use_asm_pa                    = true;
     bool        use_triton_pa                 = true;
     int64_t     absorb_opt_len                = 1024;
+    DecodeCPMLABackend decode_cp_mla_backend = DecodeCPMLABackend::TOKENSPEED;
+    DecodeCPMLAFusionMode decode_cp_mla_fusion_mode = DecodeCPMLAFusionMode::AUTO;
+    DecodeCPMLAA2ABackend decode_cp_mla_a2a_backend = DecodeCPMLAA2ABackend::AUTO;
     std::string to_string() const;
 };
 

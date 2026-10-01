@@ -100,16 +100,21 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                         self.assertNotIn(key, forwarded)
 
     def test_forwards_decode_q_replicated_to_both_roles(self) -> None:
+        settings = {
+            "SMOKE_DECODE_Q_REPLICATED": "1",
+            "SMOKE_DECODE_MLA_BACKEND": "FIA2A",
+            "SMOKE_DECODE_CONCURRENCY_LIMIT": "16",
+            "SMOKE_DECODE_CAPTURE_CONFIG": "1,2,4,8,16",
+            "SMOKE_DECODE_OWNER_CONCURRENCY": "16",
+            "SMOKE_MLA_PROFILE_STEPS": "8",
+        }
         with mock.patch.dict(
-            os.environ, {"SMOKE_DECODE_Q_REPLICATED": "1"}, clear=True
+            os.environ, settings, clear=True
         ):
             for role in ("prefill", "decode"):
-                self.assertEqual(
-                    driver.forwarded_optional_environment(role)[
-                        "SMOKE_DECODE_Q_REPLICATED"
-                    ],
-                    "1",
-                )
+                forwarded = driver.forwarded_optional_environment(role)
+                for key, value in settings.items():
+                    self.assertEqual(forwarded[key], value)
 
     def test_decode_q_replicated_defaults_to_absent(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -118,6 +123,14 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                     "SMOKE_DECODE_Q_REPLICATED",
                     driver.forwarded_optional_environment(role),
                 )
+
+    def test_a2a_backend_reaches_decode_only(self) -> None:
+        for value in (None, "AUTO", "NCCL", "CUSTOM"):
+            env = {} if value is None else {"DECODE_CP_MLA_A2A_BACKEND": value}
+            with self.subTest(value=value), mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(driver.forwarded_optional_environment("decode")["DECODE_CP_MLA_A2A_BACKEND"],
+                                 value or "AUTO")
+                self.assertNotIn("DECODE_CP_MLA_A2A_BACKEND", driver.forwarded_optional_environment("prefill"))
 
     def test_forwards_service_environment_isolation_to_both_roles(self) -> None:
         settings = {"PYTHONNOUSERSITE": "1", "NCCL_GRAPH_REGISTER": "0"}
@@ -357,6 +370,11 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "smoke_shared_expert_shard": "1",
             "smoke_decode_topology": "legacy",
             "smoke_decode_q_replicated": "0",
+            "smoke_decode_mla_backend": "TOKENSPEED",
+            "smoke_decode_mla_a2a_backend": "AUTO",
+            "smoke_decode_concurrency_limit": "8",
+            "smoke_decode_capture_config": "1,2,4,8",
+            "smoke_mla_profile_steps": "0",
             "smoke_prefill_kv_cache_mem_mb": "56000",
             "smoke_decode_kv_cache_mem_mb": "29000",
             "smoke_decode_kda_pool_blocks": "32",
@@ -372,12 +390,18 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "MM_CACHE_GPU_MAX_BYTES": "21474836480",
             "ENABLE_SP_PREFILL_CUDA_GRAPH": "0",
             "RTP_LLM_MTP_ASYNC_PREPARE": "0",
+            "DECODE_CP_MLA_A2A_BACKEND": "CUSTOM",
         }
         for role, tp, dp, source_tp in (
             ("prefill", 8, 1, 8), ("prefill", 4, 1, 4),
             ("decode", 8, 1, 8), ("decode", 8, 1, 4), ("decode", 4, 2, 8),
         ):
-            for overrides in ({}, inherited):
+            for overrides in ({}, inherited, {
+                "smoke_decode_mla_backend": "FIA2A",
+                "smoke_decode_concurrency_limit": "16",
+                "smoke_decode_capture_config": "1,2,4,8,16",
+                "smoke_decode_mla_a2a_backend": "CUSTOM",
+            }):
                 with self.subTest(role=role, inherited=bool(overrides)):
                     command = "\n".join(definitions) + (
                         f"\napply_validated_common_profile\napply_validated_{role}_profile\n"
@@ -397,6 +421,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                     self.assertNotIn("CP_ROTATE_METHOD", env)
                     self.assertEqual(env["KV_CACHE_MEM_MB"], "56000" if role == "prefill" else "29000")
                     if role == "prefill":
+                        self.assertNotIn("DECODE_CP_MLA_A2A_BACKEND", env)
                         self.assertEqual(env["RTP_LLM_MTP_ASYNC_PREPARE"], "0")
                         self.assertNotIn("ENABLE_SP_PREFILL_CUDA_GRAPH", env)
                         self.assertEqual(env["PREFILL_CP_KV_CACHE_SHARDED"], "1")
@@ -412,7 +437,11 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                         self.assertEqual(env["DECODE_CP_KV_CACHE_SHARDED"], "1")
                         self.assertEqual(env["PREFILL_CP_SIZE"], str(source_tp))
                         self.assertEqual(env["NCCL_GRAPH_REGISTER"], "0")
-                        self.assertEqual(env["DECODE_CAPTURE_CONFIG"], "1,2,4,8")
+                        effective = {**settings, **overrides}
+                        self.assertEqual(env["DECODE_CP_MLA_A2A_BACKEND"], effective["smoke_decode_mla_a2a_backend"])
+                        self.assertEqual(env["DECODE_CAPTURE_CONFIG"], effective["smoke_decode_capture_config"])
+                        self.assertEqual(env["CONCURRENCY_LIMIT"], effective["smoke_decode_concurrency_limit"])
+                        self.assertEqual(env["DECODE_CP_MLA_BACKEND"], effective["smoke_decode_mla_backend"])
                         self.assertNotIn("PREFILL_CP_KV_CACHE_SHARDED", env)
 
     def test_page_rr_geometry_and_default_mixed_owners(self):

@@ -71,6 +71,7 @@ class PageRRMlaDecodeMetadata:
     def __init__(
         self, page_size: int, kernel_page_size: int, cp_size: int, cp_rank: int,
         cache_group_id: int = 0,
+        expand_query_table: bool = True,
     ):
         if page_size <= 0 or kernel_page_size <= 0 or page_size % kernel_page_size:
             raise ValueError("Page-RR ownership page must be a multiple of kernel page size")
@@ -81,6 +82,7 @@ class PageRRMlaDecodeMetadata:
         self.cp_size = cp_size
         self.cp_rank = cp_rank
         self.cache_group_id = cache_group_id
+        self.expand_query_table = expand_query_table
         self.positions_d = None
         self.slot_mapping = None
         self.local_causal_lens = None
@@ -110,18 +112,32 @@ class PageRRMlaDecodeMetadata:
             self.local_causal_lens = torch.empty(shape, dtype=torch.int32, device=base.device)
             self.positions_d = torch.empty(base.numel() * queries, dtype=torch.int32, device=base.device)
             self.slot_mapping = torch.empty_like(self.positions_d, dtype=torch.int64)
-        self.block_tables = table
+        if not self.expand_query_table and forbid_realloc:
+            if self.block_tables.shape != table.shape:
+                raise ValueError("Page-RR request page table shape cannot change during replay")
+            # The native runner normally supplies its same capture buffer.
+            # Other callers may replace the input tensor; update the captured
+            # storage instead of changing only its Python reference.
+            if self.block_tables.data_ptr() != table.data_ptr():
+                self.block_tables.copy_(table)
+            table = self.block_tables
+        else:
+            self.block_tables = table
         rows = self.positions_d.numel()
         # A completely empty owner still needs a valid kernel table descriptor.
         # Its zero lengths prevent KV reads; no dummy page becomes a real key.
         width = max(table.shape[1], 1)
         table_shape = (rows, width)
-        if self.query_block_tables is None or self.query_block_tables.shape != table_shape:
-            if forbid_realloc:
-                raise ValueError("Page-RR Decode query page table shape cannot change during replay")
-            self.query_block_tables = torch.zeros(table_shape, dtype=torch.int32, device=base.device)
-        if table.shape[1]:
-            self.query_block_tables.view(base.numel(), queries, width).copy_(table[:, None, :])
+        # TS runs each query as a separate q1 row; packed FIA reads the original
+        # request table. Repeating model-capacity tables Q times wastes memory
+        # and a large copy on every prepare, even when the live KV is short.
+        if self.expand_query_table or not table.shape[1]:
+            if self.query_block_tables is None or self.query_block_tables.shape != table_shape:
+                if forbid_realloc:
+                    raise ValueError("Page-RR Decode query page table shape cannot change during replay")
+                self.query_block_tables = torch.zeros(table_shape, dtype=torch.int32, device=base.device)
+            if table.shape[1]:
+                self.query_block_tables.view(base.numel(), queries, width).copy_(table[:, None, :])
         _prepare_decode_metadata[(triton.cdiv(rows, 128),)](
             base,
             inputs.sequence_lengths if inputs.is_cuda_graph and not multi else base,

@@ -125,6 +125,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--decode-owner-concurrency", type=int, default=0,
+        help="extra all-suite stage with this many simultaneous requests per Decode owner; 0 disables",
+    )
+    parser.add_argument(
+        "--mla-profile-steps", type=int, default=0,
+        help="opt-in Decode GPU trace windows for the small and all-owner batches; 0 disables",
+    )
     parser.add_argument("--block-size", type=int, default=4096)
     parser.add_argument(
         "--reuse-unit-tokens",
@@ -170,6 +178,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expanded-kv-budget-gib", type=float, default=6.0)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
+    if args.decode_owner_concurrency < 0:
+        parser.error("--decode-owner-concurrency must be nonnegative")
+    if args.mla_profile_steps < 0:
+        parser.error("--mla-profile-steps must be nonnegative")
+    if args.mla_profile_steps and (args.suite != "all" or not args.decode_owner_concurrency):
+        parser.error("MLA profiling requires --suite all and --decode-owner-concurrency")
     if args.batch_size < 4:
         parser.error(
             "--batch-size must be at least 4 to cover hit/partial-hit/miss mixing"
@@ -314,6 +328,7 @@ class Runner:
         self.records: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
         self.rdma_prewarm_attempts: list[dict[str, Any]] = []
+        self.profile_windows: list[dict[str, Any]] = []
         self.started_at = time.time()
         self.failures: list[dict[str, Any]] = []
         self._record_lock = threading.Lock()
@@ -365,6 +380,7 @@ class Runner:
                 ),
             },
             "stages": self.stages,
+            "profile_windows": self.profile_windows,
             "cases": self.records,
             "failures": self.failures,
         }
@@ -392,7 +408,7 @@ class Runner:
                     f"{role} health check before {stage} failed: {exc}"
                 ) from exc
 
-    def request(self, case: Case, barrier=None) -> dict[str, Any]:
+    def request(self, case: Case, barrier=None, *, on_decode_ready=None) -> dict[str, Any]:
         with self._record_lock:
             self._artifact_counter += 1
             number = self._artifact_counter
@@ -424,7 +440,10 @@ class Runner:
                 )
 
         try:
-            result = self._request(case, barrier, audit=audit, persist=persist)
+            result = self._request(
+                case, barrier, audit=audit, persist=persist,
+                on_decode_ready=on_decode_ready,
+            )
             result["phase"] = (
                 "prewarm" if case.name.startswith("rdma_prewarm_") else "formal"
             )
@@ -455,6 +474,7 @@ class Runner:
         *,
         audit: dict,
         persist: Callable,
+        on_decode_ready: Callable | None = None,
     ) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
@@ -467,7 +487,7 @@ class Runner:
             "top_k": 1,
             "top_p": 0.95,
             "seed": 0,
-            "stream": False,
+            "stream": on_decode_ready is not None,
             "debug_info": True,
         }
         if self.decode_role_addrs:
@@ -498,8 +518,12 @@ class Runner:
         request_timeout = case.timeout_s or self.args.timeout
         try:
             with self.opener.open(request, timeout=request_timeout) as response:
-                body = response.read()
                 status = response.status
+                if on_decode_ready is None:
+                    body = response.read()
+                else:
+                    result = self.read_profile_stream(response, on_decode_ready, audit)
+                    body = json.dumps(result, ensure_ascii=False).encode()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             audit.update(status=exc.code, response_body=detail)
@@ -527,6 +551,57 @@ class Runner:
             time.time() - started,
             request_max_tokens,
         )
+
+    @staticmethod
+    def read_profile_stream(response, on_decode_ready: Callable, audit: dict) -> dict:
+        # These smoke cases have one text choice. Preserve the final aux/debug
+        # metadata so streaming uses exactly the same semantic comparator.
+        message = {"content": "", "reasoning_content": ""}
+        choice = {"message": message, "finish_reason": None}
+        result = {"choices": [choice], "debug_info": {}}
+        chunks = audit.setdefault("stream_response", [])
+        started = False
+        output_ids = []
+        for line in response:
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                if not started or not choice["finish_reason"]:
+                    raise SmokeFailure("MLA profile stream ended without a complete text response")
+                result["debug_info"]["output_ids"] = [output_ids]
+                return result
+            chunk = json.loads(data)
+            chunks.append(chunk)
+            if "error" in chunk:
+                raise SmokeFailure(f"MLA profile stream failed: {chunk['error']}")
+            for field in ("aux_info", "usage"):
+                if chunk.get(field):
+                    result[field] = chunk[field]
+            for key, value in (chunk.get("debug_info") or {}).items():
+                if value is not None and key not in ("output_ids", "raw_output"):
+                    result["debug_info"][key] = value
+            token_delta = (chunk.get("extra_outputs") or {}).get("output_ids")
+            if token_delta is not None:
+                if len(token_delta) != 1:
+                    raise SmokeFailure("MLA profile requires one generated token sequence")
+                output_ids.extend(token_delta[0])
+            for update in chunk.get("choices", []):
+                if update.get("index", 0) != 0:
+                    raise SmokeFailure("MLA profile requires one response choice")
+                delta = update.get("delta") or {}
+                for field in ("content", "reasoning_content"):
+                    message[field] += delta.get(field) or ""
+                choice["finish_reason"] = update.get("finish_reason") or choice["finish_reason"]
+                # K3 carries incremental token IDs once per engine output, on
+                # the last channel frame; aux appears only in the final frame.
+                # The first token can be the Prefill seed, so wait for Decode.
+                if not started and len(output_ids) > 1 and not choice["finish_reason"]:
+                    started = True
+                    audit["decode_ready_at"] = time.time()
+                    audit["decode_ready_output_ids"] = list(output_ids)
+                    on_decode_ready()
+        raise SmokeFailure("MLA profile stream closed before [DONE]")
 
     def validate(
         self,
@@ -707,12 +782,46 @@ class Runner:
         }
 
     def request_cases(
-        self, cases: list[Case], concurrent: bool
+        self, cases: list[Case], concurrent: bool, *, profile_stage: str | None = None
     ) -> list[dict[str, Any]]:
+        profiling = bool(profile_stage and getattr(self.args, "mla_profile_steps", 0))
+        active, armed = set(), set()
+        profile_lock = threading.Lock()
+        owners = {case.decode_owner_rank for case in cases}
+
+        def decode_ready(case):
+            owner = case.decode_owner_rank
+            with profile_lock:
+                active.add(case.name)
+                expected = {c.name for c in cases if c.decode_owner_rank == owner}
+                # This profile uses buckets 1/2/4/8/16: nine live requests
+                # enter B16. Requiring all sixteen misses a valid window when
+                # earlier requests finish before the final arrivals. The GPU
+                # trace independently checks the actual bucket and kernels.
+                required = (
+                    min(len(expected), 9)
+                    if profile_stage == "large"
+                    else len(expected)
+                )
+                ready = owner not in armed and len(expected & active) >= required
+                if ready:
+                    armed.add(owner)
+            if ready:
+                self.arm_mla_profile(profile_stage, owner)
+
+        def submit(case, barrier=None):
+            if not profiling:
+                return self.request(case, barrier)
+            try:
+                return self.request(case, barrier, on_decode_ready=lambda: decode_ready(case))
+            finally:
+                with profile_lock:
+                    active.discard(case.name)
+
         if concurrent:
             barrier = threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-                futures = [pool.submit(self.request, case, barrier) for case in cases]
+                futures = [pool.submit(submit, case, barrier) for case in cases]
                 results, errors = [], []
                 for future in futures:
                     try:
@@ -726,8 +835,11 @@ class Runner:
                         errors[0],
                     )
                     raise fatal
-                return results
-        return [self.request(case) for case in cases]
+        else:
+            results = [submit(case) for case in cases]
+        if profiling and armed != owners:
+            raise SmokeFailure(f"MLA profile did not reach concurrent Decode on owners {sorted(owners - armed)}")
+        return results
 
     def prewarm_rdma_pool(self) -> None:
         if self.args.rdma_prewarm_attempts == 0:
@@ -797,7 +909,8 @@ class Runner:
                 time.sleep(self.args.rdma_prewarm_settle_s)
             return
 
-    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False) -> None:
+    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False,
+                  *, profile_stage: str | None = None) -> None:
         self.health(name)
         started = time.time()
         stage = {
@@ -812,7 +925,10 @@ class Runner:
             if name == "dp_rolling_refill":
                 self.request_refill(cases)
             else:
-                self.request_cases(cases, concurrent)
+                if profile_stage:
+                    self.request_cases(cases, concurrent, profile_stage=profile_stage)
+                else:
+                    self.request_cases(cases, concurrent)
             stage["passed"] = True
         except Exception as exc:
             stage["error"] = f"{type(exc).__name__}: {exc}"
@@ -965,11 +1081,13 @@ class Runner:
                     f"owner_records_rotate_{rotation}",
                     [
                         self.record_case(
-                            f"owner-record-{rotation}-{i}", (i + rotation) % size
+                            f"owner-record-{rotation}-{i}", (i + rotation) % size,
+                            words=8 if rotation == 0 and getattr(self.args, "mla_profile_steps", 0) else 1,
                         )
                         for i in range(size)
                     ],
                     concurrent=True,
+                    profile_stage="small" if rotation == 0 else None,
                 )
             self.run_stage(
                 "owner_last_only", [self.record_case("owner-last-only", size - 1)]
@@ -1251,6 +1369,59 @@ class Runner:
             concurrent=True,
         )
 
+    def arm_mla_profile(self, stage: str, owner: int) -> None:
+        steps = getattr(self.args, "mla_profile_steps", 0)
+        if not steps:
+            return
+        if not self.decode_role_addrs:
+            raise SmokeFailure("MLA profiling requires explicit Decode owner endpoints")
+        address = self.decode_role_addrs[owner]
+        # enable_all_rank broadcasts within this TP group, not across DP.
+        endpoint = f"http://{address['ip']}:{address['http_port']}/start_profile"
+        payload = dict(trace_name=f"mla_{stage}_owner{owner}", start_step=0,
+                       num_steps=steps, enable_all_rank=True)
+        request = urllib.request.Request(
+            endpoint, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with self.opener.open(request, timeout=10) as response:
+            result = json.load(response)
+        if result.get("status") != "ok":
+            raise SmokeFailure(f"Cannot arm MLA profile on owner {owner}: {result}")
+        self.profile_windows.append(dict(stage=stage, owner=owner, endpoint=endpoint,
+                                         armed_at=time.time(), **payload))
+
+    def build_concurrent_owner_cases(self, count: int) -> list[Case]:
+        # Reuse a shared prefix so Prefill can feed both Decode owners quickly.
+        # Every real request retains KV on all Page-RR owners and copies a
+        # bounded record, giving Decode time to form the B16 Graph bucket.
+        seed_tail = '\n只输出 JSON {"value":"READY"}。'
+        seed_prompt, tokens = self.fit_prompt(
+            f"MLA {self.args.namespace}/shared-prefix。以下是无关填充。\n",
+            seed_tail, 2*self.reuse_unit_tokens+64,
+        )
+        self.run_stage("cuda_graph_all_owners_seed", [Case(
+            "cuda_graph_all_owners_seed", seed_prompt, r"", "miss",
+            expected_json={"value": "READY"}, expected_input_len=len(tokens),
+            max_tokens=self.args.identity_max_tokens,
+        )])
+        prefix = seed_prompt[:-len(seed_tail)]
+        cases = []
+        for owner in range(max(1, len(self.decode_role_addrs))):
+            for index in range(count):
+                case = self.record_case(f"cuda_graph_owner_{owner}_{index}", owner, words=32)
+                cases.append(replace(case, prompt=prefix+"\n"+case.prompt,
+                                     reuse="partial", expected_reuse_len=2*self.reuse_unit_tokens))
+        # Verify the shared frontier with the serving tokenizer, as in the
+        # existing partial-cache cases; a character suffix is not a token bound.
+        query_tokens = self.tokenize(cases[0].prompt)
+        common_tokens = next((i for i, (a, b) in enumerate(zip(tokens, query_tokens)) if a != b),
+                             min(len(tokens), len(query_tokens)))
+        if common_tokens // self.reuse_unit_tokens != 2:
+            raise SmokeFailure(f"MLA shared prefix must retain exactly two reuse units, got {common_tokens} tokens")
+        self.save_token_fixture(cases[0].prompt, query_tokens)
+        return cases
+
     def run_all(self) -> None:
         self.prewarm_rdma_pool()
         self.run_owner_regressions()
@@ -1477,6 +1648,16 @@ class Runner:
             ],
             concurrent=True,
         )
+
+        owner_concurrency = getattr(self.args, "decode_owner_concurrency", 0)
+        if owner_concurrency:
+            owner_cases = self.build_concurrent_owner_cases(owner_concurrency)
+            self.run_stage(
+                "cuda_graph_all_owners",
+                owner_cases,
+                concurrent=True,
+                profile_stage="large",
+            )
 
         single_prompt = make_whole_chunk_prompt(
             self.args.namespace, "whole-chunk-single", 61

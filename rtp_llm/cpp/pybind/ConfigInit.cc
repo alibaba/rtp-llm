@@ -367,6 +367,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
+    py::enum_<DecodeCPMLABackend>(m, "DecodeCPMLABackend")
+        .value("TOKENSPEED", DecodeCPMLABackend::TOKENSPEED)
+        .value("FIA2A", DecodeCPMLABackend::FIA2A);
+
+    py::enum_<DecodeCPMLAFusionMode>(m, "DecodeCPMLAFusionMode")
+        .value("AUTO", DecodeCPMLAFusionMode::AUTO)
+        .value("FUSED", DecodeCPMLAFusionMode::FUSED)
+        .value("UNFUSED", DecodeCPMLAFusionMode::UNFUSED);
+
+    py::enum_<DecodeCPMLAA2ABackend>(m, "DecodeCPMLAA2ABackend")
+        .value("AUTO", DecodeCPMLAA2ABackend::AUTO)
+        .value("NCCL", DecodeCPMLAA2ABackend::NCCL)
+        .value("CUSTOM", DecodeCPMLAA2ABackend::CUSTOM);
+
     // Register FMHAConfig
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
@@ -382,6 +396,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
+        .def_readwrite("decode_cp_mla_backend", &FMHAConfig::decode_cp_mla_backend)
+        .def_readwrite("decode_cp_mla_fusion_mode", &FMHAConfig::decode_cp_mla_fusion_mode)
+        .def_readwrite("decode_cp_mla_a2a_backend", &FMHAConfig::decode_cp_mla_a2a_backend)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
@@ -396,10 +413,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
                                       self.use_triton_pa,
-                                      self.absorb_opt_len);
+                                      self.absorb_opt_len,
+                                      self.decode_cp_mla_backend,
+                                      self.decode_cp_mla_fusion_mode,
+                                      self.decode_cp_mla_a2a_backend);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -415,6 +435,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_asm_pa                    = t[9].cast<bool>();
                     c.use_triton_pa                 = t[10].cast<bool>();
                     c.absorb_opt_len                = t[11].cast<int64_t>();
+                    c.decode_cp_mla_backend         = t[12].cast<DecodeCPMLABackend>();
+                    c.decode_cp_mla_fusion_mode     = t[13].cast<DecodeCPMLAFusionMode>();
+                    c.decode_cp_mla_a2a_backend     = t[14].cast<DecodeCPMLAA2ABackend>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

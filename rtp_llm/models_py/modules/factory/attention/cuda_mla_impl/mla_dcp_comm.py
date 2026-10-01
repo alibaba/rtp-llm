@@ -19,7 +19,8 @@ def _pack_a2a(
     partial, lse, lengths, packed_o, packed_lse, tokens,
     heads: tl.constexpr, local_heads: tl.constexpr, dim: tl.constexpr, block: tl.constexpr,
 ):
-    token, head = tl.program_id(0), tl.program_id(1)
+    token, head = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    tokens = tl.full((), tokens, tl.int64)
     destination = head // local_heads
     output_row = (destination * tokens + token) * local_heads + head % local_heads
     # Each wire row is dim BF16 values followed by one bit-exact FP32 LSE.
@@ -37,7 +38,8 @@ def _combine_a2a(
     received_o, received_lse, output, tokens,
     local_heads: tl.constexpr, dim: tl.constexpr, cp_size: tl.constexpr, block: tl.constexpr,
 ):
-    token, head = tl.program_id(0), tl.program_id(1)
+    token, head = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    tokens = tl.full((), tokens, tl.int64)
     offset = (token * local_heads + head) * (dim + 2)
     rank_stride = tokens * local_heads * (dim + 2)
     maximum = tl.full((), -float("inf"), tl.float32)
@@ -108,7 +110,7 @@ class MlaDcpCommunicator:
         all_gather_into(local_q.view(wire_dtype), output.view(wire_dtype), Group.TP)
         return output
 
-    def combine(self, partial_o, partial_lse, local_seq_lens):
+    def combine(self, partial_o, partial_lse, local_seq_lens, *, a2a_buffers=None):
         tokens, heads, dim = partial_o.shape
         if (
             heads != self.heads or dim != self.latent_dim
@@ -120,13 +122,17 @@ class MlaDcpCommunicator:
         ):
             raise ValueError("MLA DCP combine requires BF16 O[T,H,L], FP32 LSE[T,H] and int32 lengths[T]")
         shape = (self.size, tokens, self.local_heads, dim + 2)
-        packed = torch.empty(shape, dtype=torch.bfloat16, device=self.device)
+        packed = (torch.empty(shape, dtype=torch.bfloat16, device=self.device)
+                  if a2a_buffers is None else a2a_buffers.packed(tokens))
         _pack_a2a[(tokens, heads)](
             partial_o, partial_lse, local_seq_lens, packed, packed.view(torch.float32),
             tokens, heads=heads, local_heads=self.local_heads, dim=dim,
             block=triton.next_power_of_2(dim),
         )
-        received = all_to_all_single(packed, Group.TP)
+        if a2a_buffers is None:
+            received = all_to_all_single(packed, Group.TP)
+        else:
+            received = a2a_buffers.exchange(tokens)
         output = partial_o.new_empty(self.local_heads, tokens, dim)
         _combine_a2a[(tokens, self.local_heads)](
             received, received.view(torch.float32), output, tokens,

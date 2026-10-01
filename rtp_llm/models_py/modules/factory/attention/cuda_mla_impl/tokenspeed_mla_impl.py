@@ -777,7 +777,12 @@ class TokenSpeedMlaDecodeOp:
             if self.use_cuda_graph
             else max(self._max_seq_len, self.token_per_block)
         )
-        attn_output = _TOKENSPEED_MLA_API(
+        attn_output = self._forward_mla(q_absorbed, paged_kv, output, max_seq_len, q_len)
+        return self._project_output(attn_output, layer_id)
+
+    def _forward_mla(self, q_absorbed, paged_kv, output, max_seq_len, q_len):
+        """Absorbed Q through local MLA/split reduction, before V projection."""
+        return _TOKENSPEED_MLA_API(
             query=q_absorbed.view(
                 self._batch_size, q_len, self.num_heads, q_absorbed.size(-1)
             ),
@@ -795,7 +800,6 @@ class TokenSpeedMlaDecodeOp:
             causal_mask=True,
             enable_pdl=False,
         )
-        return self._project_output(attn_output, layer_id)
 
 
 class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):

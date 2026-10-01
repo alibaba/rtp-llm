@@ -1,6 +1,33 @@
 import argparse
 
-from rtp_llm.ops import CPRotateMethod
+from rtp_llm.ops import CPRotateMethod, DecodeCPMLABackend, DecodeCPMLAFusionMode, DecodeCPMLAA2ABackend
+
+
+def str2_decode_cp_mla_backend(value):
+    try:
+        return DecodeCPMLABackend.__members__[value]
+    except KeyError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid Decode CP MLA backend {value!r}; choose TOKENSPEED or FIA2A"
+        ) from None
+
+
+def str2_decode_cp_mla_fusion_mode(value):
+    try:
+        return DecodeCPMLAFusionMode.__members__[value]
+    except KeyError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid Decode CP MLA fusion mode {value!r}; choose AUTO, FUSED or UNFUSED"
+        ) from None
+
+
+def str2_decode_cp_mla_a2a_backend(value):
+    try:
+        return DecodeCPMLAA2ABackend.__members__[value]
+    except KeyError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid Decode CP MLA A2A backend {value!r}; choose AUTO, NCCL or CUSTOM"
+        ) from None
 
 
 def str2bool(v):

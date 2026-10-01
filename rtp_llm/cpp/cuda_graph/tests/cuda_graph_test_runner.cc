@@ -65,7 +65,11 @@ public:
                             int64_t    tokens_per_block,
                             int64_t    kernel_tokens_per_block,
                             int64_t    num_tokens_per_bs,
-                            int64_t    hidden_size) {
+                            int64_t    hidden_size,
+                            std::vector<int> kv_cache_layer_to_group,
+                            int64_t    kv_cache_group_num,
+                            int64_t    sequence_parallel_size,
+                            int64_t    sp_steps) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -78,8 +82,10 @@ public:
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
-        params.kv_cache_layer_to_group      = {};
-        params.kv_cache_group_num           = 0;
+        params.kv_cache_layer_to_group      = std::move(kv_cache_layer_to_group);
+        params.kv_cache_group_num           = static_cast<int>(kv_cache_group_num);
+        params.sequence_parallel_size      = static_cast<int>(sequence_parallel_size);
+        params.sp_steps                    = static_cast<int>(sp_steps);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -95,7 +101,10 @@ public:
                      int64_t          max_context_batch_size,
                      std::vector<int> kv_cache_layer_to_group,
                      int64_t          kv_cache_group_num,
-                     int64_t          linear_replay_group_num) {
+                     int64_t          linear_replay_group_num,
+                     int64_t          sequence_parallel_size,
+                     c10::ScalarType  model_data_type,
+                     int64_t          sp_steps) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -106,12 +115,14 @@ public:
         params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
         params.is_target_verify             = is_target_verify;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::Half;
+        params.model_data_type              = model_data_type;
+        params.sequence_parallel_size      = static_cast<int>(sequence_parallel_size);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_layer_to_group      = std::move(kv_cache_layer_to_group);
         params.kv_cache_group_num           = static_cast<int>(kv_cache_group_num);
         params.linear_replay_group_num      = static_cast<int>(linear_replay_group_num);
+        params.sp_steps                     = static_cast<int>(sp_steps);
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -130,6 +141,10 @@ public:
 
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
+    }
+
+    void reset() {
+        reset_runner();
     }
 
     ~CudaGraphTestRunner() {
@@ -172,7 +187,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("num_tokens_per_bs"),
-             py::arg("hidden_size"))
+             py::arg("hidden_size"),
+             py::arg("kv_cache_layer_to_group") = std::vector<int>{},
+             py::arg("kv_cache_group_num")      = 0,
+             py::arg("sequence_parallel_size")  = 1,
+             py::arg("sp_steps")                = 0)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -186,9 +205,13 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_context_batch_size")  = 128,
              py::arg("kv_cache_layer_to_group") = std::vector<int>{},
              py::arg("kv_cache_group_num")      = 0,
-             py::arg("linear_replay_group_num") = 0)
+             py::arg("linear_replay_group_num") = 0,
+             py::arg("sequence_parallel_size") = 1,
+             py::arg("model_data_type") = c10::ScalarType::Half,
+             py::arg("sp_steps") = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
+        .def("reset", &CudaGraphTestRunner::reset)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

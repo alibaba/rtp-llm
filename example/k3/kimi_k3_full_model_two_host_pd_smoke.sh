@@ -212,6 +212,25 @@ smoke_decode_default_dp=1
 [[ "${smoke_decode_tp_size}" != 4 ]] || smoke_decode_default_dp=2
 smoke_decode_dp_size="${SMOKE_DECODE_DP_SIZE:-${smoke_decode_default_dp}}"
 smoke_decode_q_replicated="${SMOKE_DECODE_Q_REPLICATED:-0}"
+smoke_decode_mla_backend="${SMOKE_DECODE_MLA_BACKEND:-TOKENSPEED}"
+smoke_decode_mla_a2a_backend="${DECODE_CP_MLA_A2A_BACKEND:-AUTO}"
+smoke_decode_concurrency_limit="${SMOKE_DECODE_CONCURRENCY_LIMIT:-8}"
+smoke_decode_capture_config="${SMOKE_DECODE_CAPTURE_CONFIG:-1,2,4,8}"
+smoke_mla_profile_steps="${SMOKE_MLA_PROFILE_STEPS:-0}"
+[[ "${smoke_mla_profile_steps}" =~ ^(0|[1-9][0-9]*)$ ]] \
+    || die "SMOKE_MLA_PROFILE_STEPS must be a nonnegative integer"
+case "${smoke_decode_mla_backend}" in
+    TOKENSPEED | FIA2A) ;;
+    *) die "SMOKE_DECODE_MLA_BACKEND must be TOKENSPEED or FIA2A" ;;
+esac
+case "${smoke_decode_mla_a2a_backend}" in
+    AUTO | NCCL | CUSTOM) ;;
+    *) die "DECODE_CP_MLA_A2A_BACKEND must be AUTO, NCCL or CUSTOM" ;;
+esac
+[[ "${smoke_decode_concurrency_limit}" =~ ^[1-9][0-9]*$ ]] \
+    || die "SMOKE_DECODE_CONCURRENCY_LIMIT must be a positive integer"
+[[ "${smoke_decode_capture_config}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] \
+    || die "SMOKE_DECODE_CAPTURE_CONFIG must contain comma-separated positive integers"
 [[ "${smoke_decode_q_replicated}" == "0" || "${smoke_decode_q_replicated}" == "1" ]] \
     || die "SMOKE_DECODE_Q_REPLICATED must be 0 or 1"
 for topology_size in "${smoke_prefill_tp_size}" "${smoke_decode_tp_size}" "${smoke_decode_dp_size}"; do
@@ -281,12 +300,13 @@ case_runner="${repo_root}/example/k3/kimi_k3_full_model_pd_cases.py"
 checkpoint_real="$(realpath -e "${CHECKPOINT_PATH}")" \
     || die "checkpoint does not exist: ${CHECKPOINT_PATH}"
 case "${checkpoint_real}" in
-    /data[0-9]*/* | /data/* | /ssd/*) ;;
-    *) die "checkpoint must be on a local data disk: ${checkpoint_real}" ;;
+    /data[0-9]*/* | /data/* | /ssd/* | /mnt/hf3fs/3fs/*) ;;
+    *) die "checkpoint must be on a local data disk or 3fs: ${checkpoint_real}" ;;
 esac
 checkpoint_fs="$(findmnt -T "${checkpoint_real}" -n -o FSTYPE)"
 checkpoint_source="$(findmnt -T "${checkpoint_real}" -n -o SOURCE)"
 case "${checkpoint_fs}:${checkpoint_source}" in
+    fuse.hf3fs:*) ;; # Shared 3fs model storage; retain its real mount identity.
     nfs*:* | cifs:* | smb*:* | fuse.*:* | *[Nn][Aa][Ss]*)
         die "network/NAS checkpoint is forbidden: ${checkpoint_fs}:${checkpoint_source}"
         ;;
@@ -298,12 +318,13 @@ esac
 sp_checkpoint_real="$(realpath -e "${SP_CHECKPOINT_PATH:?SP_CHECKPOINT_PATH is required}")" \
     || die "draft checkpoint does not exist: ${SP_CHECKPOINT_PATH}"
 case "${sp_checkpoint_real}" in
-    /data[0-9]*/* | /data/* | /ssd/*) ;;
-    *) die "draft checkpoint must be on a local data disk: ${sp_checkpoint_real}" ;;
+    /data[0-9]*/* | /data/* | /ssd/* | /mnt/hf3fs/3fs/*) ;;
+    *) die "draft checkpoint must be on a local data disk or 3fs: ${sp_checkpoint_real}" ;;
 esac
 sp_checkpoint_fs="$(findmnt -T "${sp_checkpoint_real}" -n -o FSTYPE)"
 sp_checkpoint_source="$(findmnt -T "${sp_checkpoint_real}" -n -o SOURCE)"
 case "${sp_checkpoint_fs}:${sp_checkpoint_source}" in
+    fuse.hf3fs:*) ;;
     nfs*:* | cifs:* | smb*:* | fuse.*:* | *[Nn][Aa][Ss]*)
         die "network/NAS draft checkpoint is forbidden: ${sp_checkpoint_fs}:${sp_checkpoint_source}"
         ;;
@@ -642,10 +663,10 @@ verify_decode_graph_log() {
         | tail -20 >>"${evidence_file}" \
         || die "Decode log has no local Page-RR cache evidence"
     local physical_buckets
-    physical_buckets="$(PYTHONPATH="${repo_root}/example/k3" python3 - "${smoke_tp_size}" "${smoke_proposal_tokens}" <<'PYBUCKETS'
+    physical_buckets="$(PYTHONPATH="${repo_root}/example/k3" python3 - "${smoke_tp_size}" "${smoke_proposal_tokens}" "${smoke_decode_capture_config}" <<'PYBUCKETS'
 import sys
 from kimi_k3_smoke_runtime_evidence import physical_graph_buckets
-print(*physical_graph_buckets(int(sys.argv[1]), int(sys.argv[2])))
+print(*physical_graph_buckets(int(sys.argv[1]), int(sys.argv[2]), tuple(map(int, sys.argv[3].split(",")))))
 PYBUCKETS
 )" || die "failed to derive physical Decode Graph buckets"
     for bucket in ${physical_buckets}; do
@@ -660,6 +681,9 @@ verify_smoke_runtime_coverage() {
     python3 "${repo_root}/example/k3/kimi_k3_smoke_runtime_evidence.py" \
         --role "${role}" --root "${role_dir}" \
         --decode-page-rr 1 --proposal-tokens "${smoke_proposal_tokens}" \
+        --decode-capture-config "${smoke_decode_capture_config}" \
+        --mla-profile-steps "${smoke_mla_profile_steps}" --mla-backend "${smoke_decode_mla_backend}" \
+        --mla-a2a-backend "${smoke_decode_mla_a2a_backend}" \
         --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}" --source-tp-size "${smoke_prefill_tp_size}" \
         --prefill-page-rr "${smoke_prefill_page_rr_multi_launch}"
 }
@@ -706,6 +730,9 @@ verify_role_environment() {
         "${smoke_dp_size}" \
         "${smoke_prefill_tp_size}" \
         "${smoke_decode_q_replicated}" \
+        "${smoke_decode_mla_backend}" \
+        "${smoke_decode_concurrency_limit}" \
+        "${smoke_decode_capture_config}" \
         "${smoke_decode_topology}" \
         "${smoke_proposal_tokens}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
@@ -732,6 +759,9 @@ import sys
     dp_size,
     prefill_tp_size,
     decode_q_replicated,
+    decode_mla_backend,
+    decode_concurrency_limit,
+    decode_capture_config,
     decode_topology,
     proposal_tokens,
     core_dump_on_exception,
@@ -805,7 +835,7 @@ else:
     expected["RTP_LLM_MTP_ASYNC_PREPARE"] = "1"
     expected["ENABLE_SP_PREFILL_CUDA_GRAPH"] = "1"
     expected.update({
-        "CONCURRENCY_LIMIT": "8",
+        "CONCURRENCY_LIMIT": decode_concurrency_limit,
         "MAX_SEQ_LEN": "1468006",
         "MAX_BATCH_TOKENS_SIZE": "1468006",
         "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
@@ -815,16 +845,20 @@ else:
         "NCCL_MAX_CTAS": "8",
         "NCCL_GRAPH_REGISTER": "0",
         "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1,2,4,8",
+        "DECODE_CAPTURE_CONFIG": decode_capture_config,
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "DECODE_CP_KV_CACHE_SHARDED": "1",
         "DECODE_CP_Q_REPLICATED": decode_q_replicated,
+        "DECODE_CP_MLA_BACKEND": decode_mla_backend,
+        "DECODE_CP_MLA_A2A_BACKEND": os.environ.get("DECODE_CP_MLA_A2A_BACKEND", "AUTO"),
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
     })
     expected["PREFILL_CP_SIZE"] = prefill_tp_size
+    if int(os.environ.get("SMOKE_MLA_PROFILE_STEPS", "0")) > 0:
+        expected["TORCH_CUDA_PROFILER_DIR"] = os.environ["TORCH_CUDA_PROFILER_DIR"]
     absent.append("PREFILL_CP_KV_CACHE_SHARDED")
     absent.extend([
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD",
@@ -940,6 +974,7 @@ apply_validated_prefill_profile() {
     # Admit the full HTTP batch: the uneven DP stage submits 4+3+2+1 requests.
     export CONCURRENCY_LIMIT=32
     unset DECODE_CP_KV_CACHE_SHARDED DECODE_CP_Q_REPLICATED
+    unset DECODE_CP_MLA_A2A_BACKEND
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
     export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
@@ -962,8 +997,8 @@ apply_validated_prefill_profile() {
 }
 
 apply_validated_decode_profile() {
-    # The sole DP owner admits up to the largest Graph bucket.
-    export CONCURRENCY_LIMIT=8
+    # The concurrency limit applies independently to each DP owner.
+    export CONCURRENCY_LIMIT="${smoke_decode_concurrency_limit}"
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
     export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
@@ -981,10 +1016,16 @@ apply_validated_decode_profile() {
     export ENABLE_SP_PREFILL_CUDA_GRAPH=1
     export RTP_LLM_MTP_ASYNC_PREPARE=1
     # Exercise the DCP group with several public Graph buckets.
-    export DECODE_CAPTURE_CONFIG=1,2,4,8
+    export DECODE_CAPTURE_CONFIG="${smoke_decode_capture_config}"
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export DECODE_CP_KV_CACHE_SHARDED=1
     export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
+    export DECODE_CP_MLA_BACKEND="${smoke_decode_mla_backend}"
+    export DECODE_CP_MLA_A2A_BACKEND="${smoke_decode_mla_a2a_backend}"
+    if ((smoke_mla_profile_steps > 0)); then
+        export TORCH_CUDA_PROFILER_DIR="${role_dir}/mla-profile"
+        mkdir -p "${TORCH_CUDA_PROFILER_DIR}"
+    fi
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
@@ -1148,6 +1189,8 @@ python3 -u "${case_runner}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
     "${decode_role_addr_args[@]}" \
     --decode-dp-size "${smoke_decode_dp_size}" \
+    --decode-owner-concurrency "${SMOKE_DECODE_OWNER_CONCURRENCY:-0}" \
+    --mla-profile-steps "${smoke_mla_profile_steps}" \
     --output "${accuracy_file}" \
     --suite "${smoke_suite}" \
     --namespace "${SMOKE_RUN_ID}" \

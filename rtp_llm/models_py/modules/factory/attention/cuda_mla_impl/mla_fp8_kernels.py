@@ -41,7 +41,8 @@ def _quantize(
     X, Y, N, INV_SCALE: tl.constexpr, BLOCK: tl.constexpr,
     SHAPE, STRIDES, CONTIGUOUS: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    # Replicated MLA Q can contain more than 2^31 elements at large B*Q.
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     if CONTIGUOUS:
         src = offsets
     else:

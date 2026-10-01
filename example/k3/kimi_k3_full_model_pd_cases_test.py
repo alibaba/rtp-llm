@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import io
 import pathlib
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -435,6 +437,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             name: str,
             cases: list[Case],
             concurrent: bool = False,
+            *, profile_stage: str | None = None,
         ) -> None:
             del concurrent
             stages[name] = cases
@@ -491,6 +494,159 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             [case.decode_owner_rank for case in stages["whole_chunk_batch_miss"]],
             [0, 1],
         )
+
+    def test_all_suite_adds_one_concurrent_stage_for_both_owners(self) -> None:
+        args = make_args()
+        args.decode_role_addrs = args.decode_role_addrs[:2]
+        args.decode_owner_concurrency = 16
+        runner = Runner(args)
+        with (
+            mock.patch.object(runner, "fit_prompt", side_effect=lambda head, tail, target: (head+tail, [0]*target)),
+            mock.patch.object(runner, "tokenize", return_value=[0]*(2*runner.reuse_unit_tokens+32)+[1]),
+            mock.patch.object(Runner, "run_prefix_branches"),
+            mock.patch.object(Runner, "run_padding_boundaries"),
+            mock.patch.object(Runner, "run_page_rr_boundaries"),
+            mock.patch.object(runner, "run_long_prefix_case"),
+            mock.patch.object(runner, "run_stage") as stage,
+        ):
+            runner.run_all()
+        calls = [call for call in stage.call_args_list if call.args[0] == "cuda_graph_all_owners"]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].kwargs["concurrent"])
+        cases = calls[0].args[1]
+        self.assertEqual([case.decode_owner_rank for case in cases], [0] * 16 + [1] * 16)
+        self.assertEqual(len({case.name for case in cases}), 32)
+        self.assertTrue(all(len(case.expected_json["value"].split()) == 32 for case in cases))
+        self.assertTrue(all(case.max_tokens >= 2304 for case in cases))
+        self.assertTrue(all(case.expected_reuse_len == 2*runner.reuse_unit_tokens for case in cases))
+        with (
+            mock.patch.object(runner, "fit_prompt", side_effect=lambda head, tail, target: (head+tail, [0]*target)),
+            mock.patch.object(runner, "run_stage"),
+            mock.patch.object(runner, "tokenize", return_value=[1]),
+        ):
+            with self.assertRaisesRegex(SmokeFailure, "exactly two reuse units"):
+                runner.build_concurrent_owner_cases(16)
+
+    def test_mla_profile_arms_each_owner_tp_group(self) -> None:
+        args = make_args()
+        args.decode_role_addrs = args.decode_role_addrs[:2]
+        args.mla_profile_steps = 8
+        runner = Runner(args)
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"status":"ok"}'
+        with mock.patch.object(runner.opener, "open", return_value=response) as post:
+            for owner in range(2):
+                runner.arm_mla_profile("large", owner)
+        self.assertEqual(post.call_count, 2)
+        for owner, call in enumerate(post.call_args_list):
+            request = call.args[0]
+            address = args.decode_role_addrs[owner]
+            self.assertEqual(request.full_url, f"http://{address['ip']}:{address['http_port']}/start_profile")
+            self.assertEqual(json.loads(request.data), dict(
+                trace_name=f"mla_large_owner{owner}", start_step=0,
+                num_steps=8, enable_all_rank=True,
+            ))
+        self.assertEqual(len(runner.profile_windows), 2)
+
+    def test_profile_stream_preserves_semantic_response_and_requires_completion(self):
+        chunks = [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}],
+             "debug_info": {"input_urls": ["fixture"]}},
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "think"}}],
+             "extra_outputs": {"output_ids": [[1]]}},
+            {"choices": [{"index": 0, "delta": {"content": '{"value":'}}],
+             "extra_outputs": {"output_ids": [[2]]}},
+            {"choices": [{"index": 0, "delta": {"content": '"READY"}'}}],
+             "extra_outputs": {"output_ids": [[3]]}},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+             "aux_info": {"output_len": 3, "iter_count": 2}},
+        ]
+        data = b"".join(b"data: " + json.dumps(chunk).encode() + b"\n\n" for chunk in chunks)
+        audit, first = {}, mock.Mock()
+        result = Runner.read_profile_stream(io.BytesIO(data + b"data: [DONE]\n"), first, audit)
+        first.assert_called_once_with()
+        self.assertEqual(result["choices"][0]["message"], {
+            "content": '{"value":"READY"}', "reasoning_content": "think",
+        })
+        self.assertEqual(result["aux_info"], chunks[-1]["aux_info"])
+        self.assertEqual(result["debug_info"], {"input_urls": ["fixture"], "output_ids": [[1, 2, 3]]})
+        self.assertEqual(audit["stream_response"], chunks)
+        self.assertEqual(audit["decode_ready_output_ids"], [1, 2])
+        with self.assertRaisesRegex(SmokeFailure, "before.*DONE"):
+            Runner.read_profile_stream(io.BytesIO(data), mock.Mock(), {})
+
+    def test_profile_waits_for_each_owners_live_decode_requests(self):
+        args = make_args()
+        args.mla_profile_steps = 8
+        runner = Runner(args)
+        cases = [runner.record_case(f"record-{i}", i // 2) for i in range(4)]
+        live = set()
+        lock = threading.Lock()
+        finish = threading.Barrier(len(cases))
+
+        def request(case, barrier, *, on_decode_ready):
+            barrier.wait(timeout=5)
+            with lock:
+                live.add(case.name)
+            on_decode_ready()
+            finish.wait(timeout=5)
+            return {"name": case.name}
+
+        def arm(stage, owner):
+            self.assertEqual(stage, "large")
+            with lock:
+                self.assertTrue({c.name for c in cases if c.decode_owner_rank == owner} <= live)
+
+        with mock.patch.object(runner, "request", side_effect=request), \
+             mock.patch.object(runner, "arm_mla_profile", side_effect=arm) as profile:
+            results = runner.request_cases(cases, concurrent=True, profile_stage="large")
+        self.assertEqual(len(results), 4)
+        self.assertCountEqual(profile.call_args_list, [mock.call("large", 0), mock.call("large", 1)])
+
+        # Completed requests cannot be accumulated into an invented live batch.
+        with mock.patch.object(runner, "request", side_effect=lambda case, barrier, on_decode_ready: on_decode_ready()), \
+             mock.patch.object(runner, "arm_mla_profile") as profile:
+            with self.assertRaisesRegex(SmokeFailure, "concurrent Decode"):
+                runner.request_cases(cases[:2], concurrent=False, profile_stage="large")
+        profile.assert_not_called()
+
+    def test_large_profile_arms_before_all_sixteen_requests_arrive(self):
+        args = make_args()
+        args.mla_profile_steps = 8
+        runner = Runner(args)
+        cases = [runner.record_case(f"record-{i}", i // 16) for i in range(32)]
+        positions = {case.name: i % 16 for i, case in enumerate(cases)}
+        profiled = [threading.Event(), threading.Event()]
+        live = [set(), set()]
+        lock = threading.Lock()
+
+        def request(case, barrier, *, on_decode_ready):
+            barrier.wait(timeout=5)
+            owner = case.decode_owner_rank
+            # Only nine requests arrive in the first wave. The remaining
+            # seven cannot make the first wave's capture condition true.
+            if positions[case.name] >= 9:
+                self.assertTrue(profiled[owner].wait(timeout=5))
+            with lock:
+                live[owner].add(case.name)
+            try:
+                on_decode_ready()
+                self.assertTrue(profiled[owner].wait(timeout=5))
+                return {"name": case.name}
+            finally:
+                with lock:
+                    live[owner].discard(case.name)
+
+        def arm(stage, owner):
+            self.assertEqual(stage, "large")
+            with lock:
+                self.assertEqual(len(live[owner]), 9)
+            profiled[owner].set()
+
+        with mock.patch.object(runner, "request", side_effect=request), \
+             mock.patch.object(runner, "arm_mla_profile", side_effect=arm) as profile:
+            self.assertEqual(len(runner.request_cases(cases, True, profile_stage="large")), 32)
+        self.assertCountEqual(profile.call_args_list, [mock.call("large", 0), mock.call("large", 1)])
 
     def test_mtp_chunk_case_requires_an_accepted_draft_token(self) -> None:
         runner = Runner(make_args())

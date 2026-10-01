@@ -12,6 +12,11 @@ import math
 import pathlib
 import re
 
+try:
+    from .mla_request_trace import wait_and_verify_mla_traces
+except ImportError:
+    from mla_request_trace import wait_and_verify_mla_traces
+
 
 # Decode Page-RR (DCP) is KTP1, so it emits none of the Projection-KTP plan
 # events. Its runtime paths are proved by engine markers instead: every TP rank
@@ -27,7 +32,7 @@ _MAIN_LOG = re.compile(r"main_(\d+)\.log")
 GRAPH_BUCKETS = (1, 2, 4, 8)
 
 
-def physical_graph_buckets(tp: int, proposal_tokens: int = 3) -> tuple[int, ...]:
+def physical_graph_buckets(tp: int, proposal_tokens: int = 3, capture_buckets=GRAPH_BUCKETS) -> tuple[int, ...]:
     """Mirror request alignment in CudaGraphRunner::getDecodeBatchSizesToCapture."""
     if tp < 1 or proposal_tokens < 1:
         raise ValueError("TP and proposal token count must be positive")
@@ -36,7 +41,7 @@ def physical_graph_buckets(tp: int, proposal_tokens: int = 3) -> tuple[int, ...]
         alignment = tp // math.gcd(tp, width)
         buckets.update(
             ((size + alignment - 1) // alignment) * alignment
-            for size in GRAPH_BUCKETS
+            for size in capture_buckets
         )
     return tuple(sorted(buckets))
 
@@ -49,7 +54,7 @@ def adjacent_unique(values):
     ]
 
 
-def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_tokens: int = 3, expected_tp: int | None = None, dp_size: int = 1, expected_block_size: int | None = None, source_tp: int | None = None) -> dict:
+def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_tokens: int = 3, expected_tp: int | None = None, dp_size: int = 1, expected_block_size: int | None = None, source_tp: int | None = None, capture_buckets=GRAPH_BUCKETS) -> dict:
     """Prove the Decode Page-RR path ran on every rank of a KTP1 topology."""
     backends = markers.get("dcp_backends", set())
     sizes = {tp for tp, _ in backends}
@@ -80,7 +85,7 @@ def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict], proposal_t
         )
     )
     captures = markers.get("graph_captures", set())
-    expected_buckets = physical_graph_buckets(tp or 8, proposal_tokens)
+    expected_buckets = physical_graph_buckets(tp or 8, proposal_tokens, capture_buckets)
     checks["graph_capture_buckets"] = all(
         any(bucket == expected for _, bucket in captures) for expected in expected_buckets
     )
@@ -124,6 +129,7 @@ def _verify(
     expected_block_size: int | None = None,
     source_tp: int | None = None,
     prefill_page_rr: bool = False,
+    capture_buckets=GRAPH_BUCKETS,
 ) -> dict:
     checks = {}
     observations = {}
@@ -181,7 +187,7 @@ def _verify(
                 default=0,
             )
     elif decode_page_rr:
-        report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp)
+        report = _dcp_checks(markers or {}, replay_seen, events, proposal_tokens, expected_tp, dp_size, expected_block_size, source_tp, capture_buckets)
         checks.update(report["checks"])
         observations.update(report["observations"])
     else:
@@ -269,6 +275,7 @@ def verify(
     expected_block_size: int | None = None,
     source_tp: int | None = None,
     prefill_page_rr: bool = False,
+    capture_buckets=GRAPH_BUCKETS,
 ) -> dict:
     try:
         return _verify(
@@ -283,6 +290,7 @@ def verify(
             expected_block_size,
             source_tp,
             prefill_page_rr,
+            capture_buckets,
         )
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return {
@@ -361,6 +369,10 @@ def main():
         help="Decode runs a Page-RR (DCP) KTP1 topology instead of Projection-KTP",
     )
     parser.add_argument("--proposal-tokens", type=int, default=3)
+    parser.add_argument("--decode-capture-config", default="1,2,4,8")
+    parser.add_argument("--mla-profile-steps", type=int, default=0)
+    parser.add_argument("--mla-backend", choices=("TOKENSPEED", "FIA2A"), default="TOKENSPEED")
+    parser.add_argument("--mla-a2a-backend", choices=("AUTO", "NCCL", "CUSTOM"), default="AUTO")
     parser.add_argument("--tp-size", type=int)
     parser.add_argument("--dp-size", type=int, default=1)
     parser.add_argument("--block-size", type=int)
@@ -386,7 +398,15 @@ def main():
             args.block_size,
             args.source_tp_size,
             args.prefill_page_rr == "1",
+            tuple(int(value) for value in args.decode_capture_config.split(",")),
         )
+        if args.role == "decode" and args.mla_profile_steps:
+            trace_report = wait_and_verify_mla_traces(
+                args.root, args.tp_size, args.dp_size, args.mla_backend,
+                a2a_backend=args.mla_a2a_backend,
+            )
+            report["checks"]["actual_mla_request_gpu_traces"] = trace_report["passed"]
+            report["passed"] = report["passed"] and trace_report["passed"]
     except (ValueError, OSError) as exc:
         report = {
             "role": args.role,
