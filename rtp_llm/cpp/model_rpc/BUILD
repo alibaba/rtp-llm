@@ -42,6 +42,12 @@ cc_library(
 )
 
 cc_library(
+    name = "upstream_cancellation_relay",
+    hdrs = ["UpstreamCancellationRelay.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_pool",
     srcs = [],
     hdrs = ["RPCPool.h"],
@@ -64,7 +70,7 @@ cc_library(
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = ["RPCPool.h", "UpstreamCancellationRelay.h"],
     ),
     visibility = ["//visibility:public"],
     deps = [
@@ -73,6 +79,7 @@ cc_library(
         ":model_rpc_pool",
         ":rpc_error_code",
         ":tensor_pb_convert",
+        ":upstream_cancellation_relay",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",

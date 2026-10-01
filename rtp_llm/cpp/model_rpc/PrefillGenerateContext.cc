@@ -66,6 +66,7 @@ void PrefillStatInfo::nextStage() {
 PrefillGenerateContext::~PrefillGenerateContext() {
     reportTime();
     closeGrpcStream();
+    cancellation_relay.reset();
     stopStream();
 }
 
@@ -111,6 +112,7 @@ void PrefillGenerateContext::closeGrpcConnection() {
 }
 
 void PrefillGenerateContext::reset() {
+    cancellation_relay.reset();
     GenerateContext::reset();
     client_stream.reset();
     grpc_stream_closed             = false;

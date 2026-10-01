@@ -170,10 +170,14 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
-ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
+ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream,
+                                               grpc::ServerContext*             server_context) {
     const int64_t max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * int64_t{1000};
     auto          begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
+        if (server_context->IsCancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled before prefill runs");
+        }
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
@@ -185,6 +189,9 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
     }
     if (stream->hasError()) {
         return stream->statusInfo();
+    }
+    if (server_context->IsCancelled()) {
+        return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled before cache load");
     }
     return ErrorInfo::OkStatus();
 }
@@ -289,6 +296,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
+    auto* upstream_context = prefill_context.server_context;
+    auto  downstream_context = prefill_context.client_context;
+    prefill_context.cancellation_relay = std::make_unique<UpstreamCancellationRelay>(
+        [upstream_context] { return upstream_context->IsCancelled(); },
+        [downstream_context] { downstream_context->TryCancel(); });
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
@@ -380,7 +392,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     auto start_time_us         = currentTimeUs();
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream(), prefill_context.server_context);
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
@@ -389,6 +401,12 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
         return;
     }
     AtomicGuard       request_guard(loading_cache_requests_);
+    if (prefill_context.server_context->IsCancelled()) {
+        prefill_context.error_info = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled before cache load");
+        prefill_context.error_status = serializeErrorMsg(
+            prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        return;
+    }
     GenerateRequestPB load_request;
     load_request.set_stage(RemoteStage::LOAD);
     load_request.set_client_id(process_id_);
@@ -436,6 +454,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     }
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+    prefill_context.cancellation_relay.reset();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
     meta_->dequeue(prefill_context.request_id, prefill_context.getStream());

@@ -116,6 +116,16 @@ cc_test(
 )
 
 cc_test(
+    name = "upstream_cancellation_relay_test",
+    srcs = ["UpstreamCancellationRelayTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:upstream_cancellation_relay",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "k3_state_transfer_test",
     srcs = ["K3StateTransferTest.cc"],
     copts = copts(),

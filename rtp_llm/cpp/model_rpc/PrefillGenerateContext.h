@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -8,6 +10,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
+#include "rtp_llm/cpp/model_rpc/UpstreamCancellationRelay.h"
 
 namespace rtp_llm {
 
@@ -89,6 +92,7 @@ public:
     GrpcConnection                       grpc_connection;
     std::shared_ptr<RpcService::Stub>    stub;
     std::shared_ptr<grpc::ClientContext> client_context;
+    std::unique_ptr<UpstreamCancellationRelay> cancellation_relay;
     std::shared_ptr<ClientStream>        client_stream;
     bool                                 grpc_stream_closed             = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;

@@ -302,8 +302,17 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     AtomicGuard       request_guard(loading_cache_requests_);
     auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
     GenerateRequestPB load_request;
-    GRPC_RET_IF_ERROR(
-        decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    if (!grpc_stream->Read(&load_request)) {
+        const bool cancelled = decode_context.server_context->IsCancelled();
+        decode_context.error_status = grpc::Status(cancelled ? grpc::StatusCode::CANCELLED : grpc::StatusCode::INTERNAL,
+                                                   cancelled ? "request cancelled before cache load" :
+                                                               "failed to get loadRequest");
+        return;
+    }
+    GRPC_RET_IF_ERROR(decode_context,
+                      !decode_context.server_context->IsCancelled(),
+                      grpc::StatusCode::CANCELLED,
+                      "request cancelled before cache load");
     const auto load_stage = load_request.stage();
     GRPC_RET_IF_ERROR(decode_context,
                       load_stage == RemoteStage::LOAD || load_stage == RemoteStage::ALLOCATE,
@@ -720,6 +729,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             load_requests[i] = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
     }
+    // Once the first worker RPC is sent, all worker completions must be
+    // drained before Decode can release their destination KV blocks.
+    if (load_context.server_context->IsCancelled()) {
+        return ErrorInfo(ErrorCode::CANCELLED, "request cancelled before cache load dispatch");
+    }
     for (int i = 0; i < worker_size; i++) {
         auto& rpc_context = all_context[i];
         ++expected_per_queue[i % cq_size];
@@ -904,6 +918,9 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
+    if (load_context.server_context->IsCancelled()) {
+        return ErrorInfo(ErrorCode::CANCELLED, "request cancelled before cache load");
+    }
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
@@ -1370,6 +1387,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const ModelCacheLoadView main_view{&cache_config, nullptr, layer_num, maga_init_params_.model_id, "main-model"};
     ErrorInfo                aggregate_error = ErrorInfo::OkStatus();
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
+        if (load_context.server_context->IsCancelled()) {
+            aggregate_error = ErrorInfo(ErrorCode::CANCELLED, "request cancelled during cache load dispatch");
+            break;
+        }
         auto&                                            peer_addr = load_context.peer_addrs[i];
         LoadBatches batches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
@@ -1433,6 +1454,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
 
         for (const auto& batch : batches) {
+            if (load_context.server_context->IsCancelled()) {
+                aggregate_error = ErrorInfo(ErrorCode::CANCELLED, "request cancelled during cache load dispatch");
+                break;
+            }
             auto layer_cache_load_context =
                 resource_.cache_store->loadBuffers(batch.second,
                                                    ip_parts[0],
