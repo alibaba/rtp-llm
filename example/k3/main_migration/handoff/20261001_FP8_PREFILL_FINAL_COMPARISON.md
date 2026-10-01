@@ -1,5 +1,7 @@
 # Kimi K3 FP8 Prefill 算子择优与最终验收（2026-10-01）
 
+**最新验收提交为 `6be6a60eb320b5685c16365ce8d410dd23023539`。** 下文关于 `2b6218d` 的数据是峰值锚点的固定对照；`6be6a60` 的最终构建、全层 timeline 和 smoke 结果见文末补记。
+
 ## 固定代码与验证范围
 
 集成分支 `codex/luohaocheng-k3-fp8-collective-fusion-proto-20260930` 保留两个提交锚点：性能择优 `34d6d58d9ed90bc3260a7e39d503bb13ca2fd9fd`，峰值激活生命周期 `2b6218d56ccb15a977de4324a18f952a93f59d32`。下述最终服务、smoke 和 timeline 均使用第二个锚点，两端以个人账号在各自 `lhc_GPU_k3_rdma_20260929` 中用 CUDA13/SM10x 构建。114 执行 Prefill，115 执行 Decode，TP8/EP8、target FP8 E4M3 attention 与 KV、原生 MXFP4 MoE、BF16 native MTP；TP 内融合 AllGather 传 E4M3 值和 UE8M0 scale，融合 ReduceScatter 输出 BF16。FastSafetensors 通过个人 `/data0` 元数据视图读取已核实的 3FS shard，读取进程使用任务内 64 路 pread，没有修改全局 3FS 配置或 loader guard。
@@ -53,3 +55,15 @@ KDA core 全层核累计集成/feat 中位约 206.147/201.052 ms；rank 1 都是
 O01/O02/O03 与本轮 Prefill 有关的 cuLA、paged conv、FP8 TokenSpeed、target FP8 投影/融合通信和 native MTP 精度隔离已覆盖。feat 的 `linear_serial_replay` Decode endpoint 与独立 BF16 dense FlashMLA 不在本轮 FP8 Prefill 择优范围；Decode CUDA Graph＋MTP 已过正确性，但 Decode 性能择优仍暂缓。TP16 的源码分片/scale 分支已检查，未做设备验证。
 
 原始材料主要位于个人 artifact `/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/`：集成全层 `timeline-64k-peak-anchor-full93-114115-r4-20261001/`（114），feat 全层 `timeline-64k-feat-full93-114115-r3-20261001/`（114），vLLM 全层 `timeline-64k-vllm-full93-114115-r4-20261001/`（114），逐模块副本 `integration-full93-r4-all-rank-module-audit-20261001.json`、`feat-full93-r3-all-rank-module-audit-20261001.json`、阶段与 rank 到达归因 `*-fused-stage-window-audit-20261001.json`、`*-fused-collective-rank-arrival-audit-20261001.json`、vLLM 分离段 `vllm-full93-r4-separate-stages-allrank-20261001.json`、独占窗口 `integration-full93-r4-exclusive-interval-audit-20261001.json`、真实 TokenSpeed 峰值与计时 `mla-real-tokenspeed-64k-allocator-peak-r3-115-20261001.json`（115）。服务采样后，114/115 本任务的 RTP 服务进程组已清理。
+
+## `6be6a60` 的补充择优与最终复核
+
+四层 MoE 尾段沿相同 BF16 输入、权重、shared 输出和前缀残差比较了三条完整等价路径：原集成 addmm、固定 feat 的 matmul＋Triton add、固定 vLLM 的原位 addmm。各路径预热后交替测 30 组，输出逐位相同，中位分别为 **0.334864、0.314336、0.302080 ms**。因此 `6be6a60` 只把 vLLM 的原位尾段方式接入集成版；没有搬运 feat 的其他 MoE 代码。四层双机 FP8＋MTP flow 11/11、独立复核无错。相同服务配置的 64K 热态 trace 显示，候选/旧版 target 最大 rank GPU span 为 63.424/63.777 ms；每层尾段核约 0.234–0.242 ms，两版差异小于独立算子的测量差，不能把服务级变化全部归因到尾段。原始样本为 `moe-tail-threeway-fourlayer-115gpu1-20261001.json` 和 `moe-tail-service-controlled-ab-20261001.json`。
+
+为补齐四层 KDA 与 MoE latent-down 的候选记录，又做了两个同卡测试。KDA 64K core 比较了固定 vLLM FlashKDA 与集成 cuLA：先预热 10 对，再测 30 对；vLLM **3.051392 ms**、cuLA **2.419616 ms**，输出最大绝对差 6.1e-5。vLLM 候选没有执行 RTP 每页 checkpoint 发布，因此它的计时还是偏有利的下界，仍慢于 cuLA，保留当前 core。MoE latent-down 在四层每 rank 的 8192×7168→3584 BF16 形状下，使用三方各自的权重布局；预热 12 次、轮换测 30 组，输出逐位相同。集成 cuBLAS、feat contiguous in-out matmul、vLLM 风格 linear 中位分别为 **0.245008、0.247312、0.247664 ms**。差距很小，保留集成实现。原始记录为 `kda-core-vllm-vs-cula-t65536-115gpu1-20261001.json` 和 `latent-down-bf16-threeway-112-gpu2-20261001.json`。四层的 KDA 分页卷积与 FP8 producer、MLA TokenSpeed 与 FP8 epilogue、MoE router/pack/MXFP4 专家/shared GEMM/dense MLP 的既有同形状比较仍见前文和算子择优记录；投影精度或服务分块不同的地方没有强行排出逐算子名次。
+
+`6be6a60` 在 114 Prefill 和 115 Decode 各自重新用 CUDA13/SM10x 构建。114 首次加载期间有外部 GPU2 任务同时占用约 26.5 GiB，导致 rank2 初始化 OOM；清理该机器上确切冲突的进程后，114 重启并通过 FastSafetensors guard。最终有效服务为 114 `k3final93-114-20261001-r2`、115 `k3final93-115-20261001-r1`，均为 93 层、TP8/EP8、FP8 E4M3 attention、原生 MXFP4 MoE、BF16 native MTP。两端从个人 `/data0` 元数据视图直接读已核实的 3FS shard；任务内 pread 线程上限 64。此次 target 加载为 114 **215.74 s**、115 **138.01 s**；114 失败首轮的 242.69 s 不计性能数据。
+
+最终全层 64K 请求先完成 13 次相同 PD 路径预热，随后八 rank 捕获正式请求；每条均记录 Prefill 前缀不复用、Decode 接收 61,440 token KV 且有 MTP draft。各 rank 的 profiler 窗口独立起止，八份 trace 各有 8 个 target scope，但只有 6 条请求在八 rank 的绝对时间戳上齐全。只取最后 3 条齐全请求计算，target 最大 rank GPU span 为 **1388.811、1432.997、1385.895 ms**，中位 **1388.811 ms**，均在中位的 ±5% 内；target＋draft 中位 **1454.964 ms**。这与前一锚点的 1390.957 ms 基本持平，快于固定 feat 的 1475.576 ms 和固定 vLLM 服务的 1715.716 ms，但两次集成测量来自不同服务窗口，不能从约 2 ms 差值推断尾段带来了全层提速。新 trace 中 KDA core、MLA core、MXFP4 routed experts 的每 rank 累计中位分别为 **205.520、144.451、407.660 ms**，前一锚点为 206.147、145.180、408.465 ms；累计算子时间不等于关键路径。新八 rank 原始 trace 在 114 的 `timeline-64k-moe-tail-final-full93-114115-r1-20261001/traces/`，SHA256 清单与分析结果 `all-rank-module-audit.json` 同目录，115 有分析副本 `moe-tail-final-full93-all-rank-module-audit-20261001.json`。
+
+固定 `6be6a60` 后重新运行完整 93 层 FP8 双机 PD 限时 smoke：**121/121 条执行通过**，独立复核 `checked=121, errors=[]`，包括答案、重复吐字、乱码、截断、PD 状态交接和 MTP draft。原最后三条长输出 repeat 及三条已知超过 5 分钟的 case 仍是 **6 条跳过**，没有计入通过。记录为 `smoke-93layer-fp8-moe-tail-final-114115-20261001-r1/{result.json,independent-final-audit.json}`。这次验收固定了最终代码；它没有改变 vLLM BF16 投影、约 32K×2 chunk 和多 1 token 的可比性边界，也不能将总体胜出写成每个融合阶段都胜出。
