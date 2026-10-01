@@ -1,0 +1,146 @@
+{
+  "cold_failed_request_excluded": 1,
+  "diagnostic_source_sha256": "6e0407e61cc30c1353bfcb040f2a82d880dc467422525c9554512617dad732b8",
+  "ranks": {
+    "0": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "1": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "2": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "3": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "4": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "5": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "6": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    },
+    "7": {
+      "entry_mib_median": 11795.00341796875,
+      "first_peak_layer_counts": {
+        "1": 12
+      },
+      "hot_records": 12,
+      "layer_peak_mib_median": {
+        "0": 16754.69873046875,
+        "1": 16866.69873046875,
+        "2": 16866.69873046875,
+        "3": 16866.69873046875
+      },
+      "model_records": 13,
+      "peak_mib_max": 16866.69873046875,
+      "peak_mib_median": 16866.69873046875,
+      "peak_mib_min": 16866.69873046875
+    }
+  },
+  "scope": "four-layer K3 FP8 target KimiK3Model forward on Prefill ranks; active PyTorch allocations only; same PD path and 64K input",
+  "source_commit": "9e52ccf4b3a2c3182b0da099279961bedff22781",
+  "successful_measured_requests": 1,
+  "successful_warmups": 11
+}
