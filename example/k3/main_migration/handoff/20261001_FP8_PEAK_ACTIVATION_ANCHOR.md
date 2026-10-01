@@ -10,4 +10,4 @@
 
 其余峰值候选按实际路径处理：`skip-head-mid` 与每 rank 默认 6 GiB 的历史 FP8 KV 分片已经在祖先 `4dcde8045e3f1c143cb1328179ebb1bcb151b329` 中，分片的多片数值检查和四层 flow 已通过。shared expert 已是一份 gate/up GEMM 输出加两个 view；本次额外 `del` 原型没有可验证收益，已撤回。新版 `model_factory` 把本次调度器的 MoE Prefill 容量定为 65,536 个全局 token，TP8 后每 rank 8,192 个；融合投影 workspace 同样按 65,536 个 token 配置。AttnRes bank 原型会在集成版收集整段 logits 和 MTP hidden 时额外驻留，尚无峰值收益证据，已撤回。feat 的模型自有 MLA scratch 和 MTP hidden 释放接口与当前 collector 的所有权不同，未直接移植；整模型 Chunk Prefill 也未移植。
 
-这份锚点只确认四层功能和局部激活生命周期。最终验收还需要固定代码后的完整 93 层 FP8 双机 PD 限时 smoke、独立答案复核，以及三方完整模型 64K 热态 timeline；在这些结果完成前不宣称完整模型峰值或 Prefill 性能胜出。
+固定提交 `2b6218d56ccb15a977de4324a18f952a93f59d32` 的完整 93 层 FP8 双机 PD 限时 smoke 后来执行了 121 条，独立复核 121 条全部通过，6 条按约定跳过；结果在个人 artifact `smoke-93layer-fp8-peak-anchor-114115-20261001-r2/`。三方完整模型热态 timeline 和算子边界见同目录 `20261001_FP8_PREFILL_FINAL_COMPARISON.md`。这些后续结果仍不能把本提交的局部张量释放量解释为已量化的完整服务显存峰值收益。一次最终服务 NVML 20 ms 采样显示 8 rank 的 `memory.used` 在 64K 请求期间均无可见增长；权重、KV cache 与 PyTorch allocator 预留已经占据该读数，所以它不能分辨瞬时激活峰值。
