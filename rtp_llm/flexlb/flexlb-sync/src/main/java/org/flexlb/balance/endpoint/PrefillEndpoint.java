@@ -550,12 +550,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
             sizeByPriority.forEach((priority, size) ->
                     reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, priority, size));
         }
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engineIp, getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engineIp, getLocallyOwnedRequestCount());
+        PrefillState.Stats stats = prefillState.stats();
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engineIp, stats.batchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engineIp, stats.inflightRequests());
         reporter.reportInflightMaxAgeMs(
                 RoleType.PREFILL.name(),
                 engineIp,
-                prefillState.stats().maxObservedAgeMs());
+                stats.maxObservedAgeMs());
     }
 
     /**

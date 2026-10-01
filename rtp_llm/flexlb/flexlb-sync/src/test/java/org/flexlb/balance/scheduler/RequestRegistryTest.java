@@ -85,7 +85,7 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot(101L).future());
-        assertEquals(1, lifecycle.liveRequestCount());
+        assertEquals(1, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -97,9 +97,11 @@ class RequestRegistryTest {
 
         assertFalse(encoderFuture.isDone());
         assertFalse(generationFuture.isDone());
-        assertEquals(2, lifecycle.liveRequestCount());
-        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.ENCODER));
-        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.GENERATION));
+        assertEquals(2, lifecycle.trackedRequestCount());
+        assertEquals(1, lifecycle.trackedRequestStats().generationRequests());
+        assertEquals(1, lifecycle.trackedRequestStats().encoderRequests());
+        assertEquals(1, lifecycle.trackedRequestCount(RequestPhase.ENCODER));
+        assertEquals(1, lifecycle.trackedRequestCount(RequestPhase.GENERATION));
         assertEquals(RequestState.Phase.QUEUED,
                 lifecycle.getRequestState("106", 0L, RequestPhase.ENCODER).state());
         assertEquals(RequestState.Phase.QUEUED,
@@ -112,8 +114,10 @@ class RequestRegistryTest {
         assertEquals(RequestState.Phase.QUEUED,
                 lifecycle.getRequestState("106", 0L).state());
         assertFalse(generationFuture.isDone());
-        assertEquals(0, lifecycle.liveRequestCount(RequestPhase.ENCODER));
-        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.GENERATION));
+        assertEquals(0, lifecycle.trackedRequestCount(RequestPhase.ENCODER));
+        assertEquals(0, lifecycle.trackedRequestStats().encoderRequests());
+        assertEquals(1, lifecycle.trackedRequestStats().generationRequests());
+        assertEquals(1, lifecycle.trackedRequestCount(RequestPhase.GENERATION));
     }
 
     @Test
@@ -464,13 +468,13 @@ class RequestRegistryTest {
             assertFalse(lifecycle.register(high).isDone());
         }
         assertFalse(waiting.isDone(), "higher priority arrivals must not evict waiting requests");
-        assertEquals(1001, lifecycle.liveRequestCount());
+        assertEquals(1001, lifecycle.trackedRequestCount());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 lifecycle.register(context(1L)).join().getCode());
         for (long id = 1; id <= 1001; id++) {
             lifecycle.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         }
-        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -496,7 +500,7 @@ class RequestRegistryTest {
             assertNotNull(RequestLifecycleTestSupport.claimRoute(
                     lifecycle, registered.item(), () -> true));
         }
-        assertEquals(201, lifecycle.liveRequestCount());
+        assertEquals(201, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -537,7 +541,7 @@ class RequestRegistryTest {
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState(303L, 0L).state());
-        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -554,7 +558,7 @@ class RequestRegistryTest {
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState(304L, 0L).state());
-        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -653,7 +657,7 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 lifecycle.register(expired).get(5, TimeUnit.SECONDS).getCode());
         assertFalse(low.isDone());
-        assertEquals(1, lifecycle.liveRequestCount());
+        assertEquals(1, lifecycle.trackedRequestCount());
     }
 
     @Test
@@ -667,7 +671,7 @@ class RequestRegistryTest {
             for (var future : futures) {
                 assertFalse(future.get(5, TimeUnit.SECONDS).isDone());
             }
-            assertEquals(128, lifecycle.liveRequestCount());
+            assertEquals(128, lifecycle.trackedRequestCount());
         }
     }
 

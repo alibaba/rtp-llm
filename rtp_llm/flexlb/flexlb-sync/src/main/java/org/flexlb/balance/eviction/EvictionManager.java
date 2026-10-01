@@ -163,7 +163,7 @@ public class EvictionManager {
             return null;
         }
         String evictionCase = EvictionPlanner.decodeEvictionCase(
-                request.hardKvTokens(), request.expectedKvTokens(), selected);
+                request.inputKvTokens(), request.inputAndMaxOutputKvTokens(), selected);
         List<DecodeEndpointSnapshot> decodes = List.of(selected);
         if (evictionCase == null) {
             return null;
@@ -171,7 +171,7 @@ public class EvictionManager {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                request.priority(), request.hardKvTokens(), request.expectedKvTokens(),
+                request.priority(), request.inputKvTokens(), request.inputAndMaxOutputKvTokens(),
                 decodes, preemption, cancelChannel, failures);
         if (proposal == null) {
             reportEvictionPlan(request.priority(), request.requestId(),
@@ -239,8 +239,8 @@ public class EvictionManager {
                             decodeEp,
                             reservedVictims,
                             request.requestId(),
-                            request.hardKvTokens(),
-                            request.expectedKvTokens(),
+                            request.inputKvTokens(),
+                            request.inputAndMaxOutputKvTokens(),
                             request.priority(),
                             request.capacity());
             if (!evictionCommitted) {
@@ -389,8 +389,8 @@ public class EvictionManager {
         DecodePreemptionCoordinator.PreemptionCommand command =
                 new DecodePreemptionCoordinator.PreemptionCommand(
                         decodeEp,
-                        request.requestId(), request.hardKvTokens(),
-                        request.expectedKvTokens(), request.priority(),
+                        request.requestId(), request.inputKvTokens(),
+                        request.inputAndMaxOutputKvTokens(), request.priority(),
                         request.capacity(),
                         proposal.victims(), 50L,
                         preemption.getTimeoutMs(),

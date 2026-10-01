@@ -95,8 +95,8 @@ class PreemptionPhasesE2ETest {
             assertFalse(low.isDone());
             assertTrue(decodeEp.resourceSnapshot().reserved().containsKey("201"));
             // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
-            long hardKvBefore = decodeEp.routingView().inflightHardKv();
-            assertTrue(hardKvBefore > 0);
+            long requiredKvBefore = decodeEp.routingView().inputKvReserved();
+            assertTrue(requiredKvBefore > 0);
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(202, 70));
 
@@ -113,7 +113,7 @@ class PreemptionPhasesE2ETest {
             assertFalse(decodeEp.resourceSnapshot().reserved().containsKey("201"));
             assertTrue(decodeEp.resourceSnapshot().reserved().containsKey("202"));
             assertEquals(1, decodeEp.getInflightCount());
-            assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
+            assertEquals(requiredKvBefore, decodeEp.routingView().inputKvReserved(),
                     "hard KV must transfer 1:1 from victim to incoming");
 
             h.setDecodeKvCapacity(0, 1_000_000, 1_000_000);
@@ -286,7 +286,7 @@ class PreemptionPhasesE2ETest {
                         .anyMatch(task -> task.requestId().equals("311")));
                 assertEquals(0, decodeEngine.getRunningCount());
                 assertEquals(0, decodeEp.getInflightCount());
-                assertEquals(0L, decodeEp.routingView().inflightHardKv());
+                assertEquals(0L, decodeEp.routingView().inputKvReserved());
                 assertEquals(0, prefillEngine.getDownstreamOwnershipCount());
                 assertEquals(0, decodeEngine.getUpstreamOwnershipCount());
             }

@@ -292,8 +292,8 @@ class DecodeEndpointTest {
         assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
+        assertEquals(0, endpoint.routingView().inputAndMaxOutputKvReserved());
         assertEquals(0, endpoint.routingView().engineFacingKvUsed());
     }
 
@@ -319,22 +319,22 @@ class DecodeEndpointTest {
     }
 
     private DecodeEndpoint.ReservationHandle reserve(
-            long requestId, long hardKv, long expectedKv) {
+            long requestId, long requiredKv, long kvBudget) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, 0);
+                    endpoint.reserveUnqueued(pin, requestId, requiredKv, kvBudget, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
     private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint target, long requestId, long hardKv, long expectedKv) {
+            DecodeEndpoint target, long requestId, long requiredKv, long kvBudget) {
         try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
             assertNotNull(pin);
             return target.reserveUnqueued(
-                    pin, requestId, hardKv, expectedKv, 0);
+                    pin, requestId, requiredKv, kvBudget, 0);
         }
     }
 

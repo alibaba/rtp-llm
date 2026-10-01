@@ -84,7 +84,7 @@ class DirectAdmissionContractTest {
                     assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode()));
             assertEquals(prefillCapacity, fixture.prefill.observedRequestCount());
             assertEquals(prefillCapacity, fixture.decode.routingView().engineCapacityUsed());
-            assertEquals(48L * prefillCapacity, fixture.decode.routingView().inflightExpectedKv());
+            assertEquals(48L * prefillCapacity, fixture.decode.routingView().inputAndMaxOutputKvReserved());
             fixture.assertNoWaitingQueue();
             verify(fixture.requests, times(2)).commitRoute(any(), any());
             verify(fixture.prefillSelector, times(2)).select(any(), eq(RoleType.PREFILL), any());
@@ -102,9 +102,9 @@ class DirectAdmissionContractTest {
             assertEquals(1, fixture.prefill.observedRequestCount());
             assertEquals(0, fixture.prefill.getInflightBatchCount());
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
-            assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
+            assertEquals(48L, fixture.decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
-            assertEquals(1, fixture.scheduler.getInflightSize());
+            assertEquals(1, fixture.scheduler.getTrackedRequestCount());
             assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.scheduler.getRequestState("101", 0L).state());
             var reservation = fixture.decode.reservationHandle(101L);
             assertNotNull(reservation);
@@ -114,13 +114,13 @@ class DirectAdmissionContractTest {
 
             fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0L, fixture.prefill.observedRequestCount());
-            assertEquals(48L, fixture.decode.routingView().inflightExpectedKv(),
+            assertEquals(48L, fixture.decode.routingView().inputAndMaxOutputKvReserved(),
                     "Prefill completion must retain Decode ownership until its own observation");
             fixture.observe(fixture.decode, Map.of("101", task(101L, TaskPhase.RUNNING)), Map.of());
             assertTrue(fixture.decode.isAcceptedByEngine(reservation));
             fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
-            assertEquals(0, fixture.scheduler.getInflightSize());
+            assertEquals(0, fixture.scheduler.getTrackedRequestCount());
             fixture.assertNoWaitingQueue();
         }
     }
@@ -148,9 +148,9 @@ class DirectAdmissionContractTest {
             assertNull(fixture.decode.reservationHandle(102L));
             assertEquals(occupant, fixture.decode.reservationHandle(999L));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
-            assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
+            assertEquals(48L, fixture.decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
-            assertEquals(0, fixture.scheduler.getInflightSize());
+            assertEquals(0, fixture.scheduler.getTrackedRequestCount());
         }
     }
 
@@ -179,8 +179,8 @@ class DirectAdmissionContractTest {
             fixture.assertNoPrefillOwnership();
             assertNull(fixture.decode.reservationHandle(103L));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
-            assertEquals(0L, fixture.decode.routingView().inflightExpectedKv());
-            assertEquals(0, fixture.scheduler.getInflightSize());
+            assertEquals(0L, fixture.decode.routingView().inputAndMaxOutputKvReserved());
+            assertEquals(0, fixture.scheduler.getTrackedRequestCount());
         }
     }
 

@@ -83,7 +83,7 @@ class EndpointCleanupOwnershipTest {
         RequestSlot original = registry.requestSlot(id);
         registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertTrue(registry.retainForSchedulerCleanup(id));
         assertSame(original, registry.requestSlot(id), "terminal record remains indexed");
         assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
@@ -240,17 +240,17 @@ class EndpointCleanupOwnershipTest {
     }
 
     private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint endpoint, String id, long hardKv, long expectedKv) {
+            DecodeEndpoint endpoint, String id, long requiredKv, long kvBudget) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, hardKv, expectedKv, 50);
+            var reservation = endpoint.reserveUnqueued(pin, id, requiredKv, kvBudget, 50);
             assertNotNull(reservation);
             return reservation;
         }
     }
 
     private static void assertDecodeLedger(DecodeEndpoint endpoint, int reserved, int confirmed,
-                                          long hardKv, long expectedKv) {
+                                          long requiredKv, long kvBudget) {
         var view = endpoint.resourceSnapshot();
         assertEquals(reserved, endpoint.getInflightCount());
         assertEquals(reserved, view.reserved().size());
@@ -259,8 +259,8 @@ class EndpointCleanupOwnershipTest {
         // These are immediate reservations, so both unqueued shadows and
         // confirmed Engine owners occupy dispatch capacity.
         assertEquals(reserved + confirmed, view.engineCapacityUsed());
-        assertEquals(hardKv, view.routing().inflightHardKv());
-        assertEquals(expectedKv, view.routing().inflightExpectedKv());
+        assertEquals(requiredKv, view.routing().inputKvReserved());
+        assertEquals(kvBudget, view.routing().inputAndMaxOutputKvReserved());
     }
 
     private record CleanupRace<T>(int evicted, T owner) { }

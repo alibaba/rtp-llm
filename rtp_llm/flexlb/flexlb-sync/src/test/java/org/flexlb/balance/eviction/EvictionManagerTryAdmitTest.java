@@ -138,8 +138,8 @@ class EvictionManagerTryAdmitTest {
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());
         assertSame(endpoint, command.getValue().endpoint());
         assertSame(frozenRequest.capacity(), command.getValue().capacity());
-        assertEquals(frozenRequest.hardKvTokens(), command.getValue().incomingKvTokens());
-        assertEquals(frozenRequest.expectedKvTokens(), command.getValue().incomingExpectedKvTokens());
+        assertEquals(frozenRequest.inputKvTokens(), command.getValue().incomingKvTokens());
+        assertEquals(frozenRequest.inputAndMaxOutputKvTokens(), command.getValue().incomingKvBudgetTokens());
         assertEquals(List.of(victim), command.getValue().victims());
     }
 

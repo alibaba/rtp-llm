@@ -220,7 +220,7 @@ class RequestInactivityTest {
     }
 
     private void assertLiveAndCharged() {
-        assertEquals(1, registry.liveRequestCount());
+        assertEquals(1, registry.trackedRequestCount());
         synchronized (slot) {
             assertSame(item, slot.activeItem());
             assertFalse(slot.snapshot().state().isTerminal());
@@ -237,7 +237,7 @@ class RequestInactivityTest {
     }
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertEquals(expectedState, registry.getRequestState(REQUEST_ID, 0L).state());
         synchronized (slot) {
             assertFalse(slot.isLiveGeneration());
