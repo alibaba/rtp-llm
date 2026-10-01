@@ -145,6 +145,15 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_projection_test",
+    srcs = ["dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_projection_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "dsv41_compressor_test",
     srcs = ["dsv41_compressor_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_compressor_test.py",
