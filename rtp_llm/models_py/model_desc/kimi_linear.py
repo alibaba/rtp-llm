@@ -70,9 +70,11 @@ class KimiLinearMetadata(object):
         self,
         prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         is_target_verify: bool = False,
+        prefill_paged_conv_meta=None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
+        self.prefill_paged_conv_meta = prefill_paged_conv_meta
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -624,7 +626,8 @@ class KimiLinearKDA(nn.Module):
             attention_inputs.is_target_verify
             or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
-        ), "prefill_conv1d_meta is required for prefill"
+            or attn_meta.prefill_paged_conv_meta is not None
+        ), "convolution metadata is required for prefill"
 
         # 1. Projections
         projected_qkv = self.in_proj_qkv(hidden_states)

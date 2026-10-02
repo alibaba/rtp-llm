@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,10 +72,22 @@ def test_ordinary_layout_is_not_tp_times_block(tmp_path, monkeypatch):
     )
 
 
+def test_cp_virtual_reuse_unit_is_recorded(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=(
+        "--suite", "main-text-64k-capped", "--reuse-unit-tokens", "8192",
+    ))
+    assert args.block_size == 4096
+    assert smoke.Runner(args).reuse_unit_tokens == 8192
+    assert smoke.cache_block_boundaries(4096, 8192, 65536) == (
+        4096, 8192, 16384, 65536, 131072,
+    )
+
+
 @pytest.mark.parametrize(
     "extra",
     [
         ["--reuse-unit-tokens", "32768"],
+        ["--reuse-unit-tokens", "6000"],
         ["--long-prefix-target-tokens", "70000"],
         ["--chunk-tokens", "32768"],
         ["--decode-dp-size", "2"],
@@ -206,3 +219,67 @@ def test_64k_cases_keep_exact_length_concurrency_and_reuse(tmp_path, monkeypatch
     saved = json.loads(args.output.read_text())
     assert saved["deferred_by_user"] and saved["suite"] == "main-text-64k"
     assert saved["single_prefill_input_limit"] == 65536
+
+
+def test_capped_64k_profile_skips_known_long_cases_without_sending(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k-capped"))
+    assert args.case_deadline_s == 300
+    runner = smoke.Runner(args)
+    sent = []
+    monkeypatch.setattr(runner, "fit_prompt", lambda h, t, n: (h + t, list(range(n))))
+    monkeypatch.setattr(runner, "run_stage", lambda name, cases, **kw: sent.extend(cases))
+    runner.run_cache_block_boundaries()
+    assert len(runner.skipped_cases) == 6
+    assert {row["name"] for row in runner.skipped_cases} == {
+        f"decode-page-cross-{boundary}-{suffix}"
+        for boundary in (4096, 8192, 65536)
+        for suffix in ("cold", "repeat")
+    }
+    assert all(not case.decode_crossings for case in sent)
+    runner.save(True)
+    saved = json.loads(args.output.read_text())
+    assert saved["summary"]["skipped_case_count"] == 6
+    assert saved["full_original_suite_passed"] is False
+
+
+def test_capped_formal_request_has_hard_wall_clock_deadline(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k-capped"))
+    runner = smoke.Runner(args)
+    monkeypatch.setattr(runner, "tokenize", lambda prompt: [1])
+    monkeypatch.setattr(runner, "save_token_fixture", lambda prompt, ids: None)
+
+    def timed_out(command, **kwargs):
+        assert command[command.index("--max-time") + 1] == "300"
+        assert command[command.index("--noproxy") + 1] == "*"
+        assert kwargs["timeout"] == 301
+        raise subprocess.TimeoutExpired(command, 301)
+
+    monkeypatch.setattr(smoke.subprocess, "run", timed_out)
+    with pytest.raises(smoke.SmokeDeadline):
+        runner.request(smoke.Case("capped-case", "input", "answer", "miss"))
+    assert not runner.failures
+    assert runner.skipped_cases[0]["name"] == "capped-case"
+    audit = json.loads(next((args.output.parent / "requests").glob("*.json")).read_text())
+    assert audit["skipped"] is True and audit["passed"] is False
+
+
+def test_capped_deadline_skips_stage_and_runs_following_cases(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k-capped"))
+    runner = smoke.Runner(args)
+    monkeypatch.setattr(runner, "health", lambda stage: None)
+    calls = []
+
+    def request_cases(cases, concurrent):
+        calls.append(cases[0].name)
+        if len(calls) == 1:
+            runner.skipped_cases.append({"name": cases[0].name, "reason": "five-minute request deadline", "sent": True})
+            raise smoke.SmokeDeadline("first case timed out")
+        return []
+
+    monkeypatch.setattr(runner, "request_cases", request_cases)
+    runner.run_stage("first", [smoke.Case("first", "prompt", "answer", "miss")])
+    runner.run_stage("second", [smoke.Case("second", "prompt", "answer", "miss")])
+    assert calls == ["first", "second"]
+    assert runner.stages[0]["skipped"] is True
+    assert runner.stages[0]["passed"] is False
+    assert runner.stages[1]["passed"] is True
