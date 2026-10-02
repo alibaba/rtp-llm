@@ -1,0 +1,250 @@
+"""CPU checks; these do not replace CUDA, distributed, or full-model validation."""
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_source(name, path):
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+Residual = load_source(
+    "k3_residual", "rtp_llm/models_py/modules/kimi_k3/residual.py"
+).KimiK3AttentionResidual
+checkpoint = load_source("k3_checkpoint", "rtp_llm/utils/kimi_k3_mtp_checkpoint.py")
+
+
+@pytest.mark.parametrize("rows", [1, 2, 3, 7, 8, 9])
+@pytest.mark.parametrize("blocks", [0, 1, 4])
+def test_attention_residual_against_scalar_reference(rows, blocks):
+    generator = torch.Generator().manual_seed(731)
+    prefix = torch.randn(rows, 16, generator=generator)
+    bank = torch.randn(rows, blocks + 2, 16, generator=generator)
+    norm = torch.randn(16, generator=generator)
+    projection = torch.randn(1, 16, generator=generator)
+    module = Residual(norm, projection, 1e-6)
+    actual = module(prefix, bank, num_blocks=blocks)
+    expected = []
+    for row in range(rows):
+        candidates = list(bank[row, :blocks].double().unbind()) + [prefix[row].double()]
+        scores = torch.stack(
+            [
+                (
+                    (value / (value.square().mean() + 1e-6).sqrt())
+                    * norm.double()
+                    * projection.double().flatten()
+                ).sum()
+                for value in candidates
+            ]
+        )
+        probabilities = scores.softmax(0)
+        expected.append(
+            sum(weight * value for weight, value in zip(probabilities, candidates))
+        )
+    torch.testing.assert_close(
+        actual.double(), torch.stack(expected), atol=3e-6, rtol=3e-6
+    )
+    # Unused capacity must not influence results when the graph bucket grows.
+    bank[:, blocks:] = float("nan")
+    torch.testing.assert_close(module(prefix, bank, num_blocks=blocks), actual)
+
+
+def test_residual_bank_commit_and_output_norm():
+    prefix = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    delta = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+    bank = torch.zeros(1, 3, 4)
+    module = Residual(torch.ones(4), torch.zeros(4), 1e-6)
+    result = module(
+        prefix,
+        bank,
+        delta=delta,
+        block_write_idx=1,
+        num_blocks=2,
+        output_norm_weight=torch.ones(4),
+        output_norm_eps=1e-6,
+    )
+    torch.testing.assert_close(bank[:, 1], torch.full((1, 4), 5.0))
+    torch.testing.assert_close(result, torch.ones_like(result))
+
+
+@pytest.mark.parametrize("source", [None, 0, -1, True, "93"])
+def test_mtp_rejects_invalid_source_layer(source):
+    with pytest.raises(ValueError):
+        checkpoint.mtp_source_layer(
+            {"num_hidden_layers": source, "num_nextn_predict_layers": 1}
+        )
+
+
+def test_mtp_source_is_nextn_layer_not_last_target_layer():
+    assert (
+        checkpoint.mtp_source_layer(
+            {"num_hidden_layers": 93, "num_nextn_predict_layers": 1}
+        )
+        == 93
+    )
+    with pytest.raises(ValueError):
+        checkpoint.mtp_source_layer(
+            {"num_hidden_layers": 93, "num_nextn_predict_layers": 3}
+        )
+
+
+layout = load_source("k3_layout", "rtp_llm/models/kimi_k3/weight_layout.py")
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+def test_kda_fused_projection_matches_unsharded_components(tp):
+    generator = torch.Generator().manual_seed(23)
+    inputs = torch.randn(9, 16, generator=generator)
+    # Eight heads, four dimensions; F_a rank is deliberately not divisible by TP.
+    components = [
+        torch.randn(16, width, generator=generator) for width in [32, 32, 32, 32, 7, 8]
+    ]
+    packed = torch.cat(components, dim=1)
+    expected = [inputs @ component for component in components]
+    local_outputs = []
+    for rank in range(tp):
+        local = layout.split_kda_input(packed, 8, 4, tp, rank)
+        local_outputs.append(
+            (inputs @ local).split([32 // tp] * 4 + [7, 8 // tp], dim=1)
+        )
+    for index in range(6):
+        if index == 4:
+            for output in local_outputs:
+                torch.testing.assert_close(output[index], expected[index])
+        else:
+            torch.testing.assert_close(
+                torch.cat([output[index] for output in local_outputs], dim=1),
+                expected[index],
+            )
+
+
+def test_kda_rejects_split_through_a_head():
+    with pytest.raises(ValueError):
+        layout.split_kda_input(torch.empty(16, 4 * 6 * 4 + 7 + 6), 6, 4, 4, 0)
+
+
+@pytest.fixture
+def tiny_mtp_checkpoint(tmp_path):
+    import json
+    import struct
+
+    text = dict(
+        num_hidden_layers=93,
+        num_nextn_predict_layers=1,
+        hidden_size=32,
+        vocab_size=64,
+        num_attention_heads=2,
+        q_lora_rank=32,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        routed_expert_hidden_size=32,
+        moe_intermediate_size=32,
+        num_shared_experts=1,
+        num_experts=2,
+        quantization_config={
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "experts": {"weights": {"group_size": 32, "num_bits": 4}}
+            },
+        },
+    )
+    header, offset = {}, 0
+    for name, (shape, dtype) in checkpoint.expected_tensors(text).items():
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+        nbytes = elements * {"U8": 1, "BF16": 2, "F32": 4}[dtype]
+        header[name] = dict(
+            shape=shape, dtype=dtype, data_offsets=[offset, offset + nbytes]
+        )
+        offset += nbytes
+
+    def write_header(entries):
+        raw = json.dumps(entries).encode()
+        raw += b" " * (-len(raw) % 8)
+        with (tmp_path / "weights.safetensors").open("wb") as output:
+            output.write(struct.pack("<Q", len(raw)))
+            output.write(raw)
+            output.truncate(8 + len(raw) + offset)
+
+    write_header(header)
+    (tmp_path / "config.json").write_text(json.dumps({"text_config": text}))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {name: "weights.safetensors" for name in header}})
+    )
+    return tmp_path, header, write_header
+
+
+def test_mtp_checkpoint_preserves_native_dtypes(tiny_mtp_checkpoint):
+    root, header, _ = tiny_mtp_checkpoint
+    result = checkpoint.validate_checkpoint(root)
+    assert result == {
+        "shards": 1,
+        "required_tensors": len(header),
+        "ignored_attnres_tensors": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "corruption", ["dtype", "shape", "offset", "missing", "truncated"]
+)
+def test_mtp_checkpoint_rejects_corrupted_weight(tiny_mtp_checkpoint, corruption):
+    root, header, write_header = tiny_mtp_checkpoint
+    name = next(name for name in header if name.endswith("w1.weight_packed"))
+    if corruption == "dtype":
+        header[name]["dtype"] = "BF16"
+    elif corruption == "shape":
+        header[name]["shape"] = [1, 1]
+    elif corruption == "offset":
+        header[name]["data_offsets"][1] += 1
+    elif corruption == "missing":
+        del header[name]
+    write_header(header)
+    if corruption == "truncated":
+        with (root / "weights.safetensors").open("r+b") as output:
+            output.truncate((root / "weights.safetensors").stat().st_size - 1)
+    with pytest.raises(ValueError):
+        checkpoint.validate_checkpoint(root)
+
+
+def test_fused_attnres_keeps_mixture_precision():
+    # Equal scores make the mixture exact, isolating the extra BF16 rounding
+    # from softmax and reduction error. Half of the outputs change if the
+    # mixture is rounded before output normalization.
+    width = 7168
+    prefix = torch.ones(1, width, dtype=torch.bfloat16)
+    prefix[:, width // 2:] = 3
+    bank = prefix.unsqueeze(1).clone()
+    bank[:, 0, :width // 2] = 1 + 1 / 128
+    module = Residual(torch.ones(width, dtype=torch.bfloat16),
+                      torch.zeros(width, dtype=torch.bfloat16), 1e-6)
+    actual = module(prefix, bank, output_norm_weight=torch.ones(width, dtype=torch.bfloat16),
+                    output_norm_eps=1e-6)
+    mixture = (prefix.double() + bank[:, 0].double()) / 2
+    expected = (mixture * torch.rsqrt(mixture.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
+    rounded = mixture.bfloat16().double()
+    split = (rounded * torch.rsqrt(rounded.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert int((actual != split).sum()) == width // 2
+    # The final residual still exposes its BF16 pre-norm input to MTP.
+    torch.testing.assert_close(module(prefix, bank), mixture.bfloat16(), rtol=0, atol=0)
+
+
+def test_attnres_accepts_rtp_transposed_scalar_projection():
+    weight = torch.arange(16, dtype=torch.float32).reshape(1, 16).transpose(0, 1)
+    assert weight.shape == (16, 1) and weight.stride() == (1, 16)
+    assert weight.is_contiguous()
+    module = Residual(torch.ones(16), weight, 1e-6)
+    assert module.projection_weight.shape == (16,)
+    assert module.projection_weight.stride() == (1,)
+    torch.testing.assert_close(module.projection_weight, weight[:, 0], rtol=0, atol=0)

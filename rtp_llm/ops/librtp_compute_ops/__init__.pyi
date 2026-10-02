@@ -234,6 +234,12 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
+    is_mtp_draft_update: bool
+    logical_request_count: int
+    physical_request_count: int
+    logical_token_count: int
+    physical_token_count: int
+    valid_token_mask: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
@@ -251,6 +257,10 @@ class PyAttentionInputs:
     def prefix_lengths_device(self) -> torch.Tensor: ...
     def __repr__(self) -> str: ...
     def __copy__(self) -> PyAttentionInputs: ...
+    def for_prefill_chunk(
+        self, input_lengths: torch.Tensor, prefix_lengths: torch.Tensor,
+        input_lengths_device: torch.Tensor, prefix_lengths_device: torch.Tensor,
+    ) -> PyAttentionInputs: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...

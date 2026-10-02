@@ -1,0 +1,2 @@
+# Unified diff context lines intentionally contain a single space.
+flashkda_fp32_recurrence.patch -whitespace

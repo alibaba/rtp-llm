@@ -223,6 +223,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.skip_run                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
+    inputs.is_mtp_draft_update       = true;
     inputs.pd_separation             = true;
     inputs.decode_entrance           = true;
     inputs.use_opaque_kv_cache_store = true;
@@ -242,6 +243,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlMtpDraftUpdate));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));

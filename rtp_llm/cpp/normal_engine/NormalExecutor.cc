@@ -103,6 +103,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    // Resolve the existing process-wide flags before engine/dispatch threads start.
+    // Later Python startup or JIT code can mutate the C environment.
+    (void)useStreamAsync();
+    (void)useDropBroadSync();
+    (void)useDeviceInput();
+    (void)checkDeviceInput();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
