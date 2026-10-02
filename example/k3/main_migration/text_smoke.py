@@ -1142,9 +1142,10 @@ class Runner:
         tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
         tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
         unit = self.reuse_unit_tokens
-        prompt_a, tokens_a = self.fit_prompt(
-            head, tail_a, unit * 2 + self.args.block_size
-        )
+        target_tokens = unit * 2 + self.args.block_size
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
+            target_tokens = min(target_tokens, 65536)
+        prompt_a, tokens_a = self.fit_prompt(head, tail_a, target_tokens)
         prompt_b = prompt_a[: -len(tail_a)] + tail_b
         tokens_b = self.tokenize(prompt_b)
         self.save_token_fixture(prompt_b, tokens_b)

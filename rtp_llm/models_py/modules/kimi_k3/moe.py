@@ -70,6 +70,9 @@ class KimiK3LatentMoE(nn.Module):
             config.routed_scaling_factor,
         )
         self.router = KimiK3RouterProjection(weights[K3W.MOE_GATE])
+        # The router prepares a second layout for GEMM. Keep the prepared
+        # storage in ModelWeights so the original layout can be released.
+        weights[K3W.MOE_GATE] = self.router.weight
         self.correction = weights[K3W.MOE_CORRECTION_BIAS].float()
         down_weight = weights[K3W.MOE_ROUTED_DOWN]
         self.down = (
@@ -77,6 +80,11 @@ class KimiK3LatentMoE(nn.Module):
             if down_weight.is_cuda and down_weight.dtype == torch.bfloat16
             else linear(weights, K3W.MOE_ROUTED_DOWN, hardware)
         )
+        if isinstance(self.down, KimiK3LatentDownLinear):
+            # The small-batch plan may make a contiguous copy of the down
+            # weight. Preserve its original [in, out] view without retaining
+            # the old allocation for every layer.
+            weights[K3W.MOE_ROUTED_DOWN] = self.down.weight.T
         self.up = linear(weights, K3W.MOE_ROUTED_UP, hardware)
         self.norm = (
             KimiK3LatentRMSNorm(weights[K3W.MOE_ROUTED_NORM], config.layernorm_eps)

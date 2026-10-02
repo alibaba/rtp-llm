@@ -7,12 +7,12 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import MlaFlashInferPrefillOp
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels import (
-    gather_bf16_prefix_slice, gather_fp8_prefix, gather_fp8_prefix_slice, quantize_fp8,
+    gather_bf16_prefix_slice, gather_fp8_prefix, gather_fp8_prefix_slice,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardRoute, plan_flashmla_forward,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_qkv_fp8_quant import quantize_qkv_fp8
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_qkv_fp8_quant import quantize_kv_fp8, quantize_qkv_fp8
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fused_fp8_epilogue import fused_mla_fp8_epilogue
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_fp8_kernels
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_prefix_chunk_plan import plan_prefix_chunks
@@ -363,8 +363,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             del latent, suffix
             if self.page_rr_adapter is not None:
                 del restored
-            key_fp8 = quantize_fp8(key)
-            value_fp8 = quantize_fp8(value)
+            key_fp8, value_fp8 = quantize_kv_fp8(key, value)
             del key, value
             q_indptr = torch.tensor((0, q_len), dtype=torch.int32, device=q.device)
             kv_indptr = torch.tensor(
@@ -462,9 +461,12 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             (capacity, self.kv_lora_rank), dtype=torch.bfloat16,
             device=q.device,
         )
-        rope_buffer = torch.empty(
-            (capacity, self.qk_rope_head_dim), dtype=torch.bfloat16,
-            device=q.device,
+        rope_buffer = (
+            torch.empty(
+                (capacity, self.qk_rope_head_dim), dtype=torch.bfloat16,
+                device=q.device,
+            )
+            if self.page_rr_adapter is None else None
         )
         for launch in plan.prefix_launches:
             for segment in launch.slices:
@@ -475,8 +477,8 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                     continue
                 length = segment.prefix_len
                 latent = latent_buffer.narrow(0, 0, length)
-                rope = rope_buffer.narrow(0, 0, length)
                 packed = packed_buffer.narrow(0, 0, length)
+                shaped = packed.view(length, self.num_heads, sum(splits))
                 if self.page_rr_adapter is not None:
                     descriptor = self.page_rr_adapter.build_prefix_chunk_descriptor(
                         (owner,), (segment.prefix_start,), (length,),
@@ -486,9 +488,16 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                         cache, self.block_table, descriptor
                     )
                     latent.copy_(restored[:, :self.kv_lora_rank])
-                    rope.copy_(restored[:, self.kv_lora_rank:])
+                    # skip-head-mid leaves the RoPE columns untouched. Fill
+                    # them from the restored PageRR view before KV-up, so a
+                    # separate full-prefix RoPE buffer never overlaps the
+                    # restored pages and the packed projection workspace.
+                    shaped[..., splits[0]:splits[0] + splits[1]].copy_(
+                        restored[:, self.kv_lora_rank:].view(length, 1, splits[1])
+                    )
                     del restored
                 else:
+                    rope = rope_buffer.narrow(0, 0, length)
                     gather_bf16_prefix_slice(
                         latent, rope, cache, self.reuse_cache_page_indice,
                         self.batch_reuse_info_vec, self.token_per_block,
@@ -498,10 +507,10 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 projection.forward_skip_head_mid(
                     latent, splits, output=packed
                 )
-                shaped = packed.view(length, self.num_heads, sum(splits))
-                shaped[..., splits[0]:splits[0] + splits[1]].copy_(
-                    rope[:, None, :]
-                )
+                if rope_buffer is not None:
+                    shaped[..., splits[0]:splits[0] + splits[1]].copy_(
+                        rope[:, None, :]
+                    )
                 q_part = q.narrow(0, q_start, q_len)
                 q_indptr = torch.tensor((0, q_len), dtype=torch.int32,
                                         device=q.device)

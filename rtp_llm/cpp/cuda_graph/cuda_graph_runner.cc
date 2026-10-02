@@ -1402,6 +1402,32 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
     const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    // Request and cache-table row counts can differ after model-specific
+    // padding. The graph key is chosen from input_lengths, while preparation
+    // copies the complete cache tables. An oversized table must use eager
+    // execution instead of reaching blockTableCopyGeometry's assertion.
+    const auto table_rows_fit = [](const torch::Tensor& source, const torch::Tensor& destination) {
+        if (!source.defined() || source.numel() == 0) {
+            return true;
+        }
+        return destination.defined() && source.dim() == destination.dim()
+               && (source.dim() != 2 || source.size(0) <= destination.size(0));
+    };
+    const auto cache_tables_fit = [&](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
+        return table_rows_fit(source.kv_cache_kernel_block_id, destination.kv_cache_kernel_block_id)
+               && table_rows_fit(source.kv_cache_kernel_block_id_device,
+                                 destination.kv_cache_kernel_block_id_device);
+    };
+    if (!cache_tables_fit(inputs.attention_inputs, captured_inputs.attention_inputs)) {
+        return false;
+    }
+    for (const auto& [tag, source] : inputs.attention_inputs_by_tag) {
+        const auto destination = captured_inputs.attention_inputs_by_tag.find(tag);
+        if (destination == captured_inputs.attention_inputs_by_tag.end()
+            || !cache_tables_fit(source, destination->second)) {
+            return false;
+        }
+    }
     if (isGenerationPrefillCudaGraph()) {
         const auto table_fits = [](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
             return source.kv_cache_kernel_block_id.defined() && destination.kv_cache_kernel_block_id.defined()
