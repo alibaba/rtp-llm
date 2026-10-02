@@ -355,6 +355,12 @@ class KimiK3MLA(nn.Module):
                 qkv, gate = (fused_input if use_fused_ag else self.input(full_hidden)).split(
                     [qkv_rows, self.heads * self.v_dim], dim=-1
                 )
+            # The projected tensors no longer depend on the gathered input.
+            # Release it before MLA expands a historical KV chunk, as the
+            # feat/k3_dev projection path does before entering attention.
+            del full_hidden
+            if use_fused_ag:
+                del fused_input
             output = self._attend(qkv, fmha, cache)
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:

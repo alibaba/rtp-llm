@@ -172,6 +172,7 @@ class KimiK3DecoderLayer(nn.Module):
 class KimiK3Model(GptModelBase):
     requires_sequence_parallel_padding = True
     requires_token_position_ids = True
+    requires_fixed_capacity_mtp_draft_prefill = True
 
     def __init__(
         self,
@@ -211,11 +212,12 @@ class KimiK3Model(GptModelBase):
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
         )
-        self.chunk_prefill_budget = int(
-            os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "65536")
+        self.fp8_collective_max_tokens = int(
+            os.environ.get("RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS", "65536")
         )
-        if self.chunk_prefill_budget <= 0 or self.chunk_prefill_budget % self.tp_size:
-            raise ValueError("K3 chunk budget must be positive and divisible by TP")
+        if (self.fp8_collective_max_tokens <= 0
+                or self.fp8_collective_max_tokens % self.tp_size):
+            raise ValueError("FP8 collective capacity must be positive and divisible by TP")
         # The scheduler bound is global; SP routes only the local token shard.
         global_prefill = model_config.moe_prefill_max_tokens_per_rank
         if global_prefill is None:
@@ -301,7 +303,7 @@ class KimiK3Model(GptModelBase):
         device = self.layers[0].attention.input.weight.device
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP), device,
-            max_m=self.chunk_prefill_budget,
+            max_m=self.fp8_collective_max_tokens,
             hidden_size=self.config.hidden_size,
             enable_ag=enable_ag,
             enable_rs=enable_rs,
@@ -310,7 +312,7 @@ class KimiK3Model(GptModelBase):
             layer.attention._fp8_collective = self._fp8_collective
         logging.info(
             "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
-            enable_ag, enable_rs, self.chunk_prefill_budget,
+            enable_ag, enable_rs, self.fp8_collective_max_tokens,
         )
         return ready
 
@@ -380,6 +382,12 @@ class KimiK3Model(GptModelBase):
         return True
 
     def _forward_layers(self, hidden, inputs, fmha_impl, sequence_parallel_input=False):
+        if hidden is None:
+            # Construct the target embedding in this frame. Passing the
+            # full-token tensor from the caller keeps its storage alive until
+            # all layers return, even after SP narrows it to local rows.
+            # feat/k3_dev releases that storage during the layer loop.
+            hidden = self.embed_tokens(inputs.input_ids)
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
             raise ValueError("K3 requires physical token padding before SP execution")
@@ -449,22 +457,8 @@ class KimiK3Model(GptModelBase):
         return all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
 
     def forward(self, inputs, fmha_impl=None):
-        primary = get_primary_attention_inputs(inputs, self.kv_cache)
-        if (
-            primary.is_prefill
-            and not primary.is_target_verify
-            and not primary.is_mtp_draft_update
-            and inputs.input_ids.shape[0] > self.chunk_prefill_budget
-        ):
-            from rtp_llm.models_py.modules.kimi_k3.chunk_forward import (
-                forward_prefill_chunks,
-            )
-
-            return forward_prefill_chunks(self, inputs)
         return self._forward_single(inputs, fmha_impl)
 
     def _forward_single(self, inputs, fmha_impl=None):
-        hidden = self._forward_layers(
-            self.embed_tokens(inputs.input_ids), inputs, fmha_impl
-        )
+        hidden = self._forward_layers(None, inputs, fmha_impl)
         return PyModelOutputs(self.norm(hidden), hidden)

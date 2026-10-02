@@ -103,7 +103,12 @@ class Fp8CollectiveProjection:
             or not projection.scale_ue8m0
             or projection.K != self.hidden_size
         ):
-            raise ValueError("FP8 AG/GEMM input or projection is incompatible")
+            raise ValueError(
+                "FP8 AG/GEMM input or projection is incompatible: "
+                f"input_shape={tuple(local_input.shape)} device={local_input.device} "
+                f"expected_device={self.device} tp={self.world_size} max_m={self.max_m} "
+                f"projection_k={projection.K} scale_ue8m0={projection.scale_ue8m0}"
+            )
         local_m, k = local_input.shape
         if isinstance(local_input, Fp8Activation):
             values, scale_wire = local_input.values, local_input.scale_wire

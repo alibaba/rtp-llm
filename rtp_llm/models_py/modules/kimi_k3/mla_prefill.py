@@ -17,6 +17,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fused_fp8_epi
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_fp8_kernels
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_prefix_chunk_plan import plan_prefix_chunks
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_state_merge import merge_mla_states_in_place
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache import MlaPageRRCacheAdapter
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_prefill_params import (
+    build_mla_page_rr_prefill_params,
+)
 from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.utils.model_weight import W
 from rtp_llm.models_py.modules.kimi_k3.native_mla_prefill import KimiK3TokenspeedPrefill
@@ -25,9 +29,11 @@ from rtp_llm.ops import KvCacheDataType
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import check_attention_inputs
 
 
 _BF16_FLASH_MLA_WORKSPACES = {}
+_LOGGED_FP8_PREFIX_PLANS = set()
 
 
 def _bf16_flash_mla_workspace(device):
@@ -62,8 +68,11 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             qo_indptr_host=mla_params.qo_indptr_h,
             kv_indptr_host=mla_params.prefill_ragged_kv_len_indptr_h,
         )
-        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
+        self.reuse_cache_page_indice = getattr(mla_params, "reuse_cache_page_indice_d", None)
+        self.page_rr_adapter = getattr(self, "page_rr_adapter", None)
+        self._page_rr_attn_inputs = getattr(mla_params, "attn_inputs", None)
         self.qo_indptr = mla_params.qo_indptr_d
+        self._bf16_kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         self.total_kv_lens = int(mla_params.prefill_ragged_kv_len_indptr_h[-1])
         q_offsets = tuple(int(v) for v in mla_params.qo_indptr_h.tolist())
@@ -85,17 +94,41 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             self._prefix_plan = plan_prefix_chunks(
                 q_lens,
                 self._prefix_lens,
-                page_tokens=self.token_per_block,
+                page_tokens=(self.page_rr_adapter.page_tokens
+                             if self.page_rr_adapter is not None
+                             else self.token_per_block),
                 heads=self.num_heads,
                 qk_dim=self.qk_rope_head_dim + self.qk_nope_head_dim,
                 v_dim=self.v_head_dim,
                 operand_bytes=1,
                 budget_gib=budget_gib,
             )
+            if (os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1"
+                    and self.page_rr_adapter is not None
+                    and self.page_rr_adapter.shard_rank == 0
+                    and self._prefix_plan.chunked):
+                launch_tokens = tuple(
+                    segment.length for segment in self._prefix_plan.slices
+                )
+                evidence_key = (q_lens, self._prefix_lens,
+                                self._prefix_plan.capacity_tokens, launch_tokens)
+                if evidence_key not in _LOGGED_FP8_PREFIX_PLANS:
+                    _LOGGED_FP8_PREFIX_PLANS.add(evidence_key)
+                    logging.info("[K3_SMOKE_EVENT] %s", json.dumps({
+                        "kind": "mla_prefix", "backend": "fp8_tokenspeed",
+                        "route": "hybrid", "query_tokens": sum(q_lens),
+                        "prefix_tokens": sum(self._prefix_lens),
+                        "capacity_tokens": self._prefix_plan.capacity_tokens,
+                        "launch_tokens": launch_tokens,
+                    }, sort_keys=True))
         else:
             self._bf16_forward_plan = plan_flashmla_forward(
                 q_lens, self._prefix_lens,
-                prefix_chunk_alignment_tokens=self.token_per_block,
+                prefix_chunk_alignment_tokens=(
+                    self.page_rr_adapter.page_tokens
+                    if self.page_rr_adapter is not None
+                    else self.token_per_block
+                ),
                 expanded_kv_budget_gib=budget_gib,
                 expanded_kv_bytes_per_token=(
                     self.num_heads
@@ -113,13 +146,47 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                     "launch_tokens": [launch.expanded_kv_tokens for launch
                                       in self._bf16_forward_plan.prefix_launches],
                 }, sort_keys=True))
-        self.block_table = mla_params.page_indice_d.unsqueeze(0)
+        self.block_table = (
+            self._page_rr_attn_inputs.kv_cache_kernel_block_id_device
+            if self.page_rr_adapter is not None
+            else mla_params.page_indice_d.unsqueeze(0)
+        )
         self.workspace_starts = torch.zeros(
             1, dtype=torch.int32, device=self.block_table.device
         )
         self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
 
     def _reuse_kv_cache_indexed_batched(self, compressed_kv, k_pe, kv_cache):
+        if self.page_rr_adapter is not None and any(self._prefix_lens):
+            if kv_cache is None:
+                raise ValueError("MLA Page-RR prefix reuse requires a paged KV cache")
+            cache = kv_cache.kv_cache_base.view(
+                -1, self.page_rr_adapter.kernel_page_tokens,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+            restored = self.page_rr_adapter.read_prefix(
+                cache, self.block_table, self._prefix_lens
+            )
+            if self.kv_cache_type == KvCacheDataType.FP8:
+                restored = restored.to(torch.bfloat16)
+            q_offsets = self._prefix_q_offsets
+            latent = torch.cat([
+                torch.cat((
+                    restored.narrow(0, sum(self._prefix_lens[:i]), prefix)[:, :self.kv_lora_rank],
+                    compressed_kv.narrow(0, q_offsets[i], q_offsets[i + 1] - q_offsets[i]),
+                ), dim=0)
+                for i, prefix in enumerate(self._prefix_lens)
+            ], dim=0)
+            suffix = torch.cat([
+                torch.cat((
+                    restored.narrow(0, sum(self._prefix_lens[:i]), prefix)[:, self.kv_lora_rank:],
+                    k_pe.narrow(0, q_offsets[i], q_offsets[i + 1] - q_offsets[i]),
+                ), dim=0)
+                for i, prefix in enumerate(self._prefix_lens)
+            ], dim=0)
+            return latent, suffix
+        if self.page_rr_adapter is not None:
+            return compressed_kv, k_pe
         if self.kv_cache_type == KvCacheDataType.FP8:
             if self.reuse_cache_page_indice is None or self.reuse_cache_page_indice.numel() == 0:
                 return compressed_kv, k_pe
@@ -181,7 +248,8 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
         Prefix reuse and a nonunit cache scale keep their existing paths.
         The caller performs the PD cache-store handoff after this method.
         """
-        if (self.kv_cache_type != KvCacheDataType.FP8 or kv_cache is None
+        if (self.page_rr_adapter is not None
+                or self.kv_cache_type != KvCacheDataType.FP8 or kv_cache is None
                 or cache_scale_value != 1.0 or self._prefix_plan.chunked
                 or any(self._prefix_lens) or mla_fp8_kernels._FP8_DIAGNOSTICS
                 or compressed_kv.shape[0] != q.shape[0]
@@ -224,7 +292,8 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
         )
 
     def _forward_fp8_chunked(self, q, compressed_kv, k_pe, kv_cache, layer_id):
-        if kv_cache is None or self.reuse_cache_page_indice is None:
+        if kv_cache is None or (self.page_rr_adapter is None
+                                and self.reuse_cache_page_indice is None):
             raise ValueError("chunked FP8 MLA Prefill requires a paged target KV cache")
         cache = kv_cache.kv_cache_base.view(
             -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
@@ -258,22 +327,42 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             q_len = self._prefix_q_offsets[owner + 1] - q_start
             if q_len == 0:
                 continue
-            latent = torch.empty(
-                (segment.length, self.kv_lora_rank),
-                dtype=torch.bfloat16, device=q.device,
-            )
-            suffix = torch.empty(
-                (segment.length, self.qk_rope_head_dim),
-                dtype=torch.bfloat16, device=q.device,
-            )
-            gather_fp8_prefix_slice(
-                latent, suffix, cache, self.reuse_cache_page_indice,
-                self.batch_reuse_info_vec, self.token_per_block,
-                owner=owner, start=segment.start,
-                prefix_len=self._prefix_lens[owner], scale=1.0,
-            )
+            if self.page_rr_adapter is not None:
+                descriptor = self.page_rr_adapter.build_prefix_chunk_descriptor(
+                    (owner,), (segment.start,), (segment.length,),
+                    feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
+                )
+                restored = self.page_rr_adapter.read_prefix_chunk(
+                    cache, self.block_table, descriptor
+                ).to(torch.bfloat16)
+                # As in the feat Page-RR path, project from a contiguous
+                # compressed-KV buffer. The sliced cache record has row stride
+                # kv_lora_rank + qk_rope_head_dim and cannot enter FP8 quant.
+                latent = torch.empty(
+                    (segment.length, self.kv_lora_rank),
+                    dtype=torch.bfloat16, device=q.device,
+                )
+                latent.copy_(restored[:, :self.kv_lora_rank])
+                suffix = restored[:, self.kv_lora_rank:]
+            else:
+                latent = torch.empty(
+                    (segment.length, self.kv_lora_rank),
+                    dtype=torch.bfloat16, device=q.device,
+                )
+                suffix = torch.empty(
+                    (segment.length, self.qk_rope_head_dim),
+                    dtype=torch.bfloat16, device=q.device,
+                )
+                gather_fp8_prefix_slice(
+                    latent, suffix, cache, self.reuse_cache_page_indice,
+                    self.batch_reuse_info_vec, self.token_per_block,
+                    owner=owner, start=segment.start,
+                    prefix_len=self._prefix_lens[owner], scale=1.0,
+                )
             key, value = self._project_kv(projection, latent, suffix)
             del latent, suffix
+            if self.page_rr_adapter is not None:
+                del restored
             key_fp8 = quantize_fp8(key)
             value_fp8 = quantize_fp8(value)
             del key, value
@@ -316,21 +405,47 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
 
     def _forward_bf16_chunked(self, q, compressed_kv, k_pe, kv_cache, layer_id):
         plan = self._bf16_forward_plan
-        if kv_cache is None or self.reuse_cache_page_indice is None:
+        if kv_cache is None or (self.page_rr_adapter is None
+                                and self.reuse_cache_page_indice is None):
             raise ValueError("chunked BF16 MLA requires a paged draft KV cache")
         projection = self._make_kv_b_proj(layer_id)
         splits = (self.qk_nope_head_dim, self.qk_rope_head_dim,
                   self.v_head_dim)
         if not projection.supports_skip_head_mid(compressed_kv, splits):
-            raise RuntimeError("chunked BF16 MLA requires packed KV-up projection")
+            raise RuntimeError(
+                "chunked BF16 MLA requires packed KV-up projection: "
+                f"input_shape={tuple(compressed_kv.shape)} "
+                f"input_stride={tuple(compressed_kv.stride())} "
+                f"input_dtype={compressed_kv.dtype} "
+                f"weight_shape={tuple(projection.weight.shape)} "
+                f"weight_stride={tuple(projection.weight.stride())} "
+                f"weight_dtype={projection.weight.dtype} "
+                f"weight_transpose_contiguous={projection.weight.T.is_contiguous()}"
+            )
         cache = kv_cache.kv_cache_base.view(
             -1, self.token_per_block,
             self.kv_lora_rank + self.qk_rope_head_dim,
         )
 
-        current_k, current_v = self._project_kv(
-            projection, compressed_kv, k_pe
+        # Reuse one packed KV workspace for current-query and historical-prefix
+        # projections, matching feat/k3_dev's FlashMLA forward workspace.
+        packed_capacity = max(q.shape[0], plan.max_expanded_kv_tokens)
+        packed_buffer = torch.empty(
+            (packed_capacity, self.num_heads * sum(splits)),
+            dtype=torch.bfloat16, device=q.device,
         )
+        current_packed = packed_buffer.narrow(0, 0, compressed_kv.shape[0])
+        projection.forward_skip_head_mid(
+            compressed_kv, splits, output=current_packed
+        )
+        current_shaped = current_packed.view(
+            compressed_kv.shape[0], self.num_heads, sum(splits)
+        )
+        current_shaped[..., splits[0]:splits[0] + splits[1]].copy_(
+            k_pe.view(-1, 1, splits[1])
+        )
+        current_k = current_shaped[..., :-self.v_head_dim]
+        current_v = current_shaped[..., -self.v_head_dim:]
         max_q = max(
             self._prefix_q_offsets[i + 1] - self._prefix_q_offsets[i]
             for i in range(len(self._prefix_lens))
@@ -339,7 +454,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             q, current_k, current_v, self.qo_indptr, self.qo_indptr,
             max_q=max_q, max_k=max_q, causal=True,
         )
-        del current_k, current_v
+        del current_k, current_v, current_shaped, current_packed
         canonical = output.float() if plan.requires_fp32_accumulator else output
 
         capacity = plan.max_expanded_kv_tokens
@@ -350,10 +465,6 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
         rope_buffer = torch.empty(
             (capacity, self.qk_rope_head_dim), dtype=torch.bfloat16,
             device=q.device,
-        )
-        packed_buffer = torch.empty(
-            (capacity, self.num_heads * sum(splits)),
-            dtype=torch.bfloat16, device=q.device,
         )
         for launch in plan.prefix_launches:
             for segment in launch.slices:
@@ -366,12 +477,24 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 latent = latent_buffer.narrow(0, 0, length)
                 rope = rope_buffer.narrow(0, 0, length)
                 packed = packed_buffer.narrow(0, 0, length)
-                gather_bf16_prefix_slice(
-                    latent, rope, cache, self.reuse_cache_page_indice,
-                    self.batch_reuse_info_vec, self.token_per_block,
-                    owner=owner, start=segment.prefix_start,
-                    prefix_len=self._prefix_lens[owner], scale=1.0,
-                )
+                if self.page_rr_adapter is not None:
+                    descriptor = self.page_rr_adapter.build_prefix_chunk_descriptor(
+                        (owner,), (segment.prefix_start,), (length,),
+                        feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
+                    )
+                    restored = self.page_rr_adapter.read_prefix_chunk(
+                        cache, self.block_table, descriptor
+                    )
+                    latent.copy_(restored[:, :self.kv_lora_rank])
+                    rope.copy_(restored[:, self.kv_lora_rank:])
+                    del restored
+                else:
+                    gather_bf16_prefix_slice(
+                        latent, rope, cache, self.reuse_cache_page_indice,
+                        self.batch_reuse_info_vec, self.token_per_block,
+                        owner=owner, start=segment.prefix_start,
+                        prefix_len=self._prefix_lens[owner], scale=1.0,
+                    )
                 projection.forward_skip_head_mid(
                     latent, splits, output=packed
                 )
@@ -397,13 +520,35 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 )
         return canonical.to(torch.bfloat16)
 
+    def _forward_bf16_full(self, q, compressed_kv, k_pe, kv_cache, layer_id):
+        # feat/k3_dev uses FlashMLA for the BF16 draft Prefill path. Keep the
+        # FP8 target on TokenSpeed and use the same BF16 backend for the draft.
+        compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
+            compressed_kv, k_pe, kv_cache
+        )
+        key, value = self._project_kv(
+            self._make_kv_b_proj(layer_id), compressed_kv, k_pe
+        )
+        del compressed_kv, k_pe
+        output, _ = self._run_bf16_partial(
+            q, key, value,
+            self.qo_indptr,
+            self._bf16_kv_indptr,
+            max_q=self.prefill_wrapper.max_q,
+            max_k=self.prefill_wrapper.max_k,
+            causal=True,
+        )
+        return output
+
     def forward(self, q, compressed_kv, k_pe, kv_cache, layer_id):
         if self.kv_cache_type != KvCacheDataType.FP8:
             if self._bf16_forward_plan.route is FlashMLAForwardRoute.HYBRID:
                 return self._forward_bf16_chunked(
                     q, compressed_kv, k_pe, kv_cache, layer_id
                 )
-            return super().forward(q, compressed_kv, k_pe, kv_cache, layer_id)
+            return self._forward_bf16_full(
+                q, compressed_kv, k_pe, kv_cache, layer_id
+            )
         if self._prefix_plan.chunked:
             return self._forward_fp8_chunked(
                 q, compressed_kv, k_pe, kv_cache, layer_id
@@ -436,8 +581,20 @@ class KimiK3MlaPrefillImpl(MlaFlashInferPrefillImpl):
             )
         attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
         inputs.headwise_config = getattr(config, "headwise_config", None)
-        # Keep expanded attention for both full and reused prefixes. Native
-        # TokenSpeed arithmetic runs under RTP's cache/state planning.
+        self._page_rr_adapter = None
+        if (parallelism.prefill_cp_config.kv_cache_sharded
+                and parallelism.tp_size > 1):
+            if parallelism.prefill_cp_config.is_enabled():
+                raise ValueError("MLA Page-RR requires Prefill Query CP disabled")
+            self._page_rr_adapter = MlaPageRRCacheAdapter(
+                page_tokens=int(attention.tokens_per_block),
+                kernel_page_tokens=int(attention.kernel_tokens_per_block),
+                shard_size=int(parallelism.tp_size),
+                shard_rank=int(parallelism.tp_rank),
+            )
+        # Keep expanded attention for both full and reused prefixes. RTP owns
+        # cache/state planning; FP8 uses TokenSpeed and BF16 draft uses the
+        # same FlashMLA dense path as feat/k3_dev.
         super().__init__(
             attention,
             inputs,
@@ -450,3 +607,38 @@ class KimiK3MlaPrefillImpl(MlaFlashInferPrefillImpl):
             parallelism_config=parallelism,
             allow_absorb=False,
         )
+
+    def create_params(self, attn_inputs):
+        if self._page_rr_adapter is None:
+            return super().create_params(attn_inputs)
+        self.prepare(attn_inputs)
+
+    def prepare(self, attn_inputs, forbid_realloc=False):
+        if self._page_rr_adapter is None:
+            return super().prepare(attn_inputs, forbid_realloc)
+        if forbid_realloc:
+            raise ValueError("MLA Page-RR Prefill uses eager metadata only")
+        check_attention_inputs(attn_inputs)
+        params = build_mla_page_rr_prefill_params(
+            attn_inputs, self._page_rr_adapter.kernel_page_tokens
+        )
+        table = attn_inputs.kv_cache_kernel_block_id_device
+        self._page_rr_adapter.validate_block_table_capacity(
+            table, params.kv_lens_host
+        )
+        logical = int(getattr(attn_inputs, "logical_token_count", 0))
+        physical = int(getattr(attn_inputs, "physical_token_count", 0))
+        params.slot_mapping = self._page_rr_adapter.slot_mapping(
+            params.positions_d,
+            params.batch_indice_d,
+            table,
+            valid_token_count=logical if physical > logical else None,
+        )
+        params.slot_mapping.record_stream(
+            torch.cuda.current_stream(params.slot_mapping.device)
+        )
+        self.attn_inputs = attn_inputs
+        self.fmha_params = params
+        self.rope_params = params
+        self.fmha_impl.page_rr_adapter = self._page_rr_adapter
+        self.fmha_impl.plan(params)

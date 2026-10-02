@@ -18,8 +18,6 @@ python -m pytest -q \
   tests/kimi_k3/test_bf16_launch_profile.py \
   tests/kimi_k3/test_launch_gpu_capacity.py \
   tests/kimi_k3/test_smoke_contract.py \
-  tests/kimi_k3/test_chunk_plan.py \
-  tests/kimi_k3/test_chunk_inputs.py \
   tests/kimi_k3/test_forward_metadata.py \
   tests/kimi_k3/test_text_renderer.py
 ```

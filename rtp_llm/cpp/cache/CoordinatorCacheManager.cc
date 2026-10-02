@@ -374,10 +374,12 @@ size_t CoordinatorCacheManager::loadTargetPosition(size_t                       
                                                    const std::string&                   tag,
                                                    const std::shared_ptr<CPSlotMapper>& mapper,
                                                    int                                  cp_scale) const {
-    const CacheGroupType type = config_.topology().group(tag).policy.group_type;
-    return type == CacheGroupType::LINEAR || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, mapper)) ?
-               (path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-               path_index;
+    const auto& group = config_.topology().group(tag);
+    const bool compact_linear = mapper && mapper->isSharded() && group.policy.group_type == CacheGroupType::LINEAR
+                                && group.seqSizePerBlock() == static_cast<size_t>(mapper->reuseBlockTokens(config_));
+    const bool sparse_logical = (group.policy.group_type == CacheGroupType::LINEAR && !compact_linear)
+                                || (group.policy.group_type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, mapper));
+    return sparse_logical ? (path_index + 1) * static_cast<size_t>(cp_scale) - 1 : path_index;
 }
 
 std::shared_ptr<LoadAsyncContext>
@@ -805,13 +807,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                     mapping_valid = false;
                     break;
                 }
-                const auto type           = config_.group(tag).policy.group_type;
-                const bool sparse_logical = cp_active
-                                            && (type == CacheGroupType::LINEAR
-                                                || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
-                    const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
+                    const size_t position = loadTargetPosition(
+                        i, tag, cp_mapper, cp_active ? cp_mapper->cpSize() : 1);
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }

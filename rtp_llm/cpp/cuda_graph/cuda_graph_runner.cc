@@ -480,6 +480,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
+    const bool has_fixed_width_dummy_rows = is_target_verify_ || usesFixedCapacityMtpDraftPrefillCudaGraph();
 
     // These values are ordinary host scalars, not captured tensor storage. A
     // replay can keep the same graph shape while prefix reuse changes the total
@@ -616,9 +617,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               0);
             }
         }
-        if (is_target_verify_ && has_padded_rows) {
+        if (has_fixed_width_dummy_rows && has_padded_rows) {
             // Multi-token graphs capture a fixed number of Q/K/V rows per
-            // batch. Their replay metadata must describe the same geometry:
+            // batch. Target verify and fixed-capacity MTP draft prefill both
+            // need replay metadata that describes the same geometry:
             // KVCacheWriteOp consumes the static K/V tensor size and cannot
             // represent a zero-token tail. Execute rounded rows as deterministic
             // dummy requests against reserved cache block 0; their outputs are
@@ -1007,7 +1009,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (has_padded_rows && has_fixed_width_dummy_rows) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)

@@ -3,6 +3,9 @@
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_dcp_comm import get_mla_dcp
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import PageRRMlaDecodeMetadata
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_page_rr import tokenspeed_mla_page_rr_decode
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.models_py.modules.kimi_k3.native_mla_decode import NativeMlaDecode
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -42,6 +45,28 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             q_scale=attention.mla_fp8_q_scale,
             kv_scale=attention.mla_fp8_kv_scale,
         )
+        self._kv_scale_value = float(attention.mla_fp8_kv_scale)
+        self.page_rr = bool(
+            parallelism.tp_size > 1
+            and parallelism.prefill_cp_config.kv_cache_sharded
+        )
+        if self.page_rr:
+            if parallelism.prefill_cp_config.is_enabled():
+                raise ValueError("MLA Page-RR requires Decode Query CP disabled")
+            self.page_rr_metadata = PageRRMlaDecodeMetadata(
+                int(attention.tokens_per_block),
+                int(attention.kernel_tokens_per_block),
+                int(parallelism.tp_size),
+                int(parallelism.tp_rank),
+            )
+            self.page_rr_communicator = get_mla_dcp(
+                attention,
+                device,
+                torch.float8_e4m3fn if attention.mla_fp8_compute else torch.bfloat16,
+            )
+            self.write_cache_store_impl = common.create_write_cache_store_impl(inputs)
+            self.prepare(inputs)
+            return
         columns = (self.max_seq_len + self.native.page_size - 1) // self.native.page_size
         # RTP reserves additional logical blocks for speculative candidates.
         # Preserve that physical metadata capacity without extending valid KV length.
@@ -74,6 +99,10 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
     def prepare(self, inputs, forbid_realloc=False):
         if inputs.input_lengths.numel() != self.batch or inputs.physical_token_count != self.tokens:
             raise ValueError("K3 MLA replay requires the captured physical shape")
+        if self.page_rr:
+            self.attn_inputs = inputs
+            self.page_rr_metadata.prepare(inputs, forbid_realloc)
+            return
         table = inputs.kv_cache_kernel_block_id
         if table.is_cuda or table.ndim != 2 or table.shape[0] != self.batch:
             raise ValueError("K3 MLA requires RTP's host kernel-page table")
@@ -87,7 +116,14 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         offsets = self.fmha_params.qo_indptr_h
         query_bound = int((offsets[1:] - offsets[:-1]).max())
         if int(offsets[-1]) != self.tokens:
-            raise ValueError("K3 MLA metadata does not cover every physical query")
+            raise ValueError(
+                "K3 MLA metadata does not cover every physical query: "
+                f"planned={int(offsets[-1])} physical={self.tokens} "
+                f"batch={self.batch} prefix_rows={inputs.prefix_lengths.numel()} "
+                f"verify={inputs.is_target_verify} "
+                f"draft_update={inputs.is_mtp_draft_update} "
+                f"graph={inputs.is_cuda_graph}"
+            )
         actual_max_seq_len = int(self.fmha_params.kvlen_h.max())
         if actual_max_seq_len > self.max_seq_len:
             raise ValueError("K3 MLA sequence exceeds configured capacity")
@@ -120,6 +156,44 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         if topk_indices is not None or kv_cache is None:
             raise ValueError("K3 native MLA requires a dense paged KV cache")
         weights = self.weights[layer_id]
+        if self.page_rr:
+            query = self.native.write_cache(
+                q, compressed_kv, k_pe, kv_cache.kv_cache_base,
+                self.page_rr_metadata.slot_mapping, weights[W.mla_kc],
+            )
+            common.apply_write_cache_store(self.write_cache_store_impl, self.attn_inputs, kv_cache)
+            local_query = query.transpose(0, 1).contiguous()
+            gathered = self.page_rr_communicator.query_gather(local_query)
+            batch, queries = self.page_rr_metadata.local_causal_lens.shape
+            dimension = self.native.kv_lora_rank + self.native.pe_dim
+            partial, lse = tokenspeed_mla_page_rr_decode(
+                gathered.transpose(0, 1).contiguous().view(
+                    batch, queries, self.page_rr_communicator.heads, dimension
+                ),
+                kv_cache.kv_cache_base.view(-1, self.native.page_size, dimension),
+                self.native.workspace.view(torch.int8),
+                self.native.kv_lora_rank,
+                self.native.pe_dim,
+                self.page_rr_metadata.query_block_tables,
+                self.page_rr_metadata.local_causal_lens,
+                self.page_rr_metadata.query_block_tables.shape[1] * self.native.page_size,
+                self.native.scale * (
+                    self.native.q_scale * self._kv_scale_value
+                    if self.native.fp8_compute else 1.0
+                ),
+                output_scale=self._kv_scale_value if self.native.fp8_compute else 1.0,
+                normalize_empty=False,
+            )
+            merged = self.page_rr_communicator.combine(
+                partial.view(self.tokens, self.page_rr_communicator.heads,
+                             self.native.kv_lora_rank),
+                lse.view(self.tokens, self.page_rr_communicator.heads),
+                self.page_rr_metadata.local_causal_lens,
+            )
+            output = q.new_empty(self.tokens, self.native.num_heads,
+                                 weights[W.mla_vc].shape[-1])
+            torch.bmm(merged, weights[W.mla_vc], out=output.transpose(0, 1))
+            return output
         query = self.native.write_cache(
             q, compressed_kv, k_pe, kv_cache.kv_cache_base,
             self.slot_mapping, weights[W.mla_kc],

@@ -421,6 +421,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             && py_instance.attr("requires_token_position_ids").cast<bool>()) {
             graph_params.position_id_len_factor = 1;
         }
+        graph_params.fixed_capacity_mtp_draft_prefill =
+            py::hasattr(py_instance, "requires_fixed_capacity_mtp_draft_prefill")
+            && py_instance.attr("requires_fixed_capacity_mtp_draft_prefill").cast<bool>();
 
         // clang-format off
         // Decision table for num_tokens_per_bs:
