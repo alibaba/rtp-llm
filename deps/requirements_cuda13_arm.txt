@@ -14,18 +14,19 @@ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer-ci/flashi
 # against torch 2.11+cu130; SHAs encoded in filename).
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl
+# Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl
 
-# DeepEP from HPN-OPEN/ACCL-EP@831fdd73038aca753952f8fb7e786a117532943b.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/accl-ep-ci/deep_ep-1.2.1.12.1%2B831fdd7.cu132-cp310-cp310-linux_aarch64.whl
-
-# rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl
+# Unified rtp_kernel built from cuda_extension main@34e3b72a against
+# torch 2.11+cu130; includes the current fused RoPE position_ids API.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_aarch64.whl
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl
 
-# DSV4 mHC uses TileLang by default.
+# DSV4 mHC uses TileLang by default. apache-tvm-ffi 0.1.11+ is
+# incompatible with the TVM bundled in this TileLang wheel.
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl
 # apache-tvm-ffi 0.1.11+ dropped the hasattr() guard in registry._add_class_attrs,
 # so it re-registers fields inherited from ancestor types (ir.Type.span et al) onto

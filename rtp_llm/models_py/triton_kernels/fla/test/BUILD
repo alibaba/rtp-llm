@@ -1,84 +1,123 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 
-requirement(["triton", "torch", "numpy", "einops", "packaging"])
+requirement([
+    "triton",
+    "torch",
+    "numpy",
+    "einops",
+    "packaging",
+])
 
 # flydsl is ROCm-only (only present in pip_gpu_rocm requirements).
 # On non-ROCm configs we point to an empty stub to avoid analysis failures.
 py_library(
     name = "flydsl",
+    visibility = ["//visibility:public"],
     deps = select({
         "@rtp_llm//:using_rocm": [requirement_gpu_rocm("flydsl")],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"],
 )
 
 # pytest is only present in the ROCm lock file. Keep its repository-specific
 # label out of non-ROCm dependency graphs so CUDA/CPU analysis remains valid.
 py_library(
     name = "pytest_rocm",
+    visibility = ["//visibility:public"],
     deps = select({
         "@rtp_llm//:using_rocm": [requirement_gpu_rocm("pytest")],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"],
 )
 
 py_test(
     name = "test_gdn_block_prefill",
     srcs = [
-        "test_gdn_block_prefill.py"
+        "test_gdn_block_prefill.py",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'A10'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_gdn_decode",
     srcs = [
-        "test_gdn_decode.py"
+        "test_gdn_decode.py",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'A10'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_gdn_block_prefill_rocm",
     srcs = ["test_gdn_block_prefill.py"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_gdn_block_prefill.py",
-    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_gdn_decode_rocm",
     srcs = ["test_gdn_decode.py"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_gdn_decode.py",
-    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_chunk_prefill",
     srcs = [
-        "test_chunk_prefill.py"
+        "test_chunk_prefill.py",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'A10'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 # Reuse test_chunk_prefill on AMD to verify chunk-gdn Triton path on ROCm.
@@ -92,54 +131,79 @@ py_test(
 py_test(
     name = "test_chunk_prefill_amd",
     srcs = [
-        "test_chunk_prefill.py"
+        "test_chunk_prefill.py",
     ],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_chunk_prefill.py",
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_l2norm",
     srcs = [
-        "test_l2norm.py"
+        "test_l2norm.py",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'A10'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_l2norm_rocm",
     srcs = [
-        "test_l2norm.py"
+        "test_l2norm.py",
     ],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_l2norm.py",
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_flydsl_chunk_gdn_shape_gate",
     srcs = [
-        "test_flydsl_chunk_gdn_shape_gate.py"
+        "test_flydsl_chunk_gdn_shape_gate.py",
     ],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":torch", ":triton", ":einops", ":packaging", ":flydsl"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":flydsl",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 # Numeric + cache-byte equivalence for the FlyDSL Chunk-GDN direct-store path,
@@ -147,50 +211,76 @@ py_test(
 py_test(
     name = "test_flydsl_chunk_gdn_cache_store",
     srcs = [
-        "test_flydsl_chunk_gdn_cache_store.py"
+        "test_flydsl_chunk_gdn_cache_store.py",
     ],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging", ":flydsl"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":flydsl",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_aiter_flydsl_gdn_prefill",
     srcs = ["test_aiter_flydsl_gdn_prefill.py"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_aiter_flydsl_gdn_prefill.py",
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging", ":pytest_rocm", ":flydsl"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":flydsl",
+        ":numpy",
+        ":packaging",
+        ":pytest_rocm",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_aiter_flydsl_gdn_decode",
     srcs = [
-        "test_aiter_flydsl_gdn_decode.py"
+        "test_aiter_flydsl_gdn_decode.py",
     ],
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'H20'},
+    ] + [
+        ":einops",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )
 
 py_test(
     name = "test_aiter_flydsl_gdn_decode_rocm",
     srcs = [
-        "test_aiter_flydsl_gdn_decode.py"
+        "test_aiter_flydsl_gdn_decode.py",
     ],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
     main = "test_aiter_flydsl_gdn_decode.py",
+    tags = ["rocm"],
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
+    ] + [
+        ":einops",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
 )

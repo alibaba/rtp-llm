@@ -1,5 +1,5 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:device_defs.bzl", "device_impl_target")
 
 cc_test = cc_test_wrapper
@@ -37,13 +37,14 @@ cc_test(
     srcs = [
         "StreamCacheResourceTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -51,13 +52,14 @@ cc_test(
     srcs = [
         "GenerateStreamTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -65,19 +67,20 @@ cc_test(
     srcs = [
         "GenerateStreamStateTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "A10_CU13"},
     # Count the otherwise non-virtual pending-abort seam without changing the
     # production API. This is the Itanium ABI symbol for
     # rtp_llm::KVCacheManager::abortPendingLoad(shared_ptr<AsyncContext> const&).
     linkopts = [
         "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE",
     ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -85,19 +88,20 @@ cc_test(
     srcs = [
         "PdSepKVCacheReleaseTest.cc",
     ],
-    data = [],
     copts = test_copts,
+    data = [],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/models_py/bindings/common",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
 )

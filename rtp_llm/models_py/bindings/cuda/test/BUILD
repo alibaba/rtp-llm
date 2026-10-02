@@ -1,5 +1,5 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test = cc_test_wrapper
 
@@ -19,6 +19,8 @@ cc_test(
     name = "cuda_speculative_sampling_test",
     srcs = ["CudaSpeculativeSamplingTest.cc"],
     copts = copts(),
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
@@ -28,5 +30,4 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    exec_properties = {'gpu':'A10'},
 )

@@ -1,5 +1,5 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test = cc_test_wrapper
 
@@ -35,13 +35,14 @@ cc_test(
     srcs = [
         "SystemPromptTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -49,13 +50,14 @@ cc_test(
     srcs = [
         "SystemPromptConstructorTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
-    ],
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
 )

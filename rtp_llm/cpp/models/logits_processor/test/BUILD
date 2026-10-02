@@ -1,5 +1,5 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test = cc_test_wrapper
 
@@ -35,13 +35,14 @@ cc_test(
     srcs = [
         "ThinkModeLogitsProcessorTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -49,15 +50,16 @@ cc_test(
     srcs = [
         "TreeLogitsProcessorTest.cc",
     ],
-    data = [
-        "gir_prefix_dict.json"
-    ],
     copts = test_copts,
-    deps = test_deps,
+    data = [
+        "gir_prefix_dict.json",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -65,13 +67,14 @@ cc_test(
     srcs = [
         "RecommendationLogitsProcessorTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -80,11 +83,12 @@ cc_test(
         "SpecLogitsVerifyRunnerTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 # The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
@@ -101,17 +105,20 @@ cc_test(
         "SpecLogitsVerifyRunnerPerfTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "A10_CU13"},
     # manual: the only case here is TEST(..., DISABLED_DeepSeekFlashDecodeB35P3),
     # so gtest reports "Running 0 tests from 0 test suites" and the target passes
     # having measured nothing -- while still reserving a GPU. The ut jobs ask for
     # the ... wildcard and filter -manual, so this removes it from CI without
     # deleting it: run the benchmark on demand by explicit label.
-    tags = ["manual"],
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "A10_CU13",
+        "manual",
+    ],
+    deps = test_deps,
 )
 
 cc_test(
@@ -120,6 +127,11 @@ cc_test(
         "GrammarLogitsProcessorTest.cc",
     ],
     copts = test_copts,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/models:logits_processor",
@@ -129,10 +141,6 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "@xgrammar//:xgrammar",
+        "@xgrammar",
     ] + torch_deps(),
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
 )

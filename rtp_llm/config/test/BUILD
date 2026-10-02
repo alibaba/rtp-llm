@@ -1,4 +1,3 @@
-
 py_test(
     name = "grammar_compile_threads_test",
     srcs = ["grammar_compile_threads_test.py"],
@@ -13,13 +12,14 @@ py_test(
     ],
     data = [
         "//rtp_llm:ops/libth_transformer_config.pyi",
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        "//rtp_llm:sdk"
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_library(

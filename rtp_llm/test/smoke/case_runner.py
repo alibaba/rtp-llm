@@ -276,11 +276,35 @@ class CaseRunner(object):
         return TaskStates()
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
-        server_path = os.path.join(
-            os.environ["TEST_SRCDIR"],
-            os.environ["TEST_WORKSPACE"],
-            "external/remote_kv_cache_manager_server",
+        runfiles_root = os.path.join(
+            os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"]
         )
+        server_path = next(
+            (
+                path
+                for name in (
+                    "remote_kv_cache_manager_server_cuda130",
+                    "remote_kv_cache_manager_server",
+                )
+                if os.path.isfile(
+                    (
+                        path := os.path.join(
+                            runfiles_root,
+                            "external",
+                            name,
+                            "bin",
+                            "kv_cache_manager_bin",
+                        )
+                    )
+                )
+            ),
+            None,
+        )
+        if server_path is None:
+            raise FileNotFoundError(
+                "kv_cache_manager_bin is absent from Bazel runfiles"
+            )
+        server_path = os.path.dirname(os.path.dirname(server_path))
         kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         kvcm_dst_logs_path = os.path.join(bazel_outputs_dir, "kvcm_logs")

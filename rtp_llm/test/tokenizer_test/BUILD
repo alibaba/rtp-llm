@@ -9,28 +9,29 @@ filegroup(
 py_test(
     name = "chatglm3_tokenizer_test",
     srcs = [
-        "chatglm3_tokenizer_test.py"
+        "chatglm3_tokenizer_test.py",
     ],
     data = [
-        ":testdata"
+        ":testdata",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "qwen2_tokenizer_test",
     srcs = [
-        "qwen2_tokenizer_test.py"
+        "qwen2_tokenizer_test.py",
     ],
     data = [
-        ":testdata"
+        ":testdata",
     ],
     deps = [
         "//rtp_llm:testlib",
-    ]
+    ],
 )
 
 py_test(
