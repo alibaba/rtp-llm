@@ -612,11 +612,19 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
 TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
     const int candidates[] = {11, 7, 9};
     EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false), 7u);
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true), 1u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true), 2u);
 
     const int invalid_candidates[] = {11, 0, 9};
     EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3, false));
     EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0, false));
+}
+
+TEST_F(KVCacheManagerTest, FastAFDAttentionCapacityIgnoresExpertCandidate) {
+    const int candidates[] = {11, 7, 2};
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false), 2u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false, 2), 7u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true, 2), 2u);
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false, 3));
 }
 
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
@@ -628,6 +636,17 @@ TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
                                            /*size_per_head=*/2);
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     EXPECT_ANY_THROW(manager->init());
+}
+
+TEST_F(KVCacheManagerTest, FfnMinimumTwoBlocksInitializes) {
+    auto config  = makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                           /*block_num=*/2,
+                                           /*tokens_per_block=*/4,
+                                           DataType::TYPE_FP16,
+                                           /*local_head_num_kv=*/1,
+                                           /*size_per_head=*/2);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    EXPECT_TRUE(manager->init());
 }
 
 TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudget) {

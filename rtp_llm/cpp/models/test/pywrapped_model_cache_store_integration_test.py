@@ -51,6 +51,7 @@ run_dirty_generation_prefill_capture_scenario = (
     _extension.run_dirty_generation_prefill_capture_scenario
 )
 run_scenario = _extension.run_scenario
+run_empty_fastafd_step = _extension.run_empty_fastafd_step
 
 
 class CacheStoreForwardModel:
@@ -596,9 +597,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         ]
         single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
         for scenario, on_cuda, two_dimensional, tags, tables in (
-            ("micro_batch_split_pinned", False, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_cuda", True, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_single_group", False, False, ["default"], single_group_tables),
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
             ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
         ):
             with self.subTest(scenario=scenario):
@@ -624,7 +643,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         self.assertEqual(tensor.device, source.device)
                         self.assertEqual(tensor.is_pinned(), not on_cuda)
                         self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(tensor.cpu(), expected.narrow(batch_axis, start, count))
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
                 self.assertEqual(
                     [batch["input_lengths"].tolist() for batch in result["batches"]],
                     [[2, 4], [2]],
@@ -685,6 +706,183 @@ class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
 
     def forward(self, inputs, fmha_impl=None):
         return PyModelOutputs(rms_norm(self.hidden(inputs)))
+
+
+class _IdleFastAFDModel:
+    requires_micro_batch_forward = True
+    use_real_micro_batches_only = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def initialize(self, _resources):
+        return True
+
+    def forward(self, _inputs):
+        raise AssertionError("idle FastAFD rank must not run decoder forward")
+
+    def forward_micro_batch(self, inputs):
+        assert inputs == []
+        self.calls += 1
+        return []
+
+
+class _MicroBatchHiddenModel:
+    def __init__(self):
+        self.batch_token_counts = []
+
+    def initialize(self, _resources):
+        return True
+
+    def forward(self, _inputs):
+        raise AssertionError("expected the micro-batch forward path")
+
+    def forward_micro_batch(self, inputs):
+        self.batch_token_counts = [part.input_ids.numel() for part in inputs]
+        return [PyModelOutputs(self.hidden(part)) for part in inputs]
+
+    @staticmethod
+    def hidden(inputs):
+        columns = torch.arange(2048, device=inputs.input_ids.device) % 16
+        return (inputs.input_ids.unsqueeze(1) * 16 + columns).to(torch.bfloat16)
+
+
+class _FastAFDHiddenModel(_MicroBatchHiddenModel):
+    requires_micro_batch_forward = True
+    use_real_micro_batches_only = True
+
+
+class _OrdinaryHiddenModel(_MicroBatchHiddenModel):
+    def prepare_fmha_impl(self, _inputs, _is_cuda_graph=False):
+        return None
+
+    def forward(self, inputs, _fmha_impl=None):
+        self.batch_token_counts.append(inputs.input_ids.numel())
+        return PyModelOutputs(self.hidden(inputs))
+
+    def forward_micro_batch(self, _inputs):
+        raise AssertionError("ordinary model must keep the unsplit forward path")
+
+
+class _ExpertFastAFDModel(_IdleFastAFDModel):
+    # The expert-service branch must bypass the splitter without the AG marker.
+    use_real_micro_batches_only = False
+
+
+def _final_norm(hidden):
+    gamma = (torch.arange(2048, device=hidden.device) % 4 + 1).to(hidden.dtype) * 0.5
+    return (
+        hidden.float()
+        * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-5)
+        * gamma
+    )
+
+
+class _PythonNormalizedHiddenModel(_OrdinaryHiddenModel):
+    @staticmethod
+    def hidden(inputs):
+        return _final_norm(_MicroBatchHiddenModel.hidden(inputs)).to(torch.bfloat16)
+
+
+class _NormalizedFastAFDHiddenModel(_PythonNormalizedHiddenModel):
+    requires_micro_batch_forward = True
+    use_real_micro_batches_only = True
+    micro_batch_outputs_are_normalized = True
+
+    def forward_micro_batch(self, inputs):
+        self.batch_token_counts = [part.input_ids.numel() for part in inputs]
+        return [PyModelOutputs(self.hidden(part)) for part in inputs]
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class MicroBatchFinalNormTest(unittest.TestCase):
+    def test_python_normalized_micro_batches_match_baseline_hidden_and_logits(self):
+        for decode, token_count, parts in ((False, 8, [6, 2]), (True, 3, [2, 1])):
+            baseline_model = _PythonNormalizedHiddenModel()
+            baseline = _extension.run_micro_batch_final_norm(
+                baseline_model, decode, False
+            )
+            self.assertEqual(baseline_model.batch_token_counts, [token_count])
+            for split in (False, True):
+                with self.subTest(decode=decode, split=split):
+                    model = _NormalizedFastAFDHiddenModel()
+                    actual = _extension.run_micro_batch_final_norm(model, decode, split)
+                    self.assertEqual(
+                        model.batch_token_counts, parts if split else [token_count]
+                    )
+                    for name in ("hidden", "logits"):
+                        torch.testing.assert_close(
+                            actual[name], baseline[name], rtol=0, atol=0
+                        )
+
+    def test_legacy_micro_batches_keep_cpp_final_norm(self):
+        for decode, token_count, parts in ((False, 8, [6, 2]), (True, 3, [2, 1])):
+            with self.subTest(decode=decode):
+                model = _MicroBatchHiddenModel()
+                actual = _extension.run_micro_batch_final_norm(model, decode, True)
+                self.assertEqual(model.batch_token_counts, parts)
+                tokens = torch.arange(1, token_count + 1, device="cuda")
+                columns = torch.arange(2048, device="cuda") % 16
+                raw = (tokens.unsqueeze(1) * 16 + columns).to(torch.bfloat16)
+                expected = _final_norm(raw)
+                torch.testing.assert_close(actual["hidden"], expected, rtol=0, atol=0)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class MicroBatchHiddenMergeTest(unittest.TestCase):
+    def assert_hidden(self, hidden, token_count):
+        self.assertEqual(tuple(hidden.shape), (token_count, 2048))
+        self.assertEqual(hidden.dtype, torch.bfloat16)
+        tokens = torch.arange(1, token_count + 1, device="cuda")
+        columns = torch.arange(2048, device="cuda") % 16
+        expected = (tokens.unsqueeze(1) * 16 + columns).to(torch.bfloat16)
+        torch.testing.assert_close(hidden, expected, rtol=0, atol=0)
+
+    def test_decoder_width_can_differ_from_attention_projection_width(self):
+        for decode, token_count, split in ((False, 8, [6, 2]), (True, 3, [2, 1])):
+            with self.subTest(decode=decode):
+                model = _MicroBatchHiddenModel()
+                hidden = _extension.run_micro_batch_hidden_merge(model, decode)
+                self.assertEqual(model.batch_token_counts, split)
+                self.assert_hidden(hidden, token_count)
+
+    def test_fastafd_protocol_entry_accepts_split_or_one_real_batch(self):
+        for decode, token_count, parts in ((False, 8, [6, 2]), (True, 3, [2, 1])):
+            for split in (False, True):
+                with self.subTest(decode=decode, split=split):
+                    model = _FastAFDHiddenModel()
+                    hidden = _extension.run_micro_batch_hidden_merge(
+                        model, decode, split
+                    )
+                    self.assertEqual(
+                        model.batch_token_counts, parts if split else [token_count]
+                    )
+                    self.assert_hidden(hidden, token_count)
+
+    def test_ordinary_model_without_capability_keeps_direct_forward(self):
+        for decode, token_count in ((False, 8), (True, 3)):
+            with self.subTest(decode=decode):
+                model = _OrdinaryHiddenModel()
+                hidden = _extension.run_micro_batch_hidden_merge(model, decode, False)
+                self.assertEqual(model.batch_token_counts, [token_count])
+                self.assert_hidden(hidden, token_count)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class EmptyFastAFDStepTest(unittest.TestCase):
+    def test_idle_attention_rank_sends_empty_step_without_decoder_input(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                model = _IdleFastAFDModel()
+                run_empty_fastafd_step(model, split)
+                self.assertEqual(model.calls, 1)
+
+    def test_expert_rank_enters_service_with_splitting_disabled(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                model = _ExpertFastAFDModel()
+                run_empty_fastafd_step(model, split, True)
+                self.assertEqual(model.calls, 1)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")

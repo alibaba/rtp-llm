@@ -18,6 +18,7 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
+_FAST_AFD_CONTROL_GROUP = "FAST_AFD_CONTROL"
 
 
 class Group(Enum):
@@ -718,6 +719,30 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         )
 
     return _group_map[group_key]
+
+
+def get_fast_afd_control_group() -> torch.distributed.ProcessGroup:
+    """Get the CPU control group shared by all FastAFD ranks.
+
+    Every attention and expert rank must call this once during model
+    construction, after the normal distributed initialization. Creating the
+    group here keeps non-FastAFD models from creating an unused Gloo group.
+    Subsequent calls reuse it; destroy_distributed_environment clears it with
+    the other process groups.
+    """
+    if not torch.distributed.is_initialized():
+        raise RuntimeError("FastAFD control requires an initialized distributed world")
+    if _FAST_AFD_CONTROL_GROUP not in _group_map:
+        if not torch.distributed.is_gloo_available():
+            raise RuntimeError("FastAFD CPU control requires the Gloo backend")
+        _group_map[_FAST_AFD_CONTROL_GROUP] = torch.distributed.new_group(
+            ranks=list(range(torch.distributed.get_world_size())),
+            backend="gloo",
+            # Idle attention ranks can wait at the step barrier indefinitely,
+            # just like the NCCL data group.
+            timeout=timedelta(days=36500),
+        )
+    return _group_map[_FAST_AFD_CONTROL_GROUP]
 
 
 # 需要注意：调用 send/recv 时如果某些 rank 没有操作，就没有对应的 ncclgroupstart/ncclgroupend

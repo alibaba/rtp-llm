@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,45 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
+    def test_fast_afd_cpu_group_is_created_once_and_keeps_nccl_world(self):
+        nccl_group = object()
+        control_group = object()
+        groups = {collective.Group.DP_AND_TP: nccl_group}
+        with (
+            patch.object(collective, "_group_map", groups),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "is_gloo_available", return_value=True),
+            patch.object(torch.distributed, "get_world_size", return_value=3),
+            patch.object(
+                torch.distributed, "new_group", return_value=control_group
+            ) as new_group,
+        ):
+            self.assertIs(collective.get_fast_afd_control_group(), control_group)
+            self.assertIs(collective.get_fast_afd_control_group(), control_group)
+        new_group.assert_called_once_with(
+            ranks=[0, 1, 2], backend="gloo", timeout=timedelta(days=36500)
+        )
+        self.assertIs(groups[collective.Group.DP_AND_TP], nccl_group)
+
+    def test_fast_afd_control_requires_initialized_world_and_gloo(self):
+        with (
+            patch.object(collective, "_group_map", {}),
+            patch.object(torch.distributed, "new_group") as new_group,
+            patch.object(torch.distributed, "is_initialized", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "initialized distributed world"):
+                collective.get_fast_afd_control_group()
+        new_group.assert_not_called()
+        with (
+            patch.object(collective, "_group_map", {}),
+            patch.object(torch.distributed, "new_group") as new_group,
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "is_gloo_available", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Gloo backend"):
+                collective.get_fast_afd_control_group()
+        new_group.assert_not_called()
+
     def _registered_callbacks(self, config=None, process_group=None):
         if process_group is None:
             process_group = MagicMock()
@@ -25,11 +65,15 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
             )
         compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
 
-        with patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}), patch.object(
-            collective,
-            "_group_map",
-            {collective.Group.DP_AND_TP: process_group},
-        ), patch.object(collective, "_parallelism_config", config):
+        with (
+            patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+            patch.object(
+                collective,
+                "_group_map",
+                {collective.Group.DP_AND_TP: process_group},
+            ),
+            patch.object(collective, "_parallelism_config", config),
+        ):
             collective._register_process_groups_to_cpp()
 
         compute_ops.register_comm_ops.assert_called_once()
@@ -92,9 +136,12 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         )
 
         broadcast = self._registered_callbacks(config, process_group)[0]
-        with patch.object(
-            torch.distributed, "get_global_rank", return_value=0
-        ) as get_global_rank, patch.object(torch.cuda, "current_device", return_value=0):
+        with (
+            patch.object(
+                torch.distributed, "get_global_rank", return_value=0
+            ) as get_global_rank,
+            patch.object(torch.cuda, "current_device", return_value=0),
+        ):
             broadcast([], 0, collective._CPP_PARALLEL_MODE_DP)
 
         get_global_rank.assert_called_once_with(process_group, 0)
@@ -107,20 +154,14 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=None),
-            patch.object(
-                collective, "_get_flashinfer_allreduce"
-            ) as flashinfer,
+            patch.object(collective, "_get_flashinfer_allreduce") as flashinfer,
             patch.object(collective, "_get_symm_mem") as symm_mem,
             patch.object(collective, "_get_group", return_value=object()),
-            patch.object(
-                torch.distributed, "all_reduce", side_effect=reduce_in_place
-            ),
+            patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place),
         ):
             flashinfer.return_value.get_flashinfer_allreduce.return_value = None
             symm_mem.return_value.get_symm_mem_communicator.return_value = None
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))
@@ -131,17 +172,13 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         capture = MagicMock()
         capture.ensure_capture_comm_ready.return_value = None
         capture.should_use_capture_collectives.return_value = True
-        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(
-            10
-        )
+        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(10)
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=capture),
             patch.object(collective, "_get_group", return_value=object()),
         ):
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))

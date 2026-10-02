@@ -14,8 +14,9 @@ from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
-from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
+from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType, SpeculativeType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.start_backend_server import start_backend_server
 
@@ -29,6 +30,121 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class Qwen35AFDSetupTest(TestCase):
+    def _config(self, world_size: int = 2) -> PyEnvConfigs:
+        config = PyEnvConfigs()
+        config.model_args.model_type = "qwen35_moe"
+        config.parallelism_config.world_size = world_size
+        config.parallelism_config.dp_size = world_size
+        config.parallelism_config.ep_size = 0
+        config.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        config.device_resource_config.enable_layer_micro_batch = 1
+        return config
+
+    def test_two_rank_topology_has_one_attention_and_one_expert(self):
+        for rank in range(2):
+            config = self._config()
+            config.parallelism_config.world_rank = rank
+            setup_default_args(config)
+            parallelism = config.parallelism_config
+            self.assertEqual(parallelism.dp_size, 2)
+            self.assertEqual(parallelism.ep_size, 2)
+            self.assertEqual(parallelism.dp_rank, rank)
+            self.assertEqual(parallelism.ep_rank, rank)
+            self.assertTrue(parallelism.ffn_disaggregate_config.enable_ffn_disaggregate)
+            self.assertEqual(parallelism.ffn_disaggregate_config.is_ffn_rank, rank == 1)
+            self.assertEqual(parallelism.ffn_disaggregate_config.attention_dp_size, 1)
+            self.assertEqual(parallelism.ffn_disaggregate_config.ffn_dp_size, 1)
+
+    def test_four_rank_topology_has_three_attention_ranks(self):
+        for rank in range(4):
+            config = self._config(world_size=4)
+            config.parallelism_config.world_rank = rank
+            setup_default_args(config)
+            parallelism = config.parallelism_config
+            self.assertEqual(parallelism.ep_size, 4)
+            self.assertTrue(parallelism.ffn_disaggregate_config.enable_ffn_disaggregate)
+            self.assertEqual(parallelism.ffn_disaggregate_config.is_ffn_rank, rank == 3)
+            self.assertEqual(parallelism.ffn_disaggregate_config.attention_dp_size, 3)
+
+    def test_micro_batch_split_is_optional_for_both_roles(self):
+        for split in (0, 1):
+            for rank in range(2):
+                with self.subTest(split=split, rank=rank):
+                    config = self._config()
+                    config.parallelism_config.world_rank = rank
+                    config.device_resource_config.enable_layer_micro_batch = split
+                    setup_default_args(config)
+                    self.assertEqual(
+                        config.device_resource_config.enable_layer_micro_batch, split
+                    )
+                    self.assertEqual(
+                        config.parallelism_config.ffn_disaggregate_config.is_ffn_rank,
+                        rank == 1,
+                    )
+
+    def test_rejects_dp_size_that_does_not_span_the_union_world(self):
+        config = self._config()
+        config.parallelism_config.dp_size = 1
+        with self.assertRaisesRegex(ValueError, "dp_size = world_size"):
+            setup_default_args(config)
+
+    def test_rejects_ep_size_that_would_partition_the_expert_rank(self):
+        config = self._config(world_size=4)
+        config.parallelism_config.ep_size = 2
+        with self.assertRaisesRegex(ValueError, "ep_size = world_size"):
+            setup_default_args(config)
+
+    def test_rejects_explicit_nonlocal_moe_strategy(self):
+        config = self._config()
+        config.moe_config.moe_strategy = "fp8_per_block_pure_dp"
+        with self.assertRaisesRegex(ValueError, "moe_strategy auto"):
+            setup_default_args(config)
+
+    def test_rejects_speculative_model_with_unmatched_expert_rounds(self):
+        config = self._config()
+        config.sp_config.type = SpeculativeType.MTP
+        with self.assertRaisesRegex(ValueError, "speculative decoding"):
+            setup_default_args(config)
+
+    def test_rejects_system_prompt_before_expert_service_starts(self):
+        for source, value in (
+            ("multi_task_prompt", "/tmp/unused-task-prompts.json"),
+            ("multi_task_prompt_str", '[{"task_id": "1", "prompt": "hi"}]'),
+        ):
+            with self.subTest(source=source):
+                config = self._config()
+                setattr(config.kv_cache_config, source, value)
+                with self.assertRaisesRegex(ValueError, "system prompts"):
+                    setup_default_args(config)
+
+        config = self._config()
+        config.kv_cache_config.insertMultiTaskPromptTokens("1", [1, 2])
+        with self.assertRaisesRegex(ValueError, "system prompts"):
+            setup_default_args(config)
+
+    def test_rejects_explicit_deepep_mode(self):
+        config = self._config()
+        config.deep_ep_config.use_deepep_low_latency = True
+        with self.assertRaisesRegex(ValueError, "disable DeepEP"):
+            setup_default_args(config)
+
+    def test_union_world_does_not_enable_symmetric_deepep(self):
+        config = self._config()
+        with patch(
+            "rtp_llm.config.server_config_setup.fetch_model_files_to_local"
+        ), patch(
+            "rtp_llm.config.server_config_setup.socket.gethostbyname",
+            return_value="127.0.0.1",
+        ):
+            setup_and_configure_server(config)
+        self.assertFalse(config.moe_config.use_deepep_moe)
+        self.assertFalse(config.moe_config.use_deepep_low_latency)
+        self.assertFalse(config.moe_config.use_deepep_internode)
+        self.assertFalse(config.moe_config.use_mori_ep)
+        self.assertTrue(config.moe_config.use_all_gather)
 
 
 class ServerConfigPortLayoutTest(TestCase):

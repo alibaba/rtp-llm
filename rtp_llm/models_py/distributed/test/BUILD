@@ -1,3 +1,32 @@
+py_test(
+    name = "fast_afd_unit_test",
+    srcs = ["fast_afd_unit_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:fast_afd",
+    ],
+    timeout = "short",
+)
+
+# Three visible CUDA devices suffice; payloads use ordinary NCCL P2P and do
+# not require NVLink or peer memory access. No model/server is started.
+py_test(
+    name = "fast_afd_transport_integration_test",
+    srcs = ["fast_afd_transport_integration_test.py"],
+    deps = [
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:fast_afd",
+    ],
+    timeout = "moderate",
+    env = {"GPU_COUNT": "3"},
+    tags = ["open_skip"],
+    exec_properties = {"gpu": "A10", "gpu_count": "3"},
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

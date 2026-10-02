@@ -36,16 +36,17 @@ inline const char* vitSeparationName(VitSeparation separation) {
 }
 
 // Keep this ownership rule aligned with LanguageCppEngine in rpc_engine.py.
-inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank) {
-    return tp_rank == 0 && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
+inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank, bool is_ffn_service) {
+    return !is_ffn_service && tp_rank == 0 && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
 }
 
 inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
                                               VitSeparation vit_separation,
                                               bool          has_local_engine,
                                               RoleType      role_type,
-                                              int64_t       tp_rank) {
-    if (!is_multimodal || !ownsMultimodalIngress(role_type, tp_rank)) {
+                                              int64_t       tp_rank,
+                                              bool          is_ffn_service = false) {
+    if (!is_multimodal || !ownsMultimodalIngress(role_type, tp_rank, is_ffn_service)) {
         return MMProcessorKind::NONE;
     }
     if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
@@ -83,14 +84,17 @@ inline MMProcessorDecision resolveAndLogMMProcessorKind(bool               is_mu
                                                         bool               has_local_engine,
                                                         RoleType           role_type,
                                                         int64_t            tp_rank,
+                                                        bool               is_ffn_service,
                                                         const std::string& model_type,
                                                         const std::string& entry) {
     MMProcessorDecision decision;
-    decision.kind = resolveMMProcessorKind(is_multimodal, vit_separation, has_local_engine, role_type, tp_rank);
+    decision.kind =
+        resolveMMProcessorKind(is_multimodal, vit_separation, has_local_engine, role_type, tp_rank, is_ffn_service);
 
     const std::string described = "entry=" + entry + ", vit_separation=" + vitSeparationName(vit_separation)
                                   + ", role_type=" + roleTypeToString(role_type)
-                                  + ", tp_rank=" + std::to_string(tp_rank) + ", model_type=" + model_type;
+                                  + ", tp_rank=" + std::to_string(tp_rank) + ", is_ffn_service="
+                                  + (is_ffn_service ? "true" : "false") + ", model_type=" + model_type;
     RTP_LLM_LOG_INFO("multimodal processor decision: %s, has_local_engine=%s, kind=%s",
                      described.c_str(),
                      has_local_engine ? "true" : "false",

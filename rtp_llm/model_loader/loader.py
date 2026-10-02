@@ -52,6 +52,39 @@ class ModelLoader:
         self._task_type = model_config.task_type
         self._load_method = load_method
         self._weights_info = weights_info
+        if getattr(weights_info, "uses_fastafd_weight_partition", False):
+            if database.is_ft_style:
+                raise ValueError(
+                    "Qwen3.5 FastAFD requires a Hugging Face checkpoint; "
+                    "FT-style pre-sharded checkpoints bypass role-specific weight loading"
+                )
+            if load_method == LoadMethod.FASTSAFETENSORS:
+                raise ValueError(
+                    "Qwen3.5 FastAFD requires scratch weight loading; "
+                    "fastsafetensors reads unrelated tensors from shared checkpoint files"
+                )
+            # The scratch loader reads only checkpoint keys declared for this
+            # rank. AUTO can otherwise select fastsafetensors at runtime.
+            self._load_method = LoadMethod.SCRATCH
+            if (
+                weights_info.enable_eplb_
+                or weights_info.phy_exp_num_ != weights_info.expert_num_
+            ):
+                raise ValueError(
+                    "Qwen3.5 FastAFD does not support EPLB or redundant experts"
+                )
+            if weights_info.output_vocab_ids:
+                raise ValueError(
+                    "Qwen3.5 FastAFD does not support output vocabulary pruning"
+                )
+            if weights_info.weight_style != WeightStyle.NONE:
+                raise ValueError(
+                    "Qwen3.5 FastAFD requires standard Hugging Face weight style"
+                )
+            if weights_info.is_ffn_service and misc_weights_info:
+                raise ValueError(
+                    "Qwen3.5 FastAFD expert rank cannot load custom module weights"
+                )
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         if self._misc_weights_info is None:
             self._misc_weights_info = []
@@ -497,7 +530,9 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights(self, device: str):
-        if not self._is_attn_model:
+        if not self._is_attn_model or getattr(
+            self._weights_info, "load_layer_weights_on_attn_rank", False
+        ):
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
@@ -735,6 +770,14 @@ class ModelLoader:
 
     def _load_dynamic_weights(self, weight: ModelWeights, device: str):
         assert weight is not None, "weight is None"
+        if (
+            getattr(self._weights_info, "uses_fastafd_weight_partition", False)
+            and self._weights_info.is_ffn_service
+        ):
+            # The FastAFD expert service owns routed layer weights only. It
+            # neither needs an embedding/LM head nor executes a model-global
+            # dynamic weight, and those globals are absent by construction.
+            return
 
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:

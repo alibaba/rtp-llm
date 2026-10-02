@@ -142,6 +142,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                           !mm_process_engine.is_none(),
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.parallelism_config.ffn_disaggregate_config
+                                                              .is_ffn_service(),
                                                           maga_init_params.model_config_.model_type,
                                                           "LocalRpcServer");
     const auto mm_kind     = mm_decision.kind;

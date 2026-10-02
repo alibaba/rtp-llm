@@ -140,6 +140,31 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     return local_world_size
 
 
+def _is_qwen35_fast_afd(py_env_configs: PyEnvConfigs) -> bool:
+    return (
+        py_env_configs.model_args.model_type == "qwen35_moe"
+        and py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate
+    )
+
+
+def _validate_fast_afd_single_node(py_env_configs: PyEnvConfigs) -> None:
+    if not _is_qwen35_fast_afd(py_env_configs):
+        return
+    pc = py_env_configs.parallelism_config
+    local_world_size = _get_local_world_size(py_env_configs)
+    if (
+        not torch.cuda.is_available()
+        or pc.world_rank != 0
+        or local_world_size != pc.world_size
+        or torch.cuda.device_count() < pc.world_size
+    ):
+        raise ValueError(
+            "Qwen3.5 FastAFD currently requires all attention and expert "
+            "ranks on one node with one visible GPU per rank; "
+            "cross-node shutdown ordering is not supported"
+        )
+
+
 def _get_cuda_device_list() -> List[str]:
     """Get CUDA device list from environment or hardware detection"""
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -291,6 +316,7 @@ def multi_rank_start(
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
+        _validate_fast_afd_single_node(py_env_configs)
         _create_rank_processes(
             global_controller, py_env_configs, ctx, processes, rank_pipe_readers
         )
@@ -305,13 +331,28 @@ def multi_rank_start(
         # Wait for all ranks to report startup status
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
-        manager = ProcessManager(
+        fast_afd = _is_qwen35_fast_afd(py_env_configs)
+        manager_options = dict(
             shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
             pre_exit_cleanup=cleanup,
         )
-        manager.set_processes(processes, shutdown_group="backend")
+        if fast_afd:
+            # AGs must finish their engine loops and send STOP before the EG
+            # receives its shutdown signal. Do not add the ordinary 120-second
+            # frontend-to-backend linger to this rank-local protocol.
+            manager_options["backend_post_frontend_drain_seconds"] = 0
+        manager = ProcessManager(**manager_options)
+        if fast_afd:
+            if local_world_size != py_env_configs.parallelism_config.world_size:
+                raise ValueError("FastAFD rank process count does not match world_size")
+            # This order applies to shutdowns managed by this parent process;
+            # direct signals to every rank bypass its staged groups.
+            manager.add_processes(processes[:-1], shutdown_group="frontend")
+            manager.add_process(processes[-1], shutdown_group="backend")
+        else:
+            manager.set_processes(processes, shutdown_group="backend")
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -386,6 +427,7 @@ def start_backend_server(
     load_gpu_nic_affinity()
 
     pc = py_env_configs.parallelism_config
+    _validate_fast_afd_single_node(py_env_configs)
     if not torch.cuda.is_available():
         return local_rank_start(
             global_controller, py_env_configs, pc.world_rank, pipe_writer

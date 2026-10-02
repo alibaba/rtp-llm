@@ -51,6 +51,8 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        remote_expert_client: Optional[Any] = None,
+        layer_idx: int = -1,
     ):
         super().__init__()
         self.config = config
@@ -62,6 +64,8 @@ class GenericMoeLayer(nn.Module):
         self.ffn_dim = config.inter_size
         self.num_experts = config.eplb_config.phy_exp_num(config.expert_num)
         self.top_k = config.moe_k
+        self.remote_expert_client = remote_expert_client
+        self.layer_idx = layer_idx
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -79,21 +83,28 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
-        config_adapter = MoEConfigAdapter(
-            model_config=config,
-            parallelism_config=parallelism_config,
-            moe_config=moe_config,
-            quant_config=quant_config,
-            enable_cuda_graph=enable_cuda_graph,
-        )
-        config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
-        router = self.fused_moe.router
-        router_tp_size = router.tp_collective_size
+        if remote_expert_client is None:
+            config_adapter = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=quant_config,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
+            self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+            router = self.fused_moe.router
+            router_tp_size = router.tp_collective_size
+        else:
+            # FastAFD keeps routing and the shared expert on the attention rank.
+            # Routed expert weights exist only on the FFN rank.
+            self.fused_moe = None
+            router = None
+            router_tp_size = 1
 
         self.num_local_experts = self.num_experts // max(self.ep_size, 1)
-        self.add_shared_expert = (
-            config.moe_style == 2 and not self.fused_moe.includes_shared_expert
+        self.add_shared_expert = config.moe_style == 2 and (
+            self.fused_moe is None or not self.fused_moe.includes_shared_expert
         )
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
@@ -127,6 +138,7 @@ class GenericMoeLayer(nn.Module):
         )
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
+            and router is not None
             and self.ffn_tp_size > 1
             and self.ep_size == 1
             and self.ffn_tp_size == router_tp_size
@@ -180,7 +192,11 @@ class GenericMoeLayer(nn.Module):
             device=hidden_states.device,
         )
         # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
+        topk_ids_dtype = (
+            self.fused_moe.topk_ids_dtype
+            if self.fused_moe is not None
+            else self.remote_expert_client.topk_ids_dtype
+        )
         topk_ids = torch.empty(
             (num_tokens, self.top_k),
             dtype=topk_ids_dtype,
@@ -217,13 +233,18 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
-        )
+        if self.remote_expert_client is None:
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                skip_tp_allreduce=self.use_unified_tp_allreduce,
+            )
+        else:
+            experts_output = self.remote_expert_client.forward(
+                self.layer_idx, hidden_states, topk_ids, topk_weights
+            )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
@@ -434,7 +455,9 @@ class GenericMoeModel(GptModelBase):
             attention_inputs = get_attention_inputs_value(inputs)
             if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
                 # Cacheless warmup shares one input and skips the indexer.
-                fmha_impl = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+                fmha_impl = super().prepare_fmha_impl(
+                    inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
                 return {"default": fmha_impl, "indexer_kv": fmha_impl}
             raw_tags = (
                 list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
@@ -445,7 +468,9 @@ class GenericMoeModel(GptModelBase):
                     "sparse MLA requires exactly attention input tags "
                     f"{sorted(required_tags)}; available tags={raw_tags}"
                 )
-        return super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids

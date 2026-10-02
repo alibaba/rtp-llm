@@ -263,6 +263,7 @@ class Qwen35Moe(Qwen3NextBase):
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
+        ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
@@ -285,7 +286,32 @@ class Qwen35Moe(Qwen3NextBase):
             )
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
-        self.py_model = Qwen35Model(
+        model_cls = Qwen35Model
+        if ffn_disaggregate_config.enable_ffn_disaggregate:
+            if isinstance(self, Qwen35Dense):
+                raise ValueError("FastAFD supports Qwen3.5 MoE, not Qwen3.5 Dense")
+            if list(model_config.moe_layer_index) != list(
+                range(model_config.num_layers)
+            ):
+                raise ValueError(
+                    "FastAFD Qwen3.5 currently requires a MoE in every layer"
+                )
+            if model_config.eplb_config.enable_eplb():
+                raise ValueError("FastAFD Qwen3.5 does not support EPLB")
+            if not is_cuda():
+                raise ValueError("FastAFD Qwen3.5 MoE currently requires CUDA")
+            from rtp_llm.models_py.model_desc.fast_afd_qwen35 import (
+                Qwen35AFDAttentionModel,
+                Qwen35AFDExpertModel,
+            )
+
+            model_cls = (
+                Qwen35AFDExpertModel
+                if ffn_disaggregate_config.is_ffn_service()
+                else Qwen35AFDAttentionModel
+            )
+
+        self.py_model = model_cls(
             model_config,
             parallelism_config,
             self.weight,

@@ -27,6 +27,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockEpNormalStrategy,
     CudaFp8PerBlockNoDPMaskedStrategy,
     CudaFp8PerBlockNoDPStrategy,
+    CudaFp8PerBlockNoDPTritonStrategy,
     CudaFp8PerBlockPureCPStrategy,
     CudaFp8PerBlockPureDPStrategy,
     CudaFp8PerTensorNoDPStrategy,
@@ -36,6 +37,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy.ep import (
     RocmEpNormalStrategy,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
+    StrategyRegistry,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
     ConditionChecker,
@@ -349,6 +353,97 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertEqual(attributes.router_class.router_type(), router_type)
         self.assertEqual(attributes.executor_class.executor_type(), executor_type)
         self.assertEqual(strategy.priority, expected_priority)
+
+
+class TestCudaFp8PerBlockNoDPTritonStrategy(unittest.TestCase):
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "triton_fp8_per_block_executor.get_sm",
+        return_value=(9, 0),
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "deepgemm_hybrid_executor.get_sm",
+        return_value=(9, 0),
+    )
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_deepgemm_keeps_priority_when_available(
+        self, mock_has_deep_gemm: Any, _deepgemm_sm: Any, _triton_sm: Any
+    ) -> None:
+        mock_has_deep_gemm.return_value = True
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+        )
+        registry = StrategyRegistry()
+        registry.register(CudaFp8PerBlockNoDPStrategy())
+        registry.register(CudaFp8PerBlockNoDPTritonStrategy())
+        self.assertIs(type(registry.get_strategy(config)), CudaFp8PerBlockNoDPStrategy)
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "triton_fp8_per_block_executor.get_sm",
+        return_value=(8, 9),
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "deepgemm_hybrid_executor.get_sm",
+        return_value=(8, 9),
+    )
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_sm89_selects_triton_without_deepgemm(
+        self, mock_has_deep_gemm: Any, _deepgemm_sm: Any, _triton_sm: Any
+    ) -> None:
+        mock_has_deep_gemm.return_value = False
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(
+                use_all_gather=True, moe_strategy="fp8_per_block_no_dp"
+            ),
+        )
+        registry = StrategyRegistry()
+        registry.register(CudaFp8PerBlockNoDPStrategy())
+        registry.register(CudaFp8PerBlockNoDPTritonStrategy())
+
+        selected = registry.get_strategy(config)
+        self.assertIsInstance(selected, CudaFp8PerBlockNoDPTritonStrategy)
+        self.assertEqual(
+            selected.get_attributes().executor_class.__name__,
+            "TritonFp8PerBlockExecutor",
+        )
+        config.moe_strategy = "auto"
+        self.assertIsInstance(
+            registry.get_strategy(config), CudaFp8PerBlockNoDPTritonStrategy
+        )
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "triton_fp8_per_block_executor.get_sm",
+        return_value=(8, 6),
+    )
+    def test_pre_fp8_architecture_is_rejected(self, _mock_sm: Any) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+        )
+        self.assertFalse(CudaFp8PerBlockNoDPTritonStrategy().can_handle(config))
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "triton_fp8_per_block_executor.get_sm",
+        return_value=(8, 9),
+    )
+    def test_cuda_graph_is_rejected(self, _mock_sm: Any) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+            enable_cuda_graph=True,
+        )
+        self.assertFalse(CudaFp8PerBlockNoDPTritonStrategy().can_handle(config))
 
 
 class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):

@@ -23,6 +23,11 @@ TEST(MMProcessorConfigTest, resolvesOnlyValidIngressConfigurations) {
     // (those roles don't run the LLM ingress path) but pin the table's completeness.
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, VIT, 0), MMProcessorKind::NONE);
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, FRONTEND, 0), MMProcessorKind::NONE);
+
+    // The FFN service has tp_rank 0 but never handles multimodal ingress. Its Python
+    // engine deliberately does not create a local MMProcessEngine.
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, false, PDFUSION, 0, true), MMProcessorKind::NONE);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, false, PREFILL, 0, true), MMProcessorKind::NONE);
 }
 
 }  // namespace rtp_llm

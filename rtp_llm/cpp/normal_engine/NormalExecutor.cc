@@ -81,6 +81,29 @@ NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
 }
 
+absl::Status NormalExecutor::shutdownFastAFD() {
+    auto* py_model = dynamic_cast<PyWrappedModel*>(model_.get());
+    if (!py_model) {
+        return absl::FailedPreconditionError("FastAFD requires a Python-wrapped model");
+    }
+    try {
+        py_model->shutdownFastAFD();
+        return absl::OkStatus();
+    } catch (const std::exception& e) {
+        return absl::InternalError(std::string("FastAFD shutdown failed: ") + e.what());
+    }
+}
+
+bool NormalExecutor::fastAFDServiceFinished() {
+    auto* py_model = dynamic_cast<PyWrappedModel*>(model_.get());
+    return py_model && py_model->fastAFDServiceFinished();
+}
+
+bool NormalExecutor::fastAFDGlobalIdle() {
+    auto* py_model = dynamic_cast<PyWrappedModel*>(model_.get());
+    return py_model && py_model->fastAFDGlobalIdle();
+}
+
 NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                bool                                   warm_up,

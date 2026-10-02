@@ -1,5 +1,6 @@
 #pragma once
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -85,6 +86,18 @@ public:
     virtual ~Executor() {};
 
     virtual bool updateEplbConfig(const EPLBConfig& config) {
+        return false;
+    }
+
+    // Used only by the Qwen3.5 FastAFD engine. The default is inert for all
+    // other executor implementations.
+    virtual absl::Status shutdownFastAFD() {
+        return absl::OkStatus();
+    }
+    virtual bool fastAFDServiceFinished() {
+        return false;
+    }
+    virtual bool fastAFDGlobalIdle() {
         return false;
     }
 

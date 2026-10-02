@@ -468,7 +468,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
 }
 
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
-                                                 const ParallelismConfig& parallelism_config) {
+                                                 const ParallelismConfig& parallelism_config,
+                                                 size_t                   attention_rank_count) {
     size_t world_size = parallelism_config.tp_size * parallelism_config.dp_size;
     if (world_size > 1) {
         RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()),
@@ -481,18 +482,33 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        return selectConfirmedBlockNum(
-            block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        return selectConfirmedBlockNum(block_num_ptr,
+                                       world_size,
+                                       parallelism_config.ffn_disaggregate_config.is_ffn_service(),
+                                       attention_rank_count);
     }
     return candidate_block_num;
 }
 
-uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service) {
+uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates,
+                                                     size_t     count,
+                                                     bool       is_ffn_service,
+                                                     size_t     attention_rank_count) {
     RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache candidates must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(attention_rank_count == 0 || attention_rank_count < count,
+                            "FastAFD attention rank count must be smaller than the union world: attention=%zu "
+                            "world=%zu",
+                            attention_rank_count,
+                            count);
     if (is_ffn_service) {
-        return 1;
+        // Block 0 is reserved; DeviceBlockPool requires one usable block.
+        return 2;
     }
-    const auto confirmed = *std::min_element(candidates, candidates + count);
+    // Qwen3.5 FastAFD's final rank owns all routed experts and only uses the
+    // minimum KV pool. Its smaller free-memory candidate must not limit
+    // the attention ranks' KV cache capacity.
+    const auto participating_count = attention_rank_count == 0 ? count : attention_rank_count;
+    const auto confirmed           = *std::min_element(candidates, candidates + participating_count);
     RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
     return static_cast<uint32_t>(confirmed);
 }

@@ -191,6 +191,22 @@ PyWrappedModel::~PyWrappedModel() {
     }
 }
 
+void PyWrappedModel::shutdownFastAFD() {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("stop_fast_afd")();
+}
+
+bool PyWrappedModel::fastAFDServiceFinished() {
+    py::gil_scoped_acquire gil;
+    return py::hasattr(py_model_, "fast_afd_service_finished")
+           && py_model_.attr("fast_afd_service_finished").cast<bool>();
+}
+
+bool PyWrappedModel::fastAFDGlobalIdle() {
+    py::gil_scoped_acquire gil;
+    return py::hasattr(py_model_, "fast_afd_global_idle") && py_model_.attr("fast_afd_global_idle").cast<bool>();
+}
+
 // Helper function to build PyAttentionInputs from GptModelInputs
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
@@ -643,10 +659,30 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
             py::object py_outputs_obj    = py_forward_method(std::vector<PyModelInputs>{});
             return GptModelOutputs();
         }
+        if (inputs.combo_tokens.defined() && inputs.combo_tokens.numel() == 0
+            && py::hasattr(py_model_, "use_real_micro_batches_only")
+            && py_model_.attr("use_real_micro_batches_only").cast<bool>()) {
+            // FastAFD attention ranks send FINISH for an idle step. The
+            // ordinary splitter would manufacture a one-token placeholder
+            // from this empty input, which is invalid for recurrent state.
+            py_model_.attr("forward_micro_batch")(std::vector<PyModelInputs>{});
+            return GptModelOutputs();
+        }
     }
 
     auto micro_batch_plan  = planMicroBatches(inputs);
     auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
+    if (!micro_batch_plan.enable) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(py_model_, "use_real_micro_batches_only")
+            && py_model_.attr("use_real_micro_batches_only").cast<bool>()) {
+            // The second entry is a placeholder used by the legacy dense AFD
+            // protocol. Replaying the first entry would update a recurrent
+            // model's KV/GDN state twice for a single request.
+            RTP_LLM_CHECK_WITH_INFO(split_inputs.size() == 2, "expected one real and one placeholder micro-batch");
+            split_inputs.resize(1);
+        }
+    }
     std::vector<PyModelInputs> input_list;
     input_list.reserve(split_inputs.size());
 
@@ -704,7 +740,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     cache_store_write_cycle.finish();
 
-    // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
     if (!micro_batch_plan.enable) {
         RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].hidden_states.size(0) == inputs.combo_tokens.size(0),
@@ -713,13 +748,23 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                 inputs.combo_tokens.size(0));
         hidden_states = py_model_outputs[0].hidden_states;
     } else {
-        size_t total_tokens = inputs.combo_tokens.size(0);
-        size_t hidden_size  = description_.attention_conf.head_num * description_.attention_conf.size_per_head;
-        hidden_states =
-            torch::empty({(int64_t)total_tokens, (int64_t)hidden_size},
-                         torch::TensorOptions(dataTypeToTorchType(description_.data_type)).device(torch::kCUDA));
-        int offset = 0;
+        const auto  total_tokens = inputs.combo_tokens.size(0);
+        const auto& first_hidden = py_model_outputs.front().hidden_states;
+        TORCH_CHECK(first_hidden.defined() && first_hidden.dim() == 2,
+                    "micro-batch output hidden states must have shape [tokens, hidden_size]");
+        // Attention projection width can differ from decoder hidden width
+        // (Qwen3.5 uses 4096 and 2048 respectively). Preserve the actual output
+        // layout, dtype and device when reassembling the micro-batches.
+        const auto hidden_size = first_hidden.size(1);
+        hidden_states          = torch::empty({total_tokens, hidden_size}, first_hidden.options());
+        int offset             = 0;
         for (int i = 0; i < py_model_outputs.size(); i++) {
+            const auto& micro_hidden = py_model_outputs[i].hidden_states;
+            TORCH_CHECK(micro_hidden.defined() && micro_hidden.dim() == 2 && micro_hidden.size(1) == hidden_size,
+                        "micro-batch output hidden widths must match");
+            TORCH_CHECK(micro_hidden.scalar_type() == first_hidden.scalar_type()
+                            && micro_hidden.device() == first_hidden.device(),
+                        "micro-batch output hidden dtype and device must match");
             RTP_LLM_CHECK_WITH_INFO(
                 offset + py_model_outputs[i].hidden_states.size(0) <= (int)total_tokens,
                 "offset + py_model_outputs[i].hidden_states.size(0):%d > inputs.combo_tokens->shape()[0]:%d",
@@ -737,7 +782,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    // Qwen35 FastAFD reuses the ordinary Python forward, including its final
+    // normalization. Legacy micro-batch models still leave this work to C++.
+    return callForwardPostLayers(hidden_states, inputs, micro_batch_outputs_are_normalized_);
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -905,7 +952,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        if (int(device_props_.enable_layer_micro_batch)) {
+        // FastAFD needs its begin/finish and expert-service entry even when the
+        // batch is not split. planMicroBatches still follows the user flag.
+        if (int(device_props_.enable_layer_micro_batch) || requires_micro_batch_forward_) {
             return with_generation_prefill_cuda_graph_status(forwardMicroBatched(inputs));
         }
         PyContextParallelParams cp_params;

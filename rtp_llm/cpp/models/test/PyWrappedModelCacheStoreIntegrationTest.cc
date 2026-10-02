@@ -937,12 +937,102 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+// Qwen3.5's attention projection is wider than its decoder hidden states.
+// Exercise the real splitter and merger with both prefill and decode inputs.
+GptModelOutputs runMicroBatchHiddenForward(py::object py_model, bool decode, bool split, bool final_norm) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    auto scenario                 = makeMicroBatchScenario();
+    scenario.inputs.pd_separation = false;
+    if (decode) {
+        scenario.inputs.combo_tokens      = pinnedTensor({1, 2, 3}, {3});
+        scenario.inputs.sequence_lengths  = scenario.inputs.input_lengths;
+        scenario.inputs.prefix_lengths    = pinnedTensor({}, {0});
+        scenario.inputs.lm_output_indexes = pinnedTensor({0, 1, 2}, {3});
+    }
+    Weights weights;
+    weights.layers.resize(1);
+    if (final_norm) {
+        auto norm = std::make_shared<LayerNormWeights>();
+        norm->gamma =
+            (torch::arange(2048, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32)).remainder(4) + 1)
+                .mul(0.5)
+                .to(torch::kBFloat16);
+        weights.final_layernorm = norm;
+        auto lm_head            = std::make_shared<DenseWeights>();
+        lm_head->kernel         = torch::eye(4, 2048, norm->gamma.options());
+        weights.lm_head         = lm_head;
+    }
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.layernorm_eps                = 1e-5;
+    description.attention_conf.head_num      = 16;
+    description.attention_conf.kv_head_num   = 2;
+    description.attention_conf.size_per_head = 256;
+    GptModelInitParams params{weights, description, std::make_optional(scenario.layout)};
+    params.hidden_size                                     = 2048;
+    params.device_resource_config.enable_layer_micro_batch = split;
+    PyWrappedModel model(params, std::move(py_model));
+    return model.forward(scenario.inputs);
+}
+
+torch::Tensor runMicroBatchHiddenMerge(py::object py_model, bool decode, bool split) {
+    return runMicroBatchHiddenForward(std::move(py_model), decode, split, false).all_hidden_states;
+}
+
+py::dict runMicroBatchFinalNorm(py::object py_model, bool decode, bool split) {
+    const auto outputs = runMicroBatchHiddenForward(std::move(py_model), decode, split, true);
+    py::dict   result;
+    result["hidden"] = outputs.all_hidden_states;
+    result["logits"] = outputs.logits;
+    return result;
+}
+
+// An idle FastAFD attention rank must send its end-of-step sentinel without
+// passing a synthetic token through the decoder's recurrent state.
+void runEmptyFastAFDStep(py::object py_model, bool split, bool expert_service) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 4;
+    GptModelInitParams params{weights, description, std::nullopt};
+    params.device_resource_config.enable_layer_micro_batch                    = split;
+    params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = expert_service;
+    params.parallelism_config.ffn_disaggregate_config.is_ffn_rank             = expert_service;
+    PyWrappedModel model(params, std::move(py_model));
+
+    auto           empty_i32 = torch::empty({0}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    GptModelInputs inputs;
+    inputs.combo_tokens     = empty_i32;
+    inputs.input_lengths    = empty_i32;
+    inputs.sequence_lengths = empty_i32;
+    inputs.prefix_lengths   = empty_i32;
+    (void)model.forward(inputs);
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_empty_fastafd_step",
+          &rtp_llm::test::runEmptyFastAFDStep,
+          py::arg("py_model"),
+          py::arg("split")          = true,
+          py::arg("expert_service") = false);
+    m.def("run_micro_batch_hidden_merge",
+          &rtp_llm::test::runMicroBatchHiddenMerge,
+          py::arg("py_model"),
+          py::arg("decode"),
+          py::arg("split") = true);
+    m.def("run_micro_batch_final_norm", &rtp_llm::test::runMicroBatchFinalNorm);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

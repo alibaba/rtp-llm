@@ -83,6 +83,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
+    void            shutdownFastAFD();
+    bool            fastAFDServiceFinished();
+    bool            fastAFDGlobalIdle();
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -159,6 +162,8 @@ private:
     py::object                 py_model_;
     py::object                 py_forward_method_;
     py::object                 held_attn_pyobj_;
+    bool                       requires_micro_batch_forward_       = false;
+    bool                       micro_batch_outputs_are_normalized_ = false;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -339,7 +344,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
+    py_model_                     = py_instance;
+    requires_micro_batch_forward_ = py::hasattr(py_model_, "requires_micro_batch_forward")
+                                    && py_model_.attr("requires_micro_batch_forward").cast<bool>();
+    micro_batch_outputs_are_normalized_ = py::hasattr(py_model_, "micro_batch_outputs_are_normalized")
+                                          && py_model_.attr("micro_batch_outputs_are_normalized").cast<bool>();
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
