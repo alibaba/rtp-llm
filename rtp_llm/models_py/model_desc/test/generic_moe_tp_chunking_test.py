@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
 def make_layer(chunks=4, mode="overlap"):
     layer = GenericMoeLayer.__new__(GenericMoeLayer)
     torch.nn.Module.__init__(layer)
+    layer.tp_fused_fp8_enabled = False
     layer.tp_chunk_config = TpMoeChunkConfig(chunks, mode, 1)
     layer.tp_prefill_config = TpMoePrefillConfig()
     layer.flashinfer_tp_prefill = None

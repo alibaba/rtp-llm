@@ -1,3 +1,5 @@
+exports_files(["tp_fp8_all_reduce_test.py"])
+
 py_test(
     name = "tp_fp8_all_reduce_unit_test",
     srcs = ["tp_fp8_all_reduce_unit_test.py"],

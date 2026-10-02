@@ -50,9 +50,10 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
             "MOE_TP_DIRECT_OUTPUT": "1",
             "MOE_TP_FUSION_MIN_TOKENS": "1",
             "DSV4_FP8_QUANT_KERNEL": "auto",
+            "RTP_LLM_MOE_TP_FUSED_FP8_AR": "0",
         }
-        expected = ("2", "overlap", "1", "flashinfer_sm12x", "1", "1", "auto")
-        for changed_index, changed_value in ((3, "default"), (4, "0")):
+        expected = ("2", "overlap", "1", "flashinfer_sm12x", "1", "1", "auto", "0")
+        for changed_index, changed_value in ((3, "default"), (4, "0"), (7, "1")):
             with self.subTest(changed_index=changed_index):
 
                 def gather(output, received, group):

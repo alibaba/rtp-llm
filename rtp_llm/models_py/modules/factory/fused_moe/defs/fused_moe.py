@@ -96,6 +96,23 @@ class CombineForwardPayload:
     router_context: object | None = None
 
 
+@dataclass
+class TpPrefillGatherRawPayload:
+    """Routed FC2 result and metadata for a caller-owned TP prefill combine.
+
+    ``down_output`` remains in the executor's token-slot layout.  The caller
+    must apply the normal EP gather semantics with ``topk_ids``,
+    ``topk_weights``, and ``output_index`` before it combines any shared
+    expert output or starts its TP collective.
+    """
+
+    down_output: torch.Tensor
+    topk_ids: torch.Tensor
+    topk_weights: torch.Tensor
+    output_index: torch.Tensor
+    expert_alignment: int
+
+
 def should_skip_tp_allreduce(
     extra_finalize_args: Optional[FinalizeArgs],
 ) -> bool:
@@ -247,6 +264,12 @@ class FusedMoeExpertExecutor(ABC):
 
         return False
 
+    @property
+    def supports_tp_prefill_gather_raw(self) -> bool:
+        """Whether this executor can return pre-``ep_gather`` FC2 data."""
+
+        return False
+
     @abstractmethod
     def execute(
         self,
@@ -288,6 +311,76 @@ class FusedMoe(torch.nn.Module):
         return bool(
             self.router.supports_gate_pack and self.fused_experts.supports_gate_pack
         )
+
+    @property
+    def supports_tp_prefill_gather_raw(self) -> bool:
+        """Whether the explicit eager pure-TP raw-gather seam is available."""
+
+        return bool(
+            self.fused_experts.supports_tp_prefill_gather_raw
+            and self.router.router_type() == RouterType.PURE_TP
+            and self.router.config.ep_size == 1
+        )
+
+    def forward_tp_prefill_raw(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str = "SiGLU",
+        alignment: Optional[int] = 64,
+    ) -> TpPrefillGatherRawPayload:
+        """Run eager pure-TP FC1/FC2 and expose data before ``ep_gather``.
+
+        This is an explicit, default-off integration seam for TP-prefill
+        experiments.  It deliberately does not invoke ``router.finalize``;
+        the caller owns gather, shared-expert merge, and TP reduction.
+        """
+
+        if not self.supports_tp_prefill_gather_raw:
+            raise RuntimeError(
+                f"strategy {self.strategy_name!r} does not support raw TP-prefill gather"
+            )
+        if activation != "SiGLU":
+            raise ValueError("raw TP-prefill gather only supports activation='SiGLU'")
+        if hidden_states.dtype != torch.bfloat16:
+            raise ValueError("raw TP-prefill gather requires BF16 hidden_states")
+        if torch.cuda.is_current_stream_capturing():
+            raise ValueError(
+                "raw TP-prefill gather is eager-only and cannot run in CUDA Graph capture"
+            )
+        if alignment not in (64, 128):
+            raise ValueError("raw TP-prefill gather alignment must be 64 or 128")
+
+        expert_payload = self.router.prepare(
+            hidden_states,
+            None,
+            None,
+            topk_weights,
+            topk_ids,
+        )
+        if expert_payload.expert_topk_ids is None:
+            expert_payload.expert_topk_ids = topk_ids
+        if expert_payload.expert_topk_weights is None:
+            expert_payload.expert_topk_weights = topk_weights
+
+        result = self.fused_experts.execute(
+            expert_payload,
+            activation=activation,
+            expert_map=None,
+            a2_scale=None,
+            apply_router_weight_on_input=False,
+            extra_expert_args={
+                "tp_prefill_fused_quant": True,
+                "tp_prefill_return_gather_raw": True,
+                "tp_prefill_alignment": alignment,
+            },
+        )
+        if not isinstance(result, TpPrefillGatherRawPayload):
+            raise RuntimeError(
+                "raw TP-prefill gather executor did not return TpPrefillGatherRawPayload"
+            )
+        return result
 
     def forward_gate_pack(
         self,

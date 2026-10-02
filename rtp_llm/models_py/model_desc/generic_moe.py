@@ -69,6 +69,12 @@ class GenericMoeLayer(nn.Module):
         self.tp_chunk_config = TpMoeChunkConfig.from_env()
         self.tp_prefill_config = TpMoePrefillConfig.from_env()
         self.flashinfer_tp_prefill = None
+        fused_fp8_switch = os.environ.get("RTP_LLM_MOE_TP_FUSED_FP8_AR", "0").strip()
+        if fused_fp8_switch not in ("0", "1"):
+            raise ValueError("RTP_LLM_MOE_TP_FUSED_FP8_AR must be 0 or 1")
+        self.tp_fused_fp8_enabled = fused_fp8_switch == "1"
+        self.tp_fused_fp8_calls = 0
+        self.tp_fused_fp8_alignment = None
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -234,6 +240,11 @@ class GenericMoeLayer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, *, allow_tp_chunking: bool = False
     ) -> torch.Tensor:
+        communicator = self._tp_gather_fp8_communicator(
+            hidden_states, allow_tp_chunking
+        )
+        if communicator is not None:
+            return self._forward_tp_gather_fp8(hidden_states, communicator)
         use_fusion = self._can_fuse_tp_prefill(hidden_states, allow_tp_chunking)
         if self._can_chunk_tp_prefill(hidden_states, allow_tp_chunking):
             if use_fusion:
@@ -244,6 +255,69 @@ class GenericMoeLayer(nn.Module):
                 hidden_states, tp_prefill_backend=self.tp_prefill_config.backend
             )
         return self._forward_impl(hidden_states)
+
+    def _tp_gather_fp8_communicator(self, hidden_states, allow_tp_prefill):
+        """Select the separate eager pure-TP experiment before ordinary paths."""
+        if not (
+            self.tp_fused_fp8_enabled
+            and allow_tp_prefill
+            and self.use_unified_tp_allreduce
+            and self.ffn_tp_size == 2
+            and self.ep_size == 1
+            and self.parallelism_config.dp_size == 1
+            and not self.parallelism_config.prefill_cp_config.is_enabled()
+            and self.tp_chunk_config.chunks == 0
+            and self.tp_prefill_config.backend in ("default", "deepgemm_fused")
+            and self.config.moe_w1_layout == "up_gate"
+            and self.hidden_dim == 2048
+            and self.top_k == 8
+            and self.shared_expert is not None
+            and self.shared_expert_gate is not None
+            and getattr(self.fused_moe, "supports_tp_prefill_gather_raw", False) is True
+            and os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+            in ("auto", "v2")
+            and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") != "1"
+        ):
+            return None
+        from rtp_llm.models_py.distributed.tp_moe_gather_fp8 import (
+            get_tp_moe_gather_fp8,
+        )
+
+        communicator = get_tp_moe_gather_fp8()
+        return (
+            communicator
+            if communicator is not None and communicator.should_use(hidden_states)
+            else None
+        )
+
+    def _forward_tp_gather_fp8(self, hidden_states, communicator):
+        topk_weights, topk_ids = self._route(hidden_states)
+        raw = self.fused_moe.forward_tp_prefill_raw(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation="SiGLU",
+            alignment=64,
+        )
+        shared = self.shared_expert(hidden_states, skip_allreduce=True)
+        gate = self.shared_expert_gate(hidden_states)
+        output = communicator.gather_gate_push(
+            raw.down_output,
+            raw.topk_ids,
+            raw.topk_weights,
+            raw.output_index,
+            shared,
+            gate,
+        )
+        self.tp_fused_fp8_calls += 1
+        self.tp_fused_fp8_alignment = raw.expert_alignment
+        if self.tp_fused_fp8_calls == 1:
+            logger.info(
+                "MoE TP fused FP8 gather enabled: tokens=%d, blocks=%d, alignment=64",
+                hidden_states.shape[0],
+                communicator.blocks,
+            )
+        return output
 
     def _can_fuse_tp_prefill(
         self, hidden_states: torch.Tensor, allow_tp_prefill: bool

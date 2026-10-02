@@ -32,7 +32,7 @@ namespace fused = rtp_llm::moe_tp_fused_fp8;
 
 constexpr int      kDefaultBlocks    = 16;
 constexpr uint64_t kWireMagic        = 0x5254504D4F454631ULL;  // RTPMOEF1
-constexpr uint32_t kWireVersion      = 1;
+constexpr uint32_t kWireVersion      = 4;
 constexpr uint64_t kSpinLimit        = 1ULL << 26;
 constexpr uint64_t kErrorPeerTimeout = 1ULL << 63;
 constexpr uint64_t kErrorNumeric     = 1ULL << 62;
@@ -54,6 +54,7 @@ struct IpcWireHandle {
     uint64_t           max_numel;
     uint64_t           packet_count;
     cudaIpcMemHandle_t packets;
+    cudaIpcMemHandle_t inbox;
     cudaIpcMemHandle_t ready;
     cudaIpcMemHandle_t ack;
     cudaIpcMemHandle_t error;
@@ -63,6 +64,10 @@ static_assert(std::is_trivially_copyable_v<IpcWireHandle>);
 struct DeviceParams {
     fused::TransportWorkspace local;
     fused::TransportWorkspace peer;
+    fused::Packet*            local_inbox;
+    fused::Packet*            peer_inbox;
+    uint64_t*                 completion;
+    int                       active_blocks;
     uint64_t                  epoch;
     size_t                    packet_count;
     size_t                    numel;
@@ -71,6 +76,35 @@ struct DeviceParams {
 
 __device__ __forceinline__ void set_timeout(uint64_t* error) {
     atomicOr(reinterpret_cast<unsigned long long*>(error), static_cast<unsigned long long>(kErrorPeerTimeout));
+}
+
+// All participating CTAs are resident.  Every current peer-inbox writer uses
+// exactly this owner mapping: first = blockIdx * 16 + n * gridDim * 16.  Once
+// CTA b has consumed all its groups, acknowledging ack[b * 16] lets only the
+// same owner CTA overwrite those groups in a later call.  This is safe across
+// sequential push/gather calls even when their message lengths differ, but is
+// deliberately not a general protocol for a future writer with another group
+// size, grid, or ownership mapping.
+__device__ __forceinline__ bool deferred_final_ack(DeviceParams const& params, int* protocol_status) {
+    constexpr size_t packets_per_group = fused::kPacketThreads / 32;
+    const size_t     owner_first       = blockIdx.x * packets_per_group;
+    __syncthreads();
+    // Preserve the old system-scope retirement discipline.  Each thread's
+    // fence precedes the CTA barrier so the leader publishes only after every
+    // consuming lane has completed its local-inbox reads and output stores.
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0)
+        fused::store_release_sys(params.epoch, params.peer.ack + owner_first);
+    if (threadIdx.x == 0)
+        *protocol_status = fused::wait_epoch(params.local.ack + owner_first, params.epoch, kSpinLimit) ? 1 : 0;
+    __syncthreads();
+    if (!*protocol_status) {
+        if (threadIdx.x == 0)
+            set_timeout(params.local.error);
+        return false;
+    }
+    return true;
 }
 
 __device__ __forceinline__ void write_packet(fused::Packet*       packet,
@@ -259,6 +293,630 @@ one_shot_all_reduce_batch_kernel(DeviceParams params, __nv_bfloat16 const* input
     }
 }
 
+union WarpPacketBf16 {
+    uint4         vectors[2];
+    __nv_bfloat16 values[16];
+};
+
+union WarpPacketFp8 {
+    uint4         vector;
+    __nv_fp8_e4m3 values[16];
+    float         metadata[4];
+};
+
+// Exact instruction sequence emitted by Triton 3.6.0 for
+// ``tl.sigmoid(gate) * shared + experts`` on SM120 in the existing
+// SigmoidGateScaleAdd kernel.  Keep this inline sequence rather than using
+// expf/__exp2f or fmaf: the experiment compares packet bytes to that Triton
+// implementation, including ex2.approx/div.full and the BF16 rounding point.
+__device__ __forceinline__ float triton_sigmoid_f32(float gate) {
+    float result;
+    asm volatile("{ .reg .f32 neg, scaled, exponent, denominator;\n\t"
+                 "sub.f32 neg, 0f00000000, %1;\n\t"
+                 "mul.f32 scaled, neg, 0f3FB8AA3B;\n\t"
+                 "ex2.approx.f32 exponent, scaled;\n\t"
+                 "add.f32 denominator, exponent, 0f3F800000;\n\t"
+                 "div.full.f32 %0, 0f3F800000, denominator;\n\t"
+                 "}"
+                 : "=f"(result)
+                 : "f"(gate));
+    return result;
+}
+
+__device__ __forceinline__ __nv_bfloat16 triton_gate_scale_add_from_sigmoid_bf16(float sigmoid,
+                                                                                 float shared,
+                                                                                 float experts) {
+    union {
+        unsigned short bits;
+        __nv_bfloat16  value;
+    } result;
+    asm volatile("{ .reg .f32 sum;\n\t"
+                 "fma.rn.f32 sum, %1, %2, %3;\n\t"
+                 "cvt.rn.bf16.f32 %0, sum;\n\t"
+                 "}"
+                 : "=h"(result.bits)
+                 : "f"(sigmoid), "f"(shared), "f"(experts));
+    return result.value;
+}
+
+__device__ __forceinline__ __nv_bfloat16 triton_sigmoid_gate_scale_add_bf16(float gate, float shared, float experts) {
+    return triton_gate_scale_add_from_sigmoid_bf16(triton_sigmoid_f32(gate), shared, experts);
+}
+
+__global__ void gated_local_warp_kernel(__nv_bfloat16 const* experts,
+                                        __nv_bfloat16 const* shared,
+                                        __nv_bfloat16 const* gate,
+                                        __nv_bfloat16*       output,
+                                        size_t               numel,
+                                        int                  hidden_size) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < numel; index += gridDim.x * blockDim.x) {
+        output[index] = triton_sigmoid_gate_scale_add_bf16(__bfloat162float(gate[index / hidden_size]),
+                                                           __bfloat162float(shared[index]),
+                                                           __bfloat162float(experts[index]));
+    }
+}
+
+// One warp owns one unchanged 496-value packet: 31 lanes each hold 16
+// values, and lane 31 holds the scale/padding. All warps in a CTA quantize
+// concurrently, amortizing ready/ack over 16 contiguous packets. This is a
+// separate transport candidate; the scalar and batch protocols stay intact.
+__global__ void
+one_shot_all_reduce_warp_kernel(DeviceParams params, __nv_bfloat16 const* input, __nv_bfloat16* output) {
+    constexpr size_t packets_per_group = fused::kPacketThreads / 32;
+    const int        lane              = threadIdx.x & 31;
+    const int        warp              = threadIdx.x / 32;
+    const bool       input_aligned     = (reinterpret_cast<uintptr_t>(input) & (alignof(uint4) - 1)) == 0;
+    const bool       output_aligned    = (reinterpret_cast<uintptr_t>(output) & (alignof(uint4) - 1)) == 0;
+    __shared__ int   protocol_status;
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    for (size_t first = blockIdx.x * packets_per_group; first < params.packet_count;
+         first += gridDim.x * packets_per_group) {
+        const size_t  packet = first + warp;
+        const size_t  base   = packet * fused::kPacketValues + lane * 16;
+        WarpPacketFp8 own;
+        float         scale = 0.f;
+        if (packet < params.packet_count) {
+            WarpPacketBf16 source;
+            source.vectors[0] = make_uint4(0, 0, 0, 0);
+            source.vectors[1] = make_uint4(0, 0, 0, 0);
+            if (input_aligned && lane < 31 && base + 16 <= params.numel) {
+                source.vectors[0] = reinterpret_cast<const uint4*>(input + base)[0];
+                source.vectors[1] = reinterpret_cast<const uint4*>(input + base)[1];
+            } else if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item)
+                    if (base + item < params.numel)
+                        source.values[item] = input[base + item];
+            }
+            float local_max = 0.f;
+#pragma unroll
+            for (int item = 0; item < 16; ++item) {
+                const float value = __bfloat162float(source.values[item]);
+                if (!isfinite(value))
+                    atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                             static_cast<unsigned long long>(kErrorNumeric));
+                local_max = fused::max_abs(value, local_max);
+            }
+            const float max_abs = fused::warp_max(local_max);
+            scale               = max_abs == 0.f ? 0.f : 448.f / max_abs;
+            if (!isfinite(scale))
+                atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                         static_cast<unsigned long long>(kErrorNumeric));
+            own.vector = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float value = __bfloat162float(source.values[item]);
+                    own.values[item]  = static_cast<__nv_fp8_e4m3>(scale == 0.f ? value : value * scale);
+                }
+            } else {
+                own.metadata[0] = scale;
+            }
+            reinterpret_cast<uint4*>(params.local.packets + packet)[lane] = own.vector;
+        }
+        // Every writer fences its own payload before the CTA publishes.
+        __threadfence_system();
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.local.ready + first);
+            protocol_status = fused::wait_epoch(params.peer.ready + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+        if (packet < params.packet_count) {
+            WarpPacketFp8 peer;
+            peer.vector            = reinterpret_cast<const uint4*>(params.peer.packets + packet)[lane];
+            const float peer_scale = __shfl_sync(0xffffffff, peer.metadata[0], 31);
+            if (lane < 31) {
+                WarpPacketBf16 result;
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float a       = scale == 0.f ? static_cast<float>(own.values[item]) :
+                                                         static_cast<float>(own.values[item]) / scale;
+                    const float b       = peer_scale == 0.f ? static_cast<float>(peer.values[item]) :
+                                                              static_cast<float>(peer.values[item]) / peer_scale;
+                    result.values[item] = __float2bfloat16_rn(params.rank == 0 ? a + b : b + a);
+                    if (!isfinite(__bfloat162float(result.values[item])))
+                        atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                                 static_cast<unsigned long long>(kErrorNumeric));
+                }
+                if (output_aligned && base + 16 <= params.numel) {
+                    reinterpret_cast<uint4*>(output + base)[0] = result.vectors[0];
+                    reinterpret_cast<uint4*>(output + base)[1] = result.vectors[1];
+                } else {
+#pragma unroll
+                    for (int item = 0; item < 16; ++item)
+                        if (base + item < params.numel)
+                            output[base + item] = result.values[item];
+                }
+            }
+        }
+        __syncthreads();
+        __threadfence_system();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.local.ack + first);
+            protocol_status = fused::wait_epoch(params.peer.ack + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+    }
+}
+
+// Push variant of the warp transport.  Each rank posts its packet to the
+// peer's inbox, then consumes the peer's posted packet from local memory.
+// Existing packets_ remains an own-packet debug mirror; old pull protocol
+// fields remain unchanged and are only interpreted in the reverse direction.
+template<bool DeferredAck>
+__global__ void
+one_shot_all_reduce_push_warp_kernel(DeviceParams params, __nv_bfloat16 const* input, __nv_bfloat16* output) {
+    constexpr size_t packets_per_group = fused::kPacketThreads / 32;
+    const int        lane              = threadIdx.x & 31;
+    const int        warp              = threadIdx.x / 32;
+    const bool       input_aligned     = (reinterpret_cast<uintptr_t>(input) & (alignof(uint4) - 1)) == 0;
+    const bool       output_aligned    = (reinterpret_cast<uintptr_t>(output) & (alignof(uint4) - 1)) == 0;
+    __shared__ int   protocol_status;
+    if constexpr (DeferredAck) {
+        if (blockIdx.x >= params.active_blocks)
+            return;
+    }
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    for (size_t first = blockIdx.x * packets_per_group; first < params.packet_count;
+         first += gridDim.x * packets_per_group) {
+        const size_t  packet = first + warp;
+        const size_t  base   = packet * fused::kPacketValues + lane * 16;
+        WarpPacketFp8 own;
+        float         scale = 0.f;
+        if (packet < params.packet_count) {
+            WarpPacketBf16 source;
+            source.vectors[0] = make_uint4(0, 0, 0, 0);
+            source.vectors[1] = make_uint4(0, 0, 0, 0);
+            if (input_aligned && lane < 31 && base + 16 <= params.numel) {
+                source.vectors[0] = reinterpret_cast<uint4 const*>(input + base)[0];
+                source.vectors[1] = reinterpret_cast<uint4 const*>(input + base)[1];
+            } else if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item)
+                    if (base + item < params.numel)
+                        source.values[item] = input[base + item];
+            }
+            float local_max = 0.f;
+#pragma unroll
+            for (int item = 0; item < 16; ++item) {
+                const float value = __bfloat162float(source.values[item]);
+                if (!isfinite(value))
+                    atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                             static_cast<unsigned long long>(kErrorNumeric));
+                local_max = fused::max_abs(value, local_max);
+            }
+            const float max_abs = fused::warp_max(local_max);
+            scale               = max_abs == 0.f ? 0.f : 448.f / max_abs;
+            if (!isfinite(scale))
+                atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                         static_cast<unsigned long long>(kErrorNumeric));
+            own.vector = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float value = __bfloat162float(source.values[item]);
+                    own.values[item]  = static_cast<__nv_fp8_e4m3>(scale == 0.f ? value : value * scale);
+                }
+            } else {
+                own.metadata[0] = scale;
+            }
+            // Keep a locally owned debug copy and post the identical vector to
+            // peer inbox.  Each warp is a contiguous 512-byte packet store.
+            reinterpret_cast<uint4*>(params.local.packets + packet)[lane] = own.vector;
+            reinterpret_cast<uint4*>(params.peer_inbox + packet)[lane]    = own.vector;
+        }
+        // A CTA leader may only publish ready after every lane's remote store
+        // is system-visible. A leader-only fence would not order other lanes.
+        __threadfence_system();
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.peer.ready + first);
+            protocol_status = fused::wait_epoch(params.local.ready + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+        if (packet < params.packet_count) {
+            // Every consuming lane acquires the locally owned ready word before
+            // reading its inbox vector; do not rely on leader acquire crossing
+            // a CTA barrier for system-scope visibility.
+            (void)fused::load_acquire_sys(params.local.ready + first);
+            WarpPacketFp8 peer;
+            peer.vector            = reinterpret_cast<uint4 const*>(params.local_inbox + packet)[lane];
+            const float peer_scale = __shfl_sync(0xffffffff, peer.metadata[0], 31);
+            if (lane < 31) {
+                WarpPacketBf16 result;
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float a       = scale == 0.f ? static_cast<float>(own.values[item]) :
+                                                         static_cast<float>(own.values[item]) / scale;
+                    const float b       = peer_scale == 0.f ? static_cast<float>(peer.values[item]) :
+                                                              static_cast<float>(peer.values[item]) / peer_scale;
+                    result.values[item] = __float2bfloat16_rn(params.rank == 0 ? a + b : b + a);
+                    if (!isfinite(__bfloat162float(result.values[item])))
+                        atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                                 static_cast<unsigned long long>(kErrorNumeric));
+                }
+                if (output_aligned && base + 16 <= params.numel) {
+                    reinterpret_cast<uint4*>(output + base)[0] = result.vectors[0];
+                    reinterpret_cast<uint4*>(output + base)[1] = result.vectors[1];
+                } else {
+#pragma unroll
+                    for (int item = 0; item < 16; ++item)
+                        if (base + item < params.numel)
+                            output[base + item] = result.values[item];
+                }
+            }
+        }
+        // Keep a CTA barrier after consuming this group.  The deferred
+        // variant replaces the per-group ack below with one final per-CTA ack.
+        __syncthreads();
+        if constexpr (!DeferredAck) {
+            __threadfence_system();
+            if (threadIdx.x == 0) {
+                fused::store_release_sys(params.epoch, params.peer.ack + first);
+                protocol_status = fused::wait_epoch(params.local.ack + first, params.epoch, kSpinLimit) ? 1 : 0;
+            }
+            __syncthreads();
+            if (!protocol_status) {
+                if (threadIdx.x == 0)
+                    set_timeout(params.local.error);
+                return;
+            }
+        }
+    }
+    if constexpr (DeferredAck)
+        (void)deferred_final_ack(params, &protocol_status);
+}
+
+// Experimental whole-batch Pure-TP finalization.  It mirrors Triton's
+// ep_gather routing order (slot 0..7, fp32 fma, then one BF16 round), then
+// applies the existing gate PTX and immediately posts the FP8 packet.  The
+// routed FC2 producer remains DeepGEMM; no GEMM epilogue is assumed here.
+template<bool DeferredAck>
+__global__ __launch_bounds__(fused::kPacketThreads,
+                             2) void gather_gate_push_warp_kernel(DeviceParams         params,
+                                                                  __nv_bfloat16 const* down_output,
+                                                                  int64_t const*       topk_ids,
+                                                                  float const*         topk_weights,
+                                                                  int64_t const*       output_index,
+                                                                  size_t               down_rows,
+                                                                  __nv_bfloat16 const* shared,
+                                                                  __nv_bfloat16 const* gate,
+                                                                  __nv_bfloat16*       output) {
+    constexpr size_t packets_per_group   = fused::kPacketThreads / 32;
+    constexpr int    hidden_size         = fused::kFc2ReferenceHiddenSize;
+    constexpr int    topk                = 8;
+    const int        lane                = threadIdx.x & 31;
+    const int        warp                = threadIdx.x / 32;
+    const bool       down_output_aligned = (reinterpret_cast<uintptr_t>(down_output) & (alignof(uint4) - 1)) == 0;
+    const bool       output_aligned      = (reinterpret_cast<uintptr_t>(output) & (alignof(uint4) - 1)) == 0;
+    __shared__ int   protocol_status;
+    if constexpr (DeferredAck) {
+        if (blockIdx.x >= params.active_blocks)
+            return;
+    }
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    for (size_t first = blockIdx.x * packets_per_group; first < params.packet_count;
+         first += gridDim.x * packets_per_group) {
+        const size_t  packet = first + warp;
+        const size_t  base   = packet * fused::kPacketValues + lane * 16;
+        WarpPacketFp8 own;
+        float         scale = 0.f;
+        if (packet < params.packet_count) {
+            WarpPacketBf16 source;
+            source.vectors[0] = make_uint4(0, 0, 0, 0);
+            source.vectors[1] = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+                // H=2048 and every lane begins at a multiple of 16, hence one
+                // gate scalar serves all 16 output elements in this lane.  The
+                // same divisibility also makes a complete lane's down row
+                // slice one aligned 32-byte vector pair when the tensor base
+                // itself is aligned; offset-one test views take the scalar
+                // fallback below.
+                float        accumulator[16]{};
+                const bool   has_values   = base < params.numel;
+                const size_t token        = base / hidden_size;
+                const size_t hidden       = base % hidden_size;
+                const size_t token_offset = token * topk;
+                const float  sigmoid      = has_values ? triton_sigmoid_f32(__bfloat162float(gate[token])) : 0.f;
+#pragma unroll
+                for (int slot = 0; slot < topk; ++slot) {
+                    // Keep ep_gather's predicate and its slot-ascending FP32
+                    // FMA sequence.  Metadata is read once per slot/lane,
+                    // rather than once for each of the lane's 16 elements.
+                    const int64_t expert_id  = has_values ? topk_ids[token_offset + slot] : -1;
+                    const int64_t source_row = has_values ? output_index[token_offset + slot] : -1;
+                    const float   weight     = has_values ? topk_weights[token_offset + slot] : 0.f;
+                    if (expert_id < 0 || source_row < 0 || static_cast<size_t>(source_row) >= down_rows)
+                        continue;
+                    WarpPacketBf16 values;
+                    const size_t   down_offset = static_cast<size_t>(source_row) * hidden_size + hidden;
+                    if (down_output_aligned && base + 16 <= params.numel) {
+                        values.vectors[0] = reinterpret_cast<uint4 const*>(down_output + down_offset)[0];
+                        values.vectors[1] = reinterpret_cast<uint4 const*>(down_output + down_offset)[1];
+                    } else {
+#pragma unroll
+                        for (int item = 0; item < 16; ++item) {
+                            const size_t index = base + item;
+                            values.values[item] =
+                                index < params.numel ? down_output[down_offset + item] : __float2bfloat16_rn(0.f);
+                        }
+                    }
+#pragma unroll
+                    for (int item = 0; item < 16; ++item)
+                        accumulator[item] = __fmaf_rn(__bfloat162float(values.values[item]), weight, accumulator[item]);
+                }
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const size_t index = base + item;
+                    if (index < params.numel) {
+                        const __nv_bfloat16 gathered = __float2bfloat16_rn(accumulator[item]);
+                        source.values[item]          = triton_gate_scale_add_from_sigmoid_bf16(
+                            sigmoid, __bfloat162float(shared[index]), __bfloat162float(gathered));
+                    }
+                }
+            }
+            float local_max = 0.f;
+#pragma unroll
+            for (int item = 0; item < 16; ++item) {
+                const float value = __bfloat162float(source.values[item]);
+                if (!isfinite(value))
+                    atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                             static_cast<unsigned long long>(kErrorNumeric));
+                local_max = fused::max_abs(value, local_max);
+            }
+            const float max_abs = fused::warp_max(local_max);
+            scale               = max_abs == 0.f ? 0.f : 448.f / max_abs;
+            if (!isfinite(scale))
+                atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                         static_cast<unsigned long long>(kErrorNumeric));
+            own.vector = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float value = __bfloat162float(source.values[item]);
+                    own.values[item]  = static_cast<__nv_fp8_e4m3>(scale == 0.f ? value : value * scale);
+                }
+            } else {
+                own.metadata[0] = scale;
+            }
+            reinterpret_cast<uint4*>(params.local.packets + packet)[lane] = own.vector;
+            reinterpret_cast<uint4*>(params.peer_inbox + packet)[lane]    = own.vector;
+        }
+        __threadfence_system();
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.peer.ready + first);
+            protocol_status = fused::wait_epoch(params.local.ready + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+        if (packet < params.packet_count) {
+            (void)fused::load_acquire_sys(params.local.ready + first);
+            WarpPacketFp8 peer;
+            peer.vector            = reinterpret_cast<uint4 const*>(params.local_inbox + packet)[lane];
+            const float peer_scale = __shfl_sync(0xffffffff, peer.metadata[0], 31);
+            if (lane < 31) {
+                WarpPacketBf16 result;
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float a       = scale == 0.f ? static_cast<float>(own.values[item]) :
+                                                         static_cast<float>(own.values[item]) / scale;
+                    const float b       = peer_scale == 0.f ? static_cast<float>(peer.values[item]) :
+                                                              static_cast<float>(peer.values[item]) / peer_scale;
+                    result.values[item] = __float2bfloat16_rn(params.rank == 0 ? a + b : b + a);
+                    if (!isfinite(__bfloat162float(result.values[item])))
+                        atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                                 static_cast<unsigned long long>(kErrorNumeric));
+                }
+                if (output_aligned && base + 16 <= params.numel) {
+                    reinterpret_cast<uint4*>(output + base)[0] = result.vectors[0];
+                    reinterpret_cast<uint4*>(output + base)[1] = result.vectors[1];
+                } else {
+#pragma unroll
+                    for (int item = 0; item < 16; ++item)
+                        if (base + item < params.numel)
+                            output[base + item] = result.values[item];
+                }
+            }
+        }
+        __syncthreads();
+        if constexpr (!DeferredAck) {
+            __threadfence_system();
+            if (threadIdx.x == 0) {
+                fused::store_release_sys(params.epoch, params.peer.ack + first);
+                protocol_status = fused::wait_epoch(params.local.ack + first, params.epoch, kSpinLimit) ? 1 : 0;
+            }
+            __syncthreads();
+            if (!protocol_status) {
+                if (threadIdx.x == 0)
+                    set_timeout(params.local.error);
+                return;
+            }
+        }
+    }
+    if constexpr (DeferredAck)
+        (void)deferred_final_ack(params, &protocol_status);
+}
+
+// Like the warp transport, but form each local BF16 value with the exact
+// existing Triton shared-gate sequence before deriving the packet FP8 scale.
+// A CTA consumes all 16 source packets before it can overwrite an exactly
+// aliased experts/output tensor, so exact in-place experts/output is safe.
+__global__ void gated_all_reduce_warp_kernel(DeviceParams         params,
+                                             __nv_bfloat16 const* experts,
+                                             __nv_bfloat16 const* shared,
+                                             __nv_bfloat16 const* gate,
+                                             __nv_bfloat16*       output,
+                                             int                  hidden_size) {
+    constexpr size_t packets_per_group = fused::kPacketThreads / 32;
+    const int        lane              = threadIdx.x & 31;
+    const int        warp              = threadIdx.x / 32;
+    const bool       output_aligned    = (reinterpret_cast<uintptr_t>(output) & (alignof(uint4) - 1)) == 0;
+    __shared__ int   protocol_status;
+    if (threadIdx.x == 0)
+        protocol_status = fused::load_acquire_sys(params.local.error) == 0 ? 1 : 0;
+    __syncthreads();
+    if (!protocol_status)
+        return;
+    for (size_t first = blockIdx.x * packets_per_group; first < params.packet_count;
+         first += gridDim.x * packets_per_group) {
+        const size_t  packet = first + warp;
+        const size_t  base   = packet * fused::kPacketValues + lane * 16;
+        WarpPacketFp8 own;
+        float         scale = 0.f;
+        if (packet < params.packet_count) {
+            WarpPacketBf16 source;
+            source.vectors[0] = make_uint4(0, 0, 0, 0);
+            source.vectors[1] = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+                // Packet/lane bases are multiples of 16 and H is a multiple
+                // of 16, so these 16 values are always in one token row.
+                // Compute Triton's BF16 gate scalar once per lane, not once
+                // per element, while retaining the exact PTX instruction path.
+                const float gate_value = base < params.numel ? __bfloat162float(gate[base / hidden_size]) : 0.f;
+                const float sigmoid    = triton_sigmoid_f32(gate_value);
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const size_t index = base + item;
+                    if (index < params.numel) {
+                        source.values[item] = triton_gate_scale_add_from_sigmoid_bf16(
+                            sigmoid, __bfloat162float(shared[index]), __bfloat162float(experts[index]));
+                    }
+                }
+            }
+            float local_max = 0.f;
+#pragma unroll
+            for (int item = 0; item < 16; ++item) {
+                const float value = __bfloat162float(source.values[item]);
+                if (!isfinite(value))
+                    atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                             static_cast<unsigned long long>(kErrorNumeric));
+                local_max = fused::max_abs(value, local_max);
+            }
+            const float max_abs = fused::warp_max(local_max);
+            scale               = max_abs == 0.f ? 0.f : 448.f / max_abs;
+            if (!isfinite(scale))
+                atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                         static_cast<unsigned long long>(kErrorNumeric));
+            own.vector = make_uint4(0, 0, 0, 0);
+            if (lane < 31) {
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float value = __bfloat162float(source.values[item]);
+                    own.values[item]  = static_cast<__nv_fp8_e4m3>(scale == 0.f ? value : value * scale);
+                }
+            } else {
+                own.metadata[0] = scale;
+            }
+            reinterpret_cast<uint4*>(params.local.packets + packet)[lane] = own.vector;
+        }
+        __threadfence_system();
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.local.ready + first);
+            protocol_status = fused::wait_epoch(params.peer.ready + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+        if (packet < params.packet_count) {
+            WarpPacketFp8 peer;
+            peer.vector            = reinterpret_cast<const uint4*>(params.peer.packets + packet)[lane];
+            const float peer_scale = __shfl_sync(0xffffffff, peer.metadata[0], 31);
+            if (lane < 31) {
+                WarpPacketBf16 result;
+#pragma unroll
+                for (int item = 0; item < 16; ++item) {
+                    const float a       = scale == 0.f ? static_cast<float>(own.values[item]) :
+                                                         static_cast<float>(own.values[item]) / scale;
+                    const float b       = peer_scale == 0.f ? static_cast<float>(peer.values[item]) :
+                                                              static_cast<float>(peer.values[item]) / peer_scale;
+                    result.values[item] = __float2bfloat16_rn(params.rank == 0 ? a + b : b + a);
+                    if (!isfinite(__bfloat162float(result.values[item])))
+                        atomicOr(reinterpret_cast<unsigned long long*>(params.local.error),
+                                 static_cast<unsigned long long>(kErrorNumeric));
+                }
+                if (output_aligned && base + 16 <= params.numel) {
+                    reinterpret_cast<uint4*>(output + base)[0] = result.vectors[0];
+                    reinterpret_cast<uint4*>(output + base)[1] = result.vectors[1];
+                } else {
+#pragma unroll
+                    for (int item = 0; item < 16; ++item)
+                        if (base + item < params.numel)
+                            output[base + item] = result.values[item];
+                }
+            }
+        }
+        __syncthreads();
+        __threadfence_system();
+        if (threadIdx.x == 0) {
+            fused::store_release_sys(params.epoch, params.local.ack + first);
+            protocol_status = fused::wait_epoch(params.peer.ack + first, params.epoch, kSpinLimit) ? 1 : 0;
+        }
+        __syncthreads();
+        if (!protocol_status) {
+            if (threadIdx.x == 0)
+                set_timeout(params.local.error);
+            return;
+        }
+    }
+}
+
 __global__ void one_shot_all_reduce_kernel(DeviceParams params, __nv_bfloat16 const* input, __nv_bfloat16* output) {
     __shared__ float warp_maxima[fused::kPacketThreads / 32];
     __shared__ int   protocol_status;
@@ -424,6 +1082,10 @@ public:
         try {
             cuda_check(cudaMalloc(reinterpret_cast<void**>(&packets_), packet_capacity_ * sizeof(fused::Packet)),
                        "cudaMalloc(packets)");
+            cuda_check(cudaMalloc(reinterpret_cast<void**>(&inbox_), packet_capacity_ * sizeof(fused::Packet)),
+                       "cudaMalloc(inbox)");
+            cuda_check(cudaMalloc(reinterpret_cast<void**>(&completion_), blocks_ * sizeof(uint64_t)),
+                       "cudaMalloc(completion)");
             cuda_check(cudaMalloc(reinterpret_cast<void**>(&ready_), packet_capacity_ * sizeof(uint64_t)),
                        "cudaMalloc(ready)");
             cuda_check(cudaMalloc(reinterpret_cast<void**>(&ack_), packet_capacity_ * sizeof(uint64_t)),
@@ -434,6 +1096,8 @@ public:
             cuda_check(cudaMemsetAsync(ack_, 0, packet_capacity_ * sizeof(uint64_t), current_stream()),
                        "cudaMemsetAsync(ack)");
             cuda_check(cudaMemsetAsync(error_, 0, sizeof(uint64_t), current_stream()), "cudaMemsetAsync(error)");
+            cuda_check(cudaMemsetAsync(completion_, 0, blocks_ * sizeof(uint64_t), current_stream()),
+                       "cudaMemsetAsync(completion)");
         } catch (...) {
             release_noexcept();
             throw;
@@ -456,6 +1120,7 @@ public:
         wire.max_numel    = max_numel_;
         wire.packet_count = packet_capacity_;
         cuda_check(cudaIpcGetMemHandle(&wire.packets, packets_), "cudaIpcGetMemHandle(packets)");
+        cuda_check(cudaIpcGetMemHandle(&wire.inbox, inbox_), "cudaIpcGetMemHandle(inbox)");
         cuda_check(cudaIpcGetMemHandle(&wire.ready, ready_), "cudaIpcGetMemHandle(ready)");
         cuda_check(cudaIpcGetMemHandle(&wire.ack, ack_), "cudaIpcGetMemHandle(ack)");
         cuda_check(cudaIpcGetMemHandle(&wire.error, error_), "cudaIpcGetMemHandle(error)");
@@ -478,6 +1143,9 @@ public:
             cuda_check(cudaIpcOpenMemHandle(
                            reinterpret_cast<void**>(&peer_packets_), wire.packets, cudaIpcMemLazyEnablePeerAccess),
                        "cudaIpcOpenMemHandle(packets; requires CUDA IPC P2P)");
+            cuda_check(cudaIpcOpenMemHandle(
+                           reinterpret_cast<void**>(&peer_inbox_), wire.inbox, cudaIpcMemLazyEnablePeerAccess),
+                       "cudaIpcOpenMemHandle(inbox; requires CUDA IPC P2P)");
             cuda_check(cudaIpcOpenMemHandle(
                            reinterpret_cast<void**>(&peer_ready_), wire.ready, cudaIpcMemLazyEnablePeerAccess),
                        "cudaIpcOpenMemHandle(ready; requires CUDA IPC P2P)");
@@ -503,8 +1171,20 @@ public:
         validate_bf16_pair(input, output, "all_reduce");
         if constexpr (PacketBatch == 32)
             ensure_compute_resident<3>();
+        if constexpr (PacketBatch == 16) {
+            ensure_warp_resident();
+            const auto in_begin  = reinterpret_cast<uintptr_t>(input.data_ptr());
+            const auto out_begin = reinterpret_cast<uintptr_t>(output.data_ptr());
+            TORCH_CHECK(in_begin == out_begin
+                            || std::max(in_begin, out_begin)
+                                   >= std::min(in_begin + input.nbytes(), out_begin + output.nbytes()),
+                        "warp transport only permits disjoint or exactly aliased input/output");
+        }
         launch_common(input.numel(), [&](DeviceParams params, cudaStream_t stream) {
-            if constexpr (PacketBatch == 32)
+            if constexpr (PacketBatch == 16)
+                one_shot_all_reduce_warp_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
+                    params, bf16_ptr(input), bf16_ptr(output));
+            else if constexpr (PacketBatch == 32)
                 one_shot_all_reduce_batch_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
                     params, bf16_ptr(input), bf16_ptr(output));
             else
@@ -512,6 +1192,127 @@ public:
                     params, bf16_ptr(input), bf16_ptr(output));
             cuda_check(cudaGetLastError(), "one_shot_all_reduce_kernel launch");
         });
+    }
+
+    void all_reduce_push_warp(torch::Tensor input, torch::Tensor output) {
+        validate_bf16_pair(input, output, "push warp all_reduce");
+        ensure_push_warp_resident();
+        const auto in_begin  = reinterpret_cast<uintptr_t>(input.data_ptr());
+        const auto out_begin = reinterpret_cast<uintptr_t>(output.data_ptr());
+        TORCH_CHECK(in_begin == out_begin
+                        || std::max(in_begin, out_begin)
+                               >= std::min(in_begin + input.nbytes(), out_begin + output.nbytes()),
+                    "push warp transport only permits disjoint or exactly aliased input/output");
+        launch_common(
+            input.numel(),
+            [&](DeviceParams params, cudaStream_t stream) {
+                one_shot_all_reduce_push_warp_kernel<false>
+                    <<<blocks_, fused::kPacketThreads, 0, stream>>>(params, bf16_ptr(input), bf16_ptr(output));
+                cuda_check(cudaGetLastError(), "one_shot_all_reduce_push_warp_kernel launch");
+            },
+            /*published_inbox=*/true);
+    }
+
+    void all_reduce_push_warp_deferred(torch::Tensor input, torch::Tensor output) {
+        validate_bf16_pair(input, output, "deferred push warp all_reduce");
+        ensure_push_warp_deferred_resident();
+        const auto in_begin  = reinterpret_cast<uintptr_t>(input.data_ptr());
+        const auto out_begin = reinterpret_cast<uintptr_t>(output.data_ptr());
+        TORCH_CHECK(in_begin == out_begin
+                        || std::max(in_begin, out_begin)
+                               >= std::min(in_begin + input.nbytes(), out_begin + output.nbytes()),
+                    "deferred push warp transport only permits disjoint or exactly aliased input/output");
+        launch_common(
+            input.numel(),
+            [&](DeviceParams params, cudaStream_t stream) {
+                one_shot_all_reduce_push_warp_kernel<true>
+                    <<<blocks_, fused::kPacketThreads, 0, stream>>>(params, bf16_ptr(input), bf16_ptr(output));
+                cuda_check(cudaGetLastError(), "one_shot_all_reduce_push_warp_deferred_kernel launch");
+            },
+            /*published_inbox=*/true);
+    }
+
+    // Experimental only: consume DeepGEMM's per-routed-row BF16 FC2 output,
+    // reproduce ep_gather + shared gate locally, and use the push transport.
+    // This does not register a serving backend or change router behavior.
+    void gather_gate_push(torch::Tensor down_output,
+                          torch::Tensor topk_ids,
+                          torch::Tensor topk_weights,
+                          torch::Tensor output_index,
+                          torch::Tensor shared,
+                          torch::Tensor gate,
+                          torch::Tensor output) {
+        const size_t tokens =
+            validate_gather_gate_push(down_output, topk_ids, topk_weights, output_index, shared, gate, output);
+        ensure_gather_gate_push_resident();
+        launch_common(
+            output.numel(),
+            [&](DeviceParams params, cudaStream_t stream) {
+                gather_gate_push_warp_kernel<false>
+                    <<<blocks_, fused::kPacketThreads, 0, stream>>>(params,
+                                                                    bf16_ptr(down_output),
+                                                                    topk_ids.data_ptr<int64_t>(),
+                                                                    topk_weights.data_ptr<float>(),
+                                                                    output_index.data_ptr<int64_t>(),
+                                                                    down_output.size(0),
+                                                                    bf16_ptr(shared),
+                                                                    bf16_ptr(gate),
+                                                                    bf16_ptr(output));
+                cuda_check(cudaGetLastError(), "gather_gate_push_warp_kernel launch");
+            },
+            /*published_inbox=*/true);
+        (void)tokens;
+    }
+
+    void gather_gate_push_deferred(torch::Tensor down_output,
+                                   torch::Tensor topk_ids,
+                                   torch::Tensor topk_weights,
+                                   torch::Tensor output_index,
+                                   torch::Tensor shared,
+                                   torch::Tensor gate,
+                                   torch::Tensor output) {
+        (void)validate_gather_gate_push(down_output, topk_ids, topk_weights, output_index, shared, gate, output);
+        ensure_gather_gate_push_deferred_resident();
+        launch_common(
+            output.numel(),
+            [&](DeviceParams params, cudaStream_t stream) {
+                gather_gate_push_warp_kernel<true>
+                    <<<blocks_, fused::kPacketThreads, 0, stream>>>(params,
+                                                                    bf16_ptr(down_output),
+                                                                    topk_ids.data_ptr<int64_t>(),
+                                                                    topk_weights.data_ptr<float>(),
+                                                                    output_index.data_ptr<int64_t>(),
+                                                                    down_output.size(0),
+                                                                    bf16_ptr(shared),
+                                                                    bf16_ptr(gate),
+                                                                    bf16_ptr(output));
+                cuda_check(cudaGetLastError(), "gather_gate_push_deferred_kernel launch");
+            },
+            /*published_inbox=*/true);
+    }
+
+    // Experimental only: encode sigmoid(gate) * shared + experts directly to
+    // the unchanged warp-packet transport.  This is intentionally separate
+    // from the serving TP all-reduce and the established all_reduce API.
+    void gated_all_reduce_warp(torch::Tensor experts, torch::Tensor shared, torch::Tensor gate, torch::Tensor output) {
+        const int hidden_size = validate_gated_warp(experts, shared, gate, output, /*require_peer=*/true);
+        ensure_gated_warp_resident();
+        launch_common(experts.numel(), [&](DeviceParams params, cudaStream_t stream) {
+            gated_all_reduce_warp_kernel<<<blocks_, fused::kPacketThreads, 0, stream>>>(
+                params, bf16_ptr(experts), bf16_ptr(shared), bf16_ptr(gate), bf16_ptr(output), hidden_size);
+            cuda_check(cudaGetLastError(), "gated_all_reduce_warp_kernel launch");
+        });
+    }
+
+    // Debug oracle for the exact Triton gate arithmetic before FP8 encoding or
+    // communication.  It shares the native validation with the fused path.
+    void gated_local_warp(torch::Tensor experts, torch::Tensor shared, torch::Tensor gate, torch::Tensor output) {
+        const int hidden_size = validate_gated_warp(experts, shared, gate, output, /*require_peer=*/false);
+        bind_stream();
+        c10::cuda::CUDAGuard guard(device_);
+        gated_local_warp_kernel<<<blocks_, fused::kPacketThreads, 0, current_stream()>>>(
+            bf16_ptr(experts), bf16_ptr(shared), bf16_ptr(gate), bf16_ptr(output), experts.numel(), hidden_size);
+        cuda_check(cudaGetLastError(), "gated_local_warp_kernel launch");
     }
 
     template<int Compute = 0>
@@ -587,6 +1388,21 @@ public:
         return result;
     }
 
+    torch::Tensor copy_local_inbox() {
+        ensure_open();
+        TORCH_CHECK(last_push_ && last_packets_ != 0, "no push invocation has published an inbox");
+        c10::cuda::CUDAGuard guard(device_);
+        auto                 options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_);
+        auto result = torch::empty({static_cast<int64_t>(last_packets_ * sizeof(fused::Packet))}, options);
+        cuda_check(cudaMemcpyAsync(result.data_ptr(),
+                                   inbox_,
+                                   last_packets_ * sizeof(fused::Packet),
+                                   cudaMemcpyDeviceToDevice,
+                                   current_stream()),
+                   "cudaMemcpyAsync(copy_local_inbox)");
+        return result;
+    }
+
     // Debug-only asynchronous device scalar. Callers must first synchronize the
     // context's dedicated stream, then may consume this tensor on their current
     // stream. It deliberately does not bind that debug copy to the launch stream.
@@ -630,6 +1446,60 @@ public:
         append_compute_info<1>(info, "mma", properties.multiProcessorCount);
         append_compute_info<2>(info, "staged", properties.multiProcessorCount);
         append_compute_info<3>(info, "mma_batch", properties.multiProcessorCount);
+        int warp_active = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, one_shot_all_reduce_warp_kernel), "warp transport attributes");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &warp_active, one_shot_all_reduce_warp_kernel, fused::kPacketThreads, 0),
+                   "warp transport occupancy");
+        info["warp_max_resident_blocks"] = warp_active * properties.multiProcessorCount;
+        info["warp_regs_per_thread"]     = attributes.numRegs;
+        info["warp_static_shared_bytes"] = attributes.sharedSizeBytes;
+        int gated_warp_active            = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, gated_all_reduce_warp_kernel), "gated warp transport attributes");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &gated_warp_active, gated_all_reduce_warp_kernel, fused::kPacketThreads, 0),
+                   "gated warp transport occupancy");
+        info["gated_warp_max_resident_blocks"] = gated_warp_active * properties.multiProcessorCount;
+        info["gated_warp_regs_per_thread"]     = attributes.numRegs;
+        info["gated_warp_static_shared_bytes"] = attributes.sharedSizeBytes;
+        int push_warp_active                   = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, one_shot_all_reduce_push_warp_kernel<false>),
+                   "push warp transport attributes");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &push_warp_active, one_shot_all_reduce_push_warp_kernel<false>, fused::kPacketThreads, 0),
+                   "push warp transport occupancy");
+        info["push_warp_max_resident_blocks"] = push_warp_active * properties.multiProcessorCount;
+        info["push_warp_regs_per_thread"]     = attributes.numRegs;
+        info["push_warp_static_shared_bytes"] = attributes.sharedSizeBytes;
+        int push_warp_deferred_active         = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, one_shot_all_reduce_push_warp_kernel<true>),
+                   "deferred push warp transport attributes");
+        cuda_check(
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &push_warp_deferred_active, one_shot_all_reduce_push_warp_kernel<true>, fused::kPacketThreads, 0),
+            "deferred push warp transport occupancy");
+        info["push_warp_deferred_max_resident_blocks"] = push_warp_deferred_active * properties.multiProcessorCount;
+        info["push_warp_deferred_regs_per_thread"]     = attributes.numRegs;
+        info["push_warp_deferred_static_shared_bytes"] = attributes.sharedSizeBytes;
+        int gather_gate_push_active                    = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, gather_gate_push_warp_kernel<false>),
+                   "gather gate push transport attributes");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &gather_gate_push_active, gather_gate_push_warp_kernel<false>, fused::kPacketThreads, 0),
+                   "gather gate push transport occupancy");
+        info["gather_gate_push_max_resident_blocks"] = gather_gate_push_active * properties.multiProcessorCount;
+        info["gather_gate_push_regs_per_thread"]     = attributes.numRegs;
+        info["gather_gate_push_static_shared_bytes"] = attributes.sharedSizeBytes;
+        int gather_gate_push_deferred_active         = 0;
+        cuda_check(cudaFuncGetAttributes(&attributes, gather_gate_push_warp_kernel<true>),
+                   "deferred gather gate push attributes");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &gather_gate_push_deferred_active, gather_gate_push_warp_kernel<true>, fused::kPacketThreads, 0),
+                   "deferred gather gate push occupancy");
+        info["gather_gate_push_deferred_max_resident_blocks"] =
+            gather_gate_push_deferred_active * properties.multiProcessorCount;
+        info["gather_gate_push_deferred_regs_per_thread"]     = attributes.numRegs;
+        info["gather_gate_push_deferred_static_shared_bytes"] = attributes.sharedSizeBytes;
         return info;
     }
 
@@ -677,20 +1547,175 @@ public:
         bound_stream_ = nullptr;
         stream_bound_ = false;
         last_packets_ = 0;
+        last_push_    = false;
     }
 
 private:
+    static bool overlaps(torch::Tensor const& left, torch::Tensor const& right) {
+        const auto left_begin  = reinterpret_cast<uintptr_t>(left.data_ptr());
+        const auto right_begin = reinterpret_cast<uintptr_t>(right.data_ptr());
+        return std::max(left_begin, right_begin) < std::min(left_begin + left.nbytes(), right_begin + right.nbytes());
+    }
+
+    int validate_gated_warp(torch::Tensor const& experts,
+                            torch::Tensor const& shared,
+                            torch::Tensor const& gate,
+                            torch::Tensor const& output,
+                            bool                 require_peer) const {
+        if (require_peer)
+            ensure_peer_open();
+        else
+            ensure_open();
+        validate_bf16_output(experts, "gated warp experts");
+        validate_bf16_output(shared, "gated warp shared");
+        validate_bf16_output(gate, "gated warp gate");
+        validate_bf16_output(output, "gated warp output");
+        TORCH_CHECK(experts.dim() == 2 && experts.size(0) > 0 && experts.size(1) > 0
+                        && experts.size(1) <= std::numeric_limits<int>::max()
+                        && (experts.size(1) == fused::kFc2ReferenceHiddenSize || experts.size(1) % 16 == 0),
+                    "gated warp experts must be BF16 [T,H], H=2048 or H divisible by 16");
+        TORCH_CHECK(shared.sizes() == experts.sizes() && output.sizes() == experts.sizes(),
+                    "gated warp shared/output must match experts [T,H]");
+        TORCH_CHECK(gate.dim() == 2 && gate.size(0) == experts.size(0) && gate.size(1) == 1,
+                    "gated warp gate must be BF16 [T,1]");
+        TORCH_CHECK(experts.numel() > 0 && static_cast<uint64_t>(experts.numel()) <= max_numel_,
+                    "gated warp output must fit the context workspace");
+        TORCH_CHECK((experts.data_ptr() == output.data_ptr()) || !overlaps(experts, output),
+                    "gated warp experts/output must be disjoint or exactly aliased");
+        TORCH_CHECK(!overlaps(shared, output) && !overlaps(gate, output) && !overlaps(experts, shared)
+                        && !overlaps(experts, gate) && !overlaps(shared, gate),
+                    "gated warp experts/shared/gate must have disjoint allocations; only experts/output may alias");
+        return static_cast<int>(experts.size(1));
+    }
+
+    size_t validate_gather_gate_push(torch::Tensor const& down_output,
+                                     torch::Tensor const& topk_ids,
+                                     torch::Tensor const& topk_weights,
+                                     torch::Tensor const& output_index,
+                                     torch::Tensor const& shared,
+                                     torch::Tensor const& gate,
+                                     torch::Tensor const& output) const {
+        ensure_peer_open();
+        auto check_cuda_contiguous = [&](torch::Tensor const& tensor, char const* name) {
+            TORCH_CHECK(tensor.is_cuda() && tensor.device().index() == device_ && tensor.is_contiguous(),
+                        name,
+                        " must be a contiguous CUDA tensor on the context device");
+        };
+        check_cuda_contiguous(down_output, "gather gate push down_output");
+        check_cuda_contiguous(topk_ids, "gather gate push topk_ids");
+        check_cuda_contiguous(topk_weights, "gather gate push topk_weights");
+        check_cuda_contiguous(output_index, "gather gate push output_index");
+        validate_bf16_output(shared, "gather gate push shared");
+        validate_bf16_output(gate, "gather gate push gate");
+        validate_bf16_output(output, "gather gate push output");
+        TORCH_CHECK(down_output.scalar_type() == at::kBFloat16 && down_output.dim() == 2 && down_output.size(0) > 0
+                        && down_output.size(1) == fused::kFc2ReferenceHiddenSize,
+                    "gather gate push down_output must be BF16 [rows,2048]");
+        TORCH_CHECK(output.dim() == 2, "gather gate push output must be rank-2");
+        const int64_t tokens = output.size(0);
+        TORCH_CHECK(tokens > 0 && output.size(1) == fused::kFc2ReferenceHiddenSize
+                        && static_cast<uint64_t>(output.numel()) <= max_numel_,
+                    "gather gate push output must be nonempty BF16 [T,2048] within workspace");
+        TORCH_CHECK(topk_ids.scalar_type() == at::kLong && output_index.scalar_type() == at::kLong
+                        && topk_weights.scalar_type() == at::kFloat && topk_ids.dim() == 2 && topk_ids.size(0) == tokens
+                        && topk_ids.size(1) == 8 && output_index.sizes() == topk_ids.sizes()
+                        && topk_weights.sizes() == topk_ids.sizes(),
+                    "gather gate push ids/index must be int64 [T,8] and weights float32 [T,8]");
+        TORCH_CHECK(shared.sizes() == output.sizes() && gate.dim() == 2 && gate.size(0) == tokens && gate.size(1) == 1,
+                    "gather gate push shared must be BF16 [T,2048] and gate BF16 [T,1]");
+        TORCH_CHECK(!overlaps(output, down_output) && !overlaps(output, topk_ids) && !overlaps(output, topk_weights)
+                        && !overlaps(output, output_index) && !overlaps(output, shared) && !overlaps(output, gate),
+                    "gather gate push output must not overlap any input");
+        TORCH_CHECK(!overlaps(down_output, topk_ids) && !overlaps(down_output, topk_weights)
+                        && !overlaps(down_output, output_index) && !overlaps(down_output, shared)
+                        && !overlaps(down_output, gate) && !overlaps(topk_ids, topk_weights)
+                        && !overlaps(topk_ids, output_index) && !overlaps(topk_ids, shared) && !overlaps(topk_ids, gate)
+                        && !overlaps(topk_weights, output_index) && !overlaps(topk_weights, shared)
+                        && !overlaps(topk_weights, gate) && !overlaps(output_index, shared)
+                        && !overlaps(output_index, gate) && !overlaps(shared, gate),
+                    "gather gate push inputs must have disjoint allocations");
+        return static_cast<size_t>(tokens);
+    }
+
+    void ensure_warp_resident() const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        int                  active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &active, one_shot_all_reduce_warp_kernel, fused::kPacketThreads, 0),
+                   "warp transport occupancy");
+        TORCH_CHECK(active > 0 && blocks_ <= active * properties.multiProcessorCount,
+                    "warp transport grid exceeds resident capacity");
+    }
+
+    void ensure_gated_warp_resident() const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        int                  active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &active, gated_all_reduce_warp_kernel, fused::kPacketThreads, 0),
+                   "gated warp transport occupancy");
+        TORCH_CHECK(active > 0 && blocks_ <= active * properties.multiProcessorCount,
+                    "gated warp transport grid exceeds resident capacity");
+    }
+
+    void ensure_push_warp_resident() const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        int                  active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &active, one_shot_all_reduce_push_warp_kernel<false>, fused::kPacketThreads, 0),
+                   "push warp transport occupancy");
+        TORCH_CHECK(active > 0 && blocks_ <= active * properties.multiProcessorCount,
+                    "push warp transport grid exceeds resident capacity");
+    }
+
+    void ensure_push_warp_deferred_resident() const {
+        ensure_resident(one_shot_all_reduce_push_warp_kernel<true>, "deferred push warp transport");
+    }
+
+    void ensure_gather_gate_push_resident() const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        int                  active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                       &active, gather_gate_push_warp_kernel<false>, fused::kPacketThreads, 0),
+                   "gather gate push transport occupancy");
+        TORCH_CHECK(active > 0 && blocks_ <= active * properties.multiProcessorCount,
+                    "gather gate push transport grid exceeds resident capacity");
+    }
+
+    void ensure_gather_gate_push_deferred_resident() const {
+        ensure_resident(gather_gate_push_warp_kernel<true>, "deferred gather gate push transport");
+    }
+
+    template<class Kernel>
+    void ensure_resident(Kernel kernel, char const* name) const {
+        c10::cuda::CUDAGuard guard(device_);
+        cudaDeviceProp       properties{};
+        int                  active = 0;
+        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
+        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, fused::kPacketThreads, 0), name);
+        TORCH_CHECK(
+            active > 0 && blocks_ <= active * properties.multiProcessorCount, name, " grid exceeds resident capacity");
+    }
+
     cudaStream_t current_stream() const {
         return at::cuda::getCurrentCUDAStream(device_).stream();
     }
 
     void ensure_open() const {
-        TORCH_CHECK(packets_ && ready_ && ack_ && error_, "MoeTpFusedFp8 context is closed");
+        TORCH_CHECK(packets_ && inbox_ && completion_ && ready_ && ack_ && error_, "MoeTpFusedFp8 context is closed");
     }
 
     void ensure_peer_open() const {
         ensure_open();
-        TORCH_CHECK(peer_packets_ && peer_ready_ && peer_ack_ && peer_error_, "open_peer must be called first");
+        TORCH_CHECK(peer_packets_ && peer_inbox_ && peer_ready_ && peer_ack_ && peer_error_,
+                    "open_peer must be called first");
     }
 
     void bind_stream() {
@@ -861,7 +1886,7 @@ private:
     }
 
     template<class Launch>
-    void launch_common(size_t numel, Launch&& launch) {
+    void launch_common(size_t numel, Launch&& launch, bool published_inbox = false) {
         ensure_peer_open();
         bind_stream();
         c10::cuda::CUDAGuard guard(device_);
@@ -870,8 +1895,13 @@ private:
         const uint64_t epoch = ++epoch_;
         TORCH_CHECK(epoch != 0, "fused MoE epoch overflow");
         last_packets_ = packets;
+        last_push_    = published_inbox;
         DeviceParams params{{packets_, ready_, ack_, error_},
                             {peer_packets_, peer_ready_, peer_ack_, peer_error_},
+                            inbox_,
+                            peer_inbox_,
+                            completion_,
+                            static_cast<int>(std::min<size_t>(blocks_, div_up(packets, fused::kPacketThreads / 32))),
                             epoch,
                             packets,
                             numel,
@@ -889,6 +1919,8 @@ private:
     void close_peer_impl() {
         if (peer_packets_)
             cuda_check(cudaIpcCloseMemHandle(peer_packets_), "cudaIpcCloseMemHandle(packets)");
+        if (peer_inbox_)
+            cuda_check(cudaIpcCloseMemHandle(peer_inbox_), "cudaIpcCloseMemHandle(inbox)");
         if (peer_ready_)
             cuda_check(cudaIpcCloseMemHandle(peer_ready_), "cudaIpcCloseMemHandle(ready)");
         if (peer_ack_)
@@ -896,6 +1928,7 @@ private:
         if (peer_error_)
             cuda_check(cudaIpcCloseMemHandle(peer_error_), "cudaIpcCloseMemHandle(error)");
         peer_packets_ = nullptr;
+        peer_inbox_   = nullptr;
         peer_ready_   = nullptr;
         peer_ack_     = nullptr;
         peer_error_   = nullptr;
@@ -904,6 +1937,8 @@ private:
     void close_peer_noexcept() noexcept {
         if (peer_packets_)
             cudaIpcCloseMemHandle(peer_packets_);
+        if (peer_inbox_)
+            cudaIpcCloseMemHandle(peer_inbox_);
         if (peer_ready_)
             cudaIpcCloseMemHandle(peer_ready_);
         if (peer_ack_)
@@ -911,6 +1946,7 @@ private:
         if (peer_error_)
             cudaIpcCloseMemHandle(peer_error_);
         peer_packets_ = nullptr;
+        peer_inbox_   = nullptr;
         peer_ready_   = nullptr;
         peer_ack_     = nullptr;
         peer_error_   = nullptr;
@@ -920,6 +1956,14 @@ private:
         if (packets_) {
             cuda_check(cudaFree(packets_), "cudaFree(packets)");
             packets_ = nullptr;
+        }
+        if (inbox_) {
+            cuda_check(cudaFree(inbox_), "cudaFree(inbox)");
+            inbox_ = nullptr;
+        }
+        if (completion_) {
+            cuda_check(cudaFree(completion_), "cudaFree(completion)");
+            completion_ = nullptr;
         }
         if (ready_) {
             cuda_check(cudaFree(ready_), "cudaFree(ready)");
@@ -943,16 +1987,22 @@ private:
         close_peer_noexcept();
         if (packets_)
             cudaFree(packets_);
+        if (inbox_)
+            cudaFree(inbox_);
+        if (completion_)
+            cudaFree(completion_);
         if (ready_)
             cudaFree(ready_);
         if (ack_)
             cudaFree(ack_);
         if (error_)
             cudaFree(error_);
-        packets_ = nullptr;
-        ready_   = nullptr;
-        ack_     = nullptr;
-        error_   = nullptr;
+        packets_    = nullptr;
+        inbox_      = nullptr;
+        completion_ = nullptr;
+        ready_      = nullptr;
+        ack_        = nullptr;
+        error_      = nullptr;
         if (have_device && old_device != device_)
             cudaSetDevice(old_device);
     }
@@ -963,15 +2013,19 @@ private:
     int            blocks_;
     size_t         packet_capacity_;
     fused::Packet* packets_{};
+    fused::Packet* inbox_{};
+    uint64_t*      completion_{};
     uint64_t*      ready_{};
     uint64_t*      ack_{};
     uint64_t*      error_{};
     fused::Packet* peer_packets_{};
+    fused::Packet* peer_inbox_{};
     uint64_t*      peer_ready_{};
     uint64_t*      peer_ack_{};
     uint64_t*      peer_error_{};
     uint64_t       epoch_{};
     size_t         last_packets_{};
+    bool           last_push_{};
     cudaStream_t   bound_stream_{};
     bool           stream_bound_{};
 };
@@ -989,6 +2043,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("close_peer", &MoeTpFusedFp8::close_peer)
         .def("all_reduce", &MoeTpFusedFp8::all_reduce<1>)
         .def("all_reduce_batch", &MoeTpFusedFp8::all_reduce<32>)
+        .def("all_reduce_warp", &MoeTpFusedFp8::all_reduce<16>)
+        .def("all_reduce_push_warp", &MoeTpFusedFp8::all_reduce_push_warp)
+        .def("all_reduce_push_warp_deferred", &MoeTpFusedFp8::all_reduce_push_warp_deferred)
+        .def("gather_gate_push", &MoeTpFusedFp8::gather_gate_push)
+        .def("gather_gate_push_deferred", &MoeTpFusedFp8::gather_gate_push_deferred)
+        .def("gated_all_reduce_warp", &MoeTpFusedFp8::gated_all_reduce_warp)
+        .def("gated_local_warp", &MoeTpFusedFp8::gated_local_warp)
         .def("local_fc2", &MoeTpFusedFp8::local_fc2<0>)
         .def("fused_fc2", &MoeTpFusedFp8::fused_fc2<0>)
         .def("local_fc2_mma_batch", &MoeTpFusedFp8::local_fc2<1>)
@@ -998,6 +2059,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("local_fc2_staged", &MoeTpFusedFp8::local_fc2<2>)
         .def("fused_fc2_staged", &MoeTpFusedFp8::fused_fc2<2>)
         .def("copy_local_packets", &MoeTpFusedFp8::copy_local_packets)
+        .def("copy_local_inbox", &MoeTpFusedFp8::copy_local_inbox)
         .def("debug_packet_bytes", &MoeTpFusedFp8::copy_local_packets)
         .def("error_status", &MoeTpFusedFp8::error_status)
         .def("blocks", &MoeTpFusedFp8::blocks)

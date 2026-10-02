@@ -39,6 +39,7 @@ _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
 _tp_fp8_allreduce = None
+_tp_moe_gather_fp8 = None
 
 
 def _get_rocm_rccl():
@@ -83,6 +84,15 @@ def _get_tp_fp8_allreduce():
     return _tp_fp8_allreduce
 
 
+def _get_tp_moe_gather_fp8():
+    global _tp_moe_gather_fp8
+    if _tp_moe_gather_fp8 is None:
+        from rtp_llm.models_py.distributed import tp_moe_gather_fp8
+
+        _tp_moe_gather_fp8 = tp_moe_gather_fp8
+    return _tp_moe_gather_fp8
+
+
 def _init_tp_fp8_allreduce(parallelism_config: ParallelismConfig) -> None:
     if parallelism_config.tp_size <= 1:
         if os.environ.get("RTP_LLM_TP_FP8_ALLREDUCE", "0").strip() != "0":
@@ -92,6 +102,18 @@ def _init_tp_fp8_allreduce(parallelism_config: ParallelismConfig) -> None:
     # be requested with its own explicit toggle. All TP ranks validate config.
     _get_tp_fp8_allreduce().init_tp_fp8_allreduce(
         _get_group(Group.TP), torch.device("cuda", parallelism_config.local_rank)
+    )
+
+
+def _init_tp_moe_gather_fp8(parallelism_config: ParallelismConfig) -> None:
+    # This module validates its independent flag on every TP rank, including
+    # unsupported topologies, then becomes an absent capability provider.  The
+    # serving caller therefore keeps its existing route rather than allowing a
+    # rank-local partial IPC initialization.
+    _get_tp_moe_gather_fp8().init_tp_moe_gather_fp8(
+        _get_group(Group.TP),
+        torch.device("cuda", parallelism_config.local_rank),
+        parallelism_config,
     )
 
 
@@ -129,6 +151,7 @@ def _validate_tp_moe_chunking_config(parallelism_config: ParallelismConfig) -> N
             ("MOE_TP_DIRECT_OUTPUT", "0"),
             ("MOE_TP_FUSION_MIN_TOKENS", "4096"),
             ("DSV4_FP8_QUANT_KERNEL", "auto"),
+            ("RTP_LLM_MOE_TP_FUSED_FP8_AR", "0"),
         )
     )
     configs = [None] * parallelism_config.tp_size
@@ -240,6 +263,7 @@ def init_distributed_environment(
         _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         _init_tp_fp8_allreduce(parallelism_config)
+        _init_tp_moe_gather_fp8(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -277,6 +301,7 @@ def init_distributed_environment(
         _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         _init_tp_fp8_allreduce(parallelism_config)
+        _init_tp_moe_gather_fp8(parallelism_config)
         return
 
     logging.info(
@@ -320,6 +345,7 @@ def init_distributed_environment(
     _validate_tp_moe_chunking_config(parallelism_config)
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
     _init_tp_fp8_allreduce(parallelism_config)
+    _init_tp_moe_gather_fp8(parallelism_config)
 
 
 def _create_process_groups(
@@ -694,6 +720,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+        _get_tp_moe_gather_fp8().destroy_tp_moe_gather_fp8()
         _get_tp_fp8_allreduce().destroy_tp_fp8_allreduce()
         _get_flashinfer_allreduce().destroy_flashinfer_allreduce()
 

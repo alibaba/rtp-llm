@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
+    TpPrefillGatherRawPayload,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -190,6 +191,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls) -> ExecutorType:
         return ExecutorType.DEEPGEMM_CONTINUOUS
+
+    @property
+    def supports_tp_prefill_gather_raw(self) -> bool:
+        return True
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -681,7 +686,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> CombineForwardPayload:
+    ) -> CombineForwardPayload | TpPrefillGatherRawPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         assert (
             payload.expert_x_scale is not None
@@ -726,12 +731,37 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     dtype=torch.bfloat16,
                 )
             )
+        return_gather_raw = bool(
+            extra_expert_args
+            and extra_expert_args.get("tp_prefill_return_gather_raw", False)
+        )
+        requested_alignment = (
+            (extra_expert_args or {}).get("tp_prefill_alignment")
+            if return_gather_raw
+            else None
+        )
+        if requested_alignment is not None and requested_alignment not in (64, 128):
+            raise ValueError("raw TP-prefill gather alignment must be 64 or 128")
+        if return_gather_raw and not (
+            self.is_sm120
+            and self.ep_size == 1
+            and activation == "SiGLU"
+            and not _is_cuda_graph_warmup_or_capture()
+        ):
+            raise ValueError(
+                "raw TP-prefill gather requires eager SM12x EP1 SiGLU DeepGEMM"
+            )
+
         if self.is_sm120:
-            expert_alignment = min(
-                self.EXPERT_ALIGNMENT,
-                get_theoretical_mk_alignment_for_contiguous_layout(
-                    routed_tokens, num_experts_local
-                ),
+            expert_alignment = (
+                requested_alignment
+                if requested_alignment is not None
+                else min(
+                    self.EXPERT_ALIGNMENT,
+                    get_theoretical_mk_alignment_for_contiguous_layout(
+                        routed_tokens, num_experts_local
+                    ),
+                )
             )
             max_active_experts = min(routed_tokens, num_experts_local)
             all_tokens = align_up_math(
@@ -905,6 +935,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
         del down_input_fp8, down_input_scale
+        if return_gather_raw:
+            return TpPrefillGatherRawPayload(
+                down_output=down_output,
+                topk_ids=topk_idx,
+                topk_weights=topk_weights,
+                output_index=output_index,
+                expert_alignment=expert_alignment,
+            )
         gather_out = (extra_expert_args or {}).get("output_tensor")
         if gather_out is None:
             gather_out = torch.empty(

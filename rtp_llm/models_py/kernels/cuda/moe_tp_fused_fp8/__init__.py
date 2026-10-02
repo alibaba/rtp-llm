@@ -1,8 +1,8 @@
 """Opt-in pure-TP2 FC2 and FP8 communication fusion experiments.
 
-The scalar reference, scalar-order shared staging and FP8 MMA variants are
-explicit benchmark APIs. None is registered in the serving model path or
-qualified as a replacement for a production grouped GEMM backend.
+The scalar reference, scalar-order shared staging and FP8 MMA variants remain
+explicit benchmark APIs. The separately gated serving communicator uses only
+the gather/gate transport after a production grouped GEMM backend.
 """
 
 from __future__ import annotations
@@ -93,8 +93,8 @@ class MoeTpFusedFp8Context:
 
     All ranks must call create, operations, and close in the same order. Calls
     validate metadata collectively before launching. The native API is exposed
-    only for already-validated fixed-input kernel benchmarks. No serving code
-    imports or selects this module automatically. Operations enqueue work;
+    only for already-validated fixed-input kernel benchmarks. Serving uses a
+    separate communicator rather than this per-call validation wrapper. Operations enqueue work;
     call synchronize() on both ranks before accepting any result, to check the
     sticky device error status. Inputs and computed outputs must remain finite.
     """
@@ -246,7 +246,7 @@ class MoeTpFusedFp8Context:
         self.calls += 1
         return out
 
-    def all_reduce(self, partial, out=None):
+    def all_reduce(self, partial, out=None, *, kernel="scalar"):
         import torch
 
         if out is None:
@@ -258,16 +258,219 @@ class MoeTpFusedFp8Context:
         )
         error = None
         try:
+            if kernel not in (
+                "scalar",
+                "batch",
+                "warp",
+                "push_warp",
+                "push_warp_deferred",
+            ):
+                raise ValueError(
+                    "all_reduce kernel must be scalar, batch, warp, push_warp or push_warp_deferred"
+                )
+            if kernel != "scalar":
+                key = "mma_batch" if kernel == "batch" else kernel
+                if (
+                    self.blocks
+                    > self.native.launch_info()[f"{key}_max_resident_blocks"]
+                ):
+                    raise ValueError("selected transport needs a smaller resident grid")
             if not bool(torch.isfinite(partial).all().item()):
                 raise ValueError("one-shot input must be finite")
             if max(partial.data_ptr(), out.data_ptr()) < min(
                 partial.data_ptr() + partial.nbytes, out.data_ptr() + out.nbytes
+            ) and not (
+                kernel in ("warp", "push_warp", "push_warp_deferred")
+                and partial.data_ptr() == out.data_ptr()
             ):
                 raise ValueError("one-shot output overlaps input allocation")
         except Exception as exc:
             error = repr(exc)
-        _agree(error, None, self.group, "one-shot values/aliasing")
-        return self._launch("all_reduce", (partial,), out)
+        _agree(error, kernel, self.group, "one-shot values/aliasing/kernel")
+        method = "all_reduce" if kernel == "scalar" else f"all_reduce_{kernel}"
+        return self._launch(method, (partial,), out)
+
+    def _validate_gated_warp_inputs(self, experts, shared, gate, out, phase):
+        import torch
+
+        gate_shape = (experts.shape[0], 1) if experts.ndim >= 1 else (-1, 1)
+        self._validate_tensors(
+            (experts, shared, gate, out),
+            (
+                (experts.shape, torch.bfloat16),
+                (experts.shape, torch.bfloat16),
+                (gate_shape, torch.bfloat16),
+                (experts.shape, torch.bfloat16),
+            ),
+            phase,
+        )
+        error = None
+        try:
+            if (
+                experts.ndim != 2
+                or experts.shape[0] <= 0
+                or (experts.shape[1] != 2048 and experts.shape[1] % 16)
+            ):
+                raise ValueError(
+                    "experts must be BF16 [T,H], H=2048 or divisible by 16"
+                )
+            tensors = (experts, shared, gate, out)
+            for index, tensor in enumerate(tensors):
+                if index < 3 and not bool(torch.isfinite(tensor).all().item()):
+                    raise ValueError("gated warp inputs must be finite")
+                for other in tensors[index + 1 :]:
+                    overlaps = max(tensor.data_ptr(), other.data_ptr()) < min(
+                        tensor.data_ptr() + tensor.nbytes,
+                        other.data_ptr() + other.nbytes,
+                    )
+                    exact_experts_out = (
+                        tensor is experts
+                        and other is out
+                        and tensor.data_ptr() == other.data_ptr()
+                    )
+                    if overlaps and not exact_experts_out:
+                        raise ValueError(
+                            "gated warp only permits exact experts/out aliasing"
+                        )
+        except Exception as exc:
+            error = repr(exc)
+        _agree(error, tuple(experts.shape), self.group, f"{phase} values/aliasing")
+
+    def gated_all_reduce_warp(self, experts, shared, gate, out=None):
+        """Experimental TP2 gate+FP8-warp all-reduce, outside serving paths."""
+
+        import torch
+
+        if out is None:
+            out = torch.empty_like(experts)
+        self._validate_gated_warp_inputs(
+            experts, shared, gate, out, "gated warp inputs"
+        )
+        error = None
+        try:
+            if (
+                self.blocks
+                > self.native.launch_info()["gated_warp_max_resident_blocks"]
+            ):
+                raise ValueError("gated warp transport needs a smaller resident grid")
+        except Exception as exc:
+            error = repr(exc)
+        _agree(error, tuple(experts.shape), self.group, "gated warp residency")
+        return self._launch("gated_all_reduce_warp", (experts, shared, gate), out)
+
+    def gated_local_warp(self, experts, shared, gate, out=None):
+        """Debug-only local BF16 gate oracle using the same inline PTX path."""
+
+        import torch
+
+        if out is None:
+            out = torch.empty_like(experts)
+        self._validate_gated_warp_inputs(
+            experts, shared, gate, out, "gated local inputs"
+        )
+        return self._launch("gated_local_warp", (experts, shared, gate), out)
+
+    def gather_gate_push(
+        self,
+        down_output,
+        topk_ids,
+        topk_weights,
+        output_index,
+        shared,
+        gate,
+        out=None,
+        *,
+        deferred_ack=False,
+    ):
+        """Experimental whole-batch ep_gather + gate + TP2 push transport.
+
+        This standalone benchmark API consumes the existing DeepGEMM FC2
+        routed-row output. It is not selected by GenericMoE or a serving path.
+        The ids and output_index contract matches the current DeepGEMM
+        ep_scatter/ep_gather implementation: both are int64 [T, 8].
+        ``deferred_ack`` is an experimental protocol choice and must match on
+        both TP ranks; it defaults to the established per-group acknowledgement.
+        """
+
+        import torch
+
+        if out is None:
+            out = torch.empty_like(shared)
+        expected_topk = (out.shape[0], 8) if out.ndim == 2 else (-1, 8)
+        self._validate_tensors(
+            (down_output, topk_ids, topk_weights, output_index, shared, gate, out),
+            (
+                (down_output.shape, torch.bfloat16),
+                (expected_topk, torch.int64),
+                (expected_topk, torch.float32),
+                (expected_topk, torch.int64),
+                (out.shape, torch.bfloat16),
+                ((out.shape[0], 1) if out.ndim == 2 else (-1, 1), torch.bfloat16),
+                (out.shape, torch.bfloat16),
+            ),
+            "gather gate push inputs",
+        )
+        error = None
+        try:
+            if (
+                down_output.ndim != 2
+                or down_output.shape[0] <= 0
+                or down_output.shape[1] != 2048
+                or out.ndim != 2
+                or out.shape[0] <= 0
+                or out.shape[1] != 2048
+                or tuple(shared.shape) != tuple(out.shape)
+            ):
+                raise ValueError(
+                    "down_output must be [rows,2048] and shared/out [T,2048]"
+                )
+            tensors = (
+                down_output,
+                topk_ids,
+                topk_weights,
+                output_index,
+                shared,
+                gate,
+            )
+            for index, tensor in enumerate(tensors):
+                if max(tensor.data_ptr(), out.data_ptr()) < min(
+                    tensor.data_ptr() + tensor.nbytes,
+                    out.data_ptr() + out.nbytes,
+                ):
+                    raise ValueError("gather gate push output may not overlap an input")
+                for other in tensors[index + 1 :]:
+                    if max(tensor.data_ptr(), other.data_ptr()) < min(
+                        tensor.data_ptr() + tensor.nbytes,
+                        other.data_ptr() + other.nbytes,
+                    ):
+                        raise ValueError(
+                            "gather gate push inputs must have disjoint allocations"
+                        )
+            resident_key = (
+                "gather_gate_push_deferred_max_resident_blocks"
+                if deferred_ack
+                else "gather_gate_push_max_resident_blocks"
+            )
+            if self.blocks > self.native.launch_info()[resident_key]:
+                raise ValueError("gather gate push needs a smaller resident grid")
+        except Exception as exc:
+            error = repr(exc)
+        _agree(
+            error,
+            (
+                tuple(down_output.shape),
+                tuple(out.shape),
+                tuple(topk_ids.shape),
+                bool(deferred_ack),
+            ),
+            self.group,
+            "gather gate push values/aliasing/residency",
+        )
+        return self._launch(
+            "gather_gate_push_deferred" if deferred_ack else "gather_gate_push",
+            (down_output, topk_ids, topk_weights, output_index, shared, gate),
+            out,
+        )
 
     def fc2(
         self,

@@ -10,10 +10,12 @@ py_library(
         "rocm_rccl.py",
         "symm_mem.py",
         "tp_fp8_all_reduce.py",
+        "tp_moe_gather_fp8.py",
     ],
     deps = [
         "//rtp_llm:torch",
         "//rtp_llm/models_py/kernels/cuda/low_precision_all_reduce:tp_fp8_all_reduce",
+        "//rtp_llm/models_py/kernels/cuda/moe_tp_fused_fp8:moe_tp_fused_fp8",
     ],
     visibility = ["//visibility:public"],
 )

@@ -79,7 +79,15 @@ def _codec_quantize_dequantize(values: torch.Tensor) -> torch.Tensor:
     padded = torch.nn.functional.pad(flat, (0, (-flat.numel()) % warp_values))
     groups = padded.reshape(-1, warp_values)
     max_abs = groups.abs().amax(dim=1, keepdim=True)
-    scale = torch.where(max_abs == 0, torch.zeros_like(max_abs), 448.0 / max_abs)
+    zero = max_abs == 0
+    safe_max_abs = torch.where(zero, torch.ones_like(max_abs), max_abs)
+    # Use a single FP32 divide, matching native CUDA's ``448.f / max_abs``.
+    # ``448.0 / max_abs`` takes PyTorch's reverse-division reciprocal path.
+    scale = torch.where(
+        zero,
+        torch.zeros_like(max_abs),
+        torch.div(torch.full_like(max_abs, 448.0), safe_max_abs),
+    )
     encoded = (groups * scale).to(torch.float8_e4m3fn)
     safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
     decoded = torch.where(
@@ -266,6 +274,43 @@ def _verify_exact_codec_cases(
     return results
 
 
+def _verify_random_multiscale_codec_oracle(
+    communicator: TpFp8AllReduceCommunicator, rank: int
+) -> dict:
+    """Regression for per-496-value scales and the native single-divide codec."""
+    warp_values = 31 * 16
+    generator = torch.Generator(device="cuda").manual_seed(9127 + rank)
+    values = torch.randn(
+        (8, warp_values),
+        generator=generator,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    scales = torch.tensor(
+        (2.0**-10, 2.0**-5, 0.125, 0.75, 1.0, 7.0, 64.0, 384.0),
+        device="cuda",
+        dtype=torch.float32,
+    ).reshape(-1, 1)
+    # Each rank contributes a different packet-scale pattern, so both phases
+    # exercise changing local and reduced maxima.
+    values = values * scales * (1.0 if rank == 0 else -0.6875)
+    input_tensor = values.to(torch.bfloat16).reshape(-1).contiguous()
+    bf16_ref, fp32_ref = _reference(input_tensor)
+    codec_ref = _codec_reference(input_tensor)
+    output = communicator.all_reduce(input_tensor)
+    torch.cuda.synchronize()
+    _assert_ranks_bitwise_equal(output)
+    if not torch.equal(output, codec_ref):
+        raise AssertionError("random multi-scale output differs from codec oracle")
+    return {
+        "case": "random_multiscale_496_value_packets",
+        "packet_values": warp_values,
+        "packet_scale_count": int(scales.numel()),
+        "codec_oracle_bitwise_equal": True,
+        "error": _error_stats(output, bf16_ref, fp32_ref),
+    }
+
+
 def _make_rank_asymmetric_layout(payload: torch.Tensor, rank: int) -> torch.Tensor:
     if rank == 0:
         return payload.contiguous()
@@ -394,7 +439,9 @@ def main() -> None:
     communicator = None
     try:
         sizes = [size * 1024 * 1024 for size in args.sizes_mib]
-        max_bytes = max(sizes)
+        # The async workspace regression always queues 32 MiB payloads,
+        # independently of the user-selected timing sizes.
+        max_bytes = max(max(sizes), 32 * 1024 * 1024)
         communicator = TpFp8AllReduceCommunicator(
             dist.group.WORLD,
             torch.device("cuda", rank),
@@ -411,6 +458,7 @@ def main() -> None:
         ]
         correctness.extend(_verify_async_workspace_reuse(communicator, rank))
         correctness.extend(_verify_exact_codec_cases(communicator, rank))
+        correctness.append(_verify_random_multiscale_codec_oracle(communicator, rank))
         correctness.extend(_verify_asymmetric_layout(communicator, rank))
         _verify_explicit_output_and_nondefault_stream(communicator, rank)
 
