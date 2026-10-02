@@ -629,9 +629,18 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
-    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
-        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const bool fast_afd_qwen35 =
+        ffn_disaggregate_config.enable_ffn_disaggregate && model_config_.model_type == "qwen35_moe";
+    // The one expert rank has no attention state. Block 0 is reserved, and the
+    // block pool requires at least one allocatable block in addition to it.
+    const auto local_block_num =
+        fast_afd_qwen35 && ffn_disaggregate_config.is_ffn_service() ?
+            2u :
+            CacheConfigCreator::computeLocalBlockNum(
+                config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    const auto attention_rank_count = fast_afd_qwen35 ? static_cast<size_t>(parallelism_config.world_size - 1) : 0;
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, attention_rank_count);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
@@ -685,10 +694,20 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    absl::Status shutdown_status = absl::OkStatus();
+    if (ffn_disaggregate_config.enable_ffn_disaggregate && model_config_.model_type == "qwen35_moe"
+        && !ffn_disaggregate_config.is_ffn_service() && executor_) {
+        // No model forward can race this control message after the loop joins.
+        // The expert rank removes this attention rank from future rounds.
+        setCurrentThreadDevice(getDeviceId());
+        shutdown_status = executor_->shutdownFastAFD();
+    }
+    // The expert rank can be waiting in a blocking receive. Its stop() must
+    // follow all attention-rank stops so every peer has sent STOP.
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return absl::OkStatus();
+    return shutdown_status;
 }
 
 void NormalEngine::loop() {
@@ -779,14 +798,22 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
-        if (parallelism_config.dp_size > 1) {
+        // The ordinary DP path inserts a synthetic token on idle ranks. A
+        // FastAFD attention rank instead participates with an empty model
+        // forward so it can send only the end-of-step marker to the expert.
+        const bool fast_afd_attention_rank =
+            ffn_disaggregate_config.enable_ffn_disaggregate && model_config_.model_type == "qwen35_moe";
+        if (parallelism_config.dp_size > 1 && !fast_afd_attention_rank) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
         // The skip_run flag inside process() handles the "no work" case.
-        if (streams.empty() && parallelism_config.tp_size <= 1) {
+        // FastAFD's expert rank drains one protocol round from every attention
+        // rank. An idle attention rank must enter the round and send FINISH so
+        // work on another attention rank cannot wait behind it indefinitely.
+        if (streams.empty() && parallelism_config.tp_size <= 1 && !fast_afd_attention_rank) {
             return absl::OkStatus();
         }
     }
@@ -819,6 +846,10 @@ absl::Status NormalEngine::step() try {
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
+        if (status.ok() && ffn_disaggregate_config.enable_ffn_disaggregate && model_config_.model_type == "qwen35_moe"
+            && ffn_disaggregate_config.is_ffn_service() && executor_->fastAFDServiceFinished()) {
+            running_ = false;
+        }
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
@@ -836,6 +867,14 @@ absl::Status NormalEngine::step() try {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
+    }
+
+    // Once every attention rank has sent FINISH without a routed request, all
+    // participants can back off together. A locally idle rank must keep pace
+    // when another attention rank is decoding, so never sleep on that path.
+    if (status.ok() && running_ && ffn_disaggregate_config.enable_ffn_disaggregate
+        && model_config_.model_type == "qwen35_moe" && executor_->fastAFDGlobalIdle()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     return status;

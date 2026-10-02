@@ -53,6 +53,32 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         )
 
 
+class CudaFp8PerBlockNoDPTritonStrategy(CudaFp8PerBlockNoDPStrategy):
+    """Use block-scaled Triton GEMMs when DeepGEMM cannot run."""
+
+    # Share the public strategy name so both auto and an explicit request can
+    # choose the backend available on this GPU. Executor priority retains
+    # DeepGEMM preference where both are eligible.
+    strategy_name = "fp8_per_block_no_dp"
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fp8_per_block_executor import (
+            TritonFp8PerBlockExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlockTriton,
+        )
+
+        return StrategyAttributes(
+            router_class=PureTpRouterFp8PerBlockTriton,
+            executor_class=TritonFp8PerBlockExecutor,
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                block_shape=[128, 128],
+            ),
+        )
+
+
 class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
     """CUDA FP8 PerBlock No DP Masked strategy"""
 

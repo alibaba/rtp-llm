@@ -162,6 +162,7 @@ py_library(
         ":configs",
         "//rtp_llm:warmup",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/distributed:fast_afd",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",

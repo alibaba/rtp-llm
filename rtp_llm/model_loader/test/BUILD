@@ -19,6 +19,13 @@ py_test(
 )
 
 py_test(
+    name = "test_qwen35_afd_weight",
+    srcs = ["test_qwen35_afd_weight.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,

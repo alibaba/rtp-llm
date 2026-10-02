@@ -83,6 +83,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
+    void            shutdownFastAFD();
+    bool            fastAFDServiceFinished();
+    bool            fastAFDGlobalIdle();
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;

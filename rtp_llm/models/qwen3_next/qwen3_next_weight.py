@@ -555,9 +555,28 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
 class Qwen35MoeWeight(Qwen3NextBaseWeight):
     """Qwen3.5 MoE weight loading (dynamic prefix detection, separate weight format, stacked support)."""
 
+    # The attention ranks also own the router and shared expert in FastAFD.
+    # The generic AFD loader skips all attention-rank layer weights, which is
+    # only suitable for the original dense Qwen3 disaggregation path.
+    load_layer_weights_on_attn_rank = True
+
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self._has_stacked_ckpt = False
+        if self.uses_fastafd_weight_partition:
+            # The serving world is represented as DP/EP ranks for scheduling,
+            # but each AG needs a full attention copy and the single EG owns
+            # all routed experts.  The checkpoint loader must see a local
+            # TP=DP=EP=1 view, independent of the global process layout.
+            self.ep_size = 1
+            self.ep_rank = 0
+            self.dp_size = 1
+            self.dp_rank = 0
+            self.num_nodes = 1
+
+    @property
+    def uses_fastafd_weight_partition(self) -> bool:
+        return self.expert_num_ > 0 and (self.is_attn_model or self.is_ffn_service)
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
         # detect prefix from layer-0 input_layernorm; skip mtp draft keys (unique match)
@@ -579,6 +598,45 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
             expert_num=self.expert_num_,
             align_size=self._align_size,
         )
+
+    def _get_weight_info(self) -> ModelWeightInfo:
+        if self.uses_fastafd_weight_partition and self.is_ffn_service:
+            # The expert rank only executes routed experts.  It has no token
+            # embedding, attention/GDN, router, shared expert, or LM head.
+            return ModelWeightInfo(
+                weights=[],
+                layer_weights=[
+                    self._create_ffn_weight() for _ in range(self._num_layers)
+                ],
+            )
+        return super()._get_weight_info()
+
+    def _create_ffn_weight(self) -> List[WeightModule]:
+        if not self.uses_fastafd_weight_partition:
+            return super()._create_ffn_weight()
+
+        moe_config = self._get_moe_config()
+        if self.is_ffn_service:
+            return [
+                MoeWeight(
+                    sub_weights=self._create_moe_expert_weights(moe_config),
+                    config=moe_config,
+                )
+            ]
+
+        ffn_config = FfnConfig(
+            is_gated_activation=self._is_gated_activation,
+            align_size=self._align_size,
+        )
+        moe_gate, shared_expert_gate, ffn_sub_weights = self._create_ffn_common_weights(
+            moe_config, ffn_config
+        )
+        weights: List[WeightModule] = [moe_gate]
+        if self.model_config.n_shared_experts > 0:
+            weights.append(FfnWeight(sub_weights=ffn_sub_weights, config=ffn_config))
+            if shared_expert_gate is not None:
+                weights.append(shared_expert_gate)
+        return weights
 
     def _create_moe_expert_weights(
         self, moe_config: MoeConfig
@@ -718,6 +776,8 @@ def build_qwen35_dense_ffn_weights(
 
 class Qwen35DenseWeight(Qwen35MoeWeight):
     """Qwen3.5 Dense weight loading (dynamic prefix detection, separate weight format, stacked support)."""
+
+    load_layer_weights_on_attn_rank = False
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)

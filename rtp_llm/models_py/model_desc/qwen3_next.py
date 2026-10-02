@@ -1398,6 +1398,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        remote_expert_client: Optional[Any] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -1435,6 +1436,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                remote_expert_client=remote_expert_client,
+                layer_idx=layer_idx,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
@@ -1489,6 +1492,7 @@ class Qwen3NextModel(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        remote_expert_client: Optional[Any] = None,
     ):
         super().__init__(
             model_config,
@@ -1519,6 +1523,7 @@ class Qwen3NextModel(GptModelBase):
                     max_generate_batch_size,
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
+                    remote_expert_client=remote_expert_client,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -1533,7 +1538,9 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        impls = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)
@@ -1799,6 +1806,7 @@ class Qwen35Model(Qwen3NextModel):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        remote_expert_client: Optional[Any] = None,
     ):
         super().__init__(
             model_config,
@@ -1809,6 +1817,7 @@ class Qwen35Model(Qwen3NextModel):
             fmha_config,
             py_hw_kernel_config,
             device_resource_config,
+            remote_expert_client,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 

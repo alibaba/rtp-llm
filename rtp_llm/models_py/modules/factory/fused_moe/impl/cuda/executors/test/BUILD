@@ -82,6 +82,19 @@ py_test (
     exec_properties = {'gpu':'RTX_5000_PRO_CU13', 'gpu_count':'1'},
 )
 
+py_test(
+    name = "triton_fp8_per_block_executor_test",
+    srcs = ["triton_fp8_per_block_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
 py_test (
     name = "triton_fp8_block_moe_sm120_benchmark",
     srcs = ["triton_fp8_block_moe_sm120_benchmark.py"],

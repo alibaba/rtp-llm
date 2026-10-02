@@ -385,10 +385,6 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
 
 
 def setup_default_args(py_env_configs):
-    set_parallelism_config(
-        py_env_configs.parallelism_config,
-        py_prefill_cp_config=py_env_configs.prefill_cp_config,
-    )
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -405,6 +401,74 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
+
+    if (
+        py_env_configs.model_args.model_type == "qwen35_moe"
+        and py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate
+    ):
+        parallelism = py_env_configs.parallelism_config
+        # The union process group remains a pure-DP topology for the server,
+        # scheduler and point-to-point transport. Rank world_size - 1 is the
+        # sole expert service; the other ranks each own a full attention model.
+        # The expert service constructs a separate rank-local EP=1 adapter for
+        # its fused MoE implementation.
+        if (
+            parallelism.world_size < 2
+            or parallelism.tp_size != 1
+            or parallelism.dp_size != parallelism.world_size
+            or parallelism.ep_size not in (0, parallelism.world_size)
+            or parallelism.pp_size != 1
+            or parallelism.ffn_sp_size != 1
+        ):
+            raise ValueError(
+                "Qwen3.5 MoE AFD requires world_size >= 2, tp_size = 1, "
+                "dp_size = world_size, ep_size = world_size (or 0 for auto), "
+                "pp_size = ffn_sp_size = 1; the last rank serves experts"
+            )
+        if not 0 <= parallelism.world_rank < parallelism.world_size:
+            raise ValueError("Qwen3.5 MoE AFD world_rank must be in [0, world_size)")
+        if py_env_configs.moe_config.moe_strategy != "auto":
+            raise ValueError(
+                "Qwen3.5 MoE AFD currently requires --moe_strategy auto so "
+                "the expert service selects a local MoE backend"
+            )
+        if py_env_configs.sp_config.type != SpeculativeType.NONE:
+            raise ValueError(
+                "Qwen3.5 MoE AFD does not support speculative decoding yet"
+            )
+        kv_cache_config = py_env_configs.kv_cache_config
+        if (
+            kv_cache_config.multi_task_prompt
+            or kv_cache_config.multi_task_prompt_str
+            or kv_cache_config.multi_task_prompt_tokens
+        ):
+            raise ValueError(
+                "Qwen3.5 MoE AFD does not support multi-task system prompts: "
+                "system-prompt pre-run starts before the expert service loop"
+            )
+        if not py_env_configs.device_resource_config.enable_layer_micro_batch:
+            raise ValueError("Qwen3.5 MoE AFD requires --enable_layer_micro_batch 1")
+        if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
+            raise ValueError("Qwen3.5 MoE AFD does not support --enable_cuda_graph yet")
+        deep_ep = py_env_configs.deep_ep_config
+        if any(
+            (
+                deep_ep.use_deepep_moe,
+                deep_ep.use_deepep_low_latency,
+                deep_ep.use_deepep_internode,
+                deep_ep.use_mori_ep,
+            )
+        ):
+            raise ValueError(
+                "Qwen3.5 MoE AFD uses a local expert runner on its service rank; "
+                "disable DeepEP and MoriEP options"
+            )
+
+    set_parallelism_config(
+        py_env_configs.parallelism_config,
+        py_ffn_disaggregate_config=py_env_configs.ffn_disaggregate_config,
+        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+    )
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
@@ -679,6 +743,21 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         role_type=py_env_configs.role_config.role_type,
         ll_num_max_token=ll_num_max_token,
     )
+
+    if (
+        py_env_configs.model_args.model_type == "qwen35_moe"
+        and py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate
+    ):
+        # The union world includes Attention ranks, but its one Expert rank
+        # owns all routed experts. World-size based DeepEP defaults would
+        # select an EP router that requires peers on the Attention ranks.
+        py_env_configs.moe_config.use_deepep_moe = False
+        py_env_configs.moe_config.use_deepep_low_latency = False
+        py_env_configs.moe_config.use_deepep_internode = False
+        py_env_configs.moe_config.use_mori_ep = False
+        # The expert rank executes every expert locally. Pure-TP MoE routers
+        # (including the FP8 per-block path) require this flag even at TP=1.
+        py_env_configs.moe_config.use_all_gather = True
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:

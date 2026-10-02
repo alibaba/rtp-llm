@@ -225,6 +225,20 @@ class PureTpRouterFp8PerBlock(PureTpRouterBase):
             return trt_fp8_quantize_128(a1, False)
 
 
+class PureTpRouterFp8PerBlockTriton(PureTpRouterFp8PerBlock):
+    """FP8 per-block routing with Triton quantization and FP32 scales.
+
+    The existing router selects packed UE8M0 scales on Blackwell for
+    DeepGEMM. This router always produces the unpacked scale layout consumed
+    by TritonFp8PerBlockExecutor, regardless of optional DeepGEMM packages.
+    """
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return sgl_per_token_group_quant_fp8(a1, group_size=128)
+
+
 class PureTpRouterW4a8Int4PerChannel(PureTpRouterBase):
     """Pure TP router with W4A8 INT4 per-channel quantization."""
 

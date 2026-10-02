@@ -909,6 +909,16 @@ class ManagerTest(JitCacheTestBase):
 
 
 class BackendTest(JitCacheTestBase):
+    def clear_local_world_size(self):
+        previous = os.environ.pop("LOCAL_WORLD_SIZE", None)
+
+        def restore():
+            os.environ.pop("LOCAL_WORLD_SIZE", None)
+            if previous is not None:
+                os.environ["LOCAL_WORLD_SIZE"] = previous
+
+        self.addCleanup(restore)
+
     def make_configs(self, remote="", world_size=1):
         configs = mock.Mock()
         configs.jit_config.remote_jit_dir = remote
@@ -930,6 +940,71 @@ class BackendTest(JitCacheTestBase):
         ):
             stack.enter_context(mock.patch.object(target, name, **kwargs))
         return stack
+
+    def test_fast_afd_registers_attention_before_expert_shutdown_group(self):
+        self.clear_local_world_size()
+        configs = self.make_configs(world_size=3)
+        configs.model_args.model_type = "qwen35_moe"
+        configs.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        configs.parallelism_config.world_rank = 0
+        configs.distribute_config.fake_gang_env = False
+        ranks = [mock.Mock(name=f"rank-{rank}") for rank in range(3)]
+        for rank, proc in enumerate(ranks):
+            proc.name = f"rank-{rank}"
+
+        def create_ranks(_gc, _configs, _ctx, processes, _readers):
+            processes.extend(ranks)
+
+        manager = mock.Mock()
+        with self.patched_backend(device_count=3), mock.patch.object(
+            backend.multiprocessing, "get_context"
+        ), mock.patch.object(
+            backend, "_create_rank_processes", side_effect=create_ranks
+        ), mock.patch.object(
+            backend, "_wait_for_ranks_startup"
+        ), mock.patch.object(
+            backend, "ProcessManager", return_value=manager
+        ) as manager_type:
+            result = backend.multi_rank_start(None, configs)
+
+        self.assertEqual(result, ranks)
+        self.assertEqual(
+            manager_type.call_args.kwargs["backend_post_frontend_drain_seconds"],
+            0,
+        )
+        manager.add_processes.assert_called_once_with(
+            ranks[:2], shutdown_group="frontend"
+        )
+        manager.add_process.assert_called_once_with(ranks[2], shutdown_group="backend")
+        manager.set_processes.assert_not_called()
+        manager.monitor_and_release_processes.assert_called_once_with()
+
+    def test_fast_afd_rejects_cross_node_before_spawning(self):
+        self.clear_local_world_size()
+        configs = self.make_configs(world_size=3)
+        configs.model_args.model_type = "qwen35_moe"
+        configs.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        configs.parallelism_config.world_rank = 0
+        with self.patched_backend(device_count=2), mock.patch.object(
+            backend, "_create_rank_processes"
+        ) as create_ranks, mock.patch.object(backend, "_send_pipe_status") as status:
+            with self.assertRaisesRegex(Exception, "cross-node shutdown ordering"):
+                backend.multi_rank_start(None, configs, pipe_writer=object())
+        create_ranks.assert_not_called()
+        self.assertEqual(status.call_args.args[1], "failed")
+
+    def test_fast_afd_rejects_single_gpu_host_before_local_rank_start(self):
+        self.clear_local_world_size()
+        configs = self.make_configs(world_size=2)
+        configs.model_args.model_type = "qwen35_moe"
+        configs.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        configs.parallelism_config.world_rank = 0
+        with self.patched_backend(device_count=1), mock.patch.object(
+            backend, "local_rank_start"
+        ) as local_rank:
+            with self.assertRaisesRegex(ValueError, "cross-node shutdown ordering"):
+                backend.start_backend_server(None, configs)
+        local_rank.assert_not_called()
 
     def test_no_remote_sets_up_local_jit_env(self):
         with mock.patch.object(

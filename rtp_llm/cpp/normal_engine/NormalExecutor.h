@@ -51,7 +51,10 @@ public:
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
-    bool updateEplbConfig(const EPLBConfig& config) override;
+    bool         updateEplbConfig(const EPLBConfig& config) override;
+    absl::Status shutdownFastAFD() override;
+    bool         fastAFDServiceFinished() override;
+    bool         fastAFDGlobalIdle() override;
 
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a

@@ -51,6 +51,7 @@ run_dirty_generation_prefill_capture_scenario = (
     _extension.run_dirty_generation_prefill_capture_scenario
 )
 run_scenario = _extension.run_scenario
+run_empty_fastafd_step = _extension.run_empty_fastafd_step
 
 
 class CacheStoreForwardModel:
@@ -596,9 +597,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         ]
         single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
         for scenario, on_cuda, two_dimensional, tags, tables in (
-            ("micro_batch_split_pinned", False, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_cuda", True, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_single_group", False, False, ["default"], single_group_tables),
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
             ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
         ):
             with self.subTest(scenario=scenario):
@@ -624,7 +643,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         self.assertEqual(tensor.device, source.device)
                         self.assertEqual(tensor.is_pinned(), not on_cuda)
                         self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(tensor.cpu(), expected.narrow(batch_axis, start, count))
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
                 self.assertEqual(
                     [batch["input_lengths"].tolist() for batch in result["batches"]],
                     [[2, 4], [2]],
@@ -685,6 +706,69 @@ class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
 
     def forward(self, inputs, fmha_impl=None):
         return PyModelOutputs(rms_norm(self.hidden(inputs)))
+
+
+class _IdleFastAFDModel:
+    use_real_micro_batches_only = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def initialize(self, _resources):
+        return True
+
+    def forward(self, _inputs):
+        raise AssertionError("idle FastAFD rank must not run decoder forward")
+
+    def forward_micro_batch(self, inputs):
+        assert inputs == []
+        self.calls += 1
+        return []
+
+
+class _MicroBatchHiddenModel:
+    def __init__(self):
+        self.batch_token_counts = []
+
+    def initialize(self, _resources):
+        return True
+
+    def forward(self, _inputs):
+        raise AssertionError("expected the micro-batch forward path")
+
+    def forward_micro_batch(self, inputs):
+        self.batch_token_counts = [part.input_ids.numel() for part in inputs]
+        columns = torch.arange(2048, device="cuda") % 16
+        return [
+            PyModelOutputs(
+                (part.input_ids.unsqueeze(1) * 16 + columns).to(torch.bfloat16)
+            )
+            for part in inputs
+        ]
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class MicroBatchHiddenMergeTest(unittest.TestCase):
+    def test_decoder_width_can_differ_from_attention_projection_width(self):
+        for decode, token_count, split in ((False, 8, [6, 2]), (True, 3, [2, 1])):
+            with self.subTest(decode=decode):
+                model = _MicroBatchHiddenModel()
+                hidden = _extension.run_micro_batch_hidden_merge(model, decode)
+                self.assertEqual(model.batch_token_counts, split)
+                self.assertEqual(tuple(hidden.shape), (token_count, 2048))
+                self.assertEqual(hidden.dtype, torch.bfloat16)
+                tokens = torch.arange(1, token_count + 1, device="cuda")
+                columns = torch.arange(2048, device="cuda") % 16
+                expected = (tokens.unsqueeze(1) * 16 + columns).to(torch.bfloat16)
+                torch.testing.assert_close(hidden, expected, rtol=0, atol=0)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class EmptyFastAFDStepTest(unittest.TestCase):
+    def test_idle_attention_rank_sends_empty_step_without_decoder_input(self):
+        model = _IdleFastAFDModel()
+        run_empty_fastafd_step(model)
+        self.assertEqual(model.calls, 1)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")

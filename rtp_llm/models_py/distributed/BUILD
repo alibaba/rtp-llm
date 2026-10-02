@@ -12,6 +12,17 @@ py_library(
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm:ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "fast_afd",
+    srcs = ["fast_afd.py"],
+    deps = [
+        ":collective_torch",
+        "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
 )

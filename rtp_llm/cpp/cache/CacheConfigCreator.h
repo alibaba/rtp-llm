@@ -50,8 +50,11 @@ public:
                                          const ParallelismConfig&                         parallelism_config,
                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                          const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
-    static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
-    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
+    static uint32_t synchronizeBlockNum(uint32_t                 local_block_num,
+                                        const ParallelismConfig& parallelism_config,
+                                        size_t                   attention_rank_count = 0);
+    static uint32_t
+    selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service, size_t attention_rank_count = 0);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.

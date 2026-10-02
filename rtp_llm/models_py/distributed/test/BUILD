@@ -1,3 +1,14 @@
+py_test(
+    name = "fast_afd_unit_test",
+    srcs = ["fast_afd_unit_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:fast_afd",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

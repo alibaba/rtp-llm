@@ -42,11 +42,13 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
+        ffn_config = engine_config.parallelism_config.ffn_disaggregate_config
         if (
             self.model.is_multimodal()
             and self.model.vit_config.vit_separation
             == VitSeparation.VIT_SEPARATION_LOCAL
             and engine_config.parallelism_config.tp_rank == 0
+            and not ffn_config.is_ffn_service()
             and (
                 engine_config.pd_sep_config.role_type == RoleType.PREFILL
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
