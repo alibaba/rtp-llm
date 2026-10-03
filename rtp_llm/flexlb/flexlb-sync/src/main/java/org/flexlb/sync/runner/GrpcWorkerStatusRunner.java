@@ -152,7 +152,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL,
+                        BalanceStatusEnum.RESPONSE_NULL,
                         workerStatus.getMetricIpPort(), roleType);
                 return;
             }
@@ -302,7 +302,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             logger.error("Worker status response handling failed after callback for {}",
                     ipPort, e);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR,
+                    BalanceStatusEnum.UNKNOWN_ERROR,
                     workerStatus.getMetricIpPort(), roleType);
         }
     }
@@ -389,7 +389,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     }
                     try {
                         LoggerFactory.getLogger("pvLogger").info(org.flexlb.util.JsonUtils.toStringOrEmpty(comparison));
-                        engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
+                        engineHealthReporter.reportCacheHitComparisonMetrics(comparison);
                     } catch (RuntimeException failure) {
                         logger.warn("Cache comparison telemetry failed at {}", ipPort, failure);
                     }
@@ -407,10 +407,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerStatus.StepMetrics previousStep) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, workerStatus.getMetricIpPort(),
+                    workerStatus.getMetricIpPort(),
                     observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
-                    modelName,
                     workerStatus,
                     endpoint,
                     observation.runningTasks().size(),
@@ -419,13 +418,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (step != null
                     && (previousStep == null || step.stepId() != previousStep.stepId())) {
                 engineHealthReporter.reportWorkerStepMetrics(
-                        modelName, workerStatus, step);
+                        workerStatus, step);
             }
             if (observation.role() == RoleType.PREFILL || observation.role() == RoleType.PDFUSION) {
                 for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
                     if (task.telemetry() != null && task.telemetry().firstTokenTimeMs() > 0) {
                         engineHealthReporter.reportPrefillWorkerStatusTask(
-                                modelName, workerStatus.getMetricIpPort(),
+                                workerStatus.getMetricIpPort(),
                                 observation.role().name(), workerStatus.getGroup(),
                                 task.telemetry());
                     }
@@ -474,11 +473,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                    BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
                     workerStatus.getMetricIpPort(), roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                    BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
                     workerStatus.getMetricIpPort(), roleType);
         }
     }

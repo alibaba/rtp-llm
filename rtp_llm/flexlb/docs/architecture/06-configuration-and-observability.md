@@ -309,7 +309,7 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 Encoder 的 worker 数由周期指标上报 `app.engine.health.check.engine.encoder.worker.number`；
 WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `app.flexlb.encoder.selection.load`、`app.flexlb.encoder.uncached.token.load`。
-三项按 `model`、`engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
+三项按 `engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
 看到的本地选点数、`running + waiting + pending` 并发数和在途编码工作量代理值。
 最后一项在首次 WorkerStatus 前采用 Client 的 MM token 预测值，之后采用活动任务的合成输入
 `input_length`；两者口径可能略有差异，finished 中的长度不参与该指标。

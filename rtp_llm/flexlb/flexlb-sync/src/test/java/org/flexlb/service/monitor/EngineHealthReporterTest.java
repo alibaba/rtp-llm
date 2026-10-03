@@ -69,8 +69,8 @@ class EngineHealthReporterTest {
         for (int prefillRequests : new int[]{2, 0}) {
             var step = new WorkerStatus.StepMetrics(42, 1700000000000L, 16000,
                     prefillRequests, prefillRequests > 0 ? 15000 : 0, 32000, 0.5);
-            reporter.reportWorkerStepMetrics("test-model", worker, step);
-            var tags = FlexMetricTags.of("model", "test-model", "engineIp", "10.0.0.1:8080@1",
+            reporter.reportWorkerStepMetrics(worker, step);
+            var tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080@1",
                     "role", "PDFUSION", "group", "test-group", "phase", prefillRequests > 0 ? "prefill" : "decode");
             verify(monitor).report("app.engine.worker.step.total.scheduled.tokens", tags, 16000.0);
             verify(monitor).report("app.engine.worker.step.prefill.request.count", tags, (double) prefillRequests);
@@ -117,14 +117,13 @@ class EngineHealthReporterTest {
     void shouldReportStatusCheckFailureCountAndLatencyWithSameTags() {
         BalanceStatusEnum failure = BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT;
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "code", String.valueOf(failure.getCode()),
                 "engineIp", "10.0.0.1:8080@0",
                 "role", RoleType.PREFILL.getCode());
 
-        reporter.reportStatusCheckerFail("test-model", failure, "10.0.0.1:8080@0", RoleType.PREFILL);
+        reporter.reportStatusCheckerFail(failure, "10.0.0.1:8080@0", RoleType.PREFILL);
         reporter.reportStatusCheckFailureLatency(
-                "test-model", failure, "10.0.0.1:8080@0", RoleType.PREFILL, 201_234);
+                failure, "10.0.0.1:8080@0", RoleType.PREFILL, 201_234);
 
         verify(monitor).report("app.engine.health.check.fail", expectedTags, 1.0);
         verify(monitor).report("app.engine.health.check.fail.total", expectedTags, 1.0);
@@ -219,10 +218,9 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportMasterDecisionToWaitingConfirmationLatency() {
         reporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
-                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 53);
+                "10.0.0.1:8080@0", "PREFILL", "test-group", 53);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
@@ -241,10 +239,9 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportWaitingToRunningLatency() {
         reporter.reportFlexlbObservedWaitingToRunningLatency(
-                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
+                "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
@@ -263,10 +260,9 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportEngineObservedWaitingToRunningLatency() {
         reporter.reportEngineObservedWaitingToRunningLatency(
-                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
+                "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
@@ -285,10 +281,9 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportEngineObservedReceivedToWaitingLatency() {
         reporter.reportEngineObservedReceivedToWaitingLatency(
-                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
+                "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
@@ -303,10 +298,9 @@ class EngineHealthReporterTest {
                 512, 256, 1, 3, 3, 128, 256);
 
         reporter.reportPrefillWorkerStatusTask(
-                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", task);
+                "10.0.0.1:8080@0", "PREFILL", "test-group", task);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
@@ -341,10 +335,9 @@ class EngineHealthReporterTest {
     void shouldReportWorkerTaskCounts() {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 3, 4);
+        reporter.reportStatusCheckerSuccess(workerStatus, null, 3, 4);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
         verify(monitor).report("app.engine.health.check.running.task.info.size", expectedTags, 3.0);
@@ -360,9 +353,9 @@ class EngineHealthReporterTest {
         when(endpoint.inflightUncachedTokenEstimate()).thenReturn(640L);
         when(endpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, endpoint, 3, 1);
+        reporter.reportStatusCheckerSuccess(workerStatus, endpoint, 3, 1);
 
-        FlexMetricTags tags = FlexMetricTags.of("model", "test-model",
+        FlexMetricTags tags = FlexMetricTags.of(
                 "engineIp", "10.0.0.1:8080", "role", "ENCODER");
         verify(monitor).register("app.flexlb.encoder.pending.request.count",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -382,10 +375,9 @@ class EngineHealthReporterTest {
                 RoleType.PREFILL, null, "10.0.0.1", 8080, 8081,
                 null, null, 1, 2);
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 3, 4);
+        reporter.reportStatusCheckerSuccess(workerStatus, null, 3, 4);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@1",
                 "role", "PREFILL");
         verify(monitor).report("app.engine.health.check.running.task.info.size", expectedTags, 3.0);
@@ -395,10 +387,9 @@ class EngineHealthReporterTest {
     void shouldReportCacheCapacityMetricsFromWorkerStatusWithoutCacheStatusPoll() {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL, 800L, 1000L, null);
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
+        reporter.reportStatusCheckerSuccess(workerStatus, null, 0, 0);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.used.kv.cache.tokens", expectedTags, 200.0);
@@ -412,10 +403,9 @@ class EngineHealthReporterTest {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
         BalanceStatusEnum failure = BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE;
 
-        reporter.reportCacheStatusCheckerFail("test-model", workerStatus, failure);
+        reporter.reportCacheStatusCheckerFail(workerStatus, failure);
 
         verify(monitor).report("app.cache.status.check.fail", FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "code", String.valueOf(failure.getCode()),
                 "role", "PREFILL"), 1.0);
@@ -425,7 +415,7 @@ class EngineHealthReporterTest {
     void shouldNotReportCacheCapacityMetricsWithoutCacheStatus() {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
 
-        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
+        reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
         verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
@@ -437,7 +427,7 @@ class EngineHealthReporterTest {
     void shouldNotReportLocalStandbyBlockSizeFromWorkerStatus() {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
+        reporter.reportStatusCheckerSuccess(workerStatus, null, 0, 0);
 
         verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
                 any(FlexMetricTags.class), anyDouble());
@@ -473,10 +463,9 @@ class EngineHealthReporterTest {
     void shouldNotReportLocalStandbyBlockSizeFromCacheStatus() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
-        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
+        reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
         verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
@@ -487,7 +476,7 @@ class EngineHealthReporterTest {
     void shouldNotReportLocalStandbyBlockSizeWhenStandbyIsDisabled() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
-        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
+        reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
         verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
                 any(FlexMetricTags.class), anyDouble());
@@ -497,10 +486,9 @@ class EngineHealthReporterTest {
     void shouldKeepCacheKeyMetricOnCacheStatusCheckerPath() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
-        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
+        reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
@@ -517,10 +505,9 @@ class EngineHealthReporterTest {
                 null,
                 new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
-        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+        reporter.reportCacheHitComparisonMetrics(comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
@@ -534,7 +521,6 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.actual.ratio", expectedTags, 0.6);
         verify(monitor).report("app.cache.hit.comparison.input.tokens", expectedTags, 200.0);
         assertEquals(Map.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
@@ -573,10 +559,9 @@ class EngineHealthReporterTest {
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null);
 
-        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+        reporter.reportCacheHitComparisonMetrics(comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
@@ -613,10 +598,9 @@ class EngineHealthReporterTest {
                 null,
                 null);
 
-        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+        reporter.reportCacheHitComparisonMetrics(comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
-                "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
@@ -637,7 +621,7 @@ class EngineHealthReporterTest {
                 null,
                 new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
-        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+        reporter.reportCacheHitComparisonMetrics(comparison);
 
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.actual.ratio"),

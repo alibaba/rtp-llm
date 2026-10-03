@@ -256,26 +256,25 @@ public class EngineHealthReporter {
     }
 
     public void reportStepLatencyVariance(
-            String modelName, String role, double variance) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+            String role, double variance) {
+        FlexMetricTags metricTags = FlexMetricTags.of("role", role);
         monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, variance);
-        logger.debug("Step-latency variance - model: {}, role: {}, value: {}",
-                modelName, role, variance);
+        logger.debug("Step-latency variance - role: {}, value: {}",
+                role, variance);
     }
 
     public void reportRunningLoadVariance(
-            String modelName, String role, double variance) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+            String role, double variance) {
+        FlexMetricTags metricTags = FlexMetricTags.of("role", role);
         monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR,
                 metricTags, variance);
-        logger.debug("Running-load variance - model: {}, role: {}, value: {}",
-                modelName, role, variance);
+        logger.debug("Running-load variance - role: {}, value: {}",
+                role, variance);
     }
 
     @Scheduled(fixedRate = 2000)
     private void reportEngineMetric() {
-        String modelName = "engine_service";
-        FlexMetricTags tags = FlexMetricTags.of("model", modelName);
+        FlexMetricTags tags = FlexMetricTags.of();
         monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags,
                 workerDirectory.discoveredCount(RoleType.PREFILL));
         monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags,
@@ -304,35 +303,31 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
+    public void reportStatusCheckRemoteInfo(String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
     }
 
     public void reportStatusCheckRemoteInfo(
-            String modelName, String engineIp, String role, Long startTime) {
+            String engineIp, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", engineIp == null ? "" : engineIp,
                 "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags,
                 (double) System.nanoTime() / 1000 - startTime);
     }
 
-    public void reportCacheStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
+    public void reportCacheStatusCheckRemoteInfo(String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "role", role);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
     public void reportCacheStatusCheckRemoteInfo(
-            String modelName, String engineIp, String role, Long startTime) {
+            String engineIp, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", engineIp == null ? "" : engineIp,
                 "role", role);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags,
@@ -340,9 +335,8 @@ public class EngineHealthReporter {
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
-    public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, RoleType role) {
+    public void reportStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
                 "role", role == null ? "" : role.getCode()
         );
@@ -350,43 +344,39 @@ public class EngineHealthReporter {
     }
 
     public void reportStatusCheckerFail(
-            String modelName, BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
+            BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
         FlexMetricTags metricTags = statusCheckFailureTags(
-                modelName, errorEnum, engineIp, role);
+                errorEnum, engineIp, role);
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
         monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
     }
 
     public void reportStatusCheckFailureLatency(
-            String modelName, BalanceStatusEnum errorEnum,
+            BalanceStatusEnum errorEnum,
             String engineIp, RoleType role, long latencyUs) {
         monitor.report(ENGINE_STATUS_CHECK_FAIL_RT,
-                statusCheckFailureTags(modelName, errorEnum, engineIp, role), latencyUs);
+                statusCheckFailureTags(errorEnum, engineIp, role), latencyUs);
     }
 
     private static FlexMetricTags statusCheckFailureTags(
-            String modelName, BalanceStatusEnum errorEnum,
+            BalanceStatusEnum errorEnum,
             String engineIp, RoleType role) {
         return FlexMetricTags.of(
-                "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
                 "engineIp", engineIp == null ? "" : engineIp,
                 "role", role == null ? "" : role.getCode());
     }
 
-    public void reportCacheStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, RoleType role) {
+    public void reportCacheStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
                 "role", role == null ? "" : role.getCode());
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
-    public void reportCacheStatusCheckerFail(String modelName,
-                                             WorkerStatus workerStatus,
+    public void reportCacheStatusCheckerFail(WorkerStatus workerStatus,
                                              BalanceStatusEnum errorEnum) {
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", workerStatus.getMetricIpPort(),
                 "code", String.valueOf(errorEnum.getCode()),
                 "role", workerStatus.getRole().getCode());
@@ -412,33 +402,33 @@ public class EngineHealthReporter {
     }
 
     public void reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
-            String modelName, String engineIp, String role, String group, long latencyMs) {
+            String engineIp, String role, String group, long latencyMs) {
         monitor.report(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS,
-                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+                lifecycleTags(engineIp, role, group), latencyMs);
     }
 
     public void reportFlexlbObservedWaitingToRunningLatency(
-            String modelName, String engineIp, String role, String group, long latencyMs) {
+            String engineIp, String role, String group, long latencyMs) {
         monitor.report(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS,
-                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+                lifecycleTags(engineIp, role, group), latencyMs);
     }
 
     public void reportEngineObservedWaitingToRunningLatency(
-            String modelName, String engineIp, String role, String group, long latencyMs) {
+            String engineIp, String role, String group, long latencyMs) {
         monitor.report(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
-                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+                lifecycleTags(engineIp, role, group), latencyMs);
     }
 
     public void reportEngineObservedReceivedToWaitingLatency(
-            String modelName, String engineIp, String role, String group, long latencyMs) {
+            String engineIp, String role, String group, long latencyMs) {
         monitor.report(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
-                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+                lifecycleTags(engineIp, role, group), latencyMs);
     }
 
     public void reportPrefillWorkerStatusTask(
-            String modelName, String engineIp, String role, String group,
+            String engineIp, String role, String group,
             WorkerStatus.TaskTelemetry task) {
-        FlexMetricTags tags = lifecycleTags(modelName, engineIp, role, group);
+        FlexMetricTags tags = lifecycleTags(engineIp, role, group);
         monitor.report(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
                 tags, task.hbmLocalMatchTokens());
         monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS,
@@ -469,9 +459,8 @@ public class EngineHealthReporter {
     }
 
     private static FlexMetricTags lifecycleTags(
-            String modelName, String engineIp, String role, String group) {
+            String engineIp, String role, String group) {
         return FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", engineIp,
                 "role", role,
                 "group", group);
@@ -488,11 +477,9 @@ public class EngineHealthReporter {
     }
 
     public void reportWorkerStepMetrics(
-            String modelName,
             WorkerStatus worker,
             WorkerStatus.StepMetrics step) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", worker.getMetricIpPort(),
                 "role", worker.getRole().name(),
                 "group", worker.topologySnapshot().group(),
@@ -509,8 +496,7 @@ public class EngineHealthReporter {
                 tags, step.budgetFillRatio());
     }
 
-    public void reportStatusCheckerSuccess(String modelName,
-                                           WorkerStatus workerStatus,
+    public void reportStatusCheckerSuccess(WorkerStatus workerStatus,
                                            WorkerEndpoint ep,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
@@ -520,7 +506,6 @@ public class EngineHealthReporter {
         WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
 
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", workerStatus.getMetricIpPort(),
                 "role", status.role().name());
 
@@ -549,15 +534,13 @@ public class EngineHealthReporter {
         reportKvCacheCapacity(metricTags, status);
     }
 
-    public void reportCacheStatusCheckerSuccess(String modelName,
-                                               WorkerStatus workerStatus,
+    public void reportCacheStatusCheckerSuccess(WorkerStatus workerStatus,
                                                long successfulPollIntervalUs) {
         WorkerStatus.EngineObservation status =
                 workerStatus.committedEngineObservation();
         CacheStatus cacheStatus = workerStatus.getCacheStatus();
         if (successfulPollIntervalUs > 0L) {
             FlexMetricTags metricTags = FlexMetricTags.of(
-                    "model", modelName,
                     "engineIp", workerStatus.getMetricIpPort(),
                     "role", status.role().name());
             monitor.report(
@@ -568,7 +551,6 @@ public class EngineHealthReporter {
         if (cacheStatus != null) {
             long cacheKeySize = cacheStatus.getCacheKeySize();
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
-                    "model", modelName,
                     "engineIp", workerStatus.getMetricIpPort(),
                     "role", status.role().name());
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
@@ -740,7 +722,7 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonResult comparison) {
+    public void reportCacheHitComparisonMetrics(CacheHitComparisonResult comparison) {
         if (comparison == null) {
             return;
         }
@@ -748,7 +730,6 @@ public class EngineHealthReporter {
         CacheHitComparisonResult.CachePrediction localSyncPrediction = comparison.localSyncPrediction();
         CacheHitComparisonResult.CachePrediction localStandbyPrediction = comparison.localStandbyPrediction();
         FlexMetricTags tags = FlexMetricTags.of(
-                "model", modelName,
                 "engineIp", comparison.worker(),
                 "role", comparison.role(),
                 "group", comparison.group(),

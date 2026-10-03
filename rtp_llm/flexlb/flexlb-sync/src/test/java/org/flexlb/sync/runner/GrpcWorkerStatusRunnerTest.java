@@ -116,7 +116,7 @@ class GrpcWorkerStatusRunnerTest {
         }
         var observed = ArgumentCaptor.forClass(WorkerStatus.StepMetrics.class);
         verify(reporter, org.mockito.Mockito.times(2)).reportWorkerStepMetrics(
-                org.mockito.Mockito.eq("test-model"), org.mockito.Mockito.eq(status), observed.capture());
+                org.mockito.Mockito.eq(status), observed.capture());
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(42L, 43L),
                 observed.getAllValues().stream().map(WorkerStatus.StepMetrics::stepId).toList());
     }
