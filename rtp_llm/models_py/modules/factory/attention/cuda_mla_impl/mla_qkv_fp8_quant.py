@@ -153,3 +153,37 @@ def quantize_qkv_fp8(q, k, v, q_scale=1.0):
             block,
         )
     return outputs
+
+
+def quantize_kv_fp8(k, v):
+    """Quantize expanded MLA K/V in one launch without staging Q."""
+    for x in (k, v):
+        if not x.is_cuda or x.device != k.device:
+            raise ValueError("MLA K/V must share one CUDA device")
+        if x.ndim != 3 or x.shape[1] <= 0 or x.shape[2] <= 0:
+            raise ValueError("MLA K/V require [tokens, heads, features]")
+        if x.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            raise TypeError("FP8 MLA quantizer requires floating activations")
+    if mla_fp8_kernels._FP8_DIAGNOSTICS:
+        mla_fp8_kernels.observe_fp8_input(k, 1.0, "prefill_k")
+        mla_fp8_kernels.observe_fp8_input(v, 1.0, "prefill_v")
+    out_k, out_v = (
+        torch.empty_like(x, dtype=torch.float8_e4m3fn,
+                         memory_format=torch.contiguous_format)
+        for x in (k, v)
+    )
+    block = 1024
+    k_blocks = triton.cdiv(k.numel(), block)
+    v_blocks = triton.cdiv(v.numel(), block)
+    if k_blocks + v_blocks:
+        # The existing Q/K/V kernel accepts an empty Q partition. Reuse its
+        # K and V branches so long historical prefixes need only one launch.
+        _quantize_qkv[(k_blocks + v_blocks,)](
+            k, k, v, out_k, out_k, out_v,
+            0, k.numel(), v.numel(), 0, k_blocks,
+            tuple(k.shape[1:]), tuple(k.shape[1:]), tuple(v.shape[1:]),
+            tuple(k.stride()), tuple(k.stride()), tuple(v.stride()),
+            k.is_contiguous(), k.is_contiguous(), v.is_contiguous(),
+            1.0, block,
+        )
+    return out_k, out_v

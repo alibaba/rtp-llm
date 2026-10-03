@@ -5,7 +5,8 @@
   "cutlass_commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
   "deep_jit_commit": "e5bdee2bc4ca519eba00cfc5f0c6e950e6a96a16",
   "patch_sha256": "3685360daa68961c64db6ecce52564fde3cff9c40feafb82095096c64de0e9ef",
-  "change": "Use a persistent device epoch for SiTU combine readiness; CUDA Graph replay reuses gridid. No arithmetic changes.",
+  "bf16_skip_patch_sha256": "b1b11ac6ff8423b6cec5fb3d96fde8e340b25e7b05b27683176b38954799955f",
+  "change": "Use a persistent device epoch for SiTU combine readiness; add a BF16 skip-head-mid epilogue for packed MLA K/V projection.",
   "archives": [
     {
       "file": "deepgemm-a6bbb800-source.tar.gz",

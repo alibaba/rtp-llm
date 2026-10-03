@@ -175,6 +175,9 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 cache_scale, cache_scale, assume_unit_scales=True,
             )
         cache_written()
+        # The fused epilogue owns its FP8 Q/K/V outputs. Drop the BF16
+        # projection and its views before TokenSpeed allocates workspace.
+        del projected, k_nope, value
         return self.prefill_wrapper.run(q_fp8, k_fp8, v_fp8).view(
             -1, self.num_heads, self.v_head_dim
         )
@@ -195,6 +198,9 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
         q_fp8, current_k_fp8, current_v_fp8 = quantize_qkv_fp8(
             q, current_k, current_v
         )
+        # The FP8 operands own separate storage. Release the expanded BF16
+        # K/V before TokenSpeed allocates its attention workspace.
+        del current_k, current_v
         output, output_lse = self.prefill_wrapper.run_partial(
             q_fp8, current_k_fp8, current_v_fp8,
             qo_indptr=self.qo_indptr,
@@ -203,7 +209,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
             max_k=self.prefill_wrapper.max_q,
             causal=True,
         )
-        del current_k, current_v, current_k_fp8, current_v_fp8
+        del current_k_fp8, current_v_fp8
 
         for segment in self._prefix_plan.slices:
             owner = segment.owner
@@ -226,8 +232,10 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 prefix_len=self._prefix_lens[owner], scale=1.0,
             )
             key, value = self._project_kv(projection, latent, suffix)
+            del latent, suffix
             key_fp8 = quantize_fp8(key)
             value_fp8 = quantize_fp8(value)
+            del key, value
             q_indptr = torch.tensor((0, q_len), dtype=torch.int32, device=q.device)
             kv_indptr = torch.tensor(
                 (0, segment.length), dtype=torch.int32, device=q.device
@@ -242,7 +250,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 output_lse.narrow(0, q_start, q_len),
                 partial, partial_lse,
             )
-            del latent, suffix, key, value, key_fp8, value_fp8
+            del key_fp8, value_fp8
             del q_indptr, kv_indptr, partial, partial_lse
         return output.view(-1, self.num_heads, self.v_head_dim)
 
@@ -262,6 +270,7 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
         q_fp8, k_fp8, v_fp8 = quantize_qkv_fp8(
             q, k, v
         )
+        del k, v
         return self.prefill_wrapper.run(q_fp8, k_fp8, v_fp8).view(
             -1, self.num_heads, self.v_head_dim
         )
