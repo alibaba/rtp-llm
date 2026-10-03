@@ -86,7 +86,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 placementAvailability);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle);
+        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,

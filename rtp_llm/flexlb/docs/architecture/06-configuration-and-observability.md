@@ -328,6 +328,14 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 周期统计复用 Prefill 快照，调度器一次遍历计算数量和最大年龄；Decode admission
 上报仅收集数值，不构造请求明细。
 
+`auto_tpm.preemption.target_invalid.count` 统计 Decode 抢占目标校验失败的尝试次数，
+使用 QPS + NORMAL（20 秒聚合）上报。一次计划即使包含多个目标也只计一次，标签仅有
+`mode=return/rpc` 和固定的 `reason`：`victim_state_changed`（预留或派发状态变化）、
+`victim_already_claimed`（目标已被其他抢占占用）、`priority_not_preemptible`（目标优先级不允许抢占）、
+`cancel_target_unavailable`（RPC 取消地址无法取得）、`request_claim_rejected`（RPC 无法锁定该请求进行抢占）。
+这类失败会结束本次高优先级请求的调度；容量不足、取消 RPC 返回 NOT_FOUND、超时不计入此指标。
+未发生事件时可能没有时间序列，不能据此断言上报链路正常。
+
 上报器分布在 common、grpc、cache、sync 模块。新增指标应复用现有 reporter ownership，
 不要恢复已删除的旧监控层。
 

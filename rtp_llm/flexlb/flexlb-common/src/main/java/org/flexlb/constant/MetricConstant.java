@@ -836,10 +836,9 @@ public class MetricConstant {
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
 
     /**
-     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry, tags: kind (yielded/preempted).
-     * Harmless in isolation, but a burst points at a registration/cleanup
-     * race — alert-worthy where a warn log is not.
+     * Decode preemption attempts rejected during target validation (QPS).
+     * Count once per failed attempt, with mode (return/rpc) and a bounded
+     * reason describing the target check that failed.
      */
-    public static final String AUTO_TPM_INFLIGHT_SETTLE_MISS = "auto_tpm.inflight_settle_miss.count";
+    public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT = "auto_tpm.preemption.target_invalid.count";
 }
