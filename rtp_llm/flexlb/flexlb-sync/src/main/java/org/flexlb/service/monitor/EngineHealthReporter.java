@@ -213,9 +213,9 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
         this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS);
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
@@ -435,10 +435,13 @@ public class EngineHealthReporter {
                 tags, task.remoteKvAddedMatchTokens());
         monitor.report(ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT,
                 tags, task.prefillStepCount());
-        monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
-                tags, task.prefillNonfinalChunkTokensMin());
-        monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
-                tags, task.prefillNonfinalChunkTokensMax());
+        // Zero means the request has no nonfinal chunk sample.
+        if (task.prefillNonfinalChunkTokensMin() > 0 && task.prefillNonfinalChunkTokensMax() > 0) {
+            monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
+                    tags, task.prefillNonfinalChunkTokensMin());
+            monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
+                    tags, task.prefillNonfinalChunkTokensMax());
+        }
         reportDuration(ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS, tags,
                 task.inputQueueDrainTimeMs(), task.inputQueueEnqueueTimeMs());
         monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS,

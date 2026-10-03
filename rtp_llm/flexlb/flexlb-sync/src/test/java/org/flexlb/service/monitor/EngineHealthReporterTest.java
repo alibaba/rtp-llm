@@ -293,6 +293,7 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportPrefillWorkerStatusTaskMetrics() {
+        reporter.init();
         WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
                 true, 900, 1000, 1100, 1200, 1600, 200, 1900,
                 512, 256, 1, 3, 3, 128, 256);
@@ -314,8 +315,33 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.engine.worker.status.hbm.local.match.tokens", expectedTags, 512.0);
         verify(monitor).report("app.engine.worker.status.remote.kv.added.match.tokens", expectedTags, 256.0);
         verify(monitor).report("app.engine.worker.status.prefill.step.count", expectedTags, 3.0);
-        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.tokens.min", expectedTags, 128.0);
-        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.tokens.max", expectedTags, 256.0);
+        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.min.tokens", expectedTags, 128.0);
+        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.max.tokens", expectedTags, 256.0);
+        verify(monitor).register("app.engine.worker.status.prefill.nonfinal.chunk.min.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
+        verify(monitor).register("app.engine.worker.status.prefill.nonfinal.chunk.max.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
+    }
+
+    @Test
+    void shouldExcludeRequestsWithoutNonfinalChunksFromChunkMetrics() {
+        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
+                true, 900, 1000, 1100, 1200, 1600, 0, 1900,
+                0, 0, 1, 1, 1, 0, 0);
+
+        reporter.reportPrefillWorkerStatusTask(
+                "10.0.0.1:8080@0", "PREFILL", "test-group", task);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1:8080@0",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.prefill.step.count", expectedTags, 1.0);
+        verify(monitor).report("app.engine.worker.status.hbm.local.match.tokens", expectedTags, 0.0);
+        verify(monitor, never()).report(
+                eq("app.engine.worker.status.prefill.nonfinal.chunk.min.tokens"), any(), anyDouble());
+        verify(monitor, never()).report(
+                eq("app.engine.worker.status.prefill.nonfinal.chunk.max.tokens"), any(), anyDouble());
     }
 
     @Test

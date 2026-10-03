@@ -260,9 +260,9 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT =
             "app.engine.worker.status.prefill.step.count";
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN =
-            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.min";
+            "app.engine.worker.status.prefill.nonfinal.chunk.min.tokens";
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
-            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
+            "app.engine.worker.status.prefill.nonfinal.chunk.max.tokens";
 
     public static final String ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS =
             "app.engine.worker.step.total.scheduled.tokens";

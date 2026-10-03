@@ -363,10 +363,24 @@ WorkerStatus 的 `last_step_metrics` 表示最近完成的非空 scheduler step�
 总调度 Token 数、Prefill 请求数、Prefill Token 数、Token 预算及预算填充率。
 字段缺失表示引擎尚无可用 step 观测；纯 Decode step 的 Prefill 请求数和 Token 数为 0。
 FlexLB 按逻辑 Worker 和 step ID 去重后，通过 `app.engine.worker.step.*` 上报五项数值。
-`phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；模型、角色、组和
+`phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；角色、组和
 `engineIp` 标签沿用 Worker 身份。预算填充率为总调度 Token 数 / Token 预算，包含 Decode Token。
 
 这些指标是 WorkerStatus 轮询采样，轮询之间完成的中间 step 不会全部保留。KMonitor 使用
 GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上报值，不提供逐 step 分布。
 指标标签不包含 step ID 或完成时间。凑批比较应筛选 `phase=prefill`，避免纯 Decode step
 稀释 Prefill 预算填充率。Turbo 转发后的指标前缀为 `dashscope_turbo_backend_flexlb_app_engine_worker_step_`。
+
+### Prefill 非末块 Token 数
+
+完成 Prefill 请求后，`app.engine.worker.status.prefill.nonfinal.chunk.min.tokens` 和
+`app.engine.worker.status.prefill.nonfinal.chunk.max.tokens` 分别上报该请求内非末块 Chunk 的
+最小、最大 Token 数。末块可能不足一个完整 Chunk，不参与统计；没有非末块样本的请求不向
+这两个指标报告 0，仍正常报告 `app.engine.worker.status.prefill.step.count`。
+例如分为 8192、8192、616 Tokens 的请求，Step 数为 3，非末块最小和最大值均为 8192。
+
+两个指标保留请求内统计口径，以 GAUGE + TRIVIAL 注册，KMonitor 每 60 秒发送一次聚合结果，
+不生成额外的 SUMMARY 分位指标；显式配置的 `FLEXLB_MONITOR_PRIORITY` 可覆盖此周期。
+曲线均值分别是有非末块样本请求的最小值均值、最大值均值，不是所有 Chunk 的均值或窗口极值。
+业务调用只更新本地统计，不逐请求发送网络数据，也不额外抽样。指标名以单位 `tokens` 结尾，
+请求内最小、最大值由 `min` / `max` 中间段区分。
