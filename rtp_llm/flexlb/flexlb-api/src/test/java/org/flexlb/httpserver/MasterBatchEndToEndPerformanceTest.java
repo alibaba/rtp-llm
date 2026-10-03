@@ -22,9 +22,12 @@ import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -45,8 +48,8 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -326,8 +329,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected DefaultRouter createRouter() {
         CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.KVCM));
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
@@ -341,6 +344,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 prefillSelector,
                 new DecodeSelector(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
+                mock(EncoderStrategy.class),
                 configService,
                 modelMeta);
     }
@@ -356,7 +360,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         RouteService routeService = new RouteService(
                 scheduler,
-                new RecentCacheKeyTraceReporter());
+                new TheoryCacheHitReporter());
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
@@ -382,7 +386,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 environment,
                 masterServerEventLoopGroup,
-                null,
+                NoOpFlexMonitor.getInstance(),
                 new GrpcServerTimingInterceptor(),
                 new GrpcQosHeaderInterceptor());
         masterServer.start();
@@ -909,7 +913,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             + "exceptional=%d scheduler_inflight=%d queued=%d "
                             + "engine_received=%d%n",
                     requestCount, completed, successful, completed - successful,
-                    scheduler.getInflightSize(), scheduler.getQueuedRequestCount(),
+                    scheduler.getTrackedRequestCount(), scheduler.getQueuedRequestCount(),
                     receivedEngineRequestCount());
             for (int index = 0; index < futures.size(); index++) {
                 CompletableFuture<TimedResponse> future = futures.get(index);
@@ -919,7 +923,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, scheduler.getRequestState(requestId, 0L));
+                        requestId, scheduler.getRequestState(Long.toString(requestId), 0L));
             }
             throw failure;
         }
@@ -1131,7 +1135,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         long expected = simulatedResponseCount.get();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while ((simulatedCompletionCount.get() < expected || !acceptedRequests.isEmpty()
-                || !simulatedCompletions.isEmpty() || scheduler.getInflightSize() != 0)
+                || !simulatedCompletions.isEmpty() || scheduler.getTrackedRequestCount() != 0)
                 && simulatedStatusFailure.get() == null
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1);
@@ -1144,7 +1148,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "every successful route must receive actual-worker completion evidence");
         assertTrue(acceptedRequests.isEmpty(), "accepted batches must all match a published route");
         assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
-        assertEquals(0, scheduler.getInflightSize(), "request lifecycle registry must be drained");
+        assertEquals(0, scheduler.getTrackedRequestCount(), "request lifecycle registry must be drained");
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
             assertEquals(0, endpoint.getInflightBatchCount(), address + " retained batch credits");
@@ -1239,7 +1243,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .setGenerateInput(ByteString.copyFrom(generateInput.toByteArray()))
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())
@@ -1714,7 +1718,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             ResponseTiming timing = new ResponseTiming(
                     context.getBatchDispatchedNanos(), context.getAckAtNanos(), responseCompletedNanos);
             super.recordCompletion(context, responseCompletedNanos);
-            if (responseTimings.putIfAbsent(context.getRequestId(), timing) != null) {
+            if (responseTimings.putIfAbsent(
+                    Long.parseLong(context.getRequestId()), timing) != null) {
                 duplicateResponses.incrementAndGet();
             }
         }

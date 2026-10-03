@@ -9,7 +9,6 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.slf4j.Logger;
@@ -20,11 +19,16 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
@@ -32,9 +36,15 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
 public class WorkerAddressService {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final long EMPTY_WORKER_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+
     private final EngineHealthReporter engineHealthReporter;
     private final ModelMetaConfig modelMetaConfig;
     private final ServiceDiscovery serviceDiscovery;
+    // Cache the last non-empty worker list per endpoint; its key fields stay unchanged after initialization.
+    private final ConcurrentMap<Endpoint, List<WorkerHost>> lastNonEmptyHostsByEndpoint = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, WorkerAvailabilityLogState> workerAvailabilityByAddress = new ConcurrentHashMap<>();
+
     /**
      * Service discovery request thread pool
      */
@@ -55,7 +65,7 @@ public class WorkerAddressService {
                 60L,
                 TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
                 new NamedThreadFactory("service-discovery-executor"),
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                new ThreadPoolExecutor.AbortPolicy()
         );
     }
 
@@ -86,65 +96,92 @@ public class WorkerAddressService {
             return workerHosts;
         }
         for (Pair<String, Endpoint> endpointTuple : endpoints) {
-            String groupName = endpointTuple.getLeft();
             Endpoint endpoint = endpointTuple.getRight();
             if (endpoint == null) {
                 logger.info("modelName={} endpoint is null, endpointType={}", modelName, modelEndpointType);
                 continue;
             }
-            String address = endpoint.getAddress();
-            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
+            workerHosts.addAll(getServiceHosts(modelName, endpoint));
         }
         return workerHosts;
     }
 
-    private List<WorkerHost> getServiceHosts(String modelName, String address) {
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(
-                () -> queryServiceHosts(modelName, address));
+    /**
+     * Failed and empty discovery results retain the endpoint's last non-empty snapshot.
+     * Cached workers continue through the regular worker health checks.
+     */
+    private List<WorkerHost> getServiceHosts(String modelName, Endpoint endpoint) {
+        String address = endpoint.getAddress();
+        Future<List<WorkerHost>> future;
         try {
-            // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
-            return future.get(500, TimeUnit.MILLISECONDS);
-        } catch (Exception e) {
-            if (e instanceof TimeoutException) {
-                logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
-            } else {
-                logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(endpoint));
+        } catch (RejectedExecutionException e) {
+            logger.error("query service discovery rejected, model={}, address={}, msg:{}", modelName, address, e.getMessage());
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            return lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of());
+        }
+        try {
+            List<WorkerHost> hosts = future.get(500, TimeUnit.MILLISECONDS);
+            reportWorkerAvailability(modelName, endpoint, hosts);
+            if (!hosts.isEmpty()) {
+                // Update the cache only after a successful wait;
+                lastNonEmptyHostsByEndpoint.put(endpoint, hosts);
+                return hosts;
             }
+        } catch (TimeoutException e) {
             future.cancel(true);
-            return new ArrayList<>();
+            logger.error("query service discovery timeout, model={}, address={}", modelName, address);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            logger.warn("query service discovery interrupted, model={}, address={}", modelName, address);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        } catch (ExecutionException e) {
+            logger.error("query service discovery error, model={}, address={}", modelName, address, e.getCause());
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         }
+        return lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of());
     }
 
-    private static List<WorkerHost> convertServiceDiscoveryHosts(
-            List<WorkerHost> hosts, String protocol, String groupName) {
-        List<WorkerHost> workerHosts = new ArrayList<>();
-        for (WorkerHost host : hosts) {
-            if (BackendServiceProtocolEnum.GRPC.getName().equals(protocol)) {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort() - 1, host.getPort(), host.getPort() + 4, host.getSite(), groupName));
-            } else {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort(), host.getPort() + 1, host.getPort() + 5, host.getSite(), groupName));
+    private void reportWorkerAvailability(String modelName, Endpoint endpoint, List<WorkerHost> hosts) {
+        WorkerAvailabilityLogState state = workerAvailabilityByAddress.computeIfAbsent(
+                endpoint.getAddress(), ignored -> new WorkerAvailabilityLogState());
+        if (hosts.isEmpty()) {
+            if (state.shouldWarnForEmptyWorkers()) {
+                logger.warn("No workers discovered, model={}, address={}, group={}; "
+                                + "retaining last non-empty worker list (warning limited to once per minute)",
+                        modelName, endpoint.getAddress(), endpoint.getGroup());
             }
+            return;
         }
-        return workerHosts;
+
+        if (state.markAvailable()) {
+            logger.info("Worker discovery recovered, model={}, address={}, group={}, worker_count={}",
+                    modelName, endpoint.getAddress(), endpoint.getGroup(), hosts.size());
+        }
     }
 
-    private List<WorkerHost> queryServiceHosts(
-            String modelName, String address) {
-        long startNanos = System.nanoTime();
-        try {
-            return serviceDiscovery.getHosts(address);
-        } catch (Throwable failure) {
-            logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
-                    TimeUnit.NANOSECONDS.toMillis(
-                            System.nanoTime() - startNanos),
-                    modelName, address, failure.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-            return new ArrayList<>();
+    private static final class WorkerAvailabilityLogState {
+
+        // Zero means workers are available; otherwise this is the next empty-list warning deadline.
+        private final AtomicLong emptyWarningDeadlineNanos = new AtomicLong();
+
+        boolean shouldWarnForEmptyWorkers() {
+            long now = System.nanoTime();
+            long warningDeadline = emptyWarningDeadlineNanos.get();
+            if (warningDeadline != 0 && now < warningDeadline) {
+                return false;
+            }
+            return emptyWarningDeadlineNanos.compareAndSet(
+                    warningDeadline, now + EMPTY_WORKER_WARNING_INTERVAL_NANOS);
+        }
+
+        boolean markAvailable() {
+            long warningDeadline = emptyWarningDeadlineNanos.get();
+            return warningDeadline != 0
+                    && emptyWarningDeadlineNanos.compareAndSet(warningDeadline, 0);
         }
     }
+
 }

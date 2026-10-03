@@ -12,8 +12,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -79,7 +80,7 @@ class QueuedBatchDeliveryTest {
             sent.add(call.getArgument(2));
             return reply;
         });
-        dispatcher = new DefaultBatchDispatcher(grpc, service, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpc, service, NoOpFlexMonitor.getInstance(), 1, 1);
         strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L,
                 registry, new DeliveryMetrics(reporter));
         prefill = mock(PrefillEndpoint.class);
@@ -148,8 +149,8 @@ class QueuedBatchDeliveryTest {
         int survivors = all ? 0 : 1;
         assertOccupancy(survivors, survivors);
         assertEquals(survivors, decode.routingView().engineCapacityUsed());
-        assertEquals(survivors, decode.routingView().inflightHardKv());
-        assertEquals(2L * survivors, decode.routingView().inflightExpectedKv());
+        assertEquals(survivors, decode.routingView().inputKvReserved());
+        assertEquals(2L * survivors, decode.routingView().inputAndMaxOutputKvReserved());
         assertEquals(survivors, sent.size());
         if (all) {
             assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -167,8 +168,8 @@ class QueuedBatchDeliveryTest {
         registry.cancelRequest(1L, 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         dispatcher.tryPrepareSubmission().value().close();
     }
 
@@ -254,8 +255,8 @@ class QueuedBatchDeliveryTest {
         verify(submission, times(1)).close();
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         verifyNoInteractions(grpc);
     }
 
@@ -269,8 +270,8 @@ class QueuedBatchDeliveryTest {
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         verifyNoInteractions(grpc);
     }
 

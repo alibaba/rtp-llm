@@ -31,27 +31,27 @@ class DecodeCapacityPreemptionTest {
     void outputBudgetRejectionProducesAPlanAndCommitRechecksCurrentUsage(boolean usageChanged) {
         DecodeEndpoint endpoint = endpoint(400L);
         DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
-        long hardKvTokens = 100L;
-        long expectedKvTokens = 250L;
+        long requiredKvTokens = 100L;
+        long kvBudgetTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
             victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
-            var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70);
+            var reservation = endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                     endpoint.acquireDispatchPermit(reservation, policy).status());
             endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         }
         var view = endpoint.routingView();
-        assertTrue(view.realKvAvailable() >= hardKvTokens);
-        assertFalse(policy.evaluate(view.dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
-        DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_ENGINE_OWNED);
+        assertTrue(view.realKvAvailable() >= requiredKvTokens);
+        assertFalse(policy.evaluate(view.dispatchUsage(), requiredKvTokens, kvBudgetTokens).fits());
+        DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_ENGINE_OWNED);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
-        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
+        assertEquals(List.of("1"), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
         if (usageChanged) { updateCapacity(endpoint, 250L); }
         assertEquals(usageChanged ? DecodeEndpoint.PreemptionBeginResult.INFEASIBLE
                         : DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                endpoint.beginPreemption(1L, List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+                endpoint.beginPreemption(1L, List.of(victim), "9", requiredKvTokens, kvBudgetTokens, 70, policy));
         assertNotNull(endpoint.reservationHandle(1L));
         if (usageChanged) { assertNull(endpoint.reservationHandle(9L)); }
     }
@@ -60,18 +60,18 @@ class DecodeCapacityPreemptionTest {
     void queuedReservationReleasesThePlacementRequestCharge() {
         DecodeEndpoint endpoint = endpoint(1000L);
         DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
-        long hardKvTokens = 100L;
-        long expectedKvTokens = 100L;
+        long requiredKvTokens = 100L;
+        long kvBudgetTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
             victim = endpoint.reserve(pin, 1L, 100L, 200L, 30);
-            assertNull(endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, policy));
+            assertNull(endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
-        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
-        DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
+        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), requiredKvTokens, kvBudgetTokens).fits());
+        DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), "9", requiredKvTokens, kvBudgetTokens, 70, policy));
         assertNull(endpoint.reservationHandle(1L));
         assertNotNull(endpoint.reservationHandle(9L));
     }
@@ -80,26 +80,26 @@ class DecodeCapacityPreemptionTest {
     void zeroPromptVictimCanReleaseItsFullOutputReservation() {
         DecodeEndpoint endpoint = endpoint(1000L);
         DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
-        long hardKvTokens = 100L;
-        long expectedKvTokens = 200L;
+        long requiredKvTokens = 100L;
+        long kvBudgetTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
             victim = endpoint.reserve(pin, 1L, 0L, 900L, 30);
         }
-        DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
-        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertEquals(200L, endpoint.routingView().inflightExpectedKv());
+        DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_RESERVED);
+        assertEquals(List.of("1"), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
+        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), "9", requiredKvTokens, kvBudgetTokens, 70, policy));
+        assertEquals(200L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
-    private static DecodeEvictionProposal plan(DecodeEndpoint endpoint, long hardKvTokens, long expectedKvTokens,
+    private static DecodeEvictionProposal plan(DecodeEndpoint endpoint, long requiredKvTokens, long kvBudgetTokens,
                                                 DecodeEndpoint.AdmissionCapacity policy, VictimStage stage) {
         PreemptionConfig preemption = new PreemptionConfig();
         preemption.setAllowedVictimStages(EnumSet.of(stage));
         EngineCancelChannel channel = mock(EngineCancelChannel.class);
         when(channel.isSupported(endpoint)).thenReturn(true);
         var failures = new HashMap<String, String>();
-        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(70, hardKvTokens, expectedKvTokens,
+        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(70, requiredKvTokens, kvBudgetTokens,
                 List.of(DecodeEndpointSnapshot.capture(endpoint, policy)), preemption, channel, failures);
         assertNotNull(proposal, failures.toString());
         return proposal;

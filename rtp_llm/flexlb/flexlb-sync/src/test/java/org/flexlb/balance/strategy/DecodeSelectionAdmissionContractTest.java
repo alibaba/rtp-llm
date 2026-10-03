@@ -59,18 +59,19 @@ class DecodeSelectionAdmissionContractTest {
                         DecodeEndpoint.ReservationHandle reservation = endpoint.reserve(
                                 pin,
                                 request.requestId(),
-                                request.hardKvTokens(),
-                                request.expectedKvTokens(),
+                                request.inputKvTokens(),
+                                request.inputAndMaxOutputKvTokens(),
                                 request.priority(),
                                 request.capacity());
                         assertNotNull(reservation, "the selected endpoint must pass the same placement gate");
                         try {
-                            assertEquals(requestId, reservation.requestId());
-                            assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
-                            var reserved = endpoint.resourceSnapshot().reserved().get(requestId);
+                            String canonicalRequestId = Long.toString(requestId);
+                            assertEquals(canonicalRequestId, reservation.requestId());
+                            assertTrue(endpoint.resourceSnapshot().isQueued(canonicalRequestId));
+                            var reserved = endpoint.resourceSnapshot().reserved().get(canonicalRequestId);
                             assertEquals(70, reserved.priority());
                             assertEquals(PROMPT_TOKENS, reserved.kvTokens());
-                            assertEquals(EXPECTED_TOKENS, reserved.expectedKvTokens());
+                            assertEquals(EXPECTED_TOKENS, reserved.kvBudgetTokens());
                         } finally {
                             endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                         }
@@ -154,11 +155,11 @@ class DecodeSelectionAdmissionContractTest {
             free = publish(FREE_IP);
             strategy = new DecodeSelector(new WorkerDirectory(endpoints));
 
-            long expectedKv = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
+            long kvBudget = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(queued.reserve(pin, 1L, 0L, expectedKv, 50));
-                assertNotNull(queued.reserve(pin, 2L, 0L, expectedKv, 50));
+                assertNotNull(queued.reserve(pin, 1L, 0L, kvBudget, 50));
+                assertNotNull(queued.reserve(pin, 2L, 0L, kvBudget, 50));
             }
         }
 

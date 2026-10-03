@@ -12,8 +12,8 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.concurrent.TimeUnit;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,8 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -61,7 +61,7 @@ class RequestAdmissionExpirationRaceTest {
                 }));
             }
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+            RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
             verify(prefill).expireCommittedItem(item);
             assertEquals(RequestState.Phase.FAILED, slot.snapshot().state());
             assertTimeoutPreemptively(Duration.ofSeconds(2),
@@ -132,7 +132,7 @@ class RequestAdmissionExpirationRaceTest {
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(clientCancellation ? RequestState.Phase.CANCELLED : RequestState.Phase.FAILED,
                     registry.getRequestState(requestId, 0L).state());
-            assertEquals(0, registry.liveRequestCount());
+            assertEquals(0, registry.trackedRequestCount());
             verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill, times(1)).expireCommittedItem(item);
         } finally {

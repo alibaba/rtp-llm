@@ -8,12 +8,17 @@ import com.google.protobuf.WrappersProto;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RoleAddrProtocolCompatibilityTest {
+    private static final List<RoleType> LEGACY_ROLE_ADDR_ROLES = List.of(
+            RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE, RoleType.VIT,
+            RoleType.FRONTEND);
 
     @Test
     void descriptorPreservesDsv4FieldsAndAddsExtensionFields() {
@@ -40,7 +45,7 @@ class RoleAddrProtocolCompatibilityTest {
     @Test
     void dualRoleAddrPayloadIsReadableByDsv4Descriptor() throws Exception {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             EngineRpcService.RoleAddrPB payload = EngineRpcService.RoleAddrPB.newBuilder()
                     .setRole(RoleTypeProtoConverter.toLegacyProto(role))
                     .setRoleStr(role.getCode())
@@ -49,19 +54,40 @@ class RoleAddrProtocolCompatibilityTest {
                     .build();
 
             DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
-            assertEquals(role.ordinal(), ((Descriptors.EnumValueDescriptor) oldReader.getField(
+            assertEquals(RoleTypeProtoConverter.toLegacyProto(role).getNumber(),
+                    ((Descriptors.EnumValueDescriptor) oldReader.getField(
                     legacy.findFieldByNumber(1))).getNumber());
         }
     }
 
     @Test
+    void encoderRoleAddrUsesNewEnumValueAndRoundTrips() throws Exception {
+        assertEquals(0, EngineRpcService.RoleAddrPB.RoleType.PDFUSION.getNumber());
+        assertEquals(1, EngineRpcService.RoleAddrPB.RoleType.PREFILL.getNumber());
+        assertEquals(2, EngineRpcService.RoleAddrPB.RoleType.DECODE.getNumber());
+        assertEquals(3, EngineRpcService.RoleAddrPB.RoleType.VIT.getNumber());
+        assertEquals(4, EngineRpcService.RoleAddrPB.RoleType.FRONTEND.getNumber());
+
+        EngineRpcService.RoleAddrPB addr = EngineRpcService.RoleAddrPB.newBuilder()
+                .setRole(RoleTypeProtoConverter.toLegacyProto(RoleType.ENCODER))
+                .setRoleStr("ENCODER")
+                .build();
+
+        assertEquals(5, addr.getRoleValue());
+        assertEquals(RoleType.ENCODER, RoleTypeProtoConverter.fromRoleAddr(addr));
+        assertEquals(RoleType.ENCODER,
+                RoleTypeProtoConverter.fromRoleAddr(
+                        EngineRpcService.RoleAddrPB.parseFrom(addr.toByteArray())));
+    }
+
+    @Test
     void currentRoleAddrReaderAcceptsDsv4PayloadAndRejectsConflict() throws Exception {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             DynamicMessage oldWriter = DynamicMessage.newBuilder(legacy)
                     .setField(legacy.findFieldByNumber(1),
                             legacy.findEnumTypeByName("RoleType")
-                                    .findValueByNumber(role.ordinal()))
+                                    .findValueByNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()))
                     .build();
             EngineRpcService.RoleAddrPB parsed =
                     EngineRpcService.RoleAddrPB.parseFrom(oldWriter.toByteArray());
@@ -80,7 +106,7 @@ class RoleAddrProtocolCompatibilityTest {
     void dualWorkerStatusPayloadIsReadableByDsv4Descriptor() throws Exception {
         Descriptors.Descriptor legacy = legacyWorkerStatusDescriptor();
         EngineRpcService.TaskInfoPB running = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(42L)
+                .setRequestId("42")
                 .setIsWaiting(false)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
@@ -92,7 +118,7 @@ class RoleAddrProtocolCompatibilityTest {
 
         DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
         assertEquals("RoleType.PREFILL", oldReader.getField(legacy.findFieldByNumber(1)));
-        DynamicMessage oldTask = (DynamicMessage) ((java.util.List<?>) oldReader.getField(
+        DynamicMessage oldTask = (DynamicMessage) ((List<?>) oldReader.getField(
                 legacy.findFieldByNumber(3))).get(0);
         assertFalse((Boolean) oldTask.getField(
                 oldTask.getDescriptorForType().findFieldByNumber(9)));
@@ -211,10 +237,10 @@ class RoleAddrProtocolCompatibilityTest {
     private static DescriptorProtos.EnumDescriptorProto roleEnum(String name, String prefix) {
         DescriptorProtos.EnumDescriptorProto.Builder builder =
                 DescriptorProtos.EnumDescriptorProto.newBuilder().setName(name);
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             builder.addValue(DescriptorProtos.EnumValueDescriptorProto.newBuilder()
                     .setName(prefix + role.name())
-                    .setNumber(role.ordinal()));
+                    .setNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()));
         }
         return builder.build();
     }

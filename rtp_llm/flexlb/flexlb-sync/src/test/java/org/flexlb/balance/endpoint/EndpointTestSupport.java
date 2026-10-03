@@ -221,7 +221,7 @@ public final class EndpointTestSupport {
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
              var commit = endpoint.tryBeginRouteCommitAdmission();
              var handoff = commit.commit(List.of(item), List.of(reservation))) {

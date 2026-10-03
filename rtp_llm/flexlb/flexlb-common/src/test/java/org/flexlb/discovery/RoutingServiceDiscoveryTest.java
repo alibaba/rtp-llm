@@ -1,0 +1,165 @@
+package org.flexlb.discovery;
+
+import org.flexlb.config.ServiceDiscoveryRuntimeConfig;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.DiscoveryConfig;
+import org.flexlb.dao.route.Endpoint;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertIterableEquals;
+
+class RoutingServiceDiscoveryTest {
+
+    @Test
+    void doesNotValidateOnRuntimeQueries() {
+        RecordingProvider provider = new RecordingProvider();
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+
+        discovery.validate(endpoint);
+        discovery.getHosts(endpoint);
+        discovery.listen(endpoint, hosts -> {
+        });
+
+        assertEquals(1, provider.validationCount.get());
+    }
+
+    @Test
+    void normalizesDiscoveredHostsWithEndpointProtocolAndGroup() {
+        WorkerHost discoveredHost =
+                WorkerHost.of("10.0.0.1", 8081, "site-a", "deployment-a");
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("grpc");
+        endpoint.setGroup("group-a");
+
+        WorkerHost normalizedHost = discovery.getHosts(endpoint).getFirst();
+
+        assertEquals("10.0.0.1", normalizedHost.getIp());
+        assertEquals(8080, normalizedHost.getHttpPort());
+        assertEquals(8081, normalizedHost.getGrpcPort());
+        assertEquals(8081, normalizedHost.getWorkerStatusPort());
+        assertEquals(8085, normalizedHost.getHttpServerPort());
+        assertEquals("site-a", normalizedHost.getSite());
+        assertEquals("group-a", normalizedHost.getGroup());
+        assertEquals("deployment-a", normalizedHost.getDeploymentName());
+        assertEquals(0, normalizedHost.getEngineIndex());
+        assertEquals(1, normalizedHost.getMultiEngineNum());
+        assertEquals("10.0.0.1:8080", normalizedHost.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@0", normalizedHost.getLogicalIpPort());
+    }
+
+    @Test
+    void usesWorkerStatusPortConfiguredOnEndpoint() {
+        WorkerHost discoveredHost = WorkerHost.of("10.0.0.1", 8080);
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("http");
+        endpoint.setWorkerStatusPort(18002);
+
+        WorkerHost normalizedHost = discovery.getHosts(endpoint).getFirst();
+
+        assertEquals(8080, normalizedHost.getHttpPort());
+        assertEquals(8081, normalizedHost.getGrpcPort());
+        assertEquals(18002, normalizedHost.getWorkerStatusPort());
+    }
+
+    @Test
+    void exposesCurrentFlexlbRuntimePolicyToDiscoveryProviders() {
+        AtomicReference<ServiceDiscoveryRuntimeConfig> current =
+                new AtomicReference<>(runtimeConfig(700));
+        RecordingProvider provider = new RecordingProvider();
+        RoutingServiceDiscovery discovery =
+                new RoutingServiceDiscovery(List.of(provider), current::get);
+        Endpoint endpoint = endpoint();
+
+        discovery.validate(endpoint);
+        assertEquals(700, endpoint.getDiscovery().getConnectTimeoutMs());
+
+        current.set(runtimeConfig(900));
+        assertEquals(900, endpoint.getDiscovery().getConnectTimeoutMs());
+    }
+
+    @Test
+    void expandsDiscoveredHostIntoIndexedLogicalWorkers() {
+        WorkerHost discoveredHost = WorkerHost.of("10.0.0.1", 8080);
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("http");
+        endpoint.setWorkerStatusPort(18002);
+        endpoint.setMultiEngineNum(2);
+
+        List<WorkerHost> hosts = discovery.getHosts(endpoint);
+
+        assertEquals(2, hosts.size());
+        assertIterableEquals(List.of(0, 1), hosts.stream().map(WorkerHost::getEngineIndex).toList());
+        assertIterableEquals(List.of(18002, 18003),
+                hosts.stream().map(WorkerHost::getWorkerStatusPort).toList());
+        assertIterableEquals(List.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"),
+                hosts.stream().map(WorkerHost::getLogicalIpPort).toList());
+        assertIterableEquals(List.of("10.0.0.1:8080", "10.0.0.1:8080"),
+                hosts.stream().map(WorkerHost::getPhysicalIpPort).toList());
+        assertIterableEquals(List.of(2, 2), hosts.stream().map(WorkerHost::getMultiEngineNum).toList());
+    }
+
+    private Endpoint endpoint() {
+        DiscoveryConfig discovery = new DiscoveryConfig();
+        discovery.setType(ServiceDiscoveryType.STATIC_ENV);
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress("static-service");
+        endpoint.setDiscovery(discovery);
+        return endpoint;
+    }
+
+    private ServiceDiscoveryRuntimeConfig runtimeConfig(int connectTimeoutMs) {
+        ServiceDiscoveryRuntimeConfig config = new ServiceDiscoveryRuntimeConfig();
+        config.setConnectTimeoutMs(connectTimeoutMs);
+        return config;
+    }
+
+    private static class RecordingProvider implements ServiceDiscoveryProvider {
+
+        private final AtomicInteger validationCount = new AtomicInteger();
+        private final List<WorkerHost> hosts;
+
+        private RecordingProvider() {
+            this(List.of());
+        }
+
+        private RecordingProvider(List<WorkerHost> hosts) {
+            this.hosts = hosts;
+        }
+
+        @Override
+        public ServiceDiscoveryType getType() {
+            return ServiceDiscoveryType.STATIC_ENV;
+        }
+
+        @Override
+        public void validate(Endpoint endpoint) {
+            validationCount.incrementAndGet();
+        }
+
+        @Override
+        public List<WorkerHost> getHosts(Endpoint endpoint) {
+            return hosts;
+        }
+
+        @Override
+        public void listen(Endpoint endpoint, ServiceHostListener listener) {
+            listener.onHostsChanged(hosts);
+        }
+
+        @Override
+        public void shutdown() {
+        }
+    }
+}

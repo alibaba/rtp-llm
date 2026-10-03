@@ -25,7 +25,8 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
@@ -83,8 +84,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     DeliveryStrategy deliveryStrategy,
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter) {
-        this(status, config, deliveryStrategy,
-                endpointEvents, reporter,
+        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
                 new PlacementAvailability());
     }
 
@@ -94,7 +94,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability) {
+        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
+                placementAvailability);
+    }
+
+    PrefillEndpoint(WorkerStatus status,
+                    Supplier<FlexlbConfig> configSupplier,
+                    DeliveryStrategy deliveryStrategy,
+                    EndpointEventProjector endpointEvents,
+                    BatchSchedulerReporter reporter,
+                    PlacementAvailability placementAvailability) {
         super(status);
+        FlexlbConfig config = configSupplier.get();
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.endpointEvents = java.util.Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
@@ -104,7 +115,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.runtime = new WorkerBatcher(
-                status.getIpPort(), this, config,
+                status.getLogicalIpPort(), this, configSupplier,
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
     }
@@ -490,21 +501,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Evict only batches whose member IDs are absent from the scheduler directory. */
     public int evictExpiredBatches(long ttlMs,
-                                   LongPredicate retainForSchedulerCleanup) {
+                                   Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredBatches(
                 ttlMs, retainForSchedulerCleanup);
     }
 
     /** Evict stale individual requests whose IDs are absent from the scheduler directory. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredIndividuals(
                 ttlMs, retainForSchedulerCleanup);
     }
 
     /** Evict endpoint orphans while retaining IDs still registered by the scheduler. */
     public int evictExpiredInflight(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         return evictExpiredBatches(ttlMs, retainForSchedulerCleanup)
                 + evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
     }
@@ -526,24 +537,26 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.RequestScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
+        String engineIp = getStatus().getMetricIpPort();
         int queueSize = runtime.queueSize();
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), engineIp, queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
                 runtime.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, 0, 0);
         } else {
             sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), priority, size));
+                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, priority, size));
         }
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getLocallyOwnedRequestCount());
+        PrefillState.Stats stats = prefillState.stats();
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engineIp, stats.batchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engineIp, stats.inflightRequests());
         reporter.reportInflightMaxAgeMs(
                 RoleType.PREFILL.name(),
-                getIp(),
-                prefillState.stats().maxObservedAgeMs());
+                engineIp,
+                stats.maxObservedAgeMs());
     }
 
     /**
@@ -593,19 +606,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // a metrics outage cannot suppress the scheduler's WorkerStatus
         // reducer or prevent the remaining observations.
         try {
-            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+            reporter.reportBatchPredictedTimeMs(
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), predictedMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch predicted-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
-            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+            reporter.reportBatchActualTimeMs(
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), actualMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch actual-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
-            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
+            reporter.reportBatchPredictGapMs(
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), gapMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);

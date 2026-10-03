@@ -44,12 +44,20 @@ public class ReuseSpringContextIntegrationTest {
                                     "prefill_endpoint": {
                                         "address": "com.prefill.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.100:8080", "127.0.0.101:8080"]
+                                        }
                                     },\s
                                     "decode_endpoint": {
                                         "address": "com.decode.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.102:8080", "127.0.0.103:8080"]
+                                        }
                                     }
                                 }
                             ]
@@ -60,5 +68,8 @@ public class ReuseSpringContextIntegrationTest {
                 {"schemaVersion":3,
                  "requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2}}}
                 """);
+        environmentVariables.set("BIZ_NAME", "flexlb-test");
+        environmentVariables.set("DEPLOYMENT_NAME", "integration");
+        environmentVariables.set("ZONE_NAME", "master");
     }
 }

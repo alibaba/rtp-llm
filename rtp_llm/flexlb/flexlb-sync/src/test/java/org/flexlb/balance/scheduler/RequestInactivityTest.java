@@ -22,13 +22,13 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.mockito.ArgumentMatchers.eq;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -220,7 +220,7 @@ class RequestInactivityTest {
     }
 
     private void assertLiveAndCharged() {
-        assertEquals(1, registry.liveRequestCount());
+        assertEquals(1, registry.trackedRequestCount());
         synchronized (slot) {
             assertSame(item, slot.activeItem());
             assertFalse(slot.snapshot().state().isTerminal());
@@ -237,7 +237,7 @@ class RequestInactivityTest {
     }
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertEquals(expectedState, registry.getRequestState(REQUEST_ID, 0L).state());
         synchronized (slot) {
             assertFalse(slot.isLiveGeneration());

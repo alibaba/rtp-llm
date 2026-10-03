@@ -6,7 +6,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -91,7 +90,7 @@ class MetricsValidationTest {
                 for (int j = 0; j < count; j++) {
                     int decodePort = decodeServices.get(
                             (i * count + j) % nDecode).getGrpcPort();
-                    inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
+                    inputs[j] = inputWithDecode(String.valueOf(startRequestId + j), 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response = enqueue(
                         prefillServices.get(i), batch(1000 + i, slot(0, inputs)));

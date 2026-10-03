@@ -14,7 +14,9 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_TIMEOUT_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 /**
  * Cancel metric contract of {@link RequestSchedulerReporter}: the cancel
@@ -82,5 +84,21 @@ class RequestSchedulerReporterTest {
 
         verify(monitor).report(AUTO_TPM_CANCEL_TIMEOUT_COUNT,
                 FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "70"), 1.0);
+    }
+
+    @Test
+    void registersTargetValidationFailuresAsQpsWithNormalAggregation() {
+        reporter.init();
+
+        verify(monitor).register(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+    }
+
+    @Test
+    void reportsOneTargetValidationFailureWithModeAndReason() {
+        reporter.reportPreemptionTargetInvalid("return", "victim_state_changed");
+
+        verify(monitor).report(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
+                FlexMetricTags.of("mode", "return", "reason", "victim_state_changed"), 1.0);
+        verifyNoMoreInteractions(monitor);
     }
 }

@@ -1,7 +1,10 @@
 package org.flexlb.consistency;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConsistencyConfig;
+import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
@@ -9,7 +12,6 @@ import org.flexlb.util.JsonUtils;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
@@ -23,15 +25,20 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final Environment environment;
-    private LBConsistencyConfig lbConsistencyConfig;
+    private final ConsistencyConfig consistencyConfig;
+    private final DeploymentIdentity deploymentIdentity;
     private String serverPort;
     private String roleId;
     private String localHostIp;
 
     public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
-                                      Environment environment) {
+                                      Environment environment,
+                                      ConfigService configService,
+                                      DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
+        this.consistencyConfig = configService.loadBalanceConfig().getConsistency();
+        this.deploymentIdentity = deploymentIdentity;
         this.init();
     }
 
@@ -49,16 +56,16 @@ public class LBStatusConsistencyService implements MasterElectService {
             serverPort = System.getProperty("server.port", "7001");
         }
         log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
-        lbConsistencyConfig = zookeeperMasterElectService.getLbConsistencyConfig();
-        roleId = System.getenv("HIPPO_ROLE");
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;
         }
+        roleId = deploymentIdentity.getDeploymentId();
         log.info("start init ZookeeperMasterElectService.");
 
     }
 
+    @Override
     public void start() {
         if (!isNeedConsistency()) {
             log.warn("start: lbConsistencyConfig is closed.");
@@ -67,6 +74,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.start();
     }
 
+    @Override
     public void offline() {
         if (!isNeedConsistency()) {
             log.warn("offline: lbConsistencyConfig is closed.");
@@ -75,7 +83,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.offline();
     }
 
-    @PreDestroy
+    @Override
     public void destroy() {
         if (!isNeedConsistency()) {
             log.warn("destroy: lbConsistencyConfig is closed.");
@@ -86,7 +94,7 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     @Override
     public boolean isNeedConsistency() {
-        return lbConsistencyConfig.isNeedConsistency();
+        return consistencyConfig instanceof ZookeeperConsistencyConfig;
     }
 
     @Override
@@ -97,6 +105,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         return zookeeperMasterElectService.isMaster();
     }
 
+    @Override
     public void refreshMasterHost(boolean forceSync) {
         if (isNeedConsistency() && forceSync) {
             zookeeperMasterElectService.updateLatestMaster();
@@ -126,7 +135,7 @@ public class LBStatusConsistencyService implements MasterElectService {
      */
     public MasterChangeNotifyResp handleMasterChange(MasterChangeNotifyReq req) {
         log.warn("recv MasterChangeNotifyReq:{}.", req);
-        if (!isNeedConsistency() || !roleId.equals(req.getRoleId())) {
+        if (!roleId.equals(req.getRoleId())) {
             MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
             resp.setSuccess(false);
             resp.setMsg("roleId not match this:" + roleId);

@@ -46,7 +46,7 @@ public final class GroupPlanner {
      * already been sorted by the queue's production comparator.
      */
     public record Item(
-            long requestId,
+            String requestId,
             int priority,
             long enqueueSeq,
             long enqueuedAtMs,
@@ -63,6 +63,12 @@ public final class GroupPlanner {
                 throw new IllegalArgumentException(
                         "hitCache must be in [0, seqLen]");
             }
+        }
+
+        public Item(long requestId, int priority, long enqueueSeq,
+                    long enqueuedAtMs, long expiresAtMs, long seqLen, long hitCache) {
+            this(Long.toString(requestId), priority, enqueueSeq,
+                    enqueuedAtMs, expiresAtMs, seqLen, hitCache);
         }
     }
 

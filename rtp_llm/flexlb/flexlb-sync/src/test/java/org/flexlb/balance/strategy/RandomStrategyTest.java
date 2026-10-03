@@ -60,11 +60,46 @@ class RandomStrategyTest {
                 context(3L), RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, selected.serverStatus().getRole());
-            assertEquals(3L, selected.serverStatus().getRequestId());
+            assertEquals("3", selected.serverStatus().getRequestId());
             assertEquals("127.0.0.3", selected.serverStatus().getServerIp());
             assertEquals(8080, selected.serverStatus().getHttpPort());
             assertEquals(8081, selected.serverStatus().getGrpcPort());
             assertEquals("group-a", selected.serverStatus().getGroup());
+        }
+    }
+
+    @Test
+    void selectedMultiEngineVitPreservesLogicalIdentity() {
+        WorkerStatus first = WorkerStatus.createDiscovered(
+                RoleType.VIT, "group-a", "127.0.0.3", 8080, 8081,
+                "test-site", null, 0, 2);
+        WorkerStatus second = WorkerStatus.createDiscovered(
+                RoleType.VIT, "group-a", "127.0.0.3", 8080, 8081,
+                "test-site", null, 1, 2);
+        StrategyTestSupport.publish(first, StrategyTestSupport.response(
+                RoleType.VIT, true, 0L, 0L, 1L));
+        StrategyTestSupport.publish(second, StrategyTestSupport.response(
+                RoleType.VIT, true, 0L, 0L, 1L));
+        StrategyTestSupport.publishEndpoint(endpoints,
+                RoleType.VIT, first.getLogicalIpPort(), first);
+        StrategyTestSupport.publishEndpoint(endpoints,
+                RoleType.VIT, second.getLogicalIpPort(), second);
+        WorkerDirectory directory = new WorkerDirectory(endpoints);
+        for (String address : endpoints.endpointAddressSnapshot(RoleType.VIT)) {
+            WorkerStatus endpointStatus = endpoints.get(
+                    RoleType.VIT, address).getStatus();
+            directory.currentOrDiscover(
+                    RoleType.VIT, address, () -> endpointStatus);
+        }
+        strategy = new RandomStrategy(directory);
+
+        try (SelectedRole selected = strategy.select(
+                context(31L), RoleType.VIT, "group-a")) {
+            assertNotNull(selected);
+            assertNotNull(selected.serverStatus().getEngineIndex());
+            assertEquals("127.0.0.3:8080@"
+                            + selected.serverStatus().getEngineIndex(),
+                    selected.serverStatus().getLogicalIpPort());
         }
     }
 
