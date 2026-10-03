@@ -1,0 +1,10 @@
+{
+  "revision": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "source": "vllm/model_executor/kernels/linear/cute_dsl",
+  "sha256": {
+    "ll_bf16.py": "862f0ea7ab82d577d667d815d1b06e6e99ab2615d26e603c1dd437c448a0c913",
+    "_ll_bf16_dotprod.py": "0e35f1549e835a6d67a279525bfc184770fac08a3e31f741b8e4de3b61b56437",
+    "_ll_bf16_splitk.py": "f282d0c1c4649d3affb19d694b7edf66cecf7764946b4effe57737830ec7a3ad"
+  },
+  "adaptations": "ll_bf16.py uses torch.cuda platform/stream queries and equivalent 2D CuTe fake tensor descriptors instead of quack; dotprod and splitk computation kernels unchanged"
+}

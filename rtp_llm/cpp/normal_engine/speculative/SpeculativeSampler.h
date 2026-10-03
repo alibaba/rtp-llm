@@ -25,6 +25,11 @@ public:
     // Per-stream verify errors from SpecLogitsVerifyRunner (main #1006 contract).
     std::vector<std::optional<ErrorInfo>> processor_errors;
 
+    // Opt-in target diagnostics, already gathered to the last accepted row.
+    // Own their storage so asynchronous bookkeeping survives graph replay.
+    torch::Tensor target_hidden_states;
+    torch::Tensor target_logits;
+
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };
 

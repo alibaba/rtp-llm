@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <algorithm>
+#include <climits>
 
 namespace rtp_llm {
 
@@ -92,6 +93,42 @@ __global__ void mtpSpecDecodeTokensMetadataPrepareKernel(const int32_t* __restri
     lm_output_indexes[idx] = idx;
     if (token_idx == 0) {
         input_lengths[batch_idx] = tokens_per_batch;
+    }
+}
+
+__global__ void mtpPrefillShiftAppendKernel(const int32_t* __restrict__ combo_tokens_in,
+                                            const int32_t* __restrict__ input_lengths,
+                                            const int32_t* __restrict__ batch_offsets,
+                                            const int32_t* __restrict__ new_all_token_ids,
+                                            int32_t* __restrict__ combo_tokens_out,
+                                            const int32_t* __restrict__ position_ids_in,
+                                            int32_t* __restrict__ position_ids_out,
+                                            int32_t token_stride,
+                                            int32_t batch_size,
+                                            int32_t total_tokens) {
+    const int32_t index = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= total_tokens) {
+        return;
+    }
+    int32_t first = 0;
+    int32_t last  = batch_size - 1;
+    while (first < last) {
+        const int32_t middle = first + ((last - first) >> 1);
+        if (batch_offsets[middle] <= index) {
+            first = middle + 1;
+        } else {
+            last = middle;
+        }
+    }
+    const int32_t request = first;
+    const int32_t begin   = request == 0 ? 0 : batch_offsets[request - 1];
+    const int32_t offset  = index - begin;
+    const int32_t length  = input_lengths[request];
+    combo_tokens_out[index] = offset == length - 1 ?
+        new_all_token_ids[request * token_stride + token_stride - 1] : combo_tokens_in[index + 1];
+    if (position_ids_out != nullptr) {
+        position_ids_out[index] =
+            position_ids_in[offset == length - 1 ? index : index + 1];
     }
 }
 
@@ -201,6 +238,76 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
         lm_output_indexes.data_ptr<int32_t>(),
         tokens_per_batch,
         static_cast<int32_t>(batch_size));
+}
+
+void invokeMtpPrefillShiftAppendImpl(const torch::Tensor& combo_tokens_in,
+                                     const torch::Tensor& input_lengths,
+                                     const torch::Tensor& batch_offsets,
+                                     const torch::Tensor& new_all_token_ids,
+                                     torch::Tensor&       combo_tokens_out,
+                                     const torch::Tensor* position_ids_in,
+                                     torch::Tensor*       position_ids_out,
+                                     int32_t              token_stride,
+                                     cudaStream_t         stream) {
+    const int64_t batch_size   = input_lengths.numel();
+    const int64_t total_tokens = combo_tokens_in.numel();
+    if (batch_size == 0 || total_tokens == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= INT_MAX && total_tokens <= INT_MAX,
+                            "MTP Prefill token count exceeds int32 range");
+    RTP_LLM_CHECK_WITH_INFO(token_stride > 0, "MTP Prefill sample stride must be positive");
+    checkCudaI32Vector(combo_tokens_in, "combo_tokens_in", total_tokens);
+    checkCudaI32Vector(combo_tokens_out, "combo_tokens_out", total_tokens);
+    checkCudaI32Vector(input_lengths, "input_lengths", batch_size);
+    checkCudaI32Vector(batch_offsets, "batch_offsets", batch_size);
+    checkCudaI32Vector(new_all_token_ids, "new_all_token_ids", batch_size * token_stride);
+    RTP_LLM_CHECK_WITH_INFO(combo_tokens_out.data_ptr<int32_t>() != combo_tokens_in.data_ptr<int32_t>(),
+                            "MTP Prefill output must not alias input");
+    RTP_LLM_CHECK_WITH_INFO((position_ids_in == nullptr) == (position_ids_out == nullptr),
+                            "MTP Prefill position input and output must be provided together");
+    if (position_ids_in != nullptr) {
+        checkCudaI32Vector(*position_ids_in, "position_ids_in", total_tokens);
+        checkCudaI32Vector(*position_ids_out, "position_ids_out", total_tokens);
+        RTP_LLM_CHECK_WITH_INFO(position_ids_out->data_ptr<int32_t>() != position_ids_in->data_ptr<int32_t>(),
+                                "MTP Prefill position output must not alias input");
+    }
+    constexpr int block_size = 256;
+    const int grid_size = static_cast<int>((total_tokens + block_size - 1) / block_size);
+    mtpPrefillShiftAppendKernel<<<grid_size, block_size, 0, stream>>>(
+        combo_tokens_in.data_ptr<int32_t>(), input_lengths.data_ptr<int32_t>(),
+        batch_offsets.data_ptr<int32_t>(), new_all_token_ids.data_ptr<int32_t>(),
+        combo_tokens_out.data_ptr<int32_t>(),
+        position_ids_in == nullptr ? nullptr : position_ids_in->data_ptr<int32_t>(),
+        position_ids_out == nullptr ? nullptr : position_ids_out->data_ptr<int32_t>(),
+        token_stride,
+        static_cast<int32_t>(batch_size), static_cast<int32_t>(total_tokens));
+}
+
+void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
+                                 const torch::Tensor& input_lengths,
+                                 const torch::Tensor& batch_offsets,
+                                 const torch::Tensor& new_all_token_ids,
+                                 torch::Tensor&       combo_tokens_out,
+                                 int32_t              token_stride,
+                                 cudaStream_t         stream) {
+    invokeMtpPrefillShiftAppendImpl(combo_tokens_in, input_lengths, batch_offsets,
+                                    new_all_token_ids, combo_tokens_out, nullptr, nullptr,
+                                    token_stride, stream);
+}
+
+void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
+                                 const torch::Tensor& input_lengths,
+                                 const torch::Tensor& batch_offsets,
+                                 const torch::Tensor& new_all_token_ids,
+                                 torch::Tensor&       combo_tokens_out,
+                                 const torch::Tensor& position_ids_in,
+                                 torch::Tensor&       position_ids_out,
+                                 int32_t              token_stride,
+                                 cudaStream_t         stream) {
+    invokeMtpPrefillShiftAppendImpl(combo_tokens_in, input_lengths, batch_offsets,
+                                    new_all_token_ids, combo_tokens_out, &position_ids_in,
+                                    &position_ids_out, token_stride, stream);
 }
 
 // Fused kernel: next_seq_len[i] = prev_seq_len[i] + accept_len[i]

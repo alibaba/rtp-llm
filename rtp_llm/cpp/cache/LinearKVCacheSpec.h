@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -47,7 +48,22 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        const auto     seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        uint32_t       seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        if (desc.cp.has_value() && desc.cp->scale_seq_size.value_or(false)) {
+            const auto& parallelism = *ctx.parallelism_config;
+            const uint64_t local_shards = parallelism.prefill_cp_config.kv_cache_sharded && parallelism.tp_size > 1 ?
+                                              static_cast<uint64_t>(parallelism.tp_size) :
+                                              1;
+            const uint64_t upstream_shards = parallelism.role_type == RoleType::DECODE ?
+                                                 static_cast<uint64_t>(std::max<int64_t>(
+                                                     1, parallelism.prefill_cp_config.prefill_cp_size)) :
+                                                 local_shards;
+            const uint64_t checkpoint_shards = std::max(local_shards, upstream_shards);
+            RTP_LLM_CHECK_WITH_INFO(seq <= std::numeric_limits<uint32_t>::max() / checkpoint_shards,
+                                    "LINEAR KVCacheSpecDesc tag=%s CP checkpoint span overflows uint32",
+                                    desc.tag.c_str());
+            seq *= static_cast<uint32_t>(checkpoint_shards);
+        }
         const auto     kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         const auto     attn_tp     = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp          = static_cast<uint32_t>(attn_tp);

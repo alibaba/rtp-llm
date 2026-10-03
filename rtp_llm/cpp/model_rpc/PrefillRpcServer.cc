@@ -392,6 +392,17 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
     }
+    // KV page sharding is independent of whether queries use Prefill CP.
+    // Decode needs the physical source shard count to pull every cache page.
+    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        const auto tp_size = maga_init_params_.parallelism_config.tp_size;
+        RTP_LLM_CHECK_WITH_INFO(tp_size > 1 && alloc_request.peer_addrs_size() == tp_size,
+                                "sharded Prefill KV requires one rank-ordered cache-store peer per TP rank, "
+                                "got peers=%d TP=%ld",
+                                alloc_request.peer_addrs_size(),
+                                tp_size);
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(tp_size));
+    }
     return alloc_request;
 }
 

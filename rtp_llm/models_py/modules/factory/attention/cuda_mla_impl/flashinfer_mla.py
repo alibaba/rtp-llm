@@ -92,6 +92,7 @@ def concat_and_cast_mha_k_kernel(
     k_nope_ptr,
     k_rope_ptr,
     head_cnt: tl.constexpr,
+    head_block: tl.constexpr,
     k_stride0: tl.constexpr,
     k_stride1: tl.constexpr,
     nope_stride0: tl.constexpr,
@@ -100,8 +101,10 @@ def concat_and_cast_mha_k_kernel(
     nope_dim: tl.constexpr,
     rope_dim: tl.constexpr,
 ):
-    pid_loc = tl.program_id(0)
-    head_range = tl.arange(0, head_cnt)
+    # A long prefix can make row * stride exceed signed 32-bit element offsets.
+    pid_loc = tl.program_id(0).to(tl.int64)
+    head_range = tl.arange(0, head_block)
+    valid_head = head_range[:, None] < head_cnt
 
     k_head_ptr = k_ptr + pid_loc * k_stride0 + head_range[:, None] * k_stride1
 
@@ -115,14 +118,14 @@ def concat_and_cast_mha_k_kernel(
     )
     dst_nope_ptr = k_head_ptr + nope_offs[None, :]
 
-    src_nope = tl.load(src_nope_ptr)
-    tl.store(dst_nope_ptr, src_nope)
+    src_nope = tl.load(src_nope_ptr, mask=valid_head, other=0)
+    tl.store(dst_nope_ptr, src_nope, mask=valid_head)
 
     rope_offs = tl.arange(0, rope_dim)
     src_rope_ptr = k_rope_ptr + pid_loc * rope_stride0 + rope_offs[None, :]
     dst_rope_ptr = k_head_ptr + nope_dim + rope_offs[None, :]
     src_rope = tl.load(src_rope_ptr)
-    tl.store(dst_rope_ptr, src_rope)
+    tl.store(dst_rope_ptr, src_rope, mask=valid_head)
 
 
 def concat_and_cast_mha_k_triton(
@@ -153,6 +156,7 @@ def concat_and_cast_mha_k_triton(
         k_nope,
         k_rope,
         k.shape[1],
+        triton.next_power_of_2(k.shape[1]),
         k.stride(0),
         k.stride(1),
         k_nope.stride(0),
@@ -196,6 +200,9 @@ class MlaFlashInferPrefillOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
         self.kv_cache_type = kv_cache_dtype
+        self.prefill_wrapper = self._create_prefill_wrapper()
+
+    def _create_prefill_wrapper(self):
         global g_workspace_buffer
         if g_workspace_buffer is None:
             # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
@@ -212,7 +219,7 @@ class MlaFlashInferPrefillOp(object):
                 device=device,
             )
 
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+        return BatchPrefillWithRaggedKVCacheWrapper(
             g_workspace_buffer,
             "NHD",
             backend="auto",
@@ -230,8 +237,8 @@ class MlaFlashInferPrefillOp(object):
             sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
             * self.softmax_extra_scale,
             causal=True,
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
+            q_data_type=self._attention_dtype(),
+            kv_data_type=self._attention_dtype(),
         )
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
@@ -242,6 +249,9 @@ class MlaFlashInferPrefillOp(object):
             1, dtype=torch.int32, device=self.block_table.device
         )
         self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+
+    def _attention_dtype(self):
+        return torch.bfloat16
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -319,6 +329,15 @@ class MlaFlashInferPrefillOp(object):
         )
         return final_compressed_kv, final_k_pe
 
+    def _make_kv_b_proj(self, layer_id):
+        return LinearFactory.create_linear_from_weights(
+            self.weights[layer_id],
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            self.quant_config,
+        )
+
     def _concat_and_cast_mha_k(self, k_nope, k_pe):
         # Temporary for DeepSeek V3/R1 only, but can generalize if needed
         k_shape = (
@@ -355,7 +374,7 @@ class MlaFlashInferPrefillOp(object):
         compatible = (
             is_power_of_2(self.qk_nope_head_dim)
             and is_power_of_2(self.qk_rope_head_dim)
-            and is_power_of_2(self.num_heads)
+            and self.num_heads > 0
         )
         return compatible
 
@@ -373,13 +392,7 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.kv_b_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id],
-            W.mla_kv_b_w,
-            W.mla_kv_b_s,
-            None,
-            self.quant_config,
-        )
+        self.kv_b_proj = self._make_kv_b_proj(layer_id)
 
         kv = self.kv_b_proj(compressed_kv)
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)

@@ -173,12 +173,14 @@ size_t DecodeRpcServer::keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
 void DecodeRpcServer::markCacheKeyRange(std::vector<size_t>& cache_key_counts,
                                         size_t               endpoint_key_index,
                                         size_t               block_offset_index,
-                                        size_t               cache_keys_per_physical_block) {
+                                        size_t               cache_keys_per_physical_block,
+                                        bool                 sharded_full) {
     if (endpoint_key_index >= cache_key_counts.size() || cache_keys_per_physical_block == 0) {
         return;
     }
-    const size_t begin =
-        cache_keys_per_physical_block == 1 ? endpoint_key_index : block_offset_index * cache_keys_per_physical_block;
+    const size_t begin = cache_keys_per_physical_block == 1 ? endpoint_key_index :
+                             (sharded_full ? endpoint_key_index / cache_keys_per_physical_block : block_offset_index)
+                                 * cache_keys_per_physical_block;
     const size_t end = std::min(endpoint_key_index + 1, cache_key_counts.size());
     if (begin >= end) {
         return;
@@ -194,7 +196,9 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
                                                                      size_t                  reuse_block_size,
                                                                      bool                    use_hybrid,
                                                                      size_t                  group_seq_size_per_block,
-                                                                     size_t                  base_seq_size_per_block) {
+                                                                     size_t                  base_seq_size_per_block,
+                                                                     int                     decode_cp_rank,
+                                                                     int                     decode_cp_size) {
     std::vector<CacheStoreBlockPair> plan;
     if (local_block_num == 0 || cache_key_count == 0) {
         return plan;
@@ -206,18 +210,22 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
     const bool   compact = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && block_scale > 1;
     const size_t group_block_count =
         (cache_key_count + key_blocks_per_logical_block - 1) / key_blocks_per_logical_block;
-    const size_t total_logical_blocks = compact ? cache_key_count : std::min(local_block_num, group_block_count);
+    const bool   sharded_full = policy.group_type == CacheGroupType::FULL
+                                && policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && decode_cp_size > 1;
+    const size_t total_logical_blocks =
+        compact ? cache_key_count : (sharded_full ? group_block_count : std::min(local_block_num, group_block_count));
     const size_t logical_reuse_block_size =
         compact ? reuse_block_size : reuse_block_size / key_blocks_per_logical_block;
-    // Decode owns whole logical blocks of BLOCK_ROUND_ROBIN groups; the per-peer
-    // split happens later, per block, so only compact groups are CP-projected here.
-    const int cp_size = compact ? static_cast<int>(block_scale) : 1;
+    // A sharded Decode table is compact: local slot i holds global page
+    // i * cp_size + cp_rank. Use the same projection as the Prefill writer.
+    const int cp_size = compact ? static_cast<int>(block_scale) : (sharded_full ? decode_cp_size : 1);
+    const int cp_rank = compact ? cp_size - 1 : (sharded_full ? decode_cp_rank : 0);
 
     const auto raw_plan = buildCacheStorePlan(policy,
                                               total_logical_blocks,
                                               logical_reuse_block_size,
                                               use_hybrid,
-                                              /*cp_rank=*/cp_size - 1,
+                                              cp_rank,
                                               cp_size,
                                               key_blocks_per_logical_block,
                                               cache_key_count);
@@ -243,18 +251,22 @@ ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t
 
 size_t DecodeRpcServer::completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                      const std::vector<size_t>& required_cache_key_counts,
-                                                     const std::vector<size_t>& transferred_cache_key_counts) {
+                                                     const std::vector<size_t>& transferred_cache_key_counts,
+                                                     bool                       sparse_rank_keys) {
     if (required_cache_key_counts.empty() || required_cache_key_counts.size() != transferred_cache_key_counts.size()) {
         return 0;
     }
 
     const size_t reused_blocks = std::min(already_reused_blocks, required_cache_key_counts.size());
     size_t       prefix_blocks = reused_blocks;
-    while (prefix_blocks < required_cache_key_counts.size() && required_cache_key_counts[prefix_blocks] > 0
+    bool         has_required_key = false;
+    while (prefix_blocks < required_cache_key_counts.size()
+           && (sparse_rank_keys || required_cache_key_counts[prefix_blocks] > 0)
            && transferred_cache_key_counts[prefix_blocks] == required_cache_key_counts[prefix_blocks]) {
+        has_required_key |= required_cache_key_counts[prefix_blocks] > 0;
         ++prefix_blocks;
     }
-    return prefix_blocks > reused_blocks ? prefix_blocks : 0;
+    return prefix_blocks > reused_blocks && (!sparse_rank_keys || has_required_key) ? prefix_blocks : 0;
 }
 
 size_t DecodeRpcServer::minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts) {
@@ -364,14 +376,15 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
-    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
-        && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+    decode_context.prefill_cp_size = std::max(1, allocate_request.prefill_cp_size());
+    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded) {
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
         RTP_LLM_CHECK_WITH_INFO(configured_prefill_cp_size > 1,
-                                "decode PREFILL_CP sharded mode requires explicit PREFILL_CP_SIZE");
-        decode_context.prefill_cp_size = static_cast<int32_t>(configured_prefill_cp_size);
-    } else {
-        decode_context.prefill_cp_size = 1;
+                                "decode sharded KV mode requires explicit PREFILL_CP_SIZE");
+        GRPC_RET_IF_ERROR(decode_context,
+                          decode_context.prefill_cp_size == configured_prefill_cp_size,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "request source KV shard count does not match Decode PREFILL_CP_SIZE");
     }
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
                       decode_context.request_key.c_str(),
@@ -1107,6 +1120,25 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     };
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
+    const auto decode_cp_mapper = cache_manager->cpSlotMapper();
+    const bool decode_page_rr = is_page_level_rr && decode_cp_mapper && decode_cp_mapper->isSharded();
+    if (decode_page_rr) {
+        RTP_LLM_CHECK_WITH_INFO(decode_cp_mapper->cpSize() == load_context.prefill_cp_size,
+                                "PageRR P/D CP size mismatch: decode=%d prefill=%d",
+                                decode_cp_mapper->cpSize(),
+                                load_context.prefill_cp_size);
+    }
+    const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
+    const int decode_attention_rank = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank());
+    if (is_page_level_rr && use_hybrid && use_mla) {
+        RTP_LLM_CHECK_WITH_INFO(decode_attention_tp == peer_cnt && decode_attention_rank >= 0
+                                    && decode_attention_rank < peer_cnt,
+                                "hybrid PageRR cache load requires rank-aligned attention TP peers: "
+                                "decode_tp=%d decode_rank=%d peers=%d",
+                                decode_attention_tp,
+                                decode_attention_rank,
+                                peer_cnt);
+    }
     auto layerGroupTags = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<std::string> layer_tags;
         if (use_hybrid) {
@@ -1142,21 +1174,36 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
     auto shouldLoadGroupFromPeer =
-        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
+        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx, bool mtp) {
             if (!is_page_level_rr) {
                 return true;
             }
             if (group_type == CacheGroupType::FULL) {
                 return true;
             }
+            // Hybrid linear state is head-sharded by attention TP, while the
+            // draft SWA state is kept per rank. Neither is a PageRR FULL page.
+            // Follow the matching Prefill rank as in the source layout.
+            if (use_hybrid && use_mla && !groupUsesCpSlice(cfg, tag)
+                && ((group_type == CacheGroupType::LINEAR && !mtp)
+                    || (group_type == CacheGroupType::SWA && mtp))) {
+                return peer_idx == decode_attention_rank;
+            }
             // Some specs are CP-sliced inside one logical block on prefill, while
             // decode still owns the full block. Pull every peer slice and place it
             // into the destination offset declared by the spec.
             return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
         };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
+    auto shouldLoadBlockFromPeer = [&](const CacheConfig& cfg,
+                                      const std::string& tag,
+                                      CacheGroupType group_type,
+                                      size_t block_pos,
+                                      int peer_idx) {
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
+        }
+        if (decode_page_rr && cfg.topology().group(tag).policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+            return peer_idx == decode_cp_mapper->cpRank();
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
     };
@@ -1173,13 +1220,17 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     auto groupLoadPlan =
         [&](const CacheConfig& cfg, bool cfg_use_hybrid, const std::string& tag, size_t local_block_num) {
             const auto& group = cfg.topology().group(tag);
+            const bool sharded_full = decode_page_rr && group.policy.group_type == CacheGroupType::FULL
+                                      && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
             return buildGroupLoadPlan(group.policy,
                                       local_block_num,
                                       load_context.cache_keys.size(),
                                       static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
                                       cfg_use_hybrid,
                                       group.seqSizePerBlock(),
-                                      cfg.seq_size_per_block);
+                                      cfg.seq_size_per_block,
+                                      sharded_full ? decode_cp_mapper->cpRank() : 0,
+                                      sharded_full ? decode_cp_mapper->cpSize() : 1);
         };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
@@ -1205,18 +1256,21 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 const auto     load_plan                     = groupLoadPlan(cache_config, use_hybrid, tag, block_num);
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                     cache_config.topology().group(tag).seqSizePerBlock(), cache_config.seq_size_per_block);
+                const bool sharded_full = decode_page_rr && group_type == CacheGroupType::FULL
+                                          && cache_config.topology().group(tag).policy.cp_mapping
+                                                 == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
-                if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
+                if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i, false)) {
                     continue;
                 }
                 for (const auto& plan_pair : load_plan) {
                     const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                     const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
+                    if (!shouldLoadBlockFromPeer(cache_config, tag, group_type, block_pos, i)) {
                         continue;
                     }
                     markCacheKeyRange(
-                        required_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block);
+                        required_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block, sharded_full);
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
@@ -1277,7 +1331,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                         }
                     }
                     markCacheKeyRange(
-                        transferred_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block);
+                        transferred_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block, sharded_full);
                 }
                 layer_caches.push_back(load_layer_cache);
             }
@@ -1338,20 +1392,24 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             const auto     cache_keys_per_physical_block =
                                 cacheKeysPerPhysicalBlock(mtp_cache_cfg.topology().group(tag).seqSizePerBlock(),
                                                           mtp_cache_cfg.seq_size_per_block);
+                            const bool sharded_full = decode_page_rr && group_type == CacheGroupType::FULL
+                                                      && mtp_cache_cfg.topology().group(tag).policy.cp_mapping
+                                                             == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
-                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i)) {
+                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i, true)) {
                                 continue;
                             }
                             for (const auto& plan_pair : load_plan) {
                                 const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                                 const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
+                                if (!shouldLoadBlockFromPeer(mtp_cache_cfg, tag, group_type, block_pos, i)) {
                                     continue;
                                 }
                                 markCacheKeyRange(required_cache_key_counts,
                                                   cache_key_index,
                                                   block_pos,
-                                                  cache_keys_per_physical_block);
+                                                  cache_keys_per_physical_block,
+                                                  sharded_full);
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
@@ -1420,7 +1478,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 markCacheKeyRange(transferred_cache_key_counts,
                                                   cache_key_index,
                                                   block_pos,
-                                                  cache_keys_per_physical_block);
+                                                  cache_keys_per_physical_block,
+                                                  sharded_full);
                             }
                             layer_caches.push_back(load_layer_cache);
                         }
@@ -1485,7 +1544,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const size_t already_reused_blocks = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
     return {
         ErrorInfo::OkStatus(),
-        completedHandoffPrefixBlocks(already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts)};
+        completedHandoffPrefixBlocks(
+            already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts, decode_page_rr)};
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,

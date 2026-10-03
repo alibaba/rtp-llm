@@ -78,6 +78,10 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
     } else if (gen_num_per_cycle != weight_count) {
         model_num = std::min(weight_count, gen_num_per_cycle);
     }
+    if (model_config.reuse_single_mtp_module) {
+        RTP_LLM_CHECK_WITH_INFO(weight_count == 1, "recurrent MTP requires exactly one layer weight");
+        model_num = 1;
+    }
     if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
         model_num = 1;
     }
