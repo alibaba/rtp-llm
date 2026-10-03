@@ -6,6 +6,16 @@ package org.flexlb.constant;
  */
 public class MetricConstant {
 
+    /**
+     * One increment per GC notification, tagged by gc, collector and pid.
+     */
+    public static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
+
+    /**
+     * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
+     */
+    public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
     /* ------------------------ Engine Status Metrics -------------------------- */
 
     /**

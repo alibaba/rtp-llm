@@ -316,6 +316,17 @@ Master 重启后累计拒绝数重新开始。已初始化的空闲线程池持�
 沿用 `grpc.server.executor.caller.runs` 上报名，面板显示“任务拒绝累计数”。
 本地 Block Hash 计算池按需创建，首次使用前不产生线程池状态样本。
 
+`JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
+通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
+`app.jvm.gc.pause.total.ms`。按 `gc`、`collector`、`pid` 区分进程与收集器：
+G1 的 `young` 包含 Mixed，`full` 对应 `G1 Old Generation`，`concurrent` 只统计
+并发周期中的暂停阶段，不表示整个并发标记周期。其它收集器标为 `other`。
+每秒上报零增量，保持未发生 GC 的序列可查询；关闭组件时移除 GC listener。
+面板展示统计窗口两端的计数差值，以及暂停毫秒数差值除以次数差值；
+例如窗口内两次暂停为 10 ms、30 ms，展示 2 次和平均 20 ms。
+没有 GC 的窗口次数为 0，平均耗时为空。底层计数器用于差分，不作为累计趋势展示；
+PID 隔离重启前后的计数器，缺少窗口边界样本时保留无数据。
+
 Encoder 的 worker 数由周期指标上报 `app.engine.health.check.engine.encoder.worker.number`；
 WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `app.flexlb.encoder.selection.load`、`app.flexlb.encoder.uncached.token.load`。
