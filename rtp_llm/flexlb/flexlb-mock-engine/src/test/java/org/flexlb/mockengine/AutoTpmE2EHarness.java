@@ -43,6 +43,7 @@ import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -277,7 +278,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     return future;
                 });
 
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance());
         EngineCancelChannel cancelChannel = realCancelChannel
                 ? new MockEngineCancelChannel(services)
                 : new UnsupportedCancelStub();
