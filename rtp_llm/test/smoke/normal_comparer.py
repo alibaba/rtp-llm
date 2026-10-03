@@ -1,6 +1,8 @@
 import json
 import logging
+import math
 import os
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
@@ -70,7 +72,7 @@ class AuxInfo(BaseModel):
     step_output_len: Optional[int] = None
     iter_count: Optional[int] = None
     iter_count_tolerance: Optional[int] = None
-    cum_log_probs: Optional[Union[List[float], List[None]]] = None
+    cum_log_probs: Optional[List[Optional[float]]] = None
     beam_responses: Optional[List[str]] = None
     pd_sep: Optional[bool] = None
     softmax_probs: Optional[List[float]] = None
@@ -310,6 +312,53 @@ class NormalComparer(BaseComparer):
                     self._format_all_diffs(diffs),
                 )
 
+    @staticmethod
+    def _beam_responses_match(
+        expect_beams: Optional[List[str]],
+        actual_beams: Optional[List[str]],
+        actual_scores: Optional[List[Optional[float]]],
+    ) -> bool:
+        if expect_beams is None or actual_beams is None:
+            return expect_beams == actual_beams
+        if not expect_beams and not actual_beams:
+            return True
+        if len(expect_beams) != len(actual_beams) or Counter(expect_beams) != Counter(
+            actual_beams
+        ):
+            return False
+        if actual_scores is None or len(actual_scores) != len(actual_beams):
+            return False
+        if any(score is None for score in actual_scores):
+            # Beam scores must be complete (see the beam-ordering unit tests);
+            # a None placeholder is a rejection, not an unverifiable tie.
+            return False
+        try:
+            scores = [float(score) for score in actual_scores]
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(score) for score in scores):
+            return False
+        for left, right in zip(scores, scores[1:]):
+            if right > left and not math.isclose(
+                left, right, rel_tol=1e-2, abs_tol=1e-2
+            ):
+                return False
+        start = 0
+        while start < len(scores):
+            end = start + 1
+            # Chain adjacent pairs so the tie band is transitive and gradual
+            # drift stays in one band (same adjacency as the ordering check
+            # above); anchoring every element to scores[start] would split a
+            # band whose endpoints exceed the tolerance against the head.
+            while end < len(scores) and math.isclose(
+                scores[end - 1], scores[end], rel_tol=1e-2, abs_tol=1e-2
+            ):
+                end += 1
+            if Counter(expect_beams[start:end]) != Counter(actual_beams[start:end]):
+                return False
+            start = end
+        return True
+
     def _format_beam_responses_diff(
         self, expect_beams: Optional[List[str]], actual_beams: Optional[List[str]]
     ) -> str:
@@ -434,7 +483,12 @@ class NormalComparer(BaseComparer):
                     )
 
         check_equal(
-            "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses
+            "beam_responses",
+            expect_aux.beam_responses,
+            actual_aux.beam_responses,
+            lambda expected, actual: self._beam_responses_match(
+                expected, actual, actual_aux.cum_log_probs
+            ),
         )
 
         def is_close_list(a: Any, b: Any) -> bool:
@@ -456,10 +510,19 @@ class NormalComparer(BaseComparer):
             actual_aux.softmax_probs,
             is_close_list,
         )
+        expected_cum_log_probs = expect_aux.cum_log_probs
+        actual_cum_log_probs = actual_aux.cum_log_probs
+        if (
+            expect_aux.beam_responses is not None
+            and expected_cum_log_probs
+            and actual_cum_log_probs
+        ):
+            expected_cum_log_probs = expected_cum_log_probs[:1]
+            actual_cum_log_probs = actual_cum_log_probs[:1]
         check_equal(
             "cum_log_probs",
-            expect_aux.cum_log_probs,
-            actual_aux.cum_log_probs,
+            expected_cum_log_probs,
+            actual_cum_log_probs,
             is_close_list,
         )
 

@@ -2,11 +2,15 @@ load("//bazel:defs.bzl", "rpm_library")
 
 rpm_library(
     name = "hf3fs",
+    hdrs = [
+        "hf3fs_usrbio.h",
+    ],
+    include_path = "usr/include",
+    lib_path = "usr/lib64",
+    origin_rpath = True,
     rpms = [
         "@hf3fs_rpm//file:file",
     ],
-    lib_path = "usr/lib64",
-    include_path = "usr/include",
     shared_libs = [
         "libhf3fs_api_shared.so",
         "libboost_context.so.1.71.0",
@@ -27,8 +31,5 @@ rpm_library(
         "libunwind.so.8",
         "libssl.so.1.1",
         "libcrypto.so.1.1",
-    ],
-    hdrs = [
-        "hf3fs_usrbio.h",
     ],
 )

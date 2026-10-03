@@ -26,11 +26,14 @@ test_deps = [
 
 cc_test(
     name = "full_prefix_invariant_scanner_test",
-    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["FullPrefixInvariantScannerTest.cc"],
     copts = test_copts,
-    tags = ["exclusive-if-local"],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
 )

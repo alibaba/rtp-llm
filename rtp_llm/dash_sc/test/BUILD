@@ -3,18 +3,20 @@ load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 py_test(
     name = "codec_test",
     srcs = ["codec_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
     name = "grammar_validator_test",
     srcs = ["inference/grammar_validator_test.py"],
-    main = "inference/grammar_validator_test.py",
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    main = "inference/grammar_validator_test.py",
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
@@ -27,67 +29,74 @@ py_test(
 py_test(
     name = "think_test",
     srcs = ["think_test.py"],
-    main = "think_test.py",
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    main = "think_test.py",
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
     name = "inference_servicer_test",
     srcs = ["inference/servicer_test.py"],
+    exec_properties = {"gpu": "A10_CU13"},
+    imports = [],
     main = "inference/servicer_test.py",
+    tags = ["A10_CU13"],
     # telemetry_test_deps() declares the opentelemetry runtime for the locks that
     # carry it, so DashScInferenceTracingTest (guarded by skipUnless(OTEL_AVAILABLE))
     # cannot silently vanish when this target is run on its own.
     deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
-    imports = [],
-    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
     name = "mrcr_smoke_test",
     srcs = ["inference/mrcr_smoke_test.py"],
     data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
-    main = "inference/mrcr_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    main = "inference/mrcr_smoke_test.py",
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
     name = "proxy_servicer_test",
     srcs = ["proxy/servicer_test.py"],
+    exec_properties = {"gpu": "A10_CU13"},
+    imports = [],
     main = "proxy/servicer_test.py",
+    tags = ["A10_CU13"],
     # Same reason as inference_servicer_test: keep ProxyTracingTest unskippable
     # on the locks that carry opentelemetry.
     deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
-    imports = [],
-    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
     name = "access_log_test",
     srcs = ["access_log_test.py"],
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
     name = "repetition_monitor_test",
     srcs = ["repetition_monitor_test.py"],
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(
     name = "app_test",
     srcs = ["app_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    tags = ["A10_CU13"],
+    deps = ["//rtp_llm:testlib"],
 )

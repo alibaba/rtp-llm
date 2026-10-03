@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
@@ -16,41 +16,42 @@ test_deps = [
 
 py_test(
     name = "openai_unittest",  # 需要有一个同名 py 文件
-    python_version = 'PY3',
-    srcs_version = 'PY3',
     srcs = [
         "openai_unittest.py",
     ],
-    deps = [
-        ":openai_unittest_pylib",
-    ],
     data = [],
+    env = select({
+        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
+    exec_properties = {"gpu": "A10_CU13"},
     imports = [
         ".",
     ],
-    env = select({
-        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
-    }),
-    exec_properties = {'gpu':'A10'},
+    python_version = "PY3",
+    srcs_version = "PY3",
+    tags = ["A10_CU13"],
+    deps = [
+        ":openai_unittest_pylib",
+    ],
 )
 
 py_library(
     name = "openai_unittest_pylib",
     srcs = [],
-    deps = [],
     data = [
         ":openai_unittest_lib.so",
     ],
+    deps = [],
 )
 
 cc_binary(
     name = "openai_unittest_lib.so",
     srcs = [],
+    linkshared = 1,
     deps = [
         ":openai_unittest_lib",
     ],
-    linkshared = 1,
 )
 
 cc_library(
@@ -62,12 +63,12 @@ cc_library(
     ] + [
         "//rtp_llm/cpp/api_server/test:api_server_mock_hdrs",
     ],
+    copts = test_copts,
+    data = [],
     deps = test_deps + [
-        "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/api_server:openai",
+        "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
-    data = [],
-    copts = test_copts,
     alwayslink = 1,
 )

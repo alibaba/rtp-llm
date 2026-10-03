@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts", "cuda_copts")
 
 cc_library(
     name = "th_eplb_py_wrapper_test_lib",
@@ -8,32 +8,33 @@ cc_library(
     ],
     hdrs = [
     ],
+    copts = cuda_copts(),
     deps = torch_deps() + [
         "//rtp_llm/cpp/models:eplb",
-        "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
+        "//rtp_llm/cpp/pybind:th_utils",
     ],
-    copts = cuda_copts(),
     alwayslink = True,
 )
 
 cc_binary(
     name = "th_eplb_py_wrapper_test",
-    deps = [":th_eplb_py_wrapper_test_lib"],
     linkshared = 1,
     visibility = ["//visibility:public"],
+    deps = [":th_eplb_py_wrapper_test_lib"],
 )
 
 py_test(
     name = "eplb_py_wrapper_test",
     srcs = [
-        "eplb_py_wrapper_test.py"
+        "eplb_py_wrapper_test.py",
     ],
     data = [
-        ":th_eplb_py_wrapper_test"
+        ":th_eplb_py_wrapper_test",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
-        "//rtp_llm:torch"
+        "//rtp_llm:torch",
     ],
-    exec_properties = {'gpu':'A10'},
 )

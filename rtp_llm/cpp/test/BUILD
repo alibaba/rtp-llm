@@ -1,7 +1,10 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
-load("//bazel:device_defs.bzl",
-    "device_impl_target", "device_test_envs")
+load("//:def.bzl", "cc_test_wrapper", "copts")
+load(
+    "//bazel:device_defs.bzl",
+    "device_impl_target",
+    "device_test_envs",
+)
 
 cc_test = cc_test_wrapper
 
@@ -11,7 +14,6 @@ sampler_test_copts = [
     # SamplerTest validates private buffer state; keep access override scoped to this target.
     "-fno-access-control",
 ] + test_copts
-
 
 cc_library(
     name = "test_headers",
@@ -32,16 +34,16 @@ test_deps = [
 
 cc_library(
     name = "test_utils",
-    hdrs = [
-        "ModelTestUtil.h",
-    ],
     srcs = [
         "ModelTestUtil.cc",
     ],
+    hdrs = [
+        "ModelTestUtil.h",
+    ],
     copts = test_copts,
+    visibility = ["//visibility:public"],
     deps = test_deps,
     alwayslink = 1,
-    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -57,21 +59,22 @@ cc_test(
     srcs = [
         "SamplerTest.cc",
     ],
-    data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata"
-    ],
     copts = sampler_test_copts,
-    deps = test_deps + [
-        ":test_utils",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     env = device_test_envs(),
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "A10_CU13"},
+    }),
     # Keeps upstream's select shape and its ROCm branch; the CUDA branch is A10
     # rather than H20. sampler_test is in the 183 targets executed twice on sm86
     # and is not among that run's failures, and ut-sm8x has gone green with it
     # on A10. Upstream was preserving the old H20 pin while refactoring env to
     # device_test_envs(), not asserting this needs sm90.
-    exec_properties = select({
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {"gpu": "A10"},
-    }),
+    tags = ["A10_CU13"],
+    deps = test_deps + [
+        ":test_utils",
+    ],
 )

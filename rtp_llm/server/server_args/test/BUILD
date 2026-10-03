@@ -4,12 +4,13 @@ py_test(
     data = [
         "//:th_transformer_config",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
-        "//rtp_llm/config/test:kv_cache_event_test_values",
-        "//rtp_llm/server:server",
         "//rtp_llm:config_ops",
         "//rtp_llm:testlib",
         "//rtp_llm:utils",
+        "//rtp_llm/config/test:kv_cache_event_test_values",
+        "//rtp_llm/server",
     ],
-    exec_properties = {'gpu':'A10'},
 )

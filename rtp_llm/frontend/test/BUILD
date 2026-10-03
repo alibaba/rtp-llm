@@ -15,17 +15,18 @@ py_test(
         "incremental_decode_test.py",
     ],
     data = [
+        "//rtp_llm/test/model_test/fake_test/testdata",
         "//rtp_llm/utils/test:testdata",
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
-        "//rtp_llm:utils",
+        "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
         "//rtp_llm:models",
         "//rtp_llm:testlib",
-        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:utils",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -33,10 +34,11 @@ py_test(
     srcs = [
         "frontend_server_test.py",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:testlib",
     ] + telemetry_test_deps(),
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -69,20 +71,21 @@ py_test(
     name = "token_processor_test",
     srcs = ["token_processor_test.py"],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
-        "//rtp_llm:testlib",
         "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "request_id_generator_test",
     srcs = ["request_id_generator_test.py"],
     deps = [
-        "//rtp_llm:testlib",
         "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
     ],
 )

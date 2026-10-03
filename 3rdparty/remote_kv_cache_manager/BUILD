@@ -12,12 +12,25 @@ rpm_library(
     include_path = "include/kv_cache_manager",
     include_prefix = "kvcm_client",
     lib_path = "lib",
-    rpms = [
-        "@remote_kv_cache_manager_client_rpm//file:file",
-    ],
+    origin_rpath = True,
+    rpms = select({
+        "@//:using_cuda13_x86": ["@remote_kv_cache_manager_client_rpm_cuda130_x86//file:file"],
+        "@//:using_cuda13_arm": ["@remote_kv_cache_manager_client_rpm_cuda130_arm//file:file"],
+        "//conditions:default": ["@remote_kv_cache_manager_client_rpm//file:file"],
+    }),
     shared_libs = [
         "kv_cache_manager_client.so",
     ],
+)
+
+alias(
+    name = "remote_kv_cache_manager_server_bin",
+    actual = select({
+        "@//:using_cuda13_x86": "@remote_kv_cache_manager_server_cuda130//:bin/kv_cache_manager_bin",
+        "@//:using_cuda13_arm": "@remote_kv_cache_manager_server_cuda130//:bin/kv_cache_manager_bin",
+        "//conditions:default": "@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin",
+    }),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

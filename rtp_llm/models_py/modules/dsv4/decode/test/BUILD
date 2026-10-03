@@ -5,55 +5,97 @@ py_test_deps = [
 py_test(
     name = "decode_attn_metadata_test",
     srcs = ["decode_attn_metadata_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "indexer_decode_test",
     srcs = ["indexer_decode_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "kv_write_decode_test",
     srcs = ["kv_write_decode_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "decode_metadata_in_place_test",
     srcs = ["decode_metadata_in_place_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "decode_fmha_impl_test",
     srcs = ["decode_fmha_impl_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "fp8_kv_quant_decode_test",
     srcs = ["fp8_kv_quant_decode_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(
     name = "fp8_sparse_attn_decode_test",
     srcs = ["fp8_sparse_attn_decode_test.py"],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
     deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )

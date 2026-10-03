@@ -120,6 +120,91 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     )
 
 
+class NormalComparerBeamOrderingTest(unittest.TestCase):
+    def setUp(self):
+        self.comparer = NormalComparer(None, "", {}, Tracer(), False)
+
+    def _response(self, beams, scores):
+        return self.comparer.format_result(
+            {
+                "response": beams[0] if beams else "same",
+                "aux_info": {
+                    "beam_responses": beams,
+                    "cum_log_probs": scores,
+                },
+            }
+        )
+
+    def test_non_beam_empty_responses_pass(self):
+        expected = self._response([], [0.0])
+        actual = self._response([], [0.0])
+        self.comparer.compare_result(expected, actual)
+
+    def test_near_equal_beams_may_swap(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        actual = self._response(["primary", "third", "second"], [-1.0, -2.0, -2.005])
+        self.comparer.compare_result(expected, actual)
+
+    def test_distinct_score_beams_must_keep_order(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        actual = self._response(["primary", "third", "second"], [-1.0, -2.0, -3.0])
+        with self.assertRaises(SmokeException) as raised:
+            self.comparer.compare_result(expected, actual)
+        self.assertIn("beam_responses", raised.exception.message)
+
+    def test_beam_scores_must_be_complete_and_descending(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        for scores in ([-1.0], [-1.0, -3.0, -2.0]):
+            with self.subTest(scores=scores):
+                with self.assertRaises(SmokeException) as raised:
+                    self.comparer.compare_result(
+                        expected, self._response(["primary", "second", "third"], scores)
+                    )
+                self.assertIn("beam_responses", raised.exception.message)
+
+    def test_beam_none_score_is_rejected_not_skipped(self):
+        expected = self._response(["primary", "second", "third"], [-1.0, -2.0, -2.005])
+        actual = self._response(["primary", "second", "third"], [-1.0, None, -2.005])
+        with self.assertRaises(SmokeException) as raised:
+            self.comparer.compare_result(expected, actual)
+        self.assertIn("beam_responses", raised.exception.message)
+
+    def test_beam_near_tie_chains_group_transitively(self):
+        # [-1.0, -1.009, -1.018]: each adjacent pair is within tolerance, so
+        # the whole chain is one swappable tie band even though the endpoints
+        # exceed the tolerance against the band head.
+        expected = self._response(
+            ["primary", "second", "third"], [-1.0, -1.009, -1.018]
+        )
+        actual = self._response(["primary", "third", "second"], [-1.0, -1.009, -1.018])
+        self.comparer.compare_result(expected, actual)
+
+    def test_beam_near_tie_chains_hold_across_score_magnitudes(self):
+        # Relative tolerance must cover chains at -7 and -22 magnitudes
+        # (golden bs_q_r uses cum_log_probs around both scales).
+        for base, step in ((-7.0, 0.05), (-22.0, 0.15)):
+            with self.subTest(base=base):
+                expected = self._response(
+                    ["primary", "second", "third"],
+                    [base, base - step, base - 2 * step],
+                )
+                actual = self._response(
+                    ["primary", "third", "second"],
+                    [base, base - step, base - 2 * step],
+                )
+                self.comparer.compare_result(expected, actual)
+
+    def test_beam_full_length_scores_only_first_element_is_compared(self):
+        # cum_log_probs are truncated to the first element on both sides for
+        # the beam case; later per-beam entries are intentionally ignored and
+        # this test locks that truncation semantics.
+        expected = self._response(
+            ["primary", "second", "third"], [-1.0, -2.0, -3.0]
+        )
+        actual = self._response(["primary", "second", "third"], [-1.0, -2.0, -2.9])
+        self.comparer.compare_result(expected, actual)
+
+
 class NormalComparerDiskReuseTest(unittest.TestCase):
     DISK_FIELDS = (
         "disk_reuse_len",

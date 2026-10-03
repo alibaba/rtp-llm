@@ -109,14 +109,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
 cc_library(
@@ -195,7 +187,7 @@ filegroup(
 # lives in exactly ONE .so.
 #
 # exec_ctx_state: ExecOps.cc
-#   Defines the non-inline globalRuntime() singleton + comm op callbacks.
+#   Defines process-global runtime and Python callback state.
 #   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
 #
 # exec_ctx_ops: CudaOps.cc + sample ops

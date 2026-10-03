@@ -50,7 +50,10 @@ _GPU_TESTS = [
 ]
 
 [
-    dsv4_py_test(name = name, deps = _DSV4_TEST_DEPS)
+    dsv4_py_test(
+        name = name,
+        deps = _DSV4_TEST_DEPS,
+    )
     for name in _CP_HELPER_TESTS
 ]
 
@@ -83,17 +86,26 @@ _PERF_TESTS = [
 [
     dsv4_py_test(
         name = name,
+        tags = [
+            "legacy_fixture",
+            "manual",
+        ],
         deps = _DSV4_TEST_DEPS,
-        tags = ["manual", "legacy_fixture"],
     )
-    for name in ["test_cp_via_concat_meta", "test_cp_indexer_seq_total"]
+    for name in [
+        "test_cp_via_concat_meta",
+        "test_cp_indexer_seq_total",
+    ]
 ]
 
 [
     dsv4_py_test(
         name = name,
+        tags = [
+            "manual",
+            "perf",
+        ],
         deps = _MODEL_TEST_DEPS + [":dsv4_kernel_perf_utils"],
-        tags = ["manual", "perf"],
     )
     for name in _PERF_TESTS
 ]
@@ -133,9 +145,9 @@ test_suite(
 # kernels, capture, profiling, and JIT specialization on its CUDA13 runtime.
 test_suite(
     name = "dsv4_cuda13_cross_arch",
-    tests = [":" + name for name in _GPU_TESTS] + [
-        ":test_dsv4_kernel_jit_warmup",
-        ":test_layer_profiler_ranges",
-        ":test_hc_impl",
+    tests = [":" + name + "_x86" for name in _GPU_TESTS] + [
+        ":test_dsv4_kernel_jit_warmup_x86",
+        ":test_hc_impl_x86",
+        ":test_layer_profiler_ranges_x86",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
 )

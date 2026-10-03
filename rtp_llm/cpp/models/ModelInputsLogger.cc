@@ -18,8 +18,6 @@
 #include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <c10/core/Event.h>
-#include <c10/core/impl/VirtualGuardImpl.h>
 #include <torch/serialize.h>
 #include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
@@ -90,21 +88,20 @@ size_t estimateBytes(const GptModelInputs& inputs) {
     addTensorListBytes(bytes, inputs.input_embeddings);
     return bytes;
 }
-torch::Tensor snapshotTensor(const torch::Tensor& tensor, std::vector<c10::Device>& devices) {
+torch::Tensor snapshotTensor(const torch::Tensor& tensor) {
     if (!tensor.defined()) {
         return {};
     }
-    if (!tensor.device().is_cpu() && std::find(devices.begin(), devices.end(), tensor.device()) == devices.end()) {
-        devices.push_back(tensor.device());
-    }
     auto snapshot = tensor.detach();
+    if (!snapshot.device().is_cpu()) {
+        return snapshot.cpu().contiguous();
+    }
     return snapshot.is_contiguous() ? snapshot.clone() : snapshot.contiguous();
 }
-void addTensor(c10::impl::GenericDict&   payload,
-               const char*               name,
-               const torch::Tensor&      tensor,
-               std::vector<c10::Device>& devices,
-               c10::impl::GenericDict&   float8_dtypes) {
+void addTensor(c10::impl::GenericDict& payload,
+               const char*             name,
+               const torch::Tensor&    tensor,
+               c10::impl::GenericDict& float8_dtypes) {
     if (!tensor.defined()) {
         payload.insert(name, c10::IValue());
         return;
@@ -112,12 +109,11 @@ void addTensor(c10::impl::GenericDict&   payload,
     if (c10::isFloat8Type(tensor.scalar_type())) {
         float8_dtypes.insert(name, c10::toString(tensor.scalar_type()));
     }
-    payload.insert(name, snapshotTensor(tensor, devices));
+    payload.insert(name, snapshotTensor(tensor));
 }
 void addTensorList(c10::impl::GenericDict&                          payload,
                    const char*                                      name,
                    const std::optional<std::vector<torch::Tensor>>& tensors,
-                   std::vector<c10::Device>&                        devices,
                    c10::impl::GenericDict&                          float8_dtypes) {
     if (!tensors) {
         payload.insert(name, c10::IValue());
@@ -130,16 +126,15 @@ void addTensorList(c10::impl::GenericDict&                          payload,
             float8_dtypes.insert(std::string(name) + "[" + std::to_string(i) + "]",
                                  c10::toString(tensor.scalar_type()));
         }
-        values.push_back(snapshotTensor(tensor, devices));
+        values.push_back(snapshotTensor(tensor));
     }
     payload.insert(name, std::move(values));
 }
-c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
-                                       ModelInputsModelRole      role,
-                                       int64_t                   model_id,
-                                       int64_t                   sequence,
-                                       int64_t                   dropped_before,
-                                       std::vector<c10::Device>& devices) {
+c10::impl::GenericDict snapshotPayload(const GptModelInputs& inputs,
+                                       ModelInputsModelRole  role,
+                                       int64_t               model_id,
+                                       int64_t               sequence,
+                                       int64_t               dropped_before) {
     c10::impl::GenericDict payload(c10::StringType::get(), c10::AnyType::get());
     payload.reserve(64);
     payload.insert("schema_version", kSchemaVersion);
@@ -152,12 +147,12 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("trace_ids", inputs.trace_ids);
     payload.insert("kv_cache_group_tags", inputs.kv_cache_group_tags);
     c10::impl::GenericDict float8_dtypes(c10::StringType::get(), c10::StringType::get());
-#define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, devices, float8_dtypes);
+#define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, float8_dtypes);
     MODEL_INPUT_TENSORS(ADD_TENSOR)
 #undef ADD_TENSOR
-    addTensorList(payload, "multimodal_features", inputs.multimodal_features, devices, float8_dtypes);
-    addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
-    addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);
+    addTensorList(payload, "multimodal_features", inputs.multimodal_features, float8_dtypes);
+    addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, float8_dtypes);
+    addTensorList(payload, "input_embeddings", inputs.input_embeddings, float8_dtypes);
     payload.insert("float8_dtypes", std::move(float8_dtypes));
     payload.insert("kv_block_stride_bytes", static_cast<int64_t>(inputs.kv_block_stride_bytes));
     payload.insert("kv_scale_stride_bytes", static_cast<int64_t>(inputs.kv_scale_stride_bytes));
@@ -174,16 +169,6 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("is_fake_stream", inputs.is_fake_stream);
     payload.insert("is_target_verify", inputs.is_target_verify);
     return payload;
-}
-std::vector<std::shared_ptr<c10::Event>> readyEvents(const std::vector<c10::Device>& devices) {
-    std::vector<std::shared_ptr<c10::Event>> events;
-    for (const auto& device : devices) {
-        c10::impl::VirtualGuardImpl guard(device.type());
-        auto                        event = std::make_shared<c10::Event>(device.type());
-        event->record(guard.getStream(device));
-        events.push_back(std::move(event));
-    }
-    return events;
 }
 torch::Tensor tensorForDump(const torch::Tensor& tensor) {
     auto output = tensor.detach();
@@ -323,10 +308,9 @@ private:
     std::vector<c10::impl::GenericDict> records_;
 };
 struct PendingRecord {
-    c10::impl::GenericDict                   payload;
-    std::vector<std::shared_ptr<c10::Event>> events;
-    int64_t                                  dropped_before;
-    size_t                                   bytes;
+    c10::impl::GenericDict payload;
+    int64_t                dropped_before;
+    size_t                 bytes;
 };
 }  // namespace
 class ModelInputsLogger::Worker {
@@ -337,8 +321,7 @@ public:
     ~Worker() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            shutdown_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-            stopping_          = true;
+            stopping_ = true;
         }
         ready_cv_.notify_one();
         thread_.join();
@@ -355,11 +338,10 @@ public:
         }
         const auto dropped_before = dropped_since_last_.exchange(0, std::memory_order_relaxed);
         try {
-            std::vector<c10::Device> devices;
-            auto payload = snapshotPayload(inputs, role, model_id, sequence, dropped_before, devices);
+            auto payload = snapshotPayload(inputs, role, model_id, sequence, dropped_before);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                queue_.push_back(PendingRecord{std::move(payload), readyEvents(devices), dropped_before, bytes});
+                queue_.push_back(PendingRecord{std::move(payload), dropped_before, bytes});
             }
             ready_cv_.notify_one();
         } catch (const std::exception& e) {
@@ -409,9 +391,9 @@ private:
     }
     void process(PendingRecord& record) {
         try {
-            if (disabled_ || !waitForEvents(record.events)) {
+            if (disabled_) {
                 dropped_since_last_.fetch_add(record.dropped_before, std::memory_order_relaxed);
-                drop("CUDA snapshot did not become ready");
+                drop("snapshot writer is unavailable");
                 return;
             }
             for (const auto& item : record.payload) {
@@ -424,19 +406,6 @@ private:
             dropped_since_last_.fetch_add(record.dropped_before, std::memory_order_relaxed);
             drop(e.what());
         }
-    }
-    bool waitForEvents(const std::vector<std::shared_ptr<c10::Event>>& events) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        for (const auto& event : events) {
-            while (!event->query()) {
-                const auto wait_deadline = stopping_.load(std::memory_order_acquire) ? shutdown_deadline_ : deadline;
-                if (std::chrono::steady_clock::now() >= wait_deadline) {
-                    return false;
-                }
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-            }
-        }
-        return true;
     }
     void writeGap() {
         try {
@@ -473,7 +442,6 @@ private:
     std::deque<PendingRecord>             queue_;
     size_t                                pending_bytes_ = 0;
     std::atomic<bool>                     stopping_{false};
-    std::chrono::steady_clock::time_point shutdown_deadline_;
     std::atomic<bool>                     disabled_{false};
     std::atomic<size_t>                   dropped_records_{0};
     std::atomic<int64_t>                  dropped_since_last_{0};
