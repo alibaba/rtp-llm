@@ -36,11 +36,10 @@ class FlexlbGrpcExecutorMetricsTest {
             MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
             MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
             MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
-            MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
             MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS);
 
     @Test
-    void skipsReportingBeforeExecutorCreationAndRegistersSixGauges() {
+    void skipsReportingBeforeExecutorCreationAndRegistersGauges() {
         FlexMonitor monitor = mock(FlexMonitor.class);
         FlexlbGrpcServer server = newServer(monitor);
 
@@ -55,7 +54,7 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void reportsIdleZeroBusyQueueAndCompletedSnapshotsWithoutDoubleCounting() throws Exception {
+    void reportsIdleBusyQueuedAndTerminatedExecutorState() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.report();
             for (String metric : METRICS) {
@@ -68,16 +67,12 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, 1);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 1);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1);
-            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS, 0);
 
             fixture.finishTasks();
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, 0);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 0);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 0);
-            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS, 2);
-            fixture.report();
-            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS, 2);
         }
     }
 
@@ -101,7 +96,6 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.finishTasks();
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
-            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS, 2);
         }
     }
 

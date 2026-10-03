@@ -152,13 +152,12 @@ public class DefaultBatchDispatcher {
     }
 
     /**
-     * Register absolute executor values, including its lifetime completed-task count.
+     * Register gauges for the current executor state.
      */
     private void registerMetrics() {
         registerGauge(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS);
         registerGauge(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE);
         registerGauge(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE);
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS);
     }
 
     private void registerGauge(String metricName) {
@@ -170,7 +169,6 @@ public class DefaultBatchDispatcher {
         monitor.report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, dispatchExecutor.getActiveCount());
         monitor.report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, dispatchExecutor.getQueue().size());
         monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
-        monitor.report(MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS, dispatchExecutor.getCompletedTaskCount());
     }
 
     public CapacityBoundary.Attempt<PreparedSubmission>

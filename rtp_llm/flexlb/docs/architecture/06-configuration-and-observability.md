@@ -306,13 +306,13 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - block hash、线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
-gRPC 服务端执行器与批次发送执行器通过 `FlexMonitor` 每 2 秒上报线程数、排队任务数和
-累计完成任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
+gRPC 服务端执行器与批次发送执行器通过 `FlexMonitor` 每 2 秒上报忙碌线程数、总线程数和
+排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
-这些值全部使用 GAUGE，包括从线程池读取的累计完成数、拒绝数；周期上报不会再次累加，
-Master 重启后累计值重新开始。已初始化的空闲线程池持续上报 0；完成数表示 Java 任务
-执行结束，不表示引擎已完成推理。拒绝数包含队列或线程饱和、线程池关闭后提交触发的拒绝，
+这些值全部使用 GAUGE，包括从拒绝处理器读取的累计拒绝数；周期上报不会再次累加，
+Master 重启后累计拒绝数重新开始。已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，
+总线程数仍包含空闲线程。拒绝数包含队列或线程饱和、线程池关闭后提交触发的拒绝，
 沿用 `grpc.server.executor.caller.runs` 上报名，面板显示“任务拒绝累计数”。
 本地 Block Hash 计算池按需创建，首次使用前不产生线程池状态样本。
 

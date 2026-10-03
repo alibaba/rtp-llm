@@ -671,11 +671,6 @@ public class MetricConstant {
     public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE = "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor completed task total since startup (cumulative gauge).
-     */
-    public static final String GRPC_SERVER_EXECUTOR_COMPLETED_TASKS = "grpc.server.executor.completed.tasks";
-
-    /**
      * gRPC server executor rejected task total since startup (cumulative gauge).
      * The wire name is retained for existing dashboards; rejection uses AbortPolicy.
      */
@@ -697,11 +692,6 @@ public class MetricConstant {
      * Dispatch executor current pool size (gauge)
      */
     public static final String DISPATCH_EXECUTOR_POOL_SIZE = "dispatch.executor.pool.size";
-
-    /**
-     * Dispatch executor completed task total since startup (cumulative gauge).
-     */
-    public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
 
     /* ------------------------ Auto-TPM Request Scheduler ----------------------------- */
 

@@ -90,15 +90,14 @@ class DefaultBatchDispatcherTest {
         for (String metric : List.of(
                 MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
                 MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
-                MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
-                MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS)) {
+                MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE)) {
             verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
             verify(monitor).report(metric, 0.0);
         }
     }
 
     @Test
-    void executorMetricsTrackQueuedWorkAndRepeatCompletedTotalWithoutIncrementingIt() throws Exception {
+    void executorMetricsTrackBusyQueuedAndIdleState() throws Exception {
         dispatcher.shutdown();
         FlexMonitor monitor = mock(FlexMonitor.class);
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, monitor, 1, 1);
@@ -130,7 +129,6 @@ class DefaultBatchDispatcherTest {
             verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 1.0);
             verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 1.0);
             verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
-            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS, 0.0);
         } finally {
             releaseFirstDispatch.countDown();
         }
@@ -143,7 +141,6 @@ class DefaultBatchDispatcherTest {
         verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 0.0);
         verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 0.0);
         verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
-        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS, 2.0);
     }
 
     @Test

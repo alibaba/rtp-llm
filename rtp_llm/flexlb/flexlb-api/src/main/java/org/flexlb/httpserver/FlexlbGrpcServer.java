@@ -127,10 +127,7 @@ public class FlexlbGrpcServer {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        // The executor and rejection handler already hold cumulative counts.
-        // Each report replaces the snapshot instead of incrementing it again.
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Report the rejection handler's cumulative count as a snapshot, without adding it again.
         monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
@@ -145,7 +142,6 @@ public class FlexlbGrpcServer {
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS, executor.getCompletedTaskCount());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
                 countingAbortHandler.getRejectionCount());
     }
