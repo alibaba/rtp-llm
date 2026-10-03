@@ -107,6 +107,10 @@ class DSparkSWATest(unittest.TestCase):
                             mask = positions[None, :] >= query_positions[:, None] - 127
                             if causal:
                                 mask &= positions[None, :] <= query_positions[:, None]
+                            else:
+                                mask &= (
+                                    positions[None, :] <= query_positions[:, None] + 127
+                                )
                             scores = (
                                 torch.einsum(
                                     "qhd,khd->hqk", q[row, :count].float(), keys.float()
@@ -172,6 +176,55 @@ class DSparkSWATest(unittest.TestCase):
                         ],
                     )
                     del graph
+
+    def test_encoder_only_short_window_and_future_visibility(self):
+        # Exercise both boundaries independently of the production window:
+        # q=0 gives uniform probabilities, V encodes key position. The first
+        # query must see future noise rows, but not rows beyond its right edge.
+        batch, width, hq, hk, dim, page = 1, 7, 4, 1, 128, 8
+        length = 5
+        cache = torch.zeros(1, 2, hk, page, dim, device="cuda", dtype=torch.bfloat16)
+        cache[0, 1, 0, :length] = torch.arange(length, device="cuda")[:, None]
+        q = torch.zeros(batch, width, hq, dim, device="cuda", dtype=torch.bfloat16)
+        k = torch.zeros(batch, width, hk, dim, device="cuda", dtype=torch.bfloat16)
+        v = (
+            (length + torch.arange(width, device="cuda", dtype=torch.bfloat16))[
+                None, :, None, None
+            ]
+            .expand_as(k)
+            .contiguous()
+        )
+        table = torch.zeros(batch, 1, device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([length], device="cuda", dtype=torch.int32)
+        live = torch.tensor([width], device="cuda", dtype=torch.int32)
+        for left in (0, 2, 4095):
+            for causal in (True, False):
+                with self.subTest(left=left, causal=causal):
+                    out = paged_gqa_swa(
+                        q,
+                        k,
+                        v,
+                        cache,
+                        table,
+                        lengths,
+                        live,
+                        window_left=left,
+                        causal=causal,
+                    )
+                    positions = length + torch.arange(width, device="cuda")
+                    first = (positions - left).clamp(min=0)
+                    last = (
+                        positions
+                        if causal
+                        else (positions + left).clamp(max=length + width - 1)
+                    )
+                    expected = ((first + last).float() / 2).to(out.dtype)
+                    torch.testing.assert_close(
+                        out,
+                        expected[None, :, None, None].expand_as(out),
+                        atol=0.04,
+                        rtol=0.01,
+                    )
 
 
 if __name__ == "__main__":

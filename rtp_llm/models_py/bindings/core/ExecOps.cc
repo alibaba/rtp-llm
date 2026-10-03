@@ -32,6 +32,7 @@
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
 #include <pybind11/functional.h>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #if USING_CUDA
 using DeviceGuard = at::cuda::CUDAGuard;
@@ -45,6 +46,13 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities);
 #if USING_CUDA
 torch::Tensor
 combineDSparkLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
+torch::Tensor                           dsparkConfidence(const torch::Tensor& hidden,
+                                                         const torch::Tensor& anchors,
+                                                         const torch::Tensor& sampled_tokens,
+                                                         const torch::Tensor& markov_w1,
+                                                         const torch::Tensor& confidence_w,
+                                                         const torch::Tensor& confidence_b);
+std::pair<torch::Tensor, torch::Tensor> dsparkVerifyPlan(const torch::Tensor& confidence, int64_t extra_budget);
 #endif
 void             reserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls);
 BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
@@ -83,6 +91,9 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
+
+std::mutex                             g_cpu_phase_mutex;
+c10::intrusive_ptr<c10d::ProcessGroup> g_cpu_phase_group;
 
 thread_local int g_cuda_graph_warmup_forward_depth  = 0;
 thread_local int g_cuda_graph_capture_forward_depth = 0;
@@ -763,6 +774,62 @@ execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, co
 #endif
 }
 
+torch::Tensor execDSparkConfidence(const torch::Tensor& hidden,
+                                   const torch::Tensor& anchors,
+                                   const torch::Tensor& sampled_tokens,
+                                   const torch::Tensor& markov_w1,
+                                   const torch::Tensor& confidence_w,
+                                   const torch::Tensor& confidence_b) {
+#if USING_CUDA
+    return dsparkConfidence(hidden, anchors, sampled_tokens, markov_w1, confidence_w, confidence_b);
+#else
+    const auto batch    = anchors.numel();
+    const auto gamma    = sampled_tokens.size(1);
+    auto       previous = torch::cat({anchors.reshape({batch, 1}), sampled_tokens.narrow(1, 0, gamma - 1)}, 1);
+    auto       markov   = markov_w1.index_select(0, previous.reshape({-1}).to(torch::kLong));
+    auto       weight   = confidence_w.reshape({-1});
+    auto       logits =
+        (hidden.reshape({batch * gamma, -1}).to(torch::kFloat32)
+         * weight.narrow(0, 0, hidden.size(-1)).to(torch::kFloat32))
+            .sum(-1)
+        + (markov.to(torch::kFloat32) * weight.narrow(0, hidden.size(-1), markov_w1.size(1)).to(torch::kFloat32))
+              .sum(-1)
+        + confidence_b.reshape({-1})[0].to(torch::kFloat32);
+    return torch::sigmoid(logits.to(hidden.scalar_type()).to(torch::kFloat32)).reshape({batch, gamma});
+#endif
+}
+
+std::pair<torch::Tensor, torch::Tensor> execDSparkVerifyPlan(const torch::Tensor& confidence, int64_t extra_budget) {
+#if USING_CUDA
+    return dsparkVerifyPlan(confidence, extra_budget);
+#else
+    RTP_LLM_CHECK_WITH_INFO(confidence.defined() && confidence.dim() == 2,
+                            "DSpARK verify planner requires [batch,gamma] confidence");
+    const auto batch = confidence.size(0);
+    const auto gamma = confidence.size(1);
+    RTP_LLM_CHECK_WITH_INFO(extra_budget >= 0 && extra_budget <= batch * gamma,
+                            "DSpARK verify planner budget is out of range");
+    auto conditional = confidence.to(torch::kFloat32);
+    conditional      = torch::where(torch::isfinite(conditional), conditional, torch::zeros_like(conditional));
+    auto survival    = conditional.clamp(0.0, 1.0).cumprod(1);
+    // Stable sorting in position-major order matches the CUDA planner's ties:
+    // earlier prefix position first, then request id.
+    auto position_major = survival.transpose(0, 1).contiguous().reshape({-1});
+    auto selected       = torch::zeros_like(position_major, torch::TensorOptions().dtype(torch::kBool));
+    if (extra_budget > 0) {
+        auto indices = std::get<1>(torch::sort(position_major, /*stable=*/true, /*dim=*/0, /*descending=*/true))
+                           .narrow(0, 0, extra_budget);
+        selected.index_fill_(0, indices, true);
+    }
+    auto lengths = selected.reshape({gamma, batch}).sum(0).to(torch::kInt32).add_(1);
+    auto dense_rows =
+        torch::arange(batch * (gamma + 1), torch::TensorOptions().dtype(torch::kInt32).device(confidence.device()))
+            .reshape({batch, gamma + 1});
+    auto row_mask = torch::arange(gamma + 1, lengths.options()).unsqueeze(0) < lengths.unsqueeze(1);
+    return {lengths.contiguous(), dense_rows.masked_select(row_mask).contiguous()};
+#endif
+}
+
 void execReserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls) {
     reserveSampleFromProbsRng(device_anchor, skipped_calls);
 }
@@ -819,6 +886,30 @@ void clearCommOpsUnlocked() {
     }
 }
 }  // anonymous namespace
+
+int execCpuPhaseMask(bool local_prefill, bool local_decode, int64_t epoch, int world_size) {
+    c10::intrusive_ptr<c10d::ProcessGroup> group;
+    {
+        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
+        group = g_cpu_phase_group;
+    }
+    TORCH_CHECK(group && group->getSize() == world_size, "batch PDFUSION requires a registered world CPU phase group");
+    TORCH_CHECK(epoch >= 0, "invalid CPU phase epoch");
+    auto  state  = torch::empty({4}, torch::dtype(torch::kInt64).device(torch::kCPU));
+    auto* values = state.data_ptr<int64_t>();
+    values[0]    = local_prefill ? 1 : 0;
+    values[1]    = local_decode ? 1 : 0;
+    values[2]    = epoch;
+    values[3]    = -epoch;
+    std::vector<at::Tensor> tensors{state};
+    c10d::AllreduceOptions  options;
+    options.reduceOp = c10d::ReduceOp::MAX;
+    // Gloo's configured finite timeout bounds peer loss. Do not call the
+    // Python comm callbacks (they promote CPU tensors to the model NCCL stream).
+    group->allreduce(tensors, options)->wait();
+    TORCH_CHECK(values[2] == -values[3], "CPU phase epoch mismatch across ranks");
+    return (values[0] ? 1 : 0) | (values[1] ? 2 : 0);
+}
 
 void execBroadcast(const BroadcastParams& params) {
     py::function           fn;
@@ -1007,6 +1098,18 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 // ============================================================
 
 void registerExecCtxOps(pybind11::module& m) {
+    m.def("register_cpu_phase_group", [](c10::intrusive_ptr<c10d::ProcessGroup> group) {
+        TORCH_CHECK(group && group->getBackendName() == "gloo", "CPU phase group must use Gloo");
+        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
+        TORCH_CHECK(!g_cpu_phase_group, "CPU phase group already registered");
+        g_cpu_phase_group = std::move(group);
+    });
+    m.def("clear_cpu_phase_group", []() {
+        py::gil_scoped_release      release;
+        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
+        g_cpu_phase_group.reset();
+    });
+    m.def("cpu_phase_mask", &execCpuPhaseMask, py::call_guard<py::gil_scoped_release>());
     m.def("get_device_id", &getDeviceId);
     m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     m.def("cuda_graph_capture_forward_enabled", &cudaGraphCaptureForwardEnabled);

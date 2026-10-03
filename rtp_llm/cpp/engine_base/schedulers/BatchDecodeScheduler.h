@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -15,9 +16,11 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
+        json.Jsonize("real_output", real_output_, false);
     }
     uint32_t    batch_size_;
     std::string mode_;
+    bool        real_output_ = false;
 };
 class BatchDecodeScheduler: public SchedulerBase {
 public:
@@ -28,12 +31,14 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
-        cache_manager_    = cache_manager;
-        metrics_reporter_ = metrics_reporter;
-        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_   = SchedulerType::kBatchDecode;
-        dp_rank_          = dp_rank;
+                         int                                    dp_rank            = 0,
+                         bool                                   coordinated_phases = false) {
+        cache_manager_      = cache_manager;
+        metrics_reporter_   = metrics_reporter;
+        batch_size_         = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        scheduler_type_     = SchedulerType::kBatchDecode;
+        dp_rank_            = dp_rank;
+        coordinated_phases_ = coordinated_phases;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -62,13 +67,18 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
+        std::lock_guard<std::mutex> lock(lock_);
+        batch_size_  = config.batch_size_;
+        real_output_ = config.real_output_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
         } else if (config.mode_ == "prefill") {
             scheduler_type_ = SchedulerType::kBatchPrefill;
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d, real_output=%d",
+                         batch_size_,
+                         int(scheduler_type_),
+                         int(real_output_));
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -150,7 +160,9 @@ public:
     void initRunningStreams() {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            (*it)->setPerfTest(true);
+            // Legacy timing tests suppress response tokens. Initialized normal
+            // rejection benchmarks explicitly retain the real token history.
+            (*it)->setPerfTest(!real_output_);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
@@ -167,10 +179,12 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty();
-        });
+        if (!coordinated_phases_) {
+            cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+                return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                       || !loading_cache_streams_.empty();
+            });
+        }
         if (stop_) {
             return std::list<GenerateStreamPtr>{};
         }
@@ -179,7 +193,6 @@ public:
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
-
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
@@ -232,7 +245,9 @@ private:
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     SchedulerType                   scheduler_type_;
-    int                             dp_rank_ = 0;
+    int                             dp_rank_            = 0;
+    bool                            coordinated_phases_ = false;
+    bool                            real_output_        = false;
 };
 
 }  // namespace rtp_llm

@@ -295,6 +295,39 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBuildsFixedWidthProposalAndVerifyI
     EXPECT_EQ(toVec<int32_t>(verify_input.lm_output_indexes), (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkAdaptiveCompactPositionsAreOptional) {
+    ModelConfig                 model_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 128;
+    model_config.vocab_size     = 32;
+    model_config.num_layers     = 1;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 7;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    TensorHolder            holder;
+    MtpBatchStreamProcessor::DSparkRoundState state{torch::tensor({2, 7}, opts), torch::tensor({11, 20}, opts), {}};
+    const auto                                proposals = torch::arange(14, opts).reshape({2, 7}) + 8;
+    const auto                                lengths   = torch::tensor({3, 2}, opts);
+    const auto                                mapping   = torch::tensor({0, 1, 2, 8, 9}, opts);
+    GptModelInputs                            input;
+    // Reusing an input must also clear positions from its previous round.
+    input.combo_position_ids = torch::ones({5}, opts);
+    processor.prepareCompactDSparkTargetVerifyModelInput(state, input, proposals, lengths, mapping, holder);
+    EXPECT_FALSE(input.combo_position_ids.defined());
+    EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{2, 8, 9, 7, 15}));
+    EXPECT_EQ(toVec<int32_t>(input.input_lengths), (std::vector<int32_t>{3, 2}));
+    EXPECT_TRUE(input.is_ragged_target_verify);
+
+    state.position_bases = torch::tensor({{11}, {20}}, opts);
+    processor.prepareCompactDSparkTargetVerifyModelInput(state, input, proposals, lengths, mapping, holder);
+    EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{11, 12, 13, 20, 21}));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkVerifyBudgetKeepsProposalWidthSeven) {
     // This fixture initializes CUDA. Re-exec death-test children instead of
     // running CUDA code in a forked copy of the parent's initialized runtime.
@@ -1334,6 +1367,46 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchSupportsCompactDraftLastH
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {9.1, 9.2});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkFailedDecodeDoesNotCommitTokensLengthOrAnchor) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 128;
+    model_config.vocab_size     = 16;
+    model_config.num_layers     = 1;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 3;
+    ResourceContext resource_context;
+    auto            failed  = createContextStream(model_config, runtime_config, resource_context, {2, 3}, 1);
+    auto            healthy = createContextStream(model_config, runtime_config, resource_context, {4, 5}, 2);
+    setSpOutputTokens(failed->getSPOutputBuffer(), {3});
+    setSpOutputTokens(healthy->getSPOutputBuffer(), {5});
+    failed->setIsContextStream(false);
+    healthy->setIsContextStream(false);
+    const auto                            old_anchor = failed->getSPOutputBuffer()->target_token_gpu.clone();
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_tokens_cpu = torch::tensor({{15, 15, 15, 15}, {6, 0, 0, 0}}, torch::kInt32);
+    output.accept_len_cpu    = torch::tensor({1, 1}, torch::kInt32);
+    output.success_cpu       = torch::tensor({false, true}, torch::kBool);
+    output.accept_tokens     = output.accept_tokens_cpu.to(torch::kCUDA);
+    output.accept_len        = output.accept_len_cpu.to(torch::kCUDA);
+    output.success           = output.success_cpu.to(torch::kCUDA);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    EXPECT_TRUE(processor.dispatchDecode(StreamGroups({failed, healthy}), output, MergedOutput{}).ok());
+    EXPECT_TRUE(failed->hasError());
+    EXPECT_EQ(failed->seqLength(), 2);
+    EXPECT_EQ(toVec<int32_t>(failed->completeTokenIds().narrow(1, 0, 2)), (vector<int32_t>{2, 3}));
+    EXPECT_TRUE(torch::equal(failed->getSPOutputBuffer()->target_token_gpu, old_anchor));
+    EXPECT_FALSE(healthy->hasError());
+    EXPECT_EQ(healthy->seqLength(), 3);
+    EXPECT_EQ(toVec<int32_t>(healthy->completeTokenIds().narrow(1, 0, 3)), (vector<int32_t>{4, 5, 6}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {

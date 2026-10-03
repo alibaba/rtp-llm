@@ -14,11 +14,8 @@ from typing import Any, Dict
 
 PREFIX = "language_model.model.dspark."
 UNVERIFIED_MATH = [
-    "hidden_norm placement and whether its scale uses Gemma (1 + weight)",
-    "final_norm scale convention and exact target hidden capture positions",
-    "sliding-window boundaries and causal versus non-causal proposal-block mask",
-    "confidence-head feature order, activation, and use during sampling",
-    "block_size-to-proposal-width and anchor-row alignment",
+    "exact target hidden capture positions",
+    "confidence STS temperature calibration and adaptive scheduling policy",
     "numerical agreement with the training/reference forward implementation",
 ]
 
@@ -88,6 +85,7 @@ def validate_schema(config: Dict[str, Any], tensors: Dict[str, Any]) -> Dict[str
         "dspark_hybrid_context_fusion": False,
         "enable_confidence_head": True,
         "confidence_head_with_markov": True,
+        "use_gemma_norm": True,
     }.items():
         require(
             text.get(key) == expected,
@@ -168,7 +166,10 @@ def validate_schema(config: Dict[str, Any], tensors: Dict[str, Any]) -> Dict[str
         "tensor_count": len(tensors),
         "draft_layers": 5,
         "attention": "sliding_attention",
+        "block_size": 7,
         "sliding_window": 4096,
+        "layer_types": ["sliding_attention"] * 5,
+        "use_gemma_norm": True,
         "ffn": "dense_mxfp8",
         "target_layer_ids": target_layers,
         "aux_feature_dim": 30720,
@@ -186,6 +187,17 @@ def inspect_checkpoint(checkpoint: str) -> Dict[str, Any]:
     """Validate config, indexed tensor names, shard extents, and total byte size."""
     root = Path(checkpoint)
     config = json.loads((root / "config.json").read_text())
+    if config.get("architectures") != ["DSparkMiniMaxDraftModel"]:
+        nested = root / "dspark"
+        if (nested / "config.json").is_file():
+            raise ValueError(
+                f"{root}: target checkpoint root was passed as SP_CHECKPOINT_PATH; "
+                f"use the nested DSpARK checkpoint {nested}"
+            )
+        raise ValueError(
+            f"{root}: expected DSparkMiniMaxDraftModel checkpoint, got "
+            f"architectures={config.get('architectures')!r}"
+        )
     index = json.loads((root / "model.safetensors.index.json").read_text())
     weight_map = index["weight_map"]
     tensors = {}

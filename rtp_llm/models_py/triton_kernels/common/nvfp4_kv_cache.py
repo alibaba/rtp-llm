@@ -1754,6 +1754,78 @@ def scatter_main_rows_to_hnd(
         )
 
 
+@triton.jit
+def _clear_packed_working_tail_scales_kernel(
+    k_scale,
+    v_scale,
+    idx_scale,
+    lengths,
+    K_PAGE_STRIDE: tl.constexpr,
+    V_PAGE_STRIDE: tl.constexpr,
+    I_PAGE_STRIDE: tl.constexpr,
+    SCRATCH_SEQ_LEN: tl.constexpr,
+    HEADS: tl.constexpr,
+    GROUPS: tl.constexpr,
+    IDX_GROUPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch, head = tl.program_id(0), tl.program_id(1)
+    length = tl.load(lengths + batch).to(tl.int64)
+    tail_start = length % 128
+    page = (batch * SCRATCH_SEQ_LEN + length) // 128
+    offsets = tl.arange(0, BLOCK)
+    row, group = offsets // GROUPS, offsets % GROUPS
+    valid = (tail_start != 0) & (row < 128) & (row >= tail_start)
+    swizzle = group // 4 * 512 + row % 32 * 16 + row // 32 * 4 + group % 4
+    tl.store(k_scale + page * K_PAGE_STRIDE + head * 128 * GROUPS + swizzle, 0.0, valid)
+    tl.store(v_scale + page * V_PAGE_STRIDE + head * 128 * GROUPS + swizzle, 0.0, valid)
+    idx_row, idx_group = offsets // IDX_GROUPS, offsets % IDX_GROUPS
+    idx_valid = (
+        (head == 0) & (tail_start != 0) & (idx_row < 128) & (idx_row >= tail_start)
+    )
+    idx_swizzle = (
+        idx_group // 4 * 512 + idx_row % 32 * 16 + idx_row // 32 * 4 + idx_group % 4
+    )
+    tl.store(idx_scale + page * I_PAGE_STRIDE + idx_swizzle, 0.0, idx_valid)
+
+
+def clear_packed_working_tail_scales(
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
+    idx_scales: torch.Tensor,
+    kv_lens: torch.Tensor,
+    scratch_seq_len: int,
+    heads: int,
+    head_dim: int,
+    index_dim: int,
+) -> None:
+    """Make only the unread last-page rows finite for whole-page FP8 MMA.
+
+    Native prefill masks QK but reads full-page V. Zero probability multiplied
+    by an uninitialized E4M3 NaN still poisons PV. Zero scales make the finite
+    E2M1 payload decode to zero, without touching any live row or clearing the
+    full historical working set. Scales use the writer's 128x4 MMA swizzle.
+    """
+    if scratch_seq_len % 128 or head_dim % 64 or index_dim % 64:
+        raise ValueError("packed tail scales require page128 and MMA group4 alignment")
+    groups, idx_groups = head_dim // NVFP4_GROUP_SIZE, index_dim // NVFP4_GROUP_SIZE
+    _clear_packed_working_tail_scales_kernel[(kv_lens.numel(), heads)](
+        k_scales,
+        v_scales,
+        idx_scales,
+        kv_lens,
+        K_PAGE_STRIDE=k_scales.stride(0),
+        V_PAGE_STRIDE=v_scales.stride(0),
+        I_PAGE_STRIDE=idx_scales.stride(0),
+        SCRATCH_SEQ_LEN=scratch_seq_len,
+        HEADS=heads,
+        GROUPS=groups,
+        IDX_GROUPS=idx_groups,
+        BLOCK=triton.next_power_of_2(128 * max(groups, idx_groups)),
+        num_warps=4,
+    )
+
+
 def clear_working_tails(
     k_pages: torch.Tensor,
     v_pages: torch.Tensor,

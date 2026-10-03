@@ -96,6 +96,13 @@ public:
                                              const torch::Tensor&    proposals,
                                              TensorHolder&           host_holder);
 
+    void prepareCompactDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                                    GptModelInputs&         model_input,
+                                                    const torch::Tensor&    proposals,
+                                                    const torch::Tensor&    verify_lengths,
+                                                    const torch::Tensor&    compact_to_dense,
+                                                    TensorHolder&           host_holder);
+
     void prepareDSparkTargetVerifyModelInput(GptModelInputs&      model_input,
                                              const torch::Tensor& anchors,
                                              const torch::Tensor& committed_ends,

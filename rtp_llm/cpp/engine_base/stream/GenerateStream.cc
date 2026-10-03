@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -162,10 +163,38 @@ absl::Status GenerateStream::incrKVBlock() {
 
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
+    bool protected_execution;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        protected_execution = kvExecutionProtected();
+        if (protected_execution) {
+            requestKvReleaseLocked();
+        }
+    }
+    if (protected_execution) {
+        // Close acquisition under the same mutex before waiting outside it.
+        std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
+        async_bookkeeping_->cv.wait(lk, [this] {
+            return async_bookkeeping_->kv_execution.users.load(std::memory_order_acquire) == 0
+                   && !hasPendingAsyncBookkeeping();
+        });
+        lk.unlock();
+        tryFinalizeKvResourceRelease();
+        lk.lock();
+        async_bookkeeping_->cv.wait(
+            lk, [this] { return !async_bookkeeping_->kv_execution.finalizing.load(std::memory_order_acquire); });
+        return;
+    }
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
-    std::lock_guard<std::mutex> lock(*mutex_);
+    std::unique_lock<std::mutex> lock(*mutex_);
+    if (kvExecutionProtected()) {
+        requestKvReleaseLocked();
+        lock.unlock();
+        releaseResource();
+        return;
+    }
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
@@ -185,7 +214,9 @@ void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
         async_bookkeeping_->cv.notify_all();
         // The last worker performs any deferred release after its update lock
         // has unwound, so releaseResource() can safely re-enter mutex_.
-        if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
+        if (kvExecutionProtected()) {
+            tryFinalizeKvResourceRelease();
+        } else if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
             releaseResource();
         }
     }
@@ -206,6 +237,116 @@ void GenerateStream::markDeferredRelease() {
 
 bool GenerateStream::isDeferredReleasePending() const {
     return async_bookkeeping_->defer_release.load(std::memory_order_acquire);
+}
+
+bool GenerateStream::kvExecutionProtected() const {
+    return async_bookkeeping_->kv_execution.enabled.load(std::memory_order_acquire);
+}
+
+void GenerateStream::quarantineKvExecution() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK(kvExecutionProtected());
+    async_bookkeeping_->kv_execution.closing           = true;
+    async_bookkeeping_->kv_execution.completion_failed = true;
+    markDeferredRelease();
+}
+
+bool GenerateStream::tryAcquireKvExecution() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    auto&                       execution = async_bookkeeping_->kv_execution;
+    if (execution.closing || stream_cache_resource_->isResourceReleased() || isFinished() || hasError()
+        || generate_status_->hasEvent(StreamEvents::GenerateDone)) {
+        return false;
+    }
+    execution.enabled.store(true, std::memory_order_release);
+    execution.users.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+}
+
+void GenerateStream::publishKvCompletionFence(uint64_t producer, std::function<void()> wait_for_completion) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    auto&                       execution = async_bookkeeping_->kv_execution;
+    RTP_LLM_CHECK(kvExecutionProtected() && !execution.finalizing.load(std::memory_order_acquire)
+                  && !execution.completion_failed && !stream_cache_resource_->isResourceReleased()
+                  && (execution.users.load(std::memory_order_acquire) > 0 || hasPendingAsyncBookkeeping()));
+    if (wait_for_completion) {
+        execution.fences[producer] = std::move(wait_for_completion);
+    }
+}
+
+void GenerateStream::finishKvExecution(uint64_t producer, std::function<void()> wait_for_completion) {
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        auto&                       execution = async_bookkeeping_->kv_execution;
+        RTP_LLM_CHECK(kvExecutionProtected() && execution.users.load(std::memory_order_acquire) > 0);
+        if (wait_for_completion) {
+            execution.fences[producer] = std::move(wait_for_completion);
+        }
+        execution.users.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    { std::lock_guard<std::mutex> lock(async_bookkeeping_->mu); }
+    async_bookkeeping_->cv.notify_all();
+    tryFinalizeKvResourceRelease();
+}
+
+void GenerateStream::requestKvReleaseLocked() {
+    RTP_LLM_CHECK(kvExecutionProtected());
+    async_bookkeeping_->kv_execution.closing = true;
+    markDeferredRelease();
+}
+
+void GenerateStream::tryFinalizeKvResourceRelease() {
+    if (!kvExecutionProtected()) {
+        return;
+    }
+    std::unordered_map<uint64_t, std::function<void()>> fences;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        auto&                       execution = async_bookkeeping_->kv_execution;
+        if (!kvExecutionProtected() || !execution.closing || execution.users.load() != 0 || hasPendingAsyncBookkeeping()
+            || execution.finalizing.load() || execution.completion_failed
+            || stream_cache_resource_->isResourceReleased()) {
+            return;
+        }
+        execution.finalizing.store(true, std::memory_order_release);
+        fences = std::move(execution.fences);
+    }
+    // A terminal-only wait: never hold the stream lock while waiting for GPU work.
+    bool complete = true;
+    try {
+        for (const auto& entry : fences) {
+            entry.second();
+        }
+    } catch (const std::exception& error) {
+        complete = false;
+        RTP_LLM_LOG_ERROR("KV completion failed; retaining blocks for stream %ld: %s", streamId(), error.what());
+    } catch (...) {
+        complete = false;
+        RTP_LLM_LOG_ERROR("KV completion failed; retaining blocks for stream %ld", streamId());
+    }
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (complete) {
+            try {
+                stream_cache_resource_->releaseResource();
+                async_bookkeeping_->defer_release.store(false, std::memory_order_release);
+            } catch (const std::exception& error) {
+                complete = false;
+                RTP_LLM_LOG_ERROR(
+                    "KV release failed; not retrying partial release for stream %ld: %s", streamId(), error.what());
+            } catch (...) {
+                complete = false;
+                RTP_LLM_LOG_ERROR("KV release failed; not retrying partial release for stream %ld", streamId());
+            }
+        }
+        if (!complete) {
+            async_bookkeeping_->kv_execution.completion_failed = true;
+            async_bookkeeping_->kv_execution.fences            = std::move(fences);
+        }
+        async_bookkeeping_->kv_execution.finalizing.store(false, std::memory_order_release);
+    }
+    { std::lock_guard<std::mutex> lock(async_bookkeeping_->mu); }
+    async_bookkeeping_->cv.notify_all();
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -631,21 +772,39 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
-
-    // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
-        cv_->notify_one();
+    StreamState state;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        state = generate_status_->moveToNext();
+        // notify one thread waiting for stream completion
+        if (getStatus() == StreamState::FINISHED) {
+            cv_->notify_one();
+        }
     }
+    tryFinalizeKvResourceRelease();
     return state;
 }
 
 CachePrepareResult GenerateStream::prepareCache() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (generate_status_->error_info.hasError()) {
+    const int64_t               enqueued_us = cache_prepare_timeline_.enqueued_us.exchange(0);
+    if (enqueued_us > 0) {
+        reportCachePrepareStage("enqueue_to_prepare", steadyTimeUs() - enqueued_us);
+    }
+    auto mark_prepared = [this]() {
+        cache_prepare_timeline_.ready_us.store(steadyTimeUs());
         generate_status_->reportEvent(StreamEvents::CachePrepared);
+    };
+    auto report_async_wait = [this]() {
+        const int64_t async_started_us = cache_prepare_timeline_.async_started_us.exchange(0);
+        if (async_started_us > 0) {
+            reportCachePrepareStage("async_context_wait", steadyTimeUs() - async_started_us);
+        }
+    };
+    if (generate_status_->error_info.hasError()) {
+        report_async_wait();
+        mark_prepared();
         return CachePrepareResult::DONE;
     }
     if (generate_status_->hasEvent(StreamEvents::CachePrepared)) {
@@ -653,31 +812,42 @@ CachePrepareResult GenerateStream::prepareCache() {
     }
 
     if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
-        auto status = stream_cache_resource_->initKVBlock(reserve_step_);
+        const int64_t init_started_us = steadyTimeUs();
+        auto          status          = stream_cache_resource_->initKVBlock(reserve_step_);
+        reportCachePrepareStage("init_kv", steadyTimeUs() - init_started_us);
         if (!status.ok()) {
             if (status.message() == "malloc failed") {
                 return CachePrepareResult::LACK_MEM;
             }
             generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
-            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            mark_prepared();
             return CachePrepareResult::DONE;
         }
-        const bool loading = stream_cache_resource_->asyncLoadCache();
+        const int64_t submit_started_us = steadyTimeUs();
+        const bool    loading           = stream_cache_resource_->asyncLoadCache();
+        const int64_t submitted_us      = steadyTimeUs();
+        reportCachePrepareStage("async_submit", submitted_us - submit_started_us);
         generate_status_->reportEvent(StreamEvents::LoadInitiated);
         if (loading) {
-            return CachePrepareResult::WAIT;
+            cache_prepare_timeline_.async_started_us.store(submitted_us);
+            if (!stream_cache_resource_->loadCacheDone()) {
+                return CachePrepareResult::WAIT;
+            }
+        } else {
+            // Match the synchronous first WAITING transition: when no connector
+            // load is needed, non-DECODE roles run with the initial allocation and
+            // do not perform an extra incrKVBlock.
+            mark_prepared();
+            return CachePrepareResult::DONE;
         }
-        // Match the synchronous first WAITING transition: when no connector
-        // load is needed, non-DECODE roles run with the initial allocation and
-        // do not perform an extra incrKVBlock.
-        generate_status_->reportEvent(StreamEvents::CachePrepared);
-        return CachePrepareResult::DONE;
     } else if (!stream_cache_resource_->loadCacheDone()) {
         return CachePrepareResult::WAIT;
     }
 
+    report_async_wait();
+
     if (generate_status_->error_info.hasError()) {
-        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        mark_prepared();
         return CachePrepareResult::DONE;
     }
 
@@ -692,12 +862,39 @@ CachePrepareResult GenerateStream::prepareCache() {
                 return CachePrepareResult::LACK_MEM;
             }
             generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
-            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            mark_prepared();
             return CachePrepareResult::DONE;
         }
     }
-    generate_status_->reportEvent(StreamEvents::CachePrepared);
+    mark_prepared();
     return CachePrepareResult::DONE;
+}
+
+int64_t GenerateStream::steadyTimeUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void GenerateStream::reportCachePrepareStage(const char* stage, int64_t latency_us) const {
+    if (metrics_reporter_) {
+        kmonitor::MetricsTags                   tags("stage", stage);
+        RtpLLMCachePrepareStageMetricsCollector collector;
+        collector.latency_us = latency_us;
+        metrics_reporter_->report<RtpLLMCachePrepareStageMetrics, RtpLLMCachePrepareStageMetricsCollector>(&tags,
+                                                                                                           &collector);
+    }
+}
+
+void GenerateStream::markCachePrepareEnqueued() {
+    int64_t unset = 0;
+    cache_prepare_timeline_.enqueued_us.compare_exchange_strong(unset, steadyTimeUs());
+}
+
+void GenerateStream::reportCachePrepareAdmitted() {
+    const int64_t ready_us = cache_prepare_timeline_.ready_us.exchange(0);
+    if (ready_us > 0) {
+        reportCachePrepareStage("ready_to_admit", steadyTimeUs() - ready_us);
+    }
 }
 
 bool GenerateStream::hasError() const {

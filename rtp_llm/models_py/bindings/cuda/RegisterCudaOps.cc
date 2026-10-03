@@ -21,6 +21,12 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("prefix_lengths"),
                   py::arg("input_lengths"),
                   py::arg("tokens_per_batch"));
+    rtp_ops_m.def("mtp_msa_target_verify_ragged_addressing_prepare",
+                  &mtpMsaTargetVerifyRaggedAddressingPrepare,
+                  py::arg("request_block_table"),
+                  py::arg("prefix_lengths"),
+                  py::arg("cu_seqlens"),
+                  py::arg("total_tokens"));
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

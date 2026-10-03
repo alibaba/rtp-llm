@@ -3,65 +3,14 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include <atomic>
-#include <cstdlib>
-#include <exception>
-#include <sstream>
-#include <string>
 #include <vector>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
+#endif
 
 namespace rtp_llm {
 namespace speculative {
-
-namespace {
-
-const bool kDebugMtpAcceptEnabled = []() {
-    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_ACCEPT");
-    return env != nullptr && std::string(env) != "0";
-}();
-
-bool debugMtpAcceptEnabled() {
-    static const bool logged = []() {
-        if (kDebugMtpAcceptEnabled) {
-            RTP_LLM_LOG_WARNING("[debug-mtp-accept] enabled; this copies small sampler tensors to host");
-        }
-        return true;
-    }();
-    (void)logged;
-    return kDebugMtpAcceptEnabled;
-}
-
-std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 24) {
-    if (!tensor.defined()) {
-        return "None";
-    }
-    std::ostringstream oss;
-    oss << "shape=[";
-    for (int64_t i = 0; i < tensor.dim(); ++i) {
-        if (i > 0) {
-            oss << ",";
-        }
-        oss << tensor.size(i);
-    }
-    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype();
-    if (tensor.numel() == 0) {
-        return oss.str();
-    }
-    try {
-        auto flat  = tensor.reshape({-1});
-        auto count = std::min<int64_t>(limit, flat.numel());
-        auto head  = flat.slice(0, 0, count);
-        if (head.device().is_cuda()) {
-            head = head.cpu();
-        }
-        oss << " head=" << head;
-    } catch (const std::exception& e) {
-        oss << " summary_error=" << e.what();
-    }
-    return oss.str();
-}
-
-}  // namespace
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
@@ -166,14 +115,31 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     return output;
 }
 
+torch::Tensor SpeculativeSampler::computeDSparkConfidence(const torch::Tensor& draft_hidden,
+                                                          const torch::Tensor& anchors,
+                                                          const torch::Tensor& sampled_tokens,
+                                                          const torch::Tensor& markov_w1,
+                                                          const torch::Tensor& confidence_w,
+                                                          const torch::Tensor& confidence_b) const {
+    RTP_LLM_PROFILE_SCOPE("speculative_sampler.compute_dspark_confidence");
+    RTP_LLM_CHECK_WITH_INFO(sampled_tokens.defined() && sampled_tokens.dim() == 2
+                                && sampled_tokens.size(1) == static_cast<int64_t>(propose_step_),
+                            "DSpARK confidence requires all gamma sampled tokens");
+    RTP_LLM_CHECK_WITH_INFO(draft_hidden.defined() && draft_hidden.dim() == 2
+                                && draft_hidden.size(0) == sampled_tokens.numel(),
+                            "DSpARK confidence hidden rows must match B*gamma");
+    return execDSparkConfidence(draft_hidden, anchors, sampled_tokens, markov_w1, confidence_w, confidence_b);
+}
+
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
-                                                     SamplerOutput&                      target_sampler_output) {
+                                                     SamplerOutput&                      target_sampler_output,
+                                                     const torch::Tensor&                active_verify_lengths) {
     // TensorHolder release point (SpeculativeSampler): advances host tensors
     // staged for rejection sampling H2D in the previous forward.
     buffer_holder_.release();
     SpeculativeSamplerOutput sample_output;
-    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
+    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output, active_verify_lengths);
 
     return sample_output;
 }
@@ -181,7 +147,8 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStr
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_output,
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
-                                     SamplerOutput&                      target_sampler_output) const {
+                                     SamplerOutput&                      target_sampler_output,
+                                     const torch::Tensor&                active_verify_lengths) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
 
@@ -268,6 +235,27 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
+        torch::Tensor validation_workspace;
+        if (proposal_mode_ == DraftProposalMode::SAMPLED) {
+            sample_output.success = torch::ones({batch_size}, do_sample_d.options());
+#if USING_CUDA
+            const auto elements =
+                rejectionValidationWorkspaceElements(batch_size, propose_step_, target_token_probs_d_t.size(2));
+            auto&                   reserved = validation_workspaces_[cuda_graph::graphGetCurrentStream().id()];
+            cudaStreamCaptureStatus capture_status;
+            RTP_LLM_CHECK(cudaStreamIsCapturing(at::cuda::getCurrentCUDAStream().stream(), &capture_status)
+                          == cudaSuccess);
+            if (!reserved.tensor.defined() || reserved.tensor.numel() < elements
+                || reserved.tensor.device() != target_token_probs_d_t.device()) {
+                RTP_LLM_CHECK_WITH_INFO(!reserved.captured && capture_status == cudaStreamCaptureStatusNone,
+                                        "DSpARK rejection workspace must be warmed to maximum batch before capture");
+                reserved.tensor = torch::empty({elements}, target_token_probs_d_t.options());
+            }
+            reserved.captured    = reserved.captured || capture_status != cudaStreamCaptureStatusNone;
+            validation_workspace = reserved.tensor;
+            validation_workspace.record_stream(cuda_graph::graphGetCurrentStream());
+#endif
+        }
         execRejectionSampling({
             draft_token_probs_d_t,
             draft_token_ids_d_t,
@@ -279,6 +267,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             do_sample_d,
             proposal_mode_ == DraftProposalMode::DETERMINISTIC,
             proposal_mode_ == DraftProposalMode::SAMPLED,
+            sample_output.success,
+            target_sampler_output.success,
+            active_verify_lengths,
+            validation_workspace,
         });
     }
 
@@ -314,6 +306,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 torch::where(force_mask,
                              torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
                              output_accepted_token_num_d);
+            // The perf-only override must not erase a failure detected by
+            // normal rejection sampling.
+            if (sample_output.success.defined()) {
+                output_accepted_token_num_d = torch::where(
+                    sample_output.success, output_accepted_token_num_d, torch::ones_like(output_accepted_token_num_d));
+                output_token_ids_d = torch::where(
+                    sample_output.success.unsqueeze(1), output_token_ids_d, torch::zeros_like(output_token_ids_d));
+            }
         }
     }
 
@@ -323,39 +323,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
-    if (debugMtpAcceptEnabled()) {
-        static std::atomic<int> log_budget{32};
-        if (log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            torch::Tensor target_sampled_ids_debug;
-            torch::Tensor draft_target_match_debug;
-            try {
-                const int64_t target_token_stride = target_token_ids_d_t.size(1);
-                auto          target_token_ids_3d = target_token_ids_d_t.reshape(
-                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), target_token_stride});
-                target_sampled_ids_debug = target_token_ids_3d.select(2, target_token_stride - 1).to(torch::kInt32);
-                draft_target_match_debug = draft_token_ids_d_t.to(torch::kInt32)
-                                               .eq(target_sampled_ids_debug.narrow(1, 0, (int64_t)propose_step_));
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("[debug-mtp-accept] failed to summarize target sampled ids: %s", e.what());
-            }
-            RTP_LLM_LOG_INFO("[debug-mtp-accept] batch=%d propose_step=%zu draft_token_ids=%s "
-                             "target_sampled_ids=%s draft_target_match=%s target_token_ids=%s accept_len=%s "
-                             "accept_tokens=%s draft_probs=%s target_probs=%s",
-                             batch_size,
-                             propose_step_,
-                             debugTensorSummary(draft_token_ids, 32).c_str(),
-                             debugTensorSummary(target_sampled_ids_debug, 32).c_str(),
-                             debugTensorSummary(draft_target_match_debug, 32).c_str(),
-                             debugTensorSummary(target_token_ids, 32).c_str(),
-                             debugTensorSummary(sample_output.accept_len, 32).c_str(),
-                             debugTensorSummary(sample_output.accept_tokens, 32).c_str(),
-                             debugTensorSummary(draft_token_probs, 0).c_str(),
-                             debugTensorSummary(target_token_probs, 0).c_str());
-        }
-    }
-
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    if (sample_output.success.defined()) {
+        sample_output.success_cpu = sample_output.success.to(torch::kCPU, true);
+    }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 

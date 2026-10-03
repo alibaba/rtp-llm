@@ -27,6 +27,15 @@ std::vector<torch::Tensor> mtpMsaTargetVerifyAddressingPrepare(const torch::Tens
                                                                const torch::Tensor& input_lengths,
                                                                int64_t              tokens_per_batch);
 
+// Ragged counterpart for compact target verify. ``cu_seqlens`` describes the
+// request-major packed token rows and has shape [batch + 1]. ``total_tokens``
+// is supplied by the caller so the operation remains asynchronous and never
+// reads the final cumulative length back to the host.
+std::vector<torch::Tensor> mtpMsaTargetVerifyRaggedAddressingPrepare(const torch::Tensor& request_block_table,
+                                                                     const torch::Tensor& prefix_lengths,
+                                                                     const torch::Tensor& cu_seqlens,
+                                                                     int64_t              total_tokens);
+
 void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,
                                         torch::Tensor& lm_output_indexes,
                                         int32_t        tokens_per_batch,

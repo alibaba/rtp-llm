@@ -960,6 +960,28 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     # Reject invalid startup budgets before fetching weights or configuring devices.
     py_env_configs.sp_config.verifySteps()
+    py_env_configs.sp_config.validateVerifyBatchSize(
+        py_env_configs.concurrency_config.concurrency_limit
+    )
+    graph_config = py_env_configs.py_hw_kernel_config
+    if (
+        py_env_configs.sp_config.isAdaptiveVerify()
+        and py_env_configs.role_config.role_type != RoleType.PREFILL
+        and graph_config.enable_cuda_graph
+        and graph_config.decode_capture_batch_sizes
+    ):
+        captured = set(graph_config.decode_capture_batch_sizes)
+        missing = sorted(
+            set(range(1, py_env_configs.concurrency_config.concurrency_limit + 1))
+            - captured
+        )
+        if missing:
+            logging.warning(
+                "adaptive DSpARK target verify requires exact batch graphs; "
+                "uncaptured batches %s will use eager. Consider complete "
+                "DECODE_CAPTURE_CONFIG coverage after checking graph memory.",
+                missing,
+            )
     setup_default_args(py_env_configs)
     setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)

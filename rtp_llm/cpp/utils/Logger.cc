@@ -37,11 +37,43 @@ const CachedLogLevelEnv kLogLevelEnv = []() {
     return CachedLogLevelEnv{env != nullptr, env ? env : ""};
 }();
 
-void warmupLoggers() {
-    Logger::getEngineLogger();
-    Logger::getAccessLogger();
-    Logger::getQueryAccessLogger();
-    Logger::getStackTraceLogger();
+uint32_t getLevelfromstr(const std::string& level_name) {
+    const std::map<std::string, uint32_t> name_to_level = {
+        {"TRACE", alog::LOG_LEVEL_TRACE1},
+        {"DEBUG", alog::LOG_LEVEL_DEBUG},
+        {"INFO", alog::LOG_LEVEL_INFO},
+        {"WARNING", alog::LOG_LEVEL_WARN},
+        {"ERROR", alog::LOG_LEVEL_ERROR},
+    };
+    auto level = name_to_level.find(level_name);
+    if (level != name_to_level.end()) {
+        return level->second;
+    }
+    throw std::runtime_error("[WARNING] Invalid logger level for env: LOG_LEVEL with value: " + level_name);
+}
+
+alog::Logger* configuredBackend(const char* name) {
+    auto* backend = alog::Logger::getLogger(kUseConsoleAppender ? "console" : name);
+    if (backend == nullptr) {
+        throw std::runtime_error("getLogger should not be nullptr");
+    }
+    if (kLogLevelEnv.has_value) {
+        backend->setLevel(getLevelfromstr(kLogLevelEnv.value));
+    }
+    return backend;
+}
+
+void bindLoggersForStartup() {
+    // RTP singletons can be shared across DSOs while alog registries are not.
+    // Resolve backends here, in the DSO that just configured the appenders.
+    const auto bind = [](Logger& logger, const char* name) {
+        auto* backend = configuredBackend(name);
+        logger.bindBackendForStartup(backend, backend->getLevel());
+    };
+    bind(Logger::getEngineLogger(), "engine");
+    bind(Logger::getAccessLogger(), "access");
+    bind(Logger::getQueryAccessLogger(), "query_access");
+    bind(Logger::getStackTraceLogger(), "stack_trace");
 }
 
 }  // namespace
@@ -54,7 +86,7 @@ bool initLogger(std::string log_file_path) {
         if (!exist) {
             AUTIL_ROOT_LOG_CONFIG();
             AUTIL_ROOT_LOG_SETLEVEL(INFO);
-            warmupLoggers();
+            bindLoggersForStartup();
             return true;
         }
         log_file_path = alog_conf_full_path;
@@ -75,24 +107,13 @@ bool initLogger(std::string log_file_path) {
         return false;
     }
 
-    warmupLoggers();
+    bindLoggersForStartup();
     return true;
 }
 
 Logger::Logger(const std::string& submodule_name) {
-    if (kUseConsoleAppender) {
-        logger_ = alog::Logger::getLogger("console");
-    } else {
-        logger_ = alog::Logger::getLogger(submodule_name.c_str());
-    }
-    if (logger_ == nullptr) {
-        throw std::runtime_error("getLogger should not be nullptr");
-    }
-    if (kLogLevelEnv.has_value) {
-        uint32_t log_level = getLevelfromstr(kLogLevelEnv.value);
-        logger_->setLevel(log_level);
-        base_log_level_ = logger_->getLevel();
-    }
+    auto* backend = configuredBackend(submodule_name.c_str());
+    bindBackendForStartup(backend, backend->getLevel());
     auto success = autil::NetUtil::GetDefaultIp(ip_);
     if (!success) {
         printf("Logger failed to get default ip\n");
@@ -108,21 +129,6 @@ void Logger::setBaseLevel(const uint32_t base_level) {
         __PRETTY_FUNCTION__,
         "Set logger level to: [%s]",
         getLevelName(base_level).c_str());
-}
-
-uint32_t Logger::getLevelfromstr(const std::string& level_name) {
-    std::map<std::string, uint32_t> name_to_level = {
-        {"TRACE", alog::LOG_LEVEL_TRACE1},
-        {"DEBUG", alog::LOG_LEVEL_DEBUG},
-        {"INFO", alog::LOG_LEVEL_INFO},
-        {"WARNING", alog::LOG_LEVEL_WARN},
-        {"ERROR", alog::LOG_LEVEL_ERROR},
-    };
-    auto level = name_to_level.find(level_name);
-    if (level != name_to_level.end()) {
-        return level->second;
-    }
-    throw std::runtime_error("[WARNING] Invalid logger level for env: LOG_LEVEL with value: " + level_name);
 }
 
 }  // namespace rtp_llm

@@ -27,6 +27,20 @@ std::vector<torch::Tensor> referenceAddressing(const torch::Tensor& request_bloc
     return {physical_block_table, positions, sequence_lengths, valid_token_mask};
 }
 
+std::vector<torch::Tensor> referenceRaggedAddressing(const torch::Tensor& request_block_table,
+                                                     const torch::Tensor& prefix_lengths,
+                                                     const torch::Tensor& input_lengths) {
+    auto request_ids = torch::arange(input_lengths.size(0), input_lengths.options()).repeat_interleave(input_lengths);
+    auto cu_seqlens  = torch::cat({torch::zeros({1}, input_lengths.options()), input_lengths.cumsum(0, torch::kInt32)});
+    auto token_rows  = torch::arange(request_ids.numel(), input_lengths.options());
+    auto local_rows  = token_rows - cu_seqlens.index_select(0, request_ids);
+    auto positions   = prefix_lengths.index_select(0, request_ids) + local_rows;
+    return {request_block_table.index_select(0, request_ids),
+            positions,
+            positions + 1,
+            torch::ones_like(positions, positions.options().dtype(torch::kBool))};
+}
+
 void expectTensorVectorsEqual(const std::vector<torch::Tensor>& actual,
                               const std::vector<torch::Tensor>& expected,
                               int64_t                           expected_device) {
@@ -167,6 +181,64 @@ TEST(MtpTargetVerifyPrepareTest, CapturesAndReplaysWithUpdatedInputs) {
     test_stream.synchronize();
     expectTensorVectorsEqual(captured_outputs,
                              referenceAddressing(request_block_table, prefix_lengths, input_lengths, 3),
+                             request_block_table.get_device());
+}
+
+TEST(MtpTargetVerifyPrepareTest, RaggedMatchesMixedRequestLengths) {
+    auto request_block_table =
+        torch::tensor({{11, 12, 13}, {21, 22, 23}, {31, 32, 33}}, torch::TensorOptions().dtype(torch::kInt32)).cuda();
+    auto prefix_lengths = toCudaI32({80, 120, 200});
+    auto input_lengths  = toCudaI32({1, 4, 2});
+    auto cu_seqlens = torch::cat({torch::zeros({1}, input_lengths.options()), input_lengths.cumsum(0, torch::kInt32)});
+
+    auto actual = mtpMsaTargetVerifyRaggedAddressingPrepare(request_block_table, prefix_lengths, cu_seqlens, 7);
+    expectTensorVectorsEqual(actual,
+                             referenceRaggedAddressing(request_block_table, prefix_lengths, input_lengths),
+                             request_block_table.get_device());
+}
+
+TEST(MtpTargetVerifyPrepareTest, RaggedSkipsEmptyRangesAndPreservesPermutation) {
+    auto request_block_table =
+        torch::tensor({{31, 32}, {11, 12}, {41, 42}, {21, 22}}, torch::TensorOptions().dtype(torch::kInt32)).cuda();
+    auto prefix_lengths = toCudaI32({300, 100, 400, 200});
+    auto input_lengths  = toCudaI32({3, 0, 1, 2});
+    auto cu_seqlens = torch::cat({torch::zeros({1}, input_lengths.options()), input_lengths.cumsum(0, torch::kInt32)});
+
+    auto actual = mtpMsaTargetVerifyRaggedAddressingPrepare(request_block_table, prefix_lengths, cu_seqlens, 6);
+    expectTensorVectorsEqual(actual,
+                             referenceRaggedAddressing(request_block_table, prefix_lengths, input_lengths),
+                             request_block_table.get_device());
+}
+
+TEST(MtpTargetVerifyPrepareTest, RaggedCapturesAndReplaysAtFixedTokenBucket) {
+    const auto test_stream   = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
+    auto request_block_table = torch::zeros({3, 4}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto prefix_lengths      = torch::zeros({3}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto input_lengths       = toCudaI32({1, 4, 2});
+    auto cu_seqlens = torch::cat({torch::zeros({1}, input_lengths.options()), input_lengths.cumsum(0, torch::kInt32)});
+
+    at::cuda::CUDAStreamGuard stream_guard(test_stream);
+    request_block_table.copy_(torch::tensor({{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}}, torch::kInt32).cuda());
+    prefix_lengths.copy_(toCudaI32({64, 128, 192}));
+    auto warmup = mtpMsaTargetVerifyRaggedAddressingPrepare(request_block_table, prefix_lengths, cu_seqlens, 7);
+    test_stream.synchronize();
+    warmup.clear();
+
+    at::cuda::CUDAGraph        graph;
+    std::vector<torch::Tensor> captured_outputs;
+    graph.capture_begin();
+    captured_outputs = mtpMsaTargetVerifyRaggedAddressingPrepare(request_block_table, prefix_lengths, cu_seqlens, 7);
+    graph.capture_end();
+
+    request_block_table.copy_(
+        torch::tensor({{21, 22, 23, 24}, {31, 32, 33, 34}, {41, 42, 43, 44}}, torch::kInt32).cuda());
+    prefix_lengths.copy_(toCudaI32({80, 160, 240}));
+    input_lengths.copy_(toCudaI32({2, 1, 4}));
+    cu_seqlens.copy_(torch::cat({torch::zeros({1}, input_lengths.options()), input_lengths.cumsum(0, torch::kInt32)}));
+    graph.replay();
+    test_stream.synchronize();
+    expectTensorVectorsEqual(captured_outputs,
+                             referenceRaggedAddressing(request_block_table, prefix_lengths, input_lengths),
                              request_block_table.get_device());
 }
 

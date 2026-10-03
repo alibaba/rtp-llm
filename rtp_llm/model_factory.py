@@ -410,7 +410,17 @@ class ModelFactory:
             return None
 
         if not sp_config.checkpoint_path:
-            return None
+            if sp_config.type == SpeculativeType.DETERMINISTIC:
+                return None
+            raise ValueError(
+                f"{sp_config.type.name} speculative decoding requires "
+                "SP_CHECKPOINT_PATH"
+            )
+
+        if not sp_config.model_type:
+            raise ValueError(
+                f"{sp_config.type.name} speculative decoding requires SP_MODEL_TYPE"
+            )
 
         # These modes all use a learned propose model. Keep the check generic;
         # architecture-specific setup belongs to the registered model class.
@@ -544,21 +554,32 @@ class ModelFactory:
         sp_config.sp_dspark_sample_from_anchor = bool(
             propose_model_config.dspark_sample_from_anchor
         )
-        model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        # Checkpoint target_layer_ids use the HF convention: zero-based target
+        # layer indices whose *outputs* feed the draft feature projection.
+        # MiniMax's capture hook is keyed by residual-stream boundaries
+        # (0=embedding, k=output of layer k-1), so convert k -> k + 1.  Passing
+        # the checkpoint values through directly shifts every feature one
+        # target layer early, including 59 selecting layer 58 instead of the
+        # final layer in the 60-layer M3.1 target.
+        target_capture_layer_ids = target_layer_ids
+        if model_config.model_type.startswith("minimax_m3"):
+            target_capture_layer_ids = [layer_id + 1 for layer_id in target_layer_ids]
+        model_config.capture_aux_hidden_layer_ids = target_capture_layer_ids
         propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
         logging.info(
             "DSpARK fixed-width wiring: gamma=%d, verify_steps=%d, noise_token_id=%d, "
-            "target capture layer ids=%s, markov_rank=%d",
+            "checkpoint target layer ids=%s, target capture boundaries=%s, markov_rank=%d",
             gamma,
             verify_steps,
             noise_token_id,
             target_layer_ids,
+            target_capture_layer_ids,
             markov_rank,
         )
         # MiniMax-M3 already owns a multi-layer target-capture buffer. Reuse
         # that exact path instead of adding a second full-sequence allocation.
         if model_config.model_type.startswith("minimax_m3"):
             model_config._minimax_m3_target_hidden_state_layer_ids = tuple(
-                target_layer_ids
+                target_capture_layer_ids
             )
             model_config.hc_mult = len(target_layer_ids)

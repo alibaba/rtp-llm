@@ -14,6 +14,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePrepareStageMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
@@ -282,6 +283,8 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_us_metric, "rtp_llm_scheduler_cache_exposed_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_total_us_metric, "rtp_llm_scheduler_cache_exposed_wait_total_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_count_metric, "rtp_llm_scheduler_cache_exposed_wait_count");
     return true;
 }
 
@@ -295,15 +298,31 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
 void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags*               tags,
                                     RtpLLMSchedulerCacheStallMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(cache_exposed_wait_us_metric, collector->cache_exposed_wait_us);
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_total_us_metric, collector->cache_exposed_wait_total_us);
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_count_metric, collector->cache_exposed_wait_count);
+}
+
+bool RtpLLMCachePrepareStageMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(latency_us_metric, "rtp_llm_cache_prepare_stage_latency_us");
+    REGISTER_QPS_MUTABLE_METRIC(event_qps_metric, "rtp_llm_cache_prepare_stage_event_qps");
+    return true;
+}
+
+void RtpLLMCachePrepareStageMetrics::report(const kmonitor::MetricsTags*             tags,
+                                            RtpLLMCachePrepareStageMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(latency_us_metric, collector->latency_us);
+    REPORT_MUTABLE_QPS(event_qps_metric);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(schedule_latency_us_metric, "rtp_llm_schedule_latency_us");
     return true;
 }
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
+    REPORT_GAUGE(schedule_latency_us);
 }
 
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {

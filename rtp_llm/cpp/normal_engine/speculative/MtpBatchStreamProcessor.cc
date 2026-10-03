@@ -1212,6 +1212,44 @@ void MtpBatchStreamProcessor::prepareDSparkTargetVerifyModelInput(const DSparkRo
     model_input.combo_position_ids = expandDSparkPositionIds(round_state.position_bases, verify_step_ + 1);
 }
 
+void MtpBatchStreamProcessor::prepareCompactDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                                                         GptModelInputs&         model_input,
+                                                                         const torch::Tensor&    proposals,
+                                                                         const torch::Tensor&    verify_lengths,
+                                                                         const torch::Tensor&    compact_to_dense,
+                                                                         TensorHolder&           host_holder) {
+    RTP_LLM_CHECK_WITH_INFO(is_dspark_, "compact DSpARK target verify requires SP_TYPE_DSPARK");
+    const int64_t batch_size = round_state.anchors.numel();
+    RTP_LLM_CHECK_WITH_INFO(round_state.anchors.defined() && round_state.anchors.dim() == 1,
+                            "DSpARK anchors must be a one-dimensional tensor");
+    RTP_LLM_CHECK_WITH_INFO(proposals.defined() && proposals.dim() == 2 && proposals.size(0) == batch_size
+                                && proposals.size(1) == verify_step_,
+                            "compact DSpARK proposals must be [batch, verify_steps]");
+    RTP_LLM_CHECK_WITH_INFO(verify_lengths.defined() && verify_lengths.is_cuda()
+                                && verify_lengths.scalar_type() == torch::kInt32
+                                && verify_lengths.numel() == batch_size,
+                            "compact DSpARK verify lengths must be CUDA int32 [batch]");
+    RTP_LLM_CHECK_WITH_INFO(compact_to_dense.defined() && compact_to_dense.is_cuda()
+                                && compact_to_dense.scalar_type() == torch::kInt32,
+                            "compact DSpARK row mapping must be CUDA int32");
+
+    auto dense_tokens        = torch::cat({toCudaInt32(round_state.anchors, host_holder).reshape({batch_size, 1}),
+                                           toCudaInt32(proposals, host_holder).reshape({batch_size, verify_step_})},
+                                   1);
+    auto dense_positions     = expandDSparkPositionIds(round_state.position_bases, verify_step_ + 1);
+    auto gather_rows         = compact_to_dense.to(torch::kLong);
+    model_input.combo_tokens = dense_tokens.reshape({-1}).index_select(0, gather_rows).contiguous();
+    model_input.combo_position_ids =
+        dense_positions.defined() ? dense_positions.index_select(0, gather_rows).contiguous() : torch::Tensor{};
+    model_input.sequence_lengths = emptyInt32OnCuda({0});
+    model_input.clearLastHiddenStates();
+    model_input.prefix_lengths          = toCudaInt32(round_state.committed_ends, host_holder).contiguous();
+    model_input.input_lengths           = verify_lengths.contiguous();
+    model_input.lm_output_indexes       = makeCudaInt32Range(compact_to_dense.numel());
+    model_input.is_target_verify        = true;
+    model_input.is_ragged_target_verify = true;
+}
+
 void MtpBatchStreamProcessor::prepareDSparkTargetVerifyModelInput(GptModelInputs&      model_input,
                                                                   const torch::Tensor& anchors,
                                                                   const torch::Tensor& committed_ends,
@@ -1232,18 +1270,22 @@ void MtpBatchStreamProcessor::prepareDSparkTargetVerifyModelInput(GptModelInputs
                       .reshape({-1});
     model_input.prefix_lengths = toCudaInt32(committed_ends, host_holder).contiguous();
     setVerifyPairInputs(model_input, std::move(verify), batch_size, verify_step_ + 1, host_holder);
-    model_input.is_target_verify = true;
+    model_input.is_target_verify        = true;
+    model_input.is_ragged_target_verify = false;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                                                 const torch::Tensor& target_features,
                                                                 size_t               batch_size) {
-    const int64_t verify_width = verify_step_ + 1;
     RTP_LLM_CHECK_WITH_INFO(is_dspark_, "DSpARK decode commit requires SP_TYPE_DSPARK");
     RTP_LLM_CHECK_WITH_INFO(target_features.defined() && target_features.dim() == 2,
                             "DSpARK decode commit requires two-dimensional target auxiliary features");
-    RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
-                            "DSpARK decode commit feature rows must equal batch*(verify_steps+1)");
+    RTP_LLM_CHECK_WITH_INFO(model_input.input_lengths.defined()
+                                && model_input.input_lengths.numel() == static_cast<int64_t>(batch_size),
+                            "DSpARK decode commit requires one input length per request");
+    RTP_LLM_CHECK_WITH_INFO(model_input.combo_tokens.defined()
+                                && target_features.size(0) == model_input.combo_tokens.numel(),
+                            "DSpARK decode commit feature rows must match packed target tokens");
     model_input.is_target_verify = true;
     model_input.setLastHiddenStates(target_features, MtpHiddenStatesLayout::GLOBAL);
 }
@@ -1474,6 +1516,21 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
+        if (spec_decode_output.success_cpu.defined()
+            && !spec_decode_output.success_cpu.data_ptr<bool>()[batch_idx_out]) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+            // Maintain one update entry per stream. specUpdate sees the error
+            // and skips output/length/anchor publication.
+            spec_update_infos.push_back({accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, 1),
+                                         0,
+                                         -1,
+                                         torch::Tensor(),
+                                         torch::Tensor()});
+            token_offset += verify_step_ + 1;
+            batch_idx_in += cur_batch_size;
+            batch_idx_out += next_batch_size;
+            continue;
+        }
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
             propose_all_probs =

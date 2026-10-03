@@ -1002,7 +1002,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
         .def_readwrite("sp_dspark_verify_tokens", &SpeculativeExecutionConfig::sp_dspark_verify_tokens)
+        .def_readwrite("sp_dspark_adaptive_verify", &SpeculativeExecutionConfig::sp_dspark_adaptive_verify)
+        .def_readwrite("sp_dspark_verify_mode", &SpeculativeExecutionConfig::sp_dspark_verify_mode)
+        .def("isAdaptiveVerify", &SpeculativeExecutionConfig::isAdaptiveVerify)
         .def("verifySteps", &SpeculativeExecutionConfig::verifySteps)
+        .def("verifyBudgetPerRequest", &SpeculativeExecutionConfig::verifyBudgetPerRequest)
+        .def("validateVerifyBatchSize", &SpeculativeExecutionConfig::validateVerifyBatchSize)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1020,10 +1025,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.deterministic_draft_exact_match,
                                       self.sp_dspark_mask_token_id,
                                       self.sp_dspark_sample_from_anchor,
-                                      self.sp_dspark_verify_tokens);
+                                      self.sp_dspark_verify_tokens,
+                                      self.sp_dspark_adaptive_verify,
+                                      self.sp_dspark_verify_mode);
             },
             [](py::tuple t) {
-                if (t.size() < 10 || t.size() > 15)
+                if (t.size() < 10 || t.size() > 17)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1052,7 +1059,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.sp_dspark_sample_from_anchor = t[next_field++].cast<bool>();
                     }
                     if (t.size() >= 15) {
-                        c.sp_dspark_verify_tokens = t[next_field].cast<int64_t>();
+                        c.sp_dspark_verify_tokens = t[next_field++].cast<int64_t>();
+                    }
+                    if (t.size() >= 16) {
+                        c.sp_dspark_adaptive_verify = t[next_field++].cast<bool>();
+                    }
+                    if (t.size() >= 17) {
+                        c.sp_dspark_verify_mode = t[next_field].cast<std::string>();
                     }
                     c.verifySteps();
                 } catch (const std::exception& e) {

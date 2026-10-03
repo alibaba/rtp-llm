@@ -324,7 +324,11 @@ void top_p_renorm_probs(torch::Tensor                probs,
         return;
     }
 
-    constexpr bool deterministic  = false;
+    // The normalized target probabilities also drive speculative rejection.
+    // Float histogram atomics can move the TopP boundary even for repeated
+    // identical dense inputs. Integer mantissa accumulation keeps that boundary
+    // reproducible when verify rows are compacted or the batch shape changes.
+    constexpr bool deterministic  = true;
     const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
     auto           workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
 

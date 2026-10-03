@@ -195,4 +195,57 @@ TEST_F(AsyncRunnerTest, LaunchSyncInterleavedStress) {
     }
 }
 
+TEST_F(AsyncRunnerTest, JoinAndDrainWithoutLaunch) {
+    AsyncRunner runner(makeStream());
+    EXPECT_FALSE(runner.joinAndDrain());
+}
+
+TEST_F(AsyncRunnerTest, JoinAndDrainPreservesTaskErrorAndAllowsRecovery) {
+    AsyncRunner runner(makeStream());
+    auto        dst = torch::zeros({64}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    currentStream().synchronize();
+    runner.launch([dst] {
+        dst.fill_(7);
+        throw std::runtime_error("failure after GPU submission");
+    });
+    auto error = runner.joinAndDrain();
+    ASSERT_TRUE(error);
+    EXPECT_THROW(std::rethrow_exception(error), std::runtime_error);
+    EXPECT_TRUE(torch::equal(dst.cpu(), torch::full({64}, 7, torch::kFloat32)));
+    EXPECT_FALSE(runner.joinAndDrain());
+    runner.launch([dst] { dst.fill_(9); });
+    EXPECT_FALSE(runner.joinAndDrain());
+    EXPECT_TRUE(torch::equal(dst.cpu(), torch::full({64}, 9, torch::kFloat32)));
+}
+
+TEST_F(AsyncRunnerTest, JoinAndDrainRejectsSelfJoin) {
+    AsyncRunner runner(makeStream());
+    runner.launch([&runner] { (void)runner.joinAndDrain(); });
+    auto error = runner.joinAndDrain();
+    ASSERT_TRUE(error);
+    EXPECT_THROW(std::rethrow_exception(error), std::logic_error);
+}
+
+TEST_F(AsyncRunnerTest, UnstartedFailureCleanupIsExactlyOnce) {
+    AsyncRunner::Task task;
+    int               cleanups = 0;
+    task.on_unstarted_failure  = [&](std::exception_ptr error) {
+        EXPECT_TRUE(error);
+        ++cleanups;
+    };
+    auto error = std::make_exception_ptr(std::runtime_error("injected stream setup failure"));
+    AsyncRunner::finishUnstartedTaskFailure(task, error);
+    AsyncRunner::finishUnstartedTaskFailure(task, error);
+    EXPECT_EQ(cleanups, 1);
+    EXPECT_THROW(std::rethrow_exception(error), std::runtime_error);
+}
+
+TEST_F(AsyncRunnerTest, StartedTaskDoesNotRunUnstartedCleanup) {
+    AsyncRunner      runner(makeStream());
+    std::atomic<int> cleanups{0};
+    runner.launch([] { throw std::runtime_error("task body failure"); }, [&](std::exception_ptr) { ++cleanups; });
+    EXPECT_TRUE(runner.joinAndDrain());
+    EXPECT_EQ(cleanups.load(), 0);
+}
+
 }  // namespace rtp_llm

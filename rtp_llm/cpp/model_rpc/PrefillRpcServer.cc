@@ -418,6 +418,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
                           "skipping remote generate stages",
                           prefill_context.request_id);
         // Exit here to keep the remote load-cache completion and release ordering intact.
+        prefill_context.stat_info.nextStage();
         prefill_context.finished = true;
     }
 }

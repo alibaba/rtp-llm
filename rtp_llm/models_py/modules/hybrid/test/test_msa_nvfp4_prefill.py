@@ -38,6 +38,41 @@ class SourceContractTest(unittest.TestCase):
         )
         self.assertIn("self.nvfp4_kv_cache", text)
 
+    def test_cp_only_prepares_fmha_chunks_for_legacy_cache(self):
+        method = self.methods["_forward_cp_prefill"]
+        gates = [
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.If)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "prepare_fmha_index_score_chunks"
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+        ]
+        self.assertEqual(len(gates), 1)
+        condition = compile(ast.Expression(gates[0].test), str(SOURCE), "eval")
+        for nvfp4 in (False, True):
+            for chunk_enabled in (False, True):
+                with self.subTest(nvfp4=nvfp4, chunk_enabled=chunk_enabled):
+                    actual = eval(
+                        condition,
+                        {},
+                        {
+                            "self": SimpleNamespace(nvfp4_kv_cache=nvfp4),
+                            "index_score_chunk_enabled": chunk_enabled,
+                        },
+                    )
+                    self.assertEqual(actual, chunk_enabled and not nvfp4)
+
+        # The native reader still needs its own host metadata and chunk cache.
+        text = ast.get_source_segment(self.text, method)
+        self.assertIn("self.nvfp4_kv_cache or index_score_chunk_enabled", text)
+        self.assertIn('index_score_plan["_fp4_host_metadata"]', text)
+        self.assertIn("flash_prefill_topk_to_block_tables_fp4(", text)
+
     def test_native_only_and_explicit_physical_addressing(self):
         text = ast.get_source_segment(self.text, self.methods["_forward_nvfp4_prefill"])
         self.assertNotIn("all_gather(", text)
@@ -266,6 +301,21 @@ class NativeWrapperTest(unittest.TestCase):
 
     def test_ragged_requests_permuted_physical_pages(self):
         self.run_case([129, 259, 131], [128, 256, 0])
+
+    def test_unwritten_tail_scale_nan_does_not_poison_native_prefill(self):
+        acquire = self.module._NVFP4_WORKING_PAGES.acquire
+
+        def poison(*args, **kwargs):
+            result = acquire(*args, **kwargs)
+            result[1].view(self.torch.uint8).fill_(127)
+            result[3].view(self.torch.uint8).fill_(127)
+            return result
+
+        with patch.object(
+            self.module._NVFP4_WORKING_PAGES, "acquire", side_effect=poison
+        ):
+            self.run_case([129, 259, 131], [128, 256, 0])
+            self.run_case([129], [128])
 
     def test_sparse_selection_beyond_topk_capacity(self):
         # More than topk=4 pages ensures index selection is not an all-pages

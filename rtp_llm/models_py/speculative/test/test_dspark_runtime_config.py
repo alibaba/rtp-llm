@@ -46,8 +46,9 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 7)
         self.assertFalse(sp_config.sp_dspark_sample_from_anchor)
-        self.assertEqual(target.capture_aux_hidden_layer_ids, [1, 3])
-        self.assertEqual(target._minimax_m3_target_hidden_state_layer_ids, (1, 3))
+        self.assertEqual(target.capture_aux_hidden_layer_ids, [2, 4])
+        self.assertEqual(target._minimax_m3_target_hidden_state_layer_ids, (2, 4))
+        self.assertEqual(draft.capture_aux_hidden_layer_ids, [1, 3])
         self.assertEqual(target.hc_mult, 2)
 
     def test_factory_rejects_unordered_or_duplicate_target_layers(self):

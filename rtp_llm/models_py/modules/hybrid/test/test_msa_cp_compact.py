@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.hybrid.msa_attention import (
+    _should_use_cp_compact_prefill,
+)
 from rtp_llm.models_py.modules.hybrid.msa_cp_compact import (
     _get_compact_geometry,
     build_source_metadata,
@@ -18,6 +21,13 @@ from rtp_llm.models_py.modules.hybrid.msa_cp_compact import (
 
 
 class CompactCpMetadataTest(unittest.TestCase):
+    def test_nvfp4_never_enters_legacy_bf16_compact_route(self):
+        # This selector is shared by the CP compact-path validation, plan
+        # preparation, and execution branch in MSAAttention.
+        self.assertFalse(_should_use_cp_compact_prefill(True, True))
+        self.assertTrue(_should_use_cp_compact_prefill(True, False))
+        self.assertFalse(_should_use_cp_compact_prefill(False, False))
+
     def test_source_rows_and_suffix_offsets(self):
         metadata = build_source_metadata(
             [128, 256],

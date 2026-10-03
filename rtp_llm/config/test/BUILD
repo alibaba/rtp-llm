@@ -1,5 +1,11 @@
 
 py_test(
+    name = "minimax_m31_prefill_router_address_test",
+    srcs = ["minimax_m31_prefill_router_address_test.py"],
+    data = ["//rtp_llm/models_py/triton_kernels:triton_kernels"],
+)
+
+py_test(
     name = "model_size_test",
     srcs = ["model_size_test.py"],
     deps = ["//rtp_llm:testlib"],

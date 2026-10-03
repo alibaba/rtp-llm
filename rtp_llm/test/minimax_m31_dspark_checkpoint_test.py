@@ -35,6 +35,7 @@ def fixture():
         dspark_hybrid_context_fusion=False,
         enable_confidence_head=True,
         confidence_head_with_markov=True,
+        use_gemma_norm=True,
         dspark_target_layer_ids=[3, 17, 31, 45, 59],
         layer_types=["sliding_attention"] * 5,
         moe_layer_freq=[0] * 5,
@@ -151,6 +152,19 @@ class CheckpointSchemaTest(unittest.TestCase):
             path.write_bytes(b"bad")
             with self.assertRaisesRegex(ValueError, "truncated"):
                 checkpoint.read_safetensors_header(path)
+
+    def test_target_root_reports_nested_dspark_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text(
+                json.dumps({"architectures": ["MiniMaxM3ForCausalLM"]})
+            )
+            (root / "dspark").mkdir()
+            (root / "dspark/config.json").write_text(
+                json.dumps({"architectures": ["DSparkMiniMaxDraftModel"]})
+            )
+            with self.assertRaisesRegex(ValueError, "use the nested DSpARK checkpoint"):
+                checkpoint.inspect_checkpoint(str(root))
 
 
 if __name__ == "__main__":

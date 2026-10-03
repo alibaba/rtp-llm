@@ -33,3 +33,14 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "rtp_llm_cache_prepare_metrics_test",
+    srcs = ["RtpLLMCachePrepareMetricsTest.cc"],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ],
+)

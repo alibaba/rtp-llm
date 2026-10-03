@@ -1178,6 +1178,8 @@ class W:
     dspark_fc_w = "dspark_fc.weight"
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
+    dspark_confidence_w = "dspark_confidence.weight"
+    dspark_confidence_b = "dspark_confidence.bias"
 
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
@@ -1508,6 +1510,8 @@ class W:
         dspark_fc_w: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
+        dspark_confidence_w: sp_id,
+        dspark_confidence_b: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_aux_norm_gamma: sp_id,

@@ -93,8 +93,15 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 GreedyOutput  execSampleGreedy(const GreedyParams& params);
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities);
 torch::Tensor
-     execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
-void execReserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls);
+execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
+torch::Tensor                           execDSparkConfidence(const torch::Tensor& hidden,
+                                                             const torch::Tensor& anchors,
+                                                             const torch::Tensor& sampled_tokens,
+                                                             const torch::Tensor& markov_w1,
+                                                             const torch::Tensor& confidence_w,
+                                                             const torch::Tensor& confidence_b);
+std::pair<torch::Tensor, torch::Tensor> execDSparkVerifyPlan(const torch::Tensor& confidence, int64_t extra_budget);
+void             execReserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls);
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
@@ -114,6 +121,15 @@ AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+// Dedicated CPU control plane; never promotes metadata to CUDA. All world
+// members must participate once per engine iteration with the same epoch.
+// Returned mask: bit0 Prefill present, bit1 Decode present; zero means all idle.
+int execCpuPhaseMask(bool local_prefill, bool local_decode, int64_t epoch, int world_size);
+
+// Candidate replacement for the above control call, NOT an additional or
+// locally optional collective. Engine integration must switch every world rank
+// together. Currently exposed for CPU multiprocess validation only.
 
 // ===================================================================
 // MOE / EPLB

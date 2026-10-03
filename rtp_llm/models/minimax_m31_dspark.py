@@ -1,11 +1,7 @@
-"""Released five-layer MiniMax-M3.1 DSpARK checkpoint declarations.
-
-Candidate execution requires an explicit opt-in; training math is unverified.
-"""
+"""Released five-layer MiniMax-M3.1 DSpARK checkpoint declarations."""
 
 import json
 import logging
-import os
 from pathlib import Path
 
 from rtp_llm.config.model_config import ModelConfig
@@ -23,8 +19,8 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
 DSPARK_HIDDEN_NORM = "dspark_hidden_norm.raw_weight"
 DSPARK_FINAL_NORM = "dspark_final_norm.raw_weight"
-DSPARK_CONFIDENCE_WEIGHT = "dspark_confidence.weight"
-DSPARK_CONFIDENCE_BIAS = "dspark_confidence.bias"
+DSPARK_CONFIDENCE_WEIGHT = W.dspark_confidence_w
+DSPARK_CONFIDENCE_BIAS = W.dspark_confidence_b
 
 
 class TargetSharedDSparkWeight(AtomicWeight):
@@ -44,7 +40,7 @@ class TargetSharedDSparkWeight(AtomicWeight):
 
 
 class MiniMaxM31DSparkWeight(MiniMaxM3Weight):
-    """Map actual draft namespaces, keeping auxiliary norm scales raw."""
+    """Map draft namespaces, preserving raw Gemma weights for FP32 scaling."""
 
     def _process_meta(self, meta_dict, weight_keys):
         super()._process_meta(meta_dict, weight_keys)
@@ -65,6 +61,15 @@ class MiniMaxM31DSparkWeight(MiniMaxM3Weight):
         modules = super()._get_hf_layer_weight_info(layer_id)
         for module in modules:
             for component in module.get_components():
+                if component.name in (
+                    W.pre_ln_gamma,
+                    W.post_ln_gamma,
+                    W.q_ln_gamma,
+                    W.k_ln_gamma,
+                ):
+                    # The draft kernel adds one after converting to FP32.
+                    # Baking the offset here rounds its scale to BF16 early.
+                    component.process_fun = identity
                 for weight in getattr(component, "weights", ()) or ():
                     weight.name = weight.name.replace(
                         self.prefix + "model.layers.{i}.",
@@ -112,7 +117,6 @@ class MiniMaxM31DSpark(MiniMaxM3):
         config.dspark_markov_rank = text["dspark_markov_rank"]
         config.dspark_checkpoint_metadata = report
         config.prepacked_nvfp4_moe = False
-        config.mock_nvfp4_moe = False
         config.expert_num = 0
         config.moe_k = 0
         config.moe_style = 0
@@ -147,26 +151,31 @@ class MiniMaxM31DSpark(MiniMaxM3):
             MiniMaxM31DSparkModel,
         )
 
-        profile = os.environ.get("M31_DSPARK_CANDIDATE_MATH", "")
-        if profile != "gemma_causal_v1":
-            raise RuntimeError(
-                "MiniMax-M3.1 DSpARK training forward is not yet verified. "
-                "For explicitly provisional E2E validation only, set "
-                "M31_DSPARK_CANDIDATE_MATH=gemma_causal_v1. "
-                "This is real computation, not a mock or a production-readiness claim."
-            )
         config = self.model_config
-        if int(config.gen_num_per_cycle) != 7 or not config.dspark_sample_from_anchor:
+        metadata = config.dspark_checkpoint_metadata
+        block_size = int(metadata["block_size"])
+        sliding_window = int(metadata["sliding_window"])
+        layer_types = metadata["layer_types"]
+        use_gemma_norm = bool(metadata["use_gemma_norm"])
+        if (
+            int(config.gen_num_per_cycle) != block_size
+            or not config.dspark_sample_from_anchor
+        ):
             raise ValueError(
-                "gemma_causal_v1 requires gamma=7 and dspark_sample_from_anchor=true"
+                "MiniMax-M3.1 DSpARK requires GEN_NUM_PER_CIRCLE to match "
+                "checkpoint dspark_block_size and sp_dspark_sample_from_anchor=true"
             )
-        logging.warning(
-            "M31 DSPARK CANDIDATE math=%s: hidden/final RMSNorm weight+1; "
-            "FC then one hidden_norm; causal query; window_left=4095; "
-            "gamma=7 includes anchor logit; target capture IDs=%s use existing RTP "
-            "capture boundaries without shift; confidence head loaded but unused "
-            "with fixed-width verification. Training alignment is UNVERIFIED.",
-            profile,
+        if layer_types != ["sliding_attention"] * 5:
+            raise ValueError(
+                "MiniMax-M3.1 DSpARK requires five sliding-attention layers"
+            )
+        if not use_gemma_norm:
+            raise ValueError("MiniMax-M3.1 DSpARK requires Gemma RMSNorm semantics")
+        logging.info(
+            "M31 DSPARK reference math: Gemma RMSNorm; non-causal query; "
+            "sliding_window=%d; gamma=%d includes anchor logit; target capture IDs=%s",
+            sliding_window,
+            block_size,
             config.dspark_target_layer_ids,
         )
         self.py_model = MiniMaxM31DSparkModel(
@@ -181,8 +190,10 @@ class MiniMaxM31DSpark(MiniMaxM3):
             math_contract=MiniMaxM31DSparkMath(
                 hidden_norm_gemma=True,
                 final_norm_gemma=True,
-                causal_query=True,
-                window_left=4095,
+                # Training demo MiniMaxDSparkAttention is ENCODER_ONLY:
+                # query tokens can attend later query tokens within the SWA.
+                causal_query=False,
+                window_left=sliding_window - 1,
             ),
         )
 

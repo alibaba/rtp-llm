@@ -193,30 +193,49 @@ void processLogits(const GreedyParams&  params,
 }  // anonymous namespace
 
 static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens) {
-    const auto batch_size = params.logits.size(0);
+    const auto  dense_batch_size = params.logits.size(0);
+    const auto& rows             = params.sample_rows;
+    const bool  compact          = rows.defined();
+    if (compact) {
+        TORCH_CHECK(rows.device() == params.logits.device() && rows.scalar_type() == torch::kLong && rows.dim() == 1
+                        && rows.is_contiguous() && rows.numel() > 0 && rows.numel() <= dense_batch_size
+                        && params.output_all_probs.has_value() && !params.cum_log_probs.has_value()
+                        && !params.output_log_probs.has_value(),
+                    "compact verify sampling requires CUDA int64 live rows and dense probabilities, without logprobs");
+    }
+    const auto batch_size = compact ? rows.numel() : dense_batch_size;
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
     // [batch_size, vocab_size] — compute softmax probabilities.
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
-    auto probs_t = torch::softmax(params.logits, -1);
-    params.logits.copy_(probs_t, true);
+    auto probs_t = torch::softmax(compact ? params.logits.index_select(0, rows) : params.logits, -1);
+    if (compact) {
+        params.logits.index_copy_(0, rows, probs_t);
+    } else {
+        params.logits.copy_(probs_t, true);
+    }
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
 
     // [1, batch_size] — last row of transposed_tokens
-    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
+    auto dense_samples = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
+    auto samples_t     = compact ? torch::empty({1, batch_size}, dense_samples.options()) : dense_samples;
 
     constexpr bool deterministic       = true;
     constexpr int  max_sampling_rounds = 32;
     auto [seed_t, offset_t]            = makeSamplingSeedOffsetTensors(
-        params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+        params.generator, dense_batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+    if (compact) {
+        seed_t   = seed_t.index_select(0, rows);
+        offset_t = offset_t.index_select(0, rows);
+    }
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
     torch::Tensor top_p_t   = params.top_p;
     torch::Tensor output_all_probs_t;
     if (params.output_all_probs.has_value()) {
-        output_all_probs_t = params.output_all_probs.value();
+        output_all_probs_t = compact ? torch::empty_like(probs_t) : params.output_all_probs.value();
     }
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
         output_all_probs_t = torch::zeros_like(probs_t);
@@ -226,11 +245,22 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
-    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
-    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+    std::transform(
+        top_p_ptr, top_p_ptr + dense_batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
+    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + dense_batch_size, [](auto t) { return t == 1; });
+    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + dense_batch_size, [](auto t) { return t <= 0; });
     const bool all_top_p_one =
-        std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
+        std::all_of(top_p_ptr, top_p_ptr + dense_batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
+    if (compact) {
+        top_p_t = params.top_p.to(torch::kCUDA, true).index_select(0, rows);
+        // Normalize no-limit values before selecting GPU row parameters; the
+        // mixed top-k/top-p branch performs the same normalization below.
+        if (!all_top_k_one && !all_top_k_no_limit) {
+            std::transform(
+                top_k_ptr, top_k_ptr + dense_batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+        }
+        top_k_t = params.top_k.to(torch::kCUDA, true).index_select(0, rows);
+    }
 
     bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
 
@@ -261,7 +291,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
         // kernel takes a top_k array, so normalize mixed batches after the
         // pure top-p route has been selected.
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+        std::transform(top_k_ptr, top_k_ptr + dense_batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
         if (all_top_p_one) {
             top_k_sampling_from_probs(probs_t,
                                       samples_t.squeeze(0),
@@ -313,6 +343,22 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         auto token_probs_t     = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
         auto token_probs_t_log = token_probs_t.log();
         cum_log_probs_t.add_(token_probs_t_log.to(cum_log_probs_t.device()));
+    }
+
+    if (compact) {
+        // Skipped rows are outside the committed verify prefix. Use a valid
+        // one-hot placeholder so the dense rejection kernel cannot encounter
+        // an all-zero residual distribution before the acceptance cap is applied.
+        params.output_all_probs.value().zero_();
+        params.output_all_probs.value().select(1, 0).fill_(1.0f);
+        params.output_all_probs.value().index_copy_(0, rows, output_all_probs_t);
+        dense_samples.zero_();
+        dense_samples.index_copy_(1, rows, samples_t);
+        if (success.defined()) {
+            auto dense_success = torch::ones({dense_batch_size}, success.options());
+            dense_success.index_copy_(0, rows, success);
+            success = std::move(dense_success);
+        }
     }
 
     // Copy results back: transpose and copy to token_ids
@@ -424,6 +470,76 @@ combineDSparkLogits(const torch::Tensor& base, const torch::Tensor& bias, const 
     return output;
 }
 
+torch::Tensor dsparkConfidence(const torch::Tensor& hidden,
+                               const torch::Tensor& anchors,
+                               const torch::Tensor& sampled_tokens,
+                               const torch::Tensor& markov_w1,
+                               const torch::Tensor& confidence_w,
+                               const torch::Tensor& confidence_b) {
+    TORCH_CHECK(hidden.is_cuda() && hidden.scalar_type() == torch::kBFloat16 && hidden.is_contiguous()
+                    && hidden.dim() == 2,
+                "DSpark confidence hidden must be contiguous CUDA BF16 [B*gamma,H]");
+    TORCH_CHECK(anchors.device() == hidden.device() && anchors.scalar_type() == torch::kInt32 && anchors.is_contiguous()
+                    && anchors.dim() == 1,
+                "DSpark confidence anchors must be contiguous CUDA INT32 [B]");
+    TORCH_CHECK(sampled_tokens.device() == hidden.device() && sampled_tokens.scalar_type() == torch::kInt32
+                    && sampled_tokens.is_contiguous() && sampled_tokens.dim() == 2
+                    && sampled_tokens.size(0) == anchors.numel() && sampled_tokens.numel() == hidden.size(0),
+                "DSpark confidence sampled tokens must be contiguous CUDA INT32 [B,gamma]");
+    TORCH_CHECK(markov_w1.device() == hidden.device() && markov_w1.scalar_type() == torch::kBFloat16
+                    && markov_w1.is_contiguous() && markov_w1.dim() == 2,
+                "DSpark confidence Markov embedding must be contiguous CUDA BF16 [vocab,rank]");
+    TORCH_CHECK(confidence_w.device() == hidden.device() && confidence_w.scalar_type() == torch::kBFloat16
+                    && confidence_w.is_contiguous() && confidence_w.numel() == hidden.size(1) + markov_w1.size(1)
+                    && confidence_b.device() == hidden.device() && confidence_b.scalar_type() == torch::kBFloat16
+                    && confidence_b.is_contiguous() && confidence_b.numel() == 1,
+                "DSpark confidence weights must be contiguous CUDA BF16 [H+rank] and [1]");
+
+    c10::cuda::CUDAGuard device_guard(hidden.device());
+    auto output = torch::empty({anchors.numel(), sampled_tokens.size(1)}, hidden.options().dtype(torch::kFloat32));
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    auto status = invokeDSparkConfidence(reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr<at::BFloat16>()),
+                                         anchors.data_ptr<int32_t>(),
+                                         sampled_tokens.data_ptr<int32_t>(),
+                                         reinterpret_cast<const __nv_bfloat16*>(markov_w1.data_ptr<at::BFloat16>()),
+                                         reinterpret_cast<const __nv_bfloat16*>(confidence_w.data_ptr<at::BFloat16>()),
+                                         reinterpret_cast<const __nv_bfloat16*>(confidence_b.data_ptr<at::BFloat16>()),
+                                         output.data_ptr<float>(),
+                                         anchors.numel(),
+                                         sampled_tokens.size(1),
+                                         hidden.size(1),
+                                         markov_w1.size(1),
+                                         stream);
+    TORCH_CHECK(status == cudaSuccess, "DSpark confidence kernel: ", cudaGetErrorString(status));
+    return output;
+}
+
+std::pair<torch::Tensor, torch::Tensor> dsparkVerifyPlan(const torch::Tensor& confidence, int64_t extra_budget) {
+    TORCH_CHECK(confidence.is_cuda() && confidence.scalar_type() == torch::kFloat32 && confidence.is_contiguous()
+                    && confidence.dim() == 2,
+                "DSpARK verify planner requires contiguous CUDA FP32 [batch,gamma] confidence");
+    const int64_t batch = confidence.size(0);
+    const int64_t gamma = confidence.size(1);
+    TORCH_CHECK(batch <= 256 && batch * gamma <= 1024,
+                "DSpARK verify planner supports batch<=256 and batch*gamma<=1024");
+    TORCH_CHECK(extra_budget >= 0 && extra_budget <= batch * gamma,
+                "DSpARK verify planner extra budget must be in [0,batch*gamma]");
+
+    c10::cuda::CUDAGuard device_guard(confidence.device());
+    auto                 lengths = torch::empty({batch}, confidence.options().dtype(torch::kInt32));
+    auto                 mapping = torch::empty({batch + extra_budget}, confidence.options().dtype(torch::kInt32));
+    auto                 stream  = at::cuda::getCurrentCUDAStream().stream();
+    auto                 status  = invokeDSparkVerifyPlan(confidence.data_ptr<float>(),
+                                         lengths.data_ptr<int32_t>(),
+                                         mapping.data_ptr<int32_t>(),
+                                         batch,
+                                         gamma,
+                                         extra_budget,
+                                         stream);
+    TORCH_CHECK(status == cudaSuccess, "DSpARK verify planner kernel: ", cudaGetErrorString(status));
+    return {std::move(lengths), std::move(mapping)};
+}
+
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
                                 && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
@@ -475,21 +591,48 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
     RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
 
-    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
-                                             params.draft_token_ids_d.data_ptr<int32_t>(),
-                                             params.uniform_samples_d.data_ptr<float>(),
-                                             params.target_probs_d.data_ptr<float>(),
-                                             params.target_token_ids_d.data_ptr<int32_t>(),
-                                             target_token_stride,
-                                             params.output_token_ids_d.data_ptr<int32_t>(),
-                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                             params.do_sample_d.data_ptr<bool>(),
-                                             params.deterministic_draft,
-                                             batch_size,
-                                             num_speculative_tokens,
-                                             target_vocab_size,
-                                             stream,
-                                             params.sampled_draft));
+    if (params.success_d.defined()) {
+        RTP_LLM_CHECK(params.validation_workspace_d.defined() && params.validation_workspace_d.is_cuda()
+                      && params.validation_workspace_d.device() == params.target_probs_d.device()
+                      && params.validation_workspace_d.scalar_type() == torch::kFloat32
+                      && params.validation_workspace_d.is_contiguous()
+                      && params.validation_workspace_d.numel() >= rejectionValidationWorkspaceElements(
+                             batch_size, num_speculative_tokens, target_vocab_size));
+        RTP_LLM_CHECK(params.success_d.is_cuda() && params.success_d.is_contiguous()
+                      && params.success_d.scalar_type() == torch::kBool && params.success_d.numel() == batch_size);
+        RTP_LLM_CHECK(params.draft_probs_d.is_contiguous() && params.target_probs_d.is_contiguous());
+        if (params.target_success_d.defined()) {
+            RTP_LLM_CHECK(params.target_success_d.is_cuda() && params.target_success_d.is_contiguous()
+                          && params.target_success_d.scalar_type() == torch::kBool
+                          && params.target_success_d.numel() == batch_size * (num_speculative_tokens + 1));
+        }
+        if (params.active_verify_lengths_d.defined()) {
+            RTP_LLM_CHECK(params.active_verify_lengths_d.is_cuda() && params.active_verify_lengths_d.is_contiguous()
+                          && params.active_verify_lengths_d.scalar_type() == torch::kInt32
+                          && params.active_verify_lengths_d.numel() == batch_size);
+        }
+    }
+
+    check_cuda_value(invokeRejectionSampling(
+        params.draft_probs_d.data_ptr<float>(),
+        params.draft_token_ids_d.data_ptr<int32_t>(),
+        params.uniform_samples_d.data_ptr<float>(),
+        params.target_probs_d.data_ptr<float>(),
+        params.target_token_ids_d.data_ptr<int32_t>(),
+        target_token_stride,
+        params.output_token_ids_d.data_ptr<int32_t>(),
+        params.output_accepted_token_num_d.data_ptr<int32_t>(),
+        params.do_sample_d.data_ptr<bool>(),
+        params.deterministic_draft,
+        batch_size,
+        num_speculative_tokens,
+        target_vocab_size,
+        stream,
+        params.sampled_draft,
+        params.success_d.defined() ? params.success_d.data_ptr<bool>() : nullptr,
+        params.target_success_d.defined() ? params.target_success_d.data_ptr<bool>() : nullptr,
+        params.active_verify_lengths_d.defined() ? params.active_verify_lengths_d.data_ptr<int>() : nullptr,
+        params.validation_workspace_d.defined() ? params.validation_workspace_d.data_ptr<float>() : nullptr));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
@@ -842,6 +985,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     int  target_token_stride    = params.target_token_ids_d.size(1);
     auto stream                 = at::hip::getCurrentHIPStream().stream();
     RTP_LLM_CHECK_WITH_INFO(!params.sampled_draft, "sampled-draft rejection sampling requires the CUDA backend");
+    RTP_LLM_CHECK_WITH_INFO(!params.success_d.defined(), "DSpARK fail-closed rejection requires the CUDA backend");
 
     RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);

@@ -296,7 +296,28 @@ public:
 
 class RtpLLMSchedulerCacheStallMetricsCollector final {
 public:
-    int64_t cache_exposed_wait_us = 0;
+    int64_t cache_exposed_wait_us       = 0;
+    int64_t cache_exposed_wait_total_us = 0;
+    int64_t cache_exposed_wait_count    = 0;
+};
+
+// Low-cardinality stage tags distinguish the parts of asynchronous cache preparation.
+class RtpLLMCachePrepareStageMetricsCollector final {
+public:
+    int64_t latency_us = 0;
+};
+
+class RtpLLMCachePrepareStageMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCachePrepareStageMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* latency_us_metric = nullptr;
+    kmonitor::MutableMetric* event_qps_metric  = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -306,11 +327,13 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerCacheStallMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* cache_exposed_wait_us_metric      = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_us_metric       = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_total_us_metric = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_count_metric    = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -318,7 +341,8 @@ private:
 
 class RtpLLMEngineMetricsCollector final {
 public:
-    int64_t step_latency_us = 0;
+    int64_t step_latency_us     = 0;
+    int64_t schedule_latency_us = 0;
 };
 
 class RtpLLMEngineMetrics: public kmonitor::MetricsGroup {
@@ -327,7 +351,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric     = nullptr;
+    kmonitor::MutableMetric* schedule_latency_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

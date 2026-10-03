@@ -58,7 +58,8 @@ private:
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
-    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool batch_prefill_required = false);
+    bool needsBatchPhaseAgreement();
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -85,7 +86,8 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
-    int                                           reserve_step_ = 0;
+    int                                           reserve_step_      = 0;
+    int64_t                                       batch_phase_epoch_ = 0;
 };
 
 }  // namespace rtp_llm

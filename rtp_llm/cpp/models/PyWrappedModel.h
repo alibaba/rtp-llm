@@ -85,11 +85,10 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    void            drainPendingCacheStore() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     bool            supportsMtpTargetHiddenStates() override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
-    torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
     void            selectMtpIterationTopkCache(const torch::Tensor& select_indices, int64_t total_tokens) override;
     void            copyMtpIterationTopkCacheFrom(const ModelBase& source) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
@@ -393,12 +392,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
 
-        const int64_t verify_steps = params.sp_config.verifySteps();
+        const int64_t verify_steps         = params.sp_config.verifySteps();
+        const bool    adaptive_dspark      = params.sp_config.isAdaptiveVerify();
+        const int64_t compact_verify_steps = adaptive_dspark ? params.sp_config.verifyBudgetPerRequest() : verify_steps;
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
             graph_params.num_tokens_per_bs =
                 params.sp_config.gen_num_per_cycle + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
-            graph_params.num_tokens_per_bs = verify_steps + 1;
+            // The adaptive planner fixes the packed total at
+            // B * (budget + 1), while each request may contribute a different
+            // number of rows. Commit consumes that same packed layout.
+            graph_params.num_tokens_per_bs = compact_verify_steps + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
@@ -407,7 +411,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             // for target model verify and draft model prefill
             // Only use multi-token capture when SP is actually enabled;
             // gen_num_per_cycle may be >1 from config even when SP is disabled.
-            graph_params.num_tokens_per_bs = (params.model_id ? params.sp_config.gen_num_per_cycle : verify_steps) + 1;
+            graph_params.num_tokens_per_bs =
+                (params.model_id ? params.sp_config.gen_num_per_cycle : compact_verify_steps) + 1;
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
@@ -422,6 +427,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify =
             dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
+        graph_params.is_ragged_target_verify = adaptive_dspark && is_target_verify_decode;
+        if (graph_params.is_ragged_target_verify) {
+            // A token tier alone does not identify request-slot geometry.
+            // Until graph keys carry both capacities, only replay an exact
+            // request-count bucket; a missing bucket safely runs eager.
+            graph_params.require_exact_decode_geometry = true;
+        }
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = (dspark_model_role_ == DSparkModelRole::PROPOSE
                                      || (params.model_id && dspark_model_role_ != DSparkModelRole::COMMIT)) ?

@@ -697,6 +697,19 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testAsyncPrepareDoesNotPublishOutOfOrderComp
     EXPECT_EQ(ready->front(), first);
     EXPECT_FALSE(scheduler->cache_exposed_wait_active_);
     EXPECT_GT(scheduler->cache_exposed_wait_us_total_, 0);
+    EXPECT_EQ(scheduler->cache_exposed_wait_count_, 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testImmediateDoneLoadPreparesInFirstPass) {
+    setupMockCoordinator();
+    auto done_ctx = createDoneAsyncContext();
+    EXPECT_CALL(*done_ctx, waitDone()).Times(1);
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
+
+    auto stream = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    EXPECT_EQ(stream->prepareCache(), CachePrepareResult::DONE);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::CachePrepared));
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testNextPrepareOverlapsCurrentGpuRound) {

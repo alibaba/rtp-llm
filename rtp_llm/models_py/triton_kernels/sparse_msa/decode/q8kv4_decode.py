@@ -142,6 +142,22 @@ def _scale1_e4m3(values: torch.Tensor, name: str, out: torch.Tensor) -> torch.Te
     return out
 
 
+def _logical_decode_block_table(
+    block_table: torch.Tensor, block_size: int, max_seq_len: int | None
+) -> torch.Tensor:
+    # Graph metadata reserves extra speculative columns beyond the model's
+    # logical context limit. Native TopK supports 8192 live pages, not those
+    # unused capacity columns. Keep the strided view: no copy or device sync.
+    if block_table.shape[1] <= 8192 or max_seq_len is None:
+        return block_table
+    if max_seq_len <= 0:
+        raise ValueError("max_seq_len must be positive")
+    logical_blocks = (max_seq_len + block_size - 1) // block_size
+    if logical_blocks > 8192:
+        raise ValueError("Q8KV4 decode supports at most 8192 logical pages")
+    return block_table[:, :logical_blocks]
+
+
 @torch.no_grad()
 def q8kv4_paged_sparse_decode(
     q: torch.Tensor,
@@ -160,8 +176,11 @@ def q8kv4_paged_sparse_decode(
     idx_sm_scale: float | None = None,
     mma_scale_layout: bool = False,
     query_width: int = 1,
+    query_cu_seqlens: torch.Tensor | None = None,
+    max_query_width: int = 1,
     fuse_bf16_query_rounding: bool = False,
     valid_token_mask: torch.Tensor | None = None,
+    max_seq_len: int | None = None,
 ) -> Q8KV4DecodeResult:
     """Run RTP Q8KV4 decode or grouped target verification.
 
@@ -174,6 +193,10 @@ def q8kv4_paged_sparse_decode(
     scale-1 copy, preserving the unrounded input carriers. Only MSA callers
     that previously pre-rounded both queries should opt in. The default keeps
     PyTorch conversion semantics for direct BF16/FP16/FP32 callers.
+
+    max_seq_len is the enforced model context limit, not the Graph allocation
+    capacity. Callers supplying it must guarantee every live seq_len is within
+    that limit. It removes only speculative reserve columns above 8192 pages.
     """
     if fuse_bf16_query_rounding and (
         q.dtype != torch.bfloat16 or idx_q.dtype != torch.bfloat16
@@ -198,6 +221,7 @@ def q8kv4_paged_sparse_decode(
         raise ValueError("seq_lens must be int32 [batch]")
     if query_width < 1 or q.shape[0] % query_width:
         raise ValueError("query_width must be positive and divide the token batch")
+    block_table = _logical_decode_block_table(block_table, block_size, max_seq_len)
     max_blocks = int(block_table.shape[1])
     target_chunks = max(
         1,
@@ -218,11 +242,20 @@ def q8kv4_paged_sparse_decode(
     logical = layout.logical_views(indexer_dim)
     score_fn = q8kv4_index_score
     score_options = {}
-    if 2 <= query_width <= 16 and idx_q.shape[1] == 4:
-        from .nvfp4_q8_grouped_index_score import q8kv4_grouped_index_score
+    if idx_q.shape[1] == 4:
+        if query_cu_seqlens is not None:
+            from .nvfp4_q8_grouped_index_score import q8kv4_ragged_grouped_index_score
 
-        score_fn = q8kv4_grouped_index_score
-        score_options["query_width"] = query_width
+            score_fn = q8kv4_ragged_grouped_index_score
+            score_options.update(
+                cu_seqlens=query_cu_seqlens,
+                max_query_width=max_query_width,
+            )
+        elif 2 <= query_width <= 16:
+            from .nvfp4_q8_grouped_index_score import q8kv4_grouped_index_score
+
+            score_fn = q8kv4_grouped_index_score
+            score_options["query_width"] = query_width
     index_scores = score_fn(
         idx_q8,
         logical.idx_k_fp4,

@@ -1,5 +1,8 @@
 
 #include "gtest/gtest.h"
+#include <chrono>
+#include <future>
+#include <atomic>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -35,6 +38,27 @@ public:
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
+
+    GenerateStreamPtr createCachedContextStream(const std::shared_ptr<KVCacheManager>& manager) {
+        auto input                             = std::make_shared<GenerateInput>();
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->reuse_cache    = false;
+        input->generate_config->max_new_tokens = 16;
+        input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
+        auto model                             = model_config_;
+        model.vocab_size                       = 100;
+        model.special_tokens.eos_token_id      = 99;
+        model.attn_config.tokens_per_block     = 2;
+        ResourceContext context;
+        context.cache_manager = manager;
+        context.reuse_cache   = false;
+        auto stream           = std::make_shared<NormalGenerateStream>(input, model, runtime_config_, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto speculative_output          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        speculative_output->tokens       = torch::zeros({2}, torch::kInt32);
+        stream->setSPOutputBuffer(speculative_output);
+        return stream;
+    }
 
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
@@ -210,6 +234,108 @@ TEST_F(GenerateStreamTest, testPendingGenerateDoneRejectsStaleUpdates) {
         EXPECT_EQ(stream->seqLength(), length);
         EXPECT_EQ(normal->generate_outputs_queue_.getSize(), queued);
     }
+}
+
+TEST_F(GenerateStreamTest, KvExecutionOwnsResourceBeforeBookkeepingRegistration) {
+    auto manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 4, 2, TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto stream = GenerateStreamBuilder().createCachedContextStream(manager);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    stream->incPendingAsyncBookkeeping();
+    stream->specUpdate({torch::tensor({{99}}, torch::kInt32), 1, -1, {}, {}});
+    stream->moveToNext();
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(manager->freeBlocksNum(), 2);
+    EXPECT_FALSE(stream->tryAcquireKvExecution());
+    bool completed = false;
+    stream->finishKvExecution(1, [&] { completed = true; });
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(manager->freeBlocksNum(), 3);
+    stream->releaseResource();
+    EXPECT_EQ(manager->freeBlocksNum(), 3);
+}
+
+TEST_F(GenerateStreamTest, KvCompletionWaitDoesNotHoldStreamLockAndReleaseIsIdempotent) {
+    auto manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 4, 2, TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto stream = GenerateStreamBuilder().createCachedContextStream(manager);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "test cancellation");
+    stream->moveToNext();
+    std::promise<void> permit_completion;
+    auto               permit = permit_completion.get_future().share();
+    std::promise<void> fence_entered;
+    auto               entered = fence_entered.get_future();
+    auto               finish  = std::async(std::launch::async, [&] {
+        stream->finishKvExecution(1, [&] {
+            fence_entered.set_value();
+            if (permit.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+                throw std::runtime_error("bounded completion test timeout");
+            }
+        });
+    });
+    EXPECT_EQ(entered.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_FALSE(stream->tryAcquireKvExecution());  // proves wait does not own mutex_
+    EXPECT_EQ(manager->freeBlocksNum(), 2);
+    auto second_release = std::async(std::launch::async, [&] { stream->releaseResource(); });
+    EXPECT_EQ(second_release.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    permit_completion.set_value();
+    finish.get();
+    second_release.get();
+    EXPECT_EQ(manager->freeBlocksNum(), 3);
+}
+
+TEST_F(GenerateStreamTest, KvCompletionFailureRetainsBlocksWithoutRetry) {
+    auto manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 4, 2, TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto stream = GenerateStreamBuilder().createCachedContextStream(manager);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    int waits = 0;
+    stream->finishKvExecution(1, [&] {
+        ++waits;
+        throw std::runtime_error("injected completion failure");
+    });
+    stream->releaseResource();
+    stream->releaseResource();
+    EXPECT_EQ(waits, 1);
+    EXPECT_EQ(manager->freeBlocksNum(), 2);
+    EXPECT_FALSE(stream->tryAcquireKvExecution());
+}
+
+TEST_F(GenerateStreamTest, KvLatestSameProducerFenceDominatesButOtherProducerRemains) {
+    auto manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 4, 2, TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto stream = GenerateStreamBuilder().createCachedContextStream(manager);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    int old_waits = 0, latest_waits = 0, worker_waits = 0;
+    stream->finishKvExecution(1, [&] { ++old_waits; });
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    stream->publishKvCompletionFence(2, [&] { ++worker_waits; });
+    stream->finishKvExecution(1, [&] { ++latest_waits; });
+    stream->releaseResource();
+    EXPECT_EQ(old_waits, 0);
+    EXPECT_EQ(latest_waits, 1);
+    EXPECT_EQ(worker_waits, 1);
+    EXPECT_EQ(manager->freeBlocksNum(), 3);
+}
+
+TEST_F(GenerateStreamTest, KvQuarantineRetainsBlocksWithoutAllocatingAnotherFence) {
+    auto manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 4, 2, TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto stream = GenerateStreamBuilder().createCachedContextStream(manager);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryAcquireKvExecution());
+    stream->quarantineKvExecution();
+    EXPECT_FALSE(stream->tryAcquireKvExecution());
+    stream->finishKvExecution(1);
+    stream->releaseResource();
+    EXPECT_EQ(manager->freeBlocksNum(), 2);
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

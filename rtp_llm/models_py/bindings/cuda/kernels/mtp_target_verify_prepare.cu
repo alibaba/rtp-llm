@@ -61,6 +61,51 @@ __global__ void mtpMsaTargetVerifyAddressingPrepareKernel(const int32_t* __restr
     }
 }
 
+__global__ void mtpMsaTargetVerifyRaggedAddressingPrepareKernel(const int32_t* __restrict__ request_block_table,
+                                                                const int32_t* __restrict__ prefix_lengths,
+                                                                const int32_t* __restrict__ cu_seqlens,
+                                                                int32_t* __restrict__ physical_block_table,
+                                                                int32_t* __restrict__ positions,
+                                                                int32_t* __restrict__ sequence_lengths,
+                                                                bool* __restrict__ valid_token_mask,
+                                                                int64_t request_block_stride,
+                                                                int32_t batch_size,
+                                                                int32_t max_blocks,
+                                                                int32_t total_tokens) {
+    const int64_t linear_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t work_items = static_cast<int64_t>(total_tokens) * max_blocks;
+    if (linear_idx >= work_items) {
+        return;
+    }
+
+    const int32_t token_row = static_cast<int32_t>(linear_idx / max_blocks);
+    const int32_t block_idx = static_cast<int32_t>(linear_idx - static_cast<int64_t>(token_row) * max_blocks);
+
+    // Find the first request whose exclusive packed-row end is greater than
+    // token_row. Empty request ranges are skipped naturally.
+    int32_t lo = 0;
+    int32_t hi = batch_size;
+    while (lo < hi) {
+        const int32_t mid = lo + ((hi - lo) >> 1);
+        if (cu_seqlens[mid + 1] <= token_row) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const int32_t request_idx = lo;
+    const int32_t token_idx   = token_row - cu_seqlens[request_idx];
+    physical_block_table[linear_idx] =
+        request_block_table[static_cast<int64_t>(request_idx) * request_block_stride + block_idx];
+
+    if (block_idx == 0) {
+        const int32_t position      = prefix_lengths[request_idx] + token_idx;
+        positions[token_row]        = position;
+        sequence_lengths[token_row] = position + 1;
+        valid_token_mask[token_row] = true;
+    }
+}
+
 __global__ void mtpSpecDecodeMetadataPrepareKernel(int32_t* __restrict__ input_lengths,
                                                    int32_t* __restrict__ lm_output_indexes,
                                                    int32_t tokens_per_batch,
@@ -242,6 +287,70 @@ std::vector<torch::Tensor> mtpMsaTargetVerifyAddressingPrepare(const torch::Tens
     const auto launch_error = cudaGetLastError();
     TORCH_CHECK(launch_error == cudaSuccess,
                 "MTP MSA target-verify addressing kernel launch failed: ",
+                cudaGetErrorString(launch_error));
+    return {physical_block_table, positions, sequence_lengths, valid_token_mask};
+}
+
+std::vector<torch::Tensor> mtpMsaTargetVerifyRaggedAddressingPrepare(const torch::Tensor& request_block_table,
+                                                                     const torch::Tensor& prefix_lengths,
+                                                                     const torch::Tensor& cu_seqlens,
+                                                                     int64_t              total_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(request_block_table.defined() && request_block_table.is_cuda(),
+                            "request_block_table must be CUDA");
+    RTP_LLM_CHECK_WITH_INFO(request_block_table.scalar_type() == torch::kInt32, "request_block_table must be int32");
+    RTP_LLM_CHECK_WITH_INFO(request_block_table.dim() == 2, "request_block_table must be rank 2");
+    RTP_LLM_CHECK_WITH_INFO(request_block_table.stride(1) == 1,
+                            "request_block_table inner dimension must be contiguous");
+
+    const int64_t batch_size = request_block_table.size(0);
+    const int64_t max_blocks = request_block_table.size(1);
+    RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && batch_size <= INT32_MAX,
+                            "request_block_table batch must be in int32 range");
+    RTP_LLM_CHECK_WITH_INFO(max_blocks > 0 && max_blocks <= INT32_MAX,
+                            "request_block_table width must be in int32 range");
+    RTP_LLM_CHECK_WITH_INFO(
+        total_tokens > 0 && total_tokens <= INT32_MAX, "total_tokens must be in int32 range, got %ld", total_tokens);
+    checkCudaI32Vector(prefix_lengths, "prefix_lengths", batch_size);
+    checkCudaI32Vector(cu_seqlens, "cu_seqlens", batch_size + 1);
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths.numel() == batch_size,
+                            "prefix_lengths numel %ld must equal batch_size %ld",
+                            prefix_lengths.numel(),
+                            batch_size);
+    RTP_LLM_CHECK_WITH_INFO(cu_seqlens.numel() == batch_size + 1,
+                            "cu_seqlens numel %ld must equal batch_size + 1 (%ld)",
+                            cu_seqlens.numel(),
+                            batch_size + 1);
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths.get_device() == request_block_table.get_device()
+                                && cu_seqlens.get_device() == request_block_table.get_device(),
+                            "all addressing tensors must be on the same CUDA device");
+
+    const int64_t work_items = total_tokens * max_blocks;
+    constexpr int block_size = 256;
+    RTP_LLM_CHECK_WITH_INFO((work_items + block_size - 1) / block_size <= INT32_MAX,
+                            "ragged MSA addressing launch grid exceeds int32 bounds");
+    const c10::cuda::CUDAGuard device_guard(request_block_table.device());
+    auto physical_block_table = torch::empty({total_tokens, max_blocks}, request_block_table.options());
+    auto positions            = torch::empty({total_tokens}, prefix_lengths.options());
+    auto sequence_lengths     = torch::empty({total_tokens}, prefix_lengths.options());
+    auto valid_token_mask     = torch::empty({total_tokens}, prefix_lengths.options().dtype(torch::kBool));
+
+    const int          grid_size = static_cast<int>((work_items + block_size - 1) / block_size);
+    const cudaStream_t stream    = at::cuda::getCurrentCUDAStream(request_block_table.get_device()).stream();
+    mtpMsaTargetVerifyRaggedAddressingPrepareKernel<<<grid_size, block_size, 0, stream>>>(
+        request_block_table.data_ptr<int32_t>(),
+        prefix_lengths.data_ptr<int32_t>(),
+        cu_seqlens.data_ptr<int32_t>(),
+        physical_block_table.data_ptr<int32_t>(),
+        positions.data_ptr<int32_t>(),
+        sequence_lengths.data_ptr<int32_t>(),
+        valid_token_mask.data_ptr<bool>(),
+        request_block_table.stride(0),
+        static_cast<int32_t>(batch_size),
+        static_cast<int32_t>(max_blocks),
+        static_cast<int32_t>(total_tokens));
+    const auto launch_error = cudaGetLastError();
+    TORCH_CHECK(launch_error == cudaSuccess,
+                "ragged MSA target-verify addressing kernel launch failed: ",
                 cudaGetErrorString(launch_error));
     return {physical_block_table, positions, sequence_lengths, valid_token_mask};
 }

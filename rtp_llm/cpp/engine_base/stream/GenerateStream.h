@@ -16,10 +16,12 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -274,6 +276,8 @@ public:
     }
     StreamState        moveToNext();
     CachePrepareResult prepareCache();
+    void               markCachePrepareEnqueued();
+    void               reportCachePrepareAdmitted();
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
@@ -529,6 +533,19 @@ public:
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
 
+    // Execution ownership is separate from CPU bookkeeping: a caller waiting
+    // for the previous worker must not wait for its own current-round lease.
+    bool tryAcquireKvExecution();
+    void finishKvExecution(uint64_t producer, std::function<void()> wait_for_completion = {});
+    void publishKvCompletionFence(uint64_t producer, std::function<void()> wait_for_completion);
+    bool kvExecutionProtected() const;
+    // Completion could not be established: close admission and retain physical
+    // blocks even if allocating/publishing another fence also fails.
+    void quarantineKvExecution();
+    // State-machine callers already hold mutex_; request only, never GPU-wait.
+    void requestKvReleaseLocked();
+    void tryFinalizeKvResourceRelease();
+
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
     // next_seq_len, propose_tokens; epoch guards stale clears in tests.
@@ -709,6 +726,9 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    void           reportCachePrepareStage(const char* stage, int64_t latency_us) const;
+    static int64_t steadyTimeUs();
+
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
@@ -723,6 +743,24 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
+    struct CachePrepareTimeline {
+        std::atomic<int64_t> enqueued_us{0};
+        std::atomic<int64_t> async_started_us{0};
+        std::atomic<int64_t> ready_us{0};
+
+        CachePrepareTimeline() = default;
+        CachePrepareTimeline(const CachePrepareTimeline& other):
+            enqueued_us(other.enqueued_us.load()),
+            async_started_us(other.async_started_us.load()),
+            ready_us(other.ready_us.load()) {}
+        CachePrepareTimeline& operator=(const CachePrepareTimeline& other) {
+            enqueued_us.store(other.enqueued_us.load());
+            async_started_us.store(other.async_started_us.load());
+            ready_us.store(other.ready_us.load());
+            return *this;
+        }
+    };
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
@@ -733,6 +771,7 @@ protected:
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_       = 0;
     bool                                  wait_time_recorded_ = false;
+    CachePrepareTimeline                  cache_prepare_timeline_;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -803,11 +842,23 @@ protected:
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.
+    // Shared by GenerateStream copies, just like mutex_ and the KV resource.
+    // One immutable latest fence per actual producer stream bounds retention;
+    // replacing it requires CUDA stream-order dominance of the previous fence.
+    struct KvExecutionCoordinator {
+        std::atomic<bool>                                   enabled{false};
+        std::atomic<int>                                    users{0};
+        bool                                                closing{false};
+        std::atomic<bool>                                   finalizing{false};
+        bool                                                completion_failed{false};
+        std::unordered_map<uint64_t, std::function<void()>> fences;
+    };
     struct AsyncBookkeepingCoordinator {
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
         std::mutex              mu;
         std::condition_variable cv;
+        KvExecutionCoordinator  kv_execution;
     };
     std::shared_ptr<AsyncBookkeepingCoordinator> async_bookkeeping_ = std::make_shared<AsyncBookkeepingCoordinator>();
 

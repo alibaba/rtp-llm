@@ -7,7 +7,6 @@ from typing import NamedTuple, Optional, Sequence, Tuple
 
 import torch
 
-
 M3_INDEX_SCORE_CHUNK_ROWS_ENV = "M3_MSA_INDEX_SCORE_CHUNK_ROWS"
 _DEFAULT_INDEX_SCORE_CHUNK_ROWS = 0
 _WORKSPACE_ALIGNMENT = 256
@@ -133,9 +132,7 @@ def resolve_prefill_score_host_metadata(
         seq_lens_host = seq_lens.cpu().tolist()
         prefix_lens_host = prefix_lens.cpu().tolist()
         slot_ids_host = (
-            slot_ids.cpu().tolist()
-            if slot_ids is not None
-            else range(len(query_lens))
+            slot_ids.cpu().tolist() if slot_ids is not None else range(len(query_lens))
         )
         host_metadata = PrefillScoreHostMetadata(
             query_lens=tuple(int(value) for value in query_lens),
@@ -233,9 +230,7 @@ def build_prefill_score_chunks(
                 prefix_lens=torch.tensor(
                     local_prefix_lens, dtype=torch.int32, device=device
                 ),
-                slot_ids=torch.tensor(
-                    local_slot_ids, dtype=slot_dtype, device=device
-                ),
+                slot_ids=torch.tensor(local_slot_ids, dtype=slot_dtype, device=device),
                 max_seqlen_q=max(local_query_lens),
                 max_seqlen_k=max(local_seq_lens),
                 kv_indices=local_kv_indices,
@@ -248,3 +243,98 @@ def build_prefill_score_chunks(
             )
         )
     return chunks
+
+
+def publish_fp4_prefill_metadata_table(plan: dict, table: torch.Tensor) -> None:
+    """Publish a new immutable CP page-table epoch in the per-forward plan.
+
+    Only the page-table producer may call this, on every table reconstruction.
+    An inference tensor has no version counter: its contents must remain
+    immutable throughout this epoch. No model/process-global cache is added.
+    """
+    plan["_fp4_metadata_table"] = (object(), table)
+    plan.pop("_fp4_prepared_chunks", None)
+
+
+def prepare_fp4_prefill_score_chunks(
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    chunk_rows: int,
+    block_size_k: int,
+    kv_indices: torch.Tensor,
+    *,
+    index_score_plan=None,
+    host_metadata: Optional[PrefillScoreHostMetadata] = None,
+):
+    """Prepare read-only chunks/offsets; reuse only an explicit producer epoch.
+
+    Unmarked callers retain uncached behavior. The plan strongly retains the
+    source table and chunk metadata, but never Q, K, scores or TopK results.
+    """
+    marker = (
+        index_score_plan.get("_fp4_metadata_table")
+        if isinstance(index_score_plan, dict)
+        else None
+    )
+    cacheable = (
+        isinstance(host_metadata, PrefillScoreHostMetadata)
+        and marker is not None
+        and marker[1] is kv_indices
+    )
+    key = None
+    if cacheable:
+        try:
+            version = kv_indices._version
+        except RuntimeError:
+            version = None  # Explicit immutable producer epoch is authoritative.
+        key = (
+            host_metadata,
+            chunk_rows,
+            block_size_k,
+            cu_seqlens.device,
+            cu_seqlens.dtype,
+            seq_lens.dtype,
+            prefix_lens.dtype,
+            kv_indices.dtype,
+            tuple(kv_indices.shape),
+            tuple(kv_indices.stride()),
+            kv_indices.storage_offset(),
+            version,
+        )
+        previous = index_score_plan.get("_fp4_prepared_chunks")
+        if (
+            previous is not None
+            and previous[0] is marker[0]
+            and previous[1] is kv_indices
+            and previous[2] == key
+        ):
+            return previous[3]
+
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        None,
+        chunk_rows,
+        block_size_k,
+        kv_indices=kv_indices,
+        host_metadata=host_metadata,
+    )
+    offsets = []
+    for chunk in chunks:
+        values = [0]
+        for length in chunk.host_metadata.seq_lens:
+            values.append(values[-1] + (length + block_size_k - 1) // block_size_k)
+        offsets.append(
+            torch.tensor(values, dtype=torch.int32, device=cu_seqlens.device)
+        )
+    result = (tuple(chunks), tuple(offsets))
+    if cacheable:
+        index_score_plan["_fp4_prepared_chunks"] = (
+            marker[0],
+            kv_indices,
+            key,
+            result,
+        )
+    return result

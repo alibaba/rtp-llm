@@ -59,6 +59,161 @@ template cudaError_t invokeDSparkCombineLogits<float>(
 template cudaError_t invokeDSparkCombineLogits<__nv_bfloat16>(
     const float*, const __nv_bfloat16*, const float*, float*, int64_t, int64_t, int64_t, cudaStream_t);
 
+template<int BLOCK_THREADS>
+__global__ void dsparkConfidenceKernel(const __nv_bfloat16* hidden,
+                                       const int32_t*       anchors,
+                                       const int32_t*       sampled_tokens,
+                                       const __nv_bfloat16* markov_w1,
+                                       const __nv_bfloat16* confidence_w,
+                                       const __nv_bfloat16* confidence_b,
+                                       float*               output,
+                                       int64_t              gamma,
+                                       int64_t              hidden_dim,
+                                       int64_t              markov_rank) {
+    using Reduce = cub::BlockReduce<float, BLOCK_THREADS>;
+    __shared__ typename Reduce::TempStorage reduce_storage;
+
+    const int64_t row      = static_cast<int64_t>(blockIdx.x);
+    const int64_t batch_id = row / gamma;
+    const int64_t position = row - batch_id * gamma;
+    const int32_t previous = position == 0 ? anchors[batch_id] : sampled_tokens[row - 1];
+
+    float partial = 0.0f;
+    for (int64_t column = threadIdx.x; column < hidden_dim; column += BLOCK_THREADS) {
+        partial += static_cast<float>(hidden[row * hidden_dim + column]) * static_cast<float>(confidence_w[column]);
+    }
+    const int64_t markov_offset = static_cast<int64_t>(previous) * markov_rank;
+    for (int64_t column = threadIdx.x; column < markov_rank; column += BLOCK_THREADS) {
+        partial += static_cast<float>(markov_w1[markov_offset + column])
+                   * static_cast<float>(confidence_w[hidden_dim + column]);
+    }
+    const float sum = Reduce(reduce_storage).Sum(partial);
+    if (threadIdx.x == 0) {
+        // The BF16 confidence projection returns BF16 raw logits before the
+        // reference head promotes them to FP32 for sigmoid/STS calibration.
+        const float logit = __bfloat162float(__float2bfloat16_rn(sum + static_cast<float>(confidence_b[0])));
+        output[row]       = 1.0f / (1.0f + expf(-logit));
+    }
+}
+
+cudaError_t invokeDSparkConfidence(const __nv_bfloat16* hidden,
+                                   const int32_t*       anchors,
+                                   const int32_t*       sampled_tokens,
+                                   const __nv_bfloat16* markov_w1,
+                                   const __nv_bfloat16* confidence_w,
+                                   const __nv_bfloat16* confidence_b,
+                                   float*               output,
+                                   int64_t              batch,
+                                   int64_t              gamma,
+                                   int64_t              hidden_dim,
+                                   int64_t              markov_rank,
+                                   cudaStream_t         stream) {
+    if (batch == 0 || gamma == 0) {
+        return cudaSuccess;
+    }
+    constexpr int threads = 256;
+    dsparkConfidenceKernel<threads><<<batch * gamma, threads, 0, stream>>>(
+        hidden, anchors, sampled_tokens, markov_w1, confidence_w, confidence_b, output, gamma, hidden_dim, markov_rank);
+    return cudaGetLastError();
+}
+
+namespace {
+
+constexpr int64_t kMaxDSparkPlanCandidates = 1024;
+constexpr int64_t kMaxDSparkPlanBatch      = 256;
+
+__global__ void dsparkVerifyPlanKernel(const float* confidence,
+                                       int32_t*     verify_lengths,
+                                       int32_t*     compact_to_dense,
+                                       int64_t      batch,
+                                       int64_t      gamma,
+                                       int64_t      extra_budget) {
+    __shared__ float   survival[kMaxDSparkPlanCandidates];
+    __shared__ uint8_t selected[kMaxDSparkPlanCandidates];
+
+    const int64_t candidate_count = batch * gamma;
+    for (int64_t candidate = threadIdx.x; candidate < candidate_count; candidate += blockDim.x) {
+        const int64_t request  = candidate / gamma;
+        const int64_t position = candidate - request * gamma;
+        float         value    = 1.0f;
+        const int64_t base     = request * gamma;
+        for (int64_t j = 0; j <= position; ++j) {
+            const float conditional = confidence[base + j];
+            value *= isfinite(conditional) ? fminf(fmaxf(conditional, 0.0f), 1.0f) : 0.0f;
+        }
+        survival[candidate] = value;
+        selected[candidate] = 0;
+    }
+    __syncthreads();
+
+    // Current production batches are small (B<=28, gamma=7).  Keeping the
+    // global selection in one CTA avoids a host sync and makes ties stable.
+    if (threadIdx.x == 0) {
+        for (int64_t request = 0; request < batch; ++request) {
+            verify_lengths[request] = 1;
+        }
+        for (int64_t picked = 0; picked < extra_budget; ++picked) {
+            int64_t best       = -1;
+            float   best_value = -1.0f;
+            for (int64_t candidate = 0; candidate < candidate_count; ++candidate) {
+                if (selected[candidate]) {
+                    continue;
+                }
+                const float   value         = survival[candidate];
+                const int64_t request       = candidate / gamma;
+                const int64_t position      = candidate - request * gamma;
+                const int64_t best_request  = best < 0 ? batch : best / gamma;
+                const int64_t best_position = best < 0 ? gamma : best - best_request * gamma;
+                // Match the reference scheduler's stable ordering: survival
+                // first, then the earlier prefix position, then request id.
+                // Request-major tie breaking can spend the whole budget on
+                // one request when confidence saturates at exactly one.
+                if (value > best_value
+                    || (value == best_value
+                        && (position < best_position || (position == best_position && request < best_request)))) {
+                    best       = candidate;
+                    best_value = value;
+                }
+            }
+            if (best < 0) {
+                break;
+            }
+            selected[best] = 1;
+            ++verify_lengths[best / gamma];
+        }
+
+        int64_t compact_row = 0;
+        for (int64_t request = 0; request < batch; ++request) {
+            const int64_t rows       = verify_lengths[request];
+            const int64_t dense_base = request * (gamma + 1);
+            for (int64_t row = 0; row < rows; ++row) {
+                compact_to_dense[compact_row++] = static_cast<int32_t>(dense_base + row);
+            }
+        }
+    }
+}
+
+}  // namespace
+
+cudaError_t invokeDSparkVerifyPlan(const float* confidence,
+                                   int32_t*     verify_lengths,
+                                   int32_t*     compact_to_dense,
+                                   int64_t      batch,
+                                   int64_t      gamma,
+                                   int64_t      extra_budget,
+                                   cudaStream_t stream) {
+    if (batch == 0) {
+        return cudaSuccess;
+    }
+    if (batch < 0 || batch > kMaxDSparkPlanBatch || gamma <= 0 || batch * gamma > kMaxDSparkPlanCandidates
+        || extra_budget < 0 || extra_budget > batch * gamma) {
+        return cudaErrorInvalidValue;
+    }
+    dsparkVerifyPlanKernel<<<1, 256, 0, stream>>>(
+        confidence, verify_lengths, compact_to_dense, batch, gamma, extra_budget);
+    return cudaGetLastError();
+}
+
 constexpr BlockScanAlgorithm   SCAN_ALGO   = BLOCK_SCAN_WARP_SCANS;
 constexpr BlockReduceAlgorithm REDUCE_ALGO = BLOCK_REDUCE_WARP_REDUCTIONS;
 
@@ -270,20 +425,22 @@ template<uint32_t             BLOCK_THREADS,
          bool                 DETERMINISTIC,
          typename DType,
          typename IdType>
-__global__ void rejection_sampling_kernel(DType*  draft_probs,
-                                          IdType* draft_token_ids,
-                                          DType*  uniform_samples,
-                                          DType*  target_probs,
-                                          IdType* target_token_ids,
-                                          int     target_token_stride,
-                                          IdType* output_token_ids,
-                                          IdType* output_accepted_token_num,
-                                          bool*   do_sample,
-                                          bool    deterministic_draft,
-                                          int     batch_size,
-                                          int     num_speculative_tokens,
-                                          int     target_vocab_size,
-                                          bool    sampled_draft) {
+__global__ void rejection_sampling_kernel(DType*     draft_probs,
+                                          IdType*    draft_token_ids,
+                                          DType*     uniform_samples,
+                                          DType*     target_probs,
+                                          IdType*    target_token_ids,
+                                          int        target_token_stride,
+                                          IdType*    output_token_ids,
+                                          IdType*    output_accepted_token_num,
+                                          bool*      do_sample,
+                                          bool       deterministic_draft,
+                                          int        batch_size,
+                                          int        num_speculative_tokens,
+                                          int        target_vocab_size,
+                                          bool       sampled_draft,
+                                          bool*      success,
+                                          const int* active_verify_lengths) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -295,6 +452,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     if (row_idx >= batch_size) {
         return;
     }
+    const int active_rows = active_verify_lengths ? active_verify_lengths[row_idx] : num_speculative_tokens + 1;
 
     if (deterministic_draft) {
         if (tx == 0) {
@@ -303,6 +461,13 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                 IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
                 IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
                                                     + target_token_stride - 1];
+                if (success && i < active_rows
+                    && (draft_id < 0 || draft_id >= target_vocab_size || target_id < 0
+                        || target_id >= target_vocab_size)) {
+                    success[row_idx]                   = false;
+                    output_accepted_token_num[row_idx] = 1;
+                    return;
+                }
                 if (target_id == draft_id) {
                     output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
                 } else {
@@ -338,6 +503,16 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
                                                 + target_token_stride - 1];
+            if (success
+                && (draft_id < 0 || draft_id >= target_vocab_size || target_id < 0 || target_id >= target_vocab_size)) {
+                if (i < active_rows) {
+                    success[row_idx] = false;
+                }
+                pos               = i;
+                all_same_token    = false;
+                greedy_exact_done = true;
+                break;
+            }
 
             float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id],
                   p = draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
@@ -431,10 +606,16 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
         temp_storage.block_aggregate.value = sum_relu_q_minus_p;
     }
     // init the first rejected token to (d - 1)
-    temp_storage.sampled_id = target_vocab_size - 1;
+    temp_storage.sampled_id = success ? target_vocab_size : target_vocab_size - 1;
     __syncthreads();
     sum_relu_q_minus_p = temp_storage.block_aggregate.value;
-    DType u            = uniform_samples[row_idx * (num_speculative_tokens + 1) + min(pos + 1, num_speculative_tokens)]
+    if (success && pos < active_rows && (!isfinite(sum_relu_q_minus_p) || sum_relu_q_minus_p <= DType(0))) {
+        if (tx == 0) {
+            success[row_idx] = false;
+        }
+        return;
+    }
+    DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + min(pos + 1, num_speculative_tokens)]
               * sum_relu_q_minus_p;
 
     DType aggregate_relu_q_minus_p(0);
@@ -472,10 +653,122 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     __syncthreads();
     if (tx == 0) {
         // set the first rejected token
-        output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = temp_storage.sampled_id;
+        if (success && temp_storage.sampled_id >= target_vocab_size) {
+            if (pos < active_rows) {
+                success[row_idx] = false;
+            }
+            output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = 0;
+        } else {
+            output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = temp_storage.sampled_id;
+        }
         // pad remaining tokens with -1
         for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
             output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
+        }
+    }
+}
+
+// Each CTA owns one (request, token row, vocab tile) scratch record. No CTA
+// here modifies success or output tokens, and every record is overwritten.
+template<int THREADS, typename DType, typename IdType>
+__global__ void validateRejectionProbabilityTiles(const DType*  draft_probs,
+                                                  const DType*  target_probs,
+                                                  const int*    active_verify_lengths,
+                                                  const IdType* accepted_lengths,
+                                                  const bool*   success,
+                                                  float*        workspace,
+                                                  int           steps,
+                                                  int           vocab,
+                                                  int           tiles) {
+    const int     batch = blockIdx.x, row = blockIdx.y, tile = blockIdx.z;
+    const int     cap    = active_verify_lengths ? active_verify_lengths[batch] : steps + 1;
+    const int     rows   = min(static_cast<int>(accepted_lengths[batch]), cap);
+    const int64_t record = (static_cast<int64_t>(batch) * (steps + 1) + row) * tiles + tile;
+    if (!success[batch] || cap < 1 || cap > steps + 1 || row >= rows) {
+        if (threadIdx.x == 0) {
+            for (int field = 0; field < 4; ++field) {
+                workspace[record * 4 + field] = 0.0f;
+            }
+        }
+        return;
+    }
+    using Reduce = cub::BlockReduce<DType, THREADS>;
+    __shared__ typename Reduce::TempStorage storage;
+    for (int plane = 0; plane < 2; ++plane) {
+        DType mass               = 0;
+        bool  finite_nonnegative = true;
+        if (plane == 0 || row < steps) {
+            const DType* probabilities = plane == 0 ?
+                                             target_probs + (static_cast<int64_t>(batch) * (steps + 1) + row) * vocab :
+                                             draft_probs + (static_cast<int64_t>(batch) * steps + row) * vocab;
+            const int    start         = tile * kRejectionValidationTileSize;
+            const int    end           = min(start + kRejectionValidationTileSize, vocab);
+            for (int column = start + threadIdx.x; column < end; column += THREADS) {
+                const DType probability = probabilities[column];
+                finite_nonnegative      = finite_nonnegative && isfinite(probability) && probability >= DType(0);
+                mass += probability;
+            }
+        }
+        const int   invalid = __syncthreads_count(!finite_nonnegative);
+        const DType total   = Reduce(storage).Sum(mass);
+        if (threadIdx.x == 0) {
+            workspace[record * 4 + plane * 2]     = total;
+            workspace[record * 4 + plane * 2 + 1] = invalid != 0 ? 1.0f : 0.0f;
+        }
+        __syncthreads();
+    }
+}
+
+// Reduce only the small scratch prefix the rejection result can commit.
+// This is the sole validation writer of each request's status/output shape.
+template<int THREADS, typename IdType>
+__global__ void finishRejectionValidation(const float* workspace,
+                                          const bool*  target_success,
+                                          const int*   active_verify_lengths,
+                                          IdType*      output_tokens,
+                                          IdType*      accepted_lengths,
+                                          bool*        success,
+                                          int          steps,
+                                          int          vocab,
+                                          int          tiles) {
+    const int batch = blockIdx.x;
+    const int cap   = active_verify_lengths ? active_verify_lengths[batch] : steps + 1;
+    const int rows  = min(static_cast<int>(accepted_lengths[batch]), cap);
+    using Reduce    = cub::BlockReduce<float, THREADS>;
+    __shared__ typename Reduce::TempStorage storage;
+    __shared__ bool                         valid;
+    if (threadIdx.x == 0) {
+        valid = success[batch] && cap >= 1 && cap <= steps + 1 && rows >= 1;
+    }
+    __syncthreads();
+    for (int row = 0; row < rows && valid; ++row) {
+        for (int plane = 0; plane < (row < steps ? 2 : 1); ++plane) {
+            float         mass        = 0;
+            bool          tiles_valid = true;
+            const int64_t base        = (static_cast<int64_t>(batch) * (steps + 1) + row) * tiles * 4 + plane * 2;
+            for (int tile = threadIdx.x; tile < tiles; tile += THREADS) {
+                mass += workspace[base + tile * 4];
+                tiles_valid = tiles_valid && workspace[base + tile * 4 + 1] == 0.0f;
+            }
+            const int   invalid = __syncthreads_count(!tiles_valid);
+            const float total   = Reduce(storage).Sum(mass);
+            if (threadIdx.x == 0) {
+                const auto token = output_tokens[batch * (steps + 1) + row];
+                valid = valid && invalid == 0 && isfinite(total) && total > 0.0f && token >= 0 && token < vocab
+                        && (plane != 0 || !target_success || target_success[batch * (steps + 1) + row]);
+            }
+            __syncthreads();
+        }
+    }
+    if (threadIdx.x == 0) {
+        success[batch] = valid;
+        if (!valid) {
+            // Keep a safe active shape until dispatch consumes success. Failed
+            // requests never commit this placeholder or use it as an anchor.
+            accepted_lengths[batch] = 1;
+            for (int row = 0; row <= steps; ++row) {
+                output_tokens[batch * (steps + 1) + row] = 0;
+            }
         }
     }
 }
@@ -495,9 +788,16 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
-                                    bool         sampled_draft) {
+                                    bool         sampled_draft,
+                                    bool*        success,
+                                    const bool*  target_success,
+                                    const int*   active_verify_lengths,
+                                    float*       validation_workspace) {
     if (batch_size == 0) {
         return cudaSuccess;
+    }
+    if (success && !validation_workspace) {
+        return cudaErrorInvalidValue;
     }
 
     constexpr uint32_t BLOCK_THREADS = 1024;
@@ -520,13 +820,40 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                     &batch_size,
                     &num_speculative_tokens,
                     &target_vocab_size,
-                    &sampled_draft};
+                    &sampled_draft,
+                    &success,
+                    &active_verify_lengths};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
         FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
         FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     });
+
+    if (success) {
+        const int tiles = (target_vocab_size + kRejectionValidationTileSize - 1) / kRejectionValidationTileSize;
+        validateRejectionProbabilityTiles<256>
+            <<<dim3(batch_size, num_speculative_tokens + 1, tiles), 256, 0, stream>>>(draft_probs,
+                                                                                      target_probs,
+                                                                                      active_verify_lengths,
+                                                                                      output_accepted_token_num,
+                                                                                      success,
+                                                                                      validation_workspace,
+                                                                                      num_speculative_tokens,
+                                                                                      target_vocab_size,
+                                                                                      tiles);
+        FLASHINFER_CUDA_CALL(cudaGetLastError());
+        finishRejectionValidation<256><<<batch_size, 256, 0, stream>>>(validation_workspace,
+                                                                       target_success,
+                                                                       active_verify_lengths,
+                                                                       output_token_ids,
+                                                                       output_accepted_token_num,
+                                                                       success,
+                                                                       num_speculative_tokens,
+                                                                       target_vocab_size,
+                                                                       tiles);
+        FLASHINFER_CUDA_CALL(cudaGetLastError());
+    }
 
     return cudaSuccess;
 }
@@ -546,7 +873,11 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                                  int          num_speculative_tokens,                                  \
                                                  int          target_vocab_size,                                       \
                                                  cudaStream_t stream,                                                  \
-                                                 bool         sampled_draft);
+                                                 bool         sampled_draft,                                           \
+                                                 bool*        success,                                                 \
+                                                 const bool*  target_success,                                          \
+                                                 const int*   active_verify_lengths,                                   \
+                                                 float*       validation_workspace);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm

@@ -178,6 +178,9 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
+        if (async_cache_prepare_enabled_) {
+            stream->markCachePrepareEnqueued();
+        }
         waiting_streams_.emplace_back(stream);
         updateCacheExposedWaitLocked();
         schedule_trigger_ = true;
@@ -196,6 +199,11 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
+        if (async_cache_prepare_enabled_) {
+            for (const auto& stream : stream_enqueued) {
+                stream->markCachePrepareEnqueued();
+            }
+        }
         waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         updateCacheExposedWaitLocked();
         schedule_trigger_ = true;
@@ -543,6 +551,9 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
             loading_cache_streams_.push_back(stream);
             break;
         case StreamState::RUNNING:
+            if (async_cache_prepare_enabled_) {
+                stream->reportCachePrepareAdmitted();
+            }
             accountBatchMetrics(stream);
             new_streams_.push_back(stream);
             break;
@@ -702,9 +713,12 @@ void FIFOScheduler::updateCacheExposedWaitLocked() {
     const auto elapsed_us =
         std::chrono::duration_cast<std::chrono::microseconds>(now - cache_exposed_wait_start_).count();
     cache_exposed_wait_us_total_ += elapsed_us;
+    ++cache_exposed_wait_count_;
     if (metrics_reporter_) {
         RtpLLMSchedulerCacheStallMetricsCollector collector;
-        collector.cache_exposed_wait_us = elapsed_us;
+        collector.cache_exposed_wait_us       = elapsed_us;
+        collector.cache_exposed_wait_total_us = cache_exposed_wait_us_total_;
+        collector.cache_exposed_wait_count    = cache_exposed_wait_count_;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerCacheStallMetricsCollector>(nullptr,
                                                                                                      &collector);
     }

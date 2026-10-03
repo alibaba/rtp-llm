@@ -121,6 +121,11 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // Target-verify rows are request-major but may have a different count per
+    // request. Consumers must use input_lengths/cu_seqlens rather than infer a
+    // uniform width from total_tokens / batch_size.
+    bool is_ragged_target_verify = false;
+
     // True only for the recurrent, decode-side MTP draft-prefill pass. The
     // initial prompt prefill also uses mtp_iteration_step == 0, so the phase
     // cannot be inferred safely from the iteration marker.
@@ -400,6 +405,8 @@ struct GreedyParams {
     // True token counts for DSpARK verify history; normalize only when calling
     // the legacy ngram kernel, which adds one to its length argument.
     bool token_history_lengths_are_counts = false;
+    // Opt-in CUDA sampling subset; dense RNG consumption/output ABI is retained.
+    torch::Tensor sample_rows;
 };
 
 struct GreedyOutput {
@@ -480,6 +487,11 @@ struct RejectionSamplingParams {
     bool          deterministic_draft = false;
     // Opt in only when draft_probs is the actual proposal distribution.
     bool sampled_draft = false;
+    // Optional DSpARK fail-closed protocol. Legacy callers leave these undefined.
+    torch::Tensor success_d;
+    torch::Tensor target_success_d;
+    torch::Tensor active_verify_lengths_d;
+    torch::Tensor validation_workspace_d;
 };
 
 struct MappingDraft2TargetParams {

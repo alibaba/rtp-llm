@@ -82,7 +82,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::skipRun]               = inputs.skip_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::isFakeStream]         = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::isRaggedTargetVerify] = inputs.is_ragged_target_verify;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -141,8 +142,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         // Keep tensor presence and synchronized layout metadata atomic.
         inputs.clearLastHiddenStates();
     }
-    inputs.skip_run       = shape_hints_ptr[GptModelInputIndex::skipRun];
-    inputs.is_fake_stream = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.skip_run                = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream          = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.is_ragged_target_verify = shape_hints_ptr[GptModelInputIndex::isRaggedTargetVerify];
     if (inputs.skip_run) {
         return;
     }

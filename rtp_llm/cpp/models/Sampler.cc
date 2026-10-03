@@ -16,6 +16,14 @@ Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::grap
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    if (inputs.verify_sample_rows.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.compact_token_ids
+                                    && !inputs.logits_processor_states_ptr && !inputs.cum_log_probs.defined()
+                                    && inputs.all_probs.defined() && !inputs.return_original_all_probs
+                                    && !inputs.spec_vocab_mask_gpu.defined() && !inputs.spec_cap_gpu.defined()
+                                    && inputs.spec_applied_processors.empty(),
+                                "verify sampling subset requires history-free unconstrained probability output");
+    }
     if (inputs.compact_token_ids) {
         // Fail closed: semantic lengths may exceed slot width only when no
         // consumer can index history. Do not rewrite lengths or RNG behavior.
@@ -143,7 +151,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
-            RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("sampler.forward.execSampleGreedy(dense_rows=%zu,live_rows=%ld)",
+                                          batch_size_in,
+                                          inputs.verify_sample_rows.defined() ? inputs.verify_sample_rows.numel() :
+                                                                                static_cast<int64_t>(batch_size_in));
             auto greedy_output = execSampleGreedy(
                 {logits,
                  input_lengths,
@@ -164,7 +175,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  do_sample,
                  generator,
                  &buffer_holder_,
-                 inputs.token_history_lengths_are_counts});
+                 inputs.token_history_lengths_are_counts,
+                 inputs.verify_sample_rows});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

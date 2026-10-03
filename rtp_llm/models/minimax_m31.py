@@ -9,6 +9,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight, _router_dtype
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -18,6 +19,13 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     transpose,
 )
+
+M31_RAW_ATTENTION_NORMS = {
+    "minimax_m31.raw_q_norm": "q_norm",
+    "minimax_m31.raw_k_norm": "k_norm",
+    "minimax_m31.raw_index_q_norm": "index_q_norm",
+    "minimax_m31.raw_index_k_norm": "index_k_norm",
+}
 
 
 def stack_nvfp4_w13_global_scales(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -71,6 +79,36 @@ class MiniMaxM31Weight(MiniMaxM3Weight):
         """M3.1 is sparse in every transformer layer by checkpoint contract."""
         sparse_set = self._sparse_layer_set or set()
         return layer_id in sparse_set
+
+    def _get_hf_layer_weight_info(self, layer_id: int):
+        layer_weights = super()._get_hf_layer_weight_info(layer_id)
+        # Preserve legacy effective-gamma keys until attention is migrated.
+        # The fused M3.1 producer needs original BF16 values: subtracting one
+        # from a rounded gamma cannot recover the checkpoint weight.
+        for key, checkpoint_name in M31_RAW_ATTENTION_NORMS.items():
+            if checkpoint_name.startswith("index_"):
+                if not self._should_load_msa_index(layer_id):
+                    continue
+            elif not self._use_qk_norm:
+                continue
+            layer_weights.append(
+                CustomAtomicWeight(
+                    key,
+                    [
+                        CkptWeightInfo(
+                            self.prefix
+                            + "model.layers.{i}.self_attn."
+                            + checkpoint_name
+                            + ".weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    data_type=torch.bfloat16,
+                    disable_quantization=True,
+                )
+            )
+        return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_ffn_layer_weight_info(layer_id)
@@ -221,9 +259,6 @@ class MiniMaxM31(MiniMaxM3):
             == "nvfp4-pack-quantized"
         )
         config.prepacked_nvfp4_moe = bool(packed_nvfp4)
-        # Keep the compatibility field, but native routed NVFP4 must never
-        # enter the shared-expert-only structural mock path.
-        config.mock_nvfp4_moe = False
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.minimax_m31 import MiniMaxM31Model

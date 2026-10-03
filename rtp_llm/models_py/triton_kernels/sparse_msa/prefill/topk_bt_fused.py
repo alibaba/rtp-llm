@@ -8,9 +8,11 @@ emits either block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
 ``idx_group_size == 1`` (M3 production: num_idx_heads == num_kv_heads).
 """
 
+import inspect
 import logging
 import os
 import subprocess
+from functools import lru_cache
 
 import torch
 import triton
@@ -47,6 +49,28 @@ _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 # compatibility rollback.
 # Read lazily (not at import) so env set after module import still takes effect.
 _DEFAULT_SPARSE_ATTN_CHUNK_SIZE = 16384
+
+
+@lru_cache(maxsize=8)
+def _nvfp4_attention_supports_out(attention) -> bool:
+    """Negotiate the optional output ABI once, without changing Q8KV4 math."""
+    return "out" in inspect.signature(attention).parameters
+
+
+@lru_cache(maxsize=8)
+def _nvfp4_attention_supports_flat_combine(attention) -> bool:
+    """Negotiate the optional combine-only geometry ABI per native callable."""
+    return "combine_cu_seqlens_q" in inspect.signature(attention).parameters
+
+
+def _flat_combine_shape_supported(num_q_heads, head_dim, topk, partial_dtype):
+    # Keep the opt-in within the numerically verified native Q8KV4 contract.
+    return (
+        num_q_heads == 64
+        and head_dim == 128
+        and topk == 16
+        and partial_dtype == torch.bfloat16
+    )
 
 
 def _sparse_attn_chunk_enabled() -> bool:
@@ -101,6 +125,35 @@ _M3_CHUNK_WS_CACHE = M3_PREFILL_WORKSPACE_CACHE
 _CHUNKED_SPARSE_ATTN_LOGGED = False
 
 _FP8_E4M3_MAX = tl.constexpr(448.0)
+
+
+@triton.jit
+def _scale1_query_fp8_kernel(src, dst, count, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(src + offsets, offsets < count, other=0.0)
+    tl.store(dst + offsets, values.to(tl.float8e4nv), offsets < count)
+
+
+def scale1_query_fp8(values: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """Training-compatible scale-1 E4M3 cast, without row/block rescaling."""
+    if (
+        not values.is_cuda
+        or values.dtype != torch.bfloat16
+        or values.ndim != 3
+        or not values.is_contiguous()
+        or out.shape != values.shape
+        or out.device != values.device
+        or out.dtype != torch.float8_e4m3fn
+        or not out.is_contiguous()
+    ):
+        raise ValueError(
+            "Q8 prefill cast requires contiguous CUDA BF16 Q and matching E4M3 out"
+        )
+    if values.numel():
+        _scale1_query_fp8_kernel[(triton.cdiv(values.numel(), 1024),)](
+            values, out, values.numel(), BLOCK=1024
+        )
+    return out
 
 
 @triton.jit
@@ -914,6 +967,8 @@ def _flash_prefill_topk_to_block_tables_chunked(
     block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
         total_q, num_heads, topk, idx_q.device, emit_block_table
     )
+    if not chunks:
+        return block_tables, output_seq_lens, topk_idx
 
     maxscore_capacity = 0
     score_capacity = 0
@@ -1238,24 +1293,22 @@ def flash_prefill_topk_to_block_tables_fp4(
     kv_indices=None,
     emit_block_table: bool = False,
 ):
-    """Packed-NVFP4 index score followed by RTP's production TopK emission.
+    """Run training-compatible Q8K4 IndexScore and RTP's production TopK.
 
-    The cache and Q scale tensors are already in fmha_sm100's 128x4 MMA
-    storage.  Query-row chunking bounds the FP32 page-score workspace while
-    preserving each segment's causal offset.
+    Q is cast to scale-one E4M3. The score kernel reads packed NVFP4 index-K
+    and its MMA-ordered block scales directly from the page table; it does not
+    materialize historical keys in BF16 or FP8 working pages.
     """
-    from fmha_sm100.cute.fp4_indexer_interface import fp4_indexer_block_scores
-
-    from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
-        quantize_query_rows_mma,
+    from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.nvfp4_q8_index_score import (
+        q8kv4_prefill_index_score,
     )
 
-    from .score_chunk import build_prefill_score_chunks
+    from .score_chunk import prepare_fp4_prefill_score_chunks
 
     if block_size_k != 128:
         raise ValueError("FP4 prefill index score requires 128-token pages")
     if idx_q.dtype != torch.bfloat16 or idx_q.dim() != 3:
-        raise ValueError("FP4 prefill index Q must be BF16 [token,head,128]")
+        raise ValueError("Q8K4 prefill index Q source must be BF16 [token,head,128]")
     if idx_k_fp4.dim() != 4 or idx_k_fp4.dtype != torch.uint8:
         raise ValueError("FP4 prefill index K must be uint8 [page,head,128,64]")
     total_q, num_heads, head_dim = map(int, idx_q.shape)
@@ -1270,85 +1323,76 @@ def flash_prefill_topk_to_block_tables_fp4(
     host_metadata = None
     if isinstance(index_score_plan, dict):
         host_metadata = index_score_plan.get("_fp4_host_metadata")
-    chunks = build_prefill_score_chunks(
+    chunks, chunk_page_offsets = prepare_fp4_prefill_score_chunks(
         cu_seqlens,
         seq_lens,
         prefix_lens,
-        None,
         chunk_rows,
         block_size_k,
-        kv_indices=kv_indices,
+        kv_indices,
+        index_score_plan=index_score_plan,
         host_metadata=host_metadata,
     )
     block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
         total_q, num_heads, topk, idx_q.device, emit_block_table
     )
-    groups = head_dim // 16
-    q_buffers = (
-        {}
-        if not isinstance(index_score_plan, dict)
-        else index_score_plan.setdefault("_fp4_q_buffers", {})
-    )
-
-    for chunk in chunks:
-        q_start, q_end = chunk.q_start, chunk.q_end
-        chunk_q = q_end - q_start
-        key = (chunk_q, num_heads, head_dim, str(idx_q.device))
-        buffers = q_buffers.get(key)
-        if buffers is None:
-            q_fp4 = torch.empty(
-                chunk_q,
-                num_heads,
-                head_dim // 2,
-                dtype=torch.uint8,
-                device=idx_q.device,
-            )
-            q_scale_mma = torch.empty(
-                num_heads,
-                triton.cdiv(chunk_q, 128),
-                groups // 4,
-                32,
-                4,
-                4,
-                dtype=torch.float8_e4m3fn,
-                device=idx_q.device,
-            )
-            buffers = (q_fp4, q_scale_mma)
-            q_buffers[key] = buffers
-        q_fp4, q_scale_mma = buffers
-        quantize_query_rows_mma(idx_q[q_start:q_end].contiguous(), q_fp4, q_scale_mma)
-
-        pages_per_segment = torch.div(
-            chunk.seq_lens + block_size_k - 1,
-            block_size_k,
-            rounding_mode="floor",
-        ).to(torch.int32)
-        cu_page_offsets = torch.zeros(
-            int(pages_per_segment.numel()) + 1,
-            dtype=torch.int32,
+    if not isinstance(index_score_plan, dict):
+        index_score_plan = {}
+    max_chunk_q = max(chunk.q_end - chunk.q_start for chunk in chunks)
+    max_pages = triton.cdiv(max_seqlen_k, block_size_k)
+    q8_buffer = index_score_plan.get("_q8_index_query_buffer")
+    if (
+        q8_buffer is None
+        or q8_buffer.shape[0] < max_chunk_q
+        or q8_buffer.shape[1:] != (num_heads, head_dim)
+        or q8_buffer.device != idx_q.device
+    ):
+        q8_buffer = torch.empty(
+            max_chunk_q,
+            num_heads,
+            head_dim,
+            dtype=torch.float8_e4m3fn,
             device=idx_q.device,
         )
-        cu_page_offsets[1:] = torch.cumsum(pages_per_segment, dim=0)
-        cu_k = torch.zeros_like(chunk.cu_seqlens)
-        cu_k[1:] = torch.cumsum(chunk.seq_lens.to(torch.int32), dim=0)
-        maxscore = fp4_indexer_block_scores(
-            q_fp4,
+        index_score_plan["_q8_index_query_buffer"] = q8_buffer
+    score_buffer = index_score_plan.get("_q8_index_score_buffer")
+    if (
+        score_buffer is None
+        or score_buffer.shape[0] != num_heads
+        or score_buffer.shape[1] < max_chunk_q
+        or score_buffer.shape[2] < max_pages
+        or score_buffer.device != idx_q.device
+    ):
+        score_buffer = torch.empty(
+            num_heads,
+            max_chunk_q,
+            max_pages,
+            dtype=torch.float32,
+            device=idx_q.device,
+        )
+        index_score_plan["_q8_index_score_buffer"] = score_buffer
+
+    for chunk, cu_page_offsets in zip(chunks, chunk_page_offsets):
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        q8_chunk = q8_buffer[:chunk_q]
+        scale1_query_fp8(idx_q[q_start:q_end].contiguous(), q8_chunk)
+
+        chunk_max_pages = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        score = score_buffer[:, :chunk_q, :chunk_max_pages]
+        q8kv4_prefill_index_score(
+            q8_chunk,
             idx_k_fp4,
-            q_scale_mma,
             idx_k_scale_mma,
             chunk.cu_seqlens,
-            cu_k,
+            chunk.seq_lens.to(torch.int32),
+            chunk.prefix_lens.to(torch.int32),
             cu_page_offsets,
+            chunk.kv_indices,
+            score,
             max_seqlen_q=chunk.max_seqlen_q,
-            max_seqlen_k=chunk.max_seqlen_k,
-            kv_indices=chunk.kv_indices,
-            fp4_format="nvfp4",
-            causal=True,
-            qo_offset=chunk.prefix_lens,
-            scale_layout="preordered_mma",
         )
-        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
-        score = _maxscore_to_score(maxscore, max_seqblock_k)
+        max_seqblock_k = chunk_max_pages
         if emit_block_table:
             bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]
             sl_chunk = output_seq_lens[q_start * num_heads : q_end * num_heads]
@@ -1527,6 +1571,19 @@ def _build_chunk_meta(
         for group in _pack_segments_into_chunks(qo_lens, chunk_size)
     ]
 
+    if nvfp4_kv and _flat_combine_shape_supported(
+        num_q_heads, head_dim, topk, partial_dtype
+    ):
+        from fmha_sm100.cute.interface import sparse_atten_nvfp4_kv_func
+
+        if _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func):
+            for chunk in chunks:
+                # Immutable and owned by this forward, reused by every sparse
+                # layer. Producer cu_q/cu_k and CSR geometry stay untouched.
+                chunk["combine_cu_q"] = torch.tensor(
+                    [0, chunk["csz"]], dtype=torch.int32, device=dev
+                )
+
     builder = SparseK2qCsrBuilderSm100()
     builder._ensure_loaded()
     # Reusable-workspace sizing (see _M3_CHUNK_WS_CACHE): fwd segment covers
@@ -1584,7 +1641,7 @@ def run_sparse_attn_chunk(
     k_scale_128x4=None,
     v_scale_128x4=None,
 ):
-    """Run existing CSR/native step3 for one chunk with caller-owned pages."""
+    """Run native sparse step3 for one chunk using caller-owned pages."""
     from interface import sparse_atten_func
 
     # Mirror sparse_fmha: the native builder schedule ignores
@@ -1608,8 +1665,22 @@ def run_sparse_attn_chunk(
     # into the persistent output (dim-0 slice is contiguous), removing a
     # [csz, Hq, dim] DtoD copy (~83us / 256MB per 16K-q chunk).
     if k_scale_128x4 is not None:
+        if q.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                "MiniMax-M3.1 packed-KV4 prefill requires Q8; BF16 compute is disabled"
+            )
         from fmha_sm100.cute.interface import sparse_atten_nvfp4_kv_func
 
+        supports_out = _nvfp4_attention_supports_out(sparse_atten_nvfp4_kv_func)
+        combine_kwargs = {}
+        if (
+            c.get("combine_cu_q") is not None
+            and _flat_combine_shape_supported(
+                q.shape[1], q.shape[2], topk, partial_dtype
+            )
+            and _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func)
+        ):
+            combine_kwargs["combine_cu_seqlens_q"] = c["combine_cu_q"]
         chunk_out = sparse_atten_nvfp4_kv_func(
             q,
             k_pages,
@@ -1633,8 +1704,13 @@ def run_sparse_attn_chunk(
             page_table=page_table,
             seqused_k=c["seqused"],
             schedule=sched,
+            **({"out": out} if supports_out else {}),
+            **combine_kwargs,
         )
-        out.copy_(chunk_out)
+        # Older fmha wheels allocate their own output. This is only an output
+        # ownership compatibility path; both APIs still compute native Q8KV4.
+        if not supports_out:
+            out.copy_(chunk_out)
     else:
         sparse_atten_func(
             q,
@@ -1663,7 +1739,7 @@ def run_sparse_attn_chunk(
 
 @torch.no_grad()
 def _sparse_attn_chunked(
-    q,  # [total_q, num_q_heads, head_dim] bf16
+    q,  # projection Q, normally BF16 [total_q, num_q_heads, head_dim]
     k_paged_f,  # [num_paged, nkv, blk, dim]
     v_paged_f,  # [num_paged, nkv, blk, dim]
     topk_idx,  # [nkv, total_q, topk] int32, -1 padded
@@ -1739,13 +1815,29 @@ def _sparse_attn_chunked(
     ws_csr = ws[fwd_bytes : fwd_bytes + csr_words * 4].view(torch.int32)
 
     out = torch.empty(total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=dev)
+    # Bound Q8 scratch by the attention chunk, not the full suffix. It is
+    # call-local and reused across chunks, never retained once per model layer.
+    q8_scratch = None
+    if k_scale_128x4 is not None:
+        if q.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(
+                "packed-KV4 prefill accepts BF16 projection Q or pre-cast Q8"
+            )
+        if q.dtype == torch.bfloat16:
+            capacity = max(c["g1"] - c["g0"] for c in meta["chunks"])
+            q8_scratch = torch.empty(
+                capacity, num_q_heads, head_dim, dtype=torch.float8_e4m3fn, device=dev
+            )
     for c in meta["chunks"]:
         g0, g1 = c["g0"], c["g1"]
         # dim-1 slice of the contiguous [nkv, total_q, topk] is non-contiguous
         # across heads -> small copy (nkv * csz * topk int32)
         topk_chunk = topk_idx[:, g0:g1, :].contiguous()
+        q_chunk = q[g0:g1]
+        if q8_scratch is not None:
+            q_chunk = scale1_query_fp8(q_chunk, q8_scratch[: g1 - g0])
         run_sparse_attn_chunk(
-            q[g0:g1],
+            q_chunk,
             k_paged_f,
             v_paged_f,
             topk_chunk,
@@ -2033,9 +2125,27 @@ def sparse_prefill_from_topk_fp4(
     block_size_k,
     sm_scale,
 ):
-    """Run fmha_sm100 sparse attention directly over packed NVFP4 pages."""
+    """Run Q8 attention directly over packed NVFP4 pages; no BF16 compute path.
+
+    BF16 projection Q is cast to scale-1 E4M3 in bounded query chunks. The
+    kernel reads FP4 values/scales and dequantizes into its FP8 MMA operands.
+    """
     if sparse_attn_plan is None:
         raise ValueError("packed FP4 sparse prefill requires a sparse_attn_plan")
+    if (
+        q.ndim != 3
+        or q.shape[-1] != 128
+        or q.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
+        or not q.is_cuda
+        or not q.is_contiguous()
+        or k_paged_fp4.dtype != torch.uint8
+        or v_paged_fp4.dtype != torch.uint8
+        or k_scale_128x4 is None
+        or v_scale_128x4 is None
+    ):
+        raise ValueError(
+            "Q8KV4 prefill requires contiguous CUDA Q and packed KV with both scales"
+        )
     total_q = int(q.shape[0])
     chunk_size = _sparse_attn_chunk_size()
     if not _sparse_attn_chunk_enabled():

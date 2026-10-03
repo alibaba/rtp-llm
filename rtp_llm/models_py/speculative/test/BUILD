@@ -6,6 +6,13 @@ py_test(
 )
 
 py_test(
+    name = "test_minimax_m31_prefill_router",
+    srcs = ["test_minimax_m31_prefill_router.py"],
+    main = "test_minimax_m31_prefill_router.py",
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "test_dspark_reference",
     srcs = ["test_dspark_reference.py"],
     main = "test_dspark_reference.py",
@@ -61,6 +68,33 @@ py_test(
     name = "test_dspark_swa",
     srcs = ["test_dspark_swa.py"],
     main = "test_dspark_swa.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_dspark_wheel_import",
+    srcs = ["test_dspark_wheel_import.py"],
+    main = "test_dspark_wheel_import.py",
+    deps = ["//rtp_llm/models_py/triton_kernels:triton_kernels"],
+)
+
+py_test(
+    name = "test_dspark_gemma_norm",
+    srcs = ["test_dspark_gemma_norm.py"],
+    main = "test_dspark_gemma_norm.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_dspark_gemma_rope",
+    srcs = ["test_dspark_gemma_rope.py"],
+    main = "test_dspark_gemma_rope.py",
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["SM100_X86"],

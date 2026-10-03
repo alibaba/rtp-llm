@@ -1,11 +1,13 @@
 import pickle
 import unittest
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.model_factory import _resolve_propose_kv_cache_dtype
-from rtp_llm.ops import KvCacheDataType, SpeculativeExecutionConfig
+from rtp_llm.model_factory import ModelFactory, _resolve_propose_kv_cache_dtype
+from rtp_llm.ops import KvCacheDataType, SpeculativeExecutionConfig, SpeculativeType
 
 
 class ModelFactorySpeculativeKVCacheTest(unittest.TestCase):
@@ -59,6 +61,32 @@ class ModelFactorySpeculativeKVCacheTest(unittest.TestCase):
         restored = pickle.loads(pickle.dumps(self.sp_config))
 
         self.assertEqual(restored.fp8_kv_cache, 0)
+
+    def test_learned_speculative_model_requires_checkpoint(self):
+        self.sp_config.type = SpeculativeType.DSPARK
+        engine_config = SimpleNamespace(sp_config=self.sp_config)
+        with self.assertRaisesRegex(ValueError, "requires SP_CHECKPOINT_PATH"):
+            ModelFactory.create_propose_model_config(
+                engine_config, ModelConfig(), ModelArgs()
+            )
+
+    def test_learned_speculative_model_requires_model_type(self):
+        self.sp_config.type = SpeculativeType.DSPARK
+        self.sp_config.checkpoint_path = "/tmp/dspark"
+        engine_config = SimpleNamespace(sp_config=self.sp_config)
+        with self.assertRaisesRegex(ValueError, "requires SP_MODEL_TYPE"):
+            ModelFactory.create_propose_model_config(
+                engine_config, ModelConfig(), ModelArgs()
+            )
+
+    def test_deterministic_speculation_does_not_require_checkpoint(self):
+        self.sp_config.type = SpeculativeType.DETERMINISTIC
+        engine_config = SimpleNamespace(sp_config=self.sp_config)
+        self.assertIsNone(
+            ModelFactory.create_propose_model_config(
+                engine_config, ModelConfig(), ModelArgs()
+            )
+        )
 
 
 if __name__ == "__main__":

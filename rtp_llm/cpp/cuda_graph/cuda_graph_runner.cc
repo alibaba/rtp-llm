@@ -391,6 +391,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
     py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
     py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+    py_model_inputs_.attention_inputs.is_ragged_target_verify = inputs.attention_inputs.is_ragged_target_verify;
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -1015,8 +1016,9 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_target_verify        = is_target_verify_;
+    inputs.attention_inputs.is_ragged_target_verify = is_ragged_target_verify_;
+    inputs.attention_inputs.is_prefill              = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1410,8 +1412,9 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     // Common slice operations for input_ids and padding_offset
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_prefill              = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_target_verify        = is_target_verify_;
+    inputs.attention_inputs.is_ragged_target_verify = is_ragged_target_verify_;
     // Draft prefill uses compact token rows by default: paged-prefill attention requires
     // q.shape[0] == cu_seqlens[-1]. Models with a fixed-batch decode-style prefill
     // path opt in to full token capacity explicitly. Hidden-width expansion is

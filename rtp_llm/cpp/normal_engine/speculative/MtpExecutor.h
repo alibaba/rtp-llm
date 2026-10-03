@@ -3,6 +3,7 @@
 #include <atomic>
 #include <list>
 #include <memory>
+#include <functional>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -37,7 +38,9 @@ public:
                          MlaOpsType                                     mla_ops_type            = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num      = 1,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
-                         bool                                           warm_up                 = false);
+                         bool                                           warm_up                 = false,
+                         std::function<void()>                          prefill_profile_start   = nullptr,
+                         std::function<void()>                          prefill_profile_finish  = nullptr);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -109,8 +112,6 @@ protected:
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
                                       const torch::Tensor& anchors);
-    void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
-                                                         const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs&     model_input,
                                                  const StreamGroups& stream_groups,
                                                  bool                broadcast_hidden_states);
@@ -190,16 +191,26 @@ protected:
     void releaseAllModelBuffers();
 
 private:
-    std::unique_ptr<ModelBase>                                               model_;
-    std::unique_ptr<Sampler>                                                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>                                          cache_manager_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
-    bool                                                                     enable_detail_log_       = false;
-    int                                                                      tp_rank_                 = 0;
-    ParallelismConfig                                                        parallelism_config_;
-    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
-    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    absl::Status processImpl(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us);
+    absl::Status processWithKvLease(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us);
+    std::list<GenerateStreamPtr> acquireKvExecutionStreams(const std::list<GenerateStreamPtr>& streams,
+                                                           std::vector<GenerateStreamPtr>&     leases);
+    // Reuse the existing zero-work EP participant if every scheduled request
+    // in a phase became terminal before execution acquired its KV lease.
+    std::function<GenerateStreamPtr(bool)>   make_kv_safe_fake_stream_;
+    static bool                              canSampleCompactVerifyRows(const SamplerInputs& inputs);
+    static void                              capDSparkVerifyLengths(speculative::SpeculativeSamplerOutput& output,
+                                                                    const torch::Tensor&                   verify_lengths);
+    std::unique_ptr<ModelBase>               model_;
+    std::unique_ptr<Sampler>                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>          cache_manager_;
+    bool                                     enable_ffn_disaggregate_ = false;
+    bool                                     enable_detail_log_       = false;
+    int                                      tp_rank_                 = 0;
+    ParallelismConfig                        parallelism_config_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>                   tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
@@ -215,9 +226,13 @@ private:
         return is_dspark_ && dspark_verify_step_ ? dspark_verify_step_ : propose_step_;
     }
     size_t        draft_vocab_size_;
-    bool          is_dspark_ = false;
+    bool          is_dspark_                        = false;
+    bool          dspark_adaptive_verify_           = false;
+    size_t        dspark_verify_budget_per_request_ = 0;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;
+    torch::Tensor dspark_confidence_w_;
+    torch::Tensor dspark_confidence_b_;
     // One immutable temperature entry, owned by the serial sampling executor.
     std::vector<float>                               dspark_temperatures_;
     torch::Tensor                                    dspark_temperature_gpu_;
@@ -231,8 +246,10 @@ private:
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
 
-    bool     warm_up_;
-    RoleType role_type_;
+    bool                  warm_up_;
+    std::function<void()> prefill_profile_start_;
+    std::function<void()> prefill_profile_finish_;
+    RoleType              role_type_;
 
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page

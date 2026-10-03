@@ -7,6 +7,7 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
@@ -527,6 +528,366 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
                   << " old_with_uniform_rng_us=" << old_full_us << " latest_us=" << latest_us
                   << " speedup_vs_old_kernel=" << (old_kernel_us / latest_us)
                   << " speedup_vs_old_with_rng=" << (old_full_us / latest_us) << std::endl;
+    }
+}
+
+TEST_F(CudaSamplerTest, CompactVerifyRowsPreserveLiveSamplesAndDenseRng) {
+    constexpr int64_t width = 8;
+    for (int64_t vocab : {256, 200064}) {
+        for (int64_t requests : {1, 3, 4}) {
+            const auto dense_rows            = requests * width;
+            const bool use_default_generator = requests == 3;
+            for (int mode = 0; mode < 4; ++mode) {
+                SCOPED_TRACE(::testing::Message() << "vocab=" << vocab << " requests=" << requests << " mode=" << mode);
+                std::vector<at::Generator> full_generators, compact_generators;
+                for (int64_t request = 0; request < (use_default_generator ? 0 : requests); ++request) {
+                    auto full_gen    = torch::make_generator<at::CUDAGeneratorImpl>();
+                    auto compact_gen = torch::make_generator<at::CUDAGeneratorImpl>();
+                    full_gen.set_current_seed(2300 + request);
+                    compact_gen.set_current_seed(2300 + request);
+                    for (int64_t position = 0; position < width; ++position) {
+                        full_generators.push_back(full_gen);
+                        compact_generators.push_back(compact_gen);
+                    }
+                }
+                // Changing ragged prefixes across calls exercises RNG continuation
+                // and full-width / one-row boundaries without resetting generators.
+                for (int round = 0; round < 3; ++round) {
+                    std::vector<int64_t> live;
+                    for (int64_t request = 0; request < requests; ++request) {
+                        const auto length = round == 0 ? 1 : round == 1 ? width : 2 + request;
+                        for (int64_t position = 0; position < length; ++position)
+                            live.push_back(request * width + position);
+                    }
+                    auto                 rows       = torch::tensor(live, torch::kLong).to(torch::kCUDA);
+                    auto                 device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                    auto                 logits = torch::randn({dense_rows, vocab}, device_i32.dtype(torch::kFloat32));
+                    auto                 full_tokens    = torch::zeros({dense_rows, 1}, device_i32);
+                    auto                 compact_tokens = full_tokens.clone();
+                    auto                 full_probs     = torch::empty_like(logits);
+                    auto                 compact_probs  = torch::empty_like(logits);
+                    std::vector<int32_t> top_k(dense_rows, mode == 0 ? 1 : mode == 2 ? 5 : 0);
+                    std::vector<float>   top_p(dense_rows, mode == 1 ? 0.8f : 1.0f);
+                    if (mode == 3) {
+                        for (int64_t row = 0; row < dense_rows; ++row) {
+                            top_k[row] = row % width < 2 ? 0 : 5;
+                            top_p[row] = row % width < 2 ? 0.8f : 0.9f;
+                        }
+                    }
+                    auto make_params =
+                        [&](torch::Tensor tokens, torch::Tensor probs, const std::vector<at::Generator>& generators) {
+                            return GreedyParams{logits.clone(),
+                                                pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                                pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                                tokens,
+                                                81920,
+                                                pinnedIntTensor(top_k),
+                                                pinnedFloatTensor(top_p),
+                                                pinnedFloatTensor(std::vector<float>(dense_rows, 0.7f)),
+                                                std::nullopt,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                false,
+                                                probs,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                generators};
+                        };
+                    auto full                     = make_params(full_tokens, full_probs, full_generators);
+                    auto compact                  = make_params(compact_tokens, compact_probs, compact_generators);
+                    compact.sample_rows           = rows;
+                    auto       default_generator  = at::cuda::detail::getDefaultCUDAGenerator();
+                    const auto default_before     = default_generator.get_state().clone();
+                    auto       full_output        = execSampleGreedy(full);
+                    const auto default_after_full = default_generator.get_state().clone();
+                    if (use_default_generator)
+                        default_generator.set_state(default_before);
+                    auto compact_output = execSampleGreedy(compact);
+                    EXPECT_TRUE(torch::equal(default_after_full, default_generator.get_state()));
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    EXPECT_TRUE(torch::equal(full_tokens.index_select(0, rows), compact_tokens.index_select(0, rows)));
+                    const auto live_full    = full_probs.index_select(0, rows);
+                    const auto live_compact = compact_probs.index_select(0, rows);
+                    if (!torch::equal(live_full, live_compact) && mode == 1) {
+                        auto repeat_probs = torch::empty_like(logits);
+                        auto repeat       = make_params(full_tokens.clone(), repeat_probs, {});
+                        execSampleGreedy(repeat);
+                        const auto repeat_live  = repeat_probs.index_select(0, rows);
+                        const auto delta        = (live_full - live_compact).abs();
+                        const auto repeat_delta = (live_full - repeat_live).abs();
+                        std::cout << "[compact-topp-diagnostic] vocab=" << vocab << " requests=" << requests
+                                  << " round=" << round << " max_abs=" << delta.max().item<float>()
+                                  << " row_l1=" << delta.sum(-1).max().item<float>()
+                                  << " support_equal=" << torch::equal(live_full > 0, live_compact > 0)
+                                  << " softmax_equal="
+                                  << torch::equal(full.logits.index_select(0, rows),
+                                                  compact.logits.index_select(0, rows))
+                                  << " dense_repeat_max_abs=" << repeat_delta.max().item<float>()
+                                  << " dense_repeat_row_l1=" << repeat_delta.sum(-1).max().item<float>()
+                                  << " dense_repeat_support_equal=" << torch::equal(live_full > 0, repeat_live > 0)
+                                  << std::endl;
+                    }
+                    if (vocab == 256 || mode < 2) {
+                        EXPECT_TRUE(torch::equal(live_full, live_compact));
+                    } else {
+                        // Diagnostic coverage only: the executor keeps large-vocab
+                        // TopK and mixed TopK/TopP on the unchanged dense path.
+                        auto repeat_probs = torch::empty_like(logits);
+                        auto repeat       = make_params(full_tokens.clone(), repeat_probs, {});
+                        execSampleGreedy(repeat);
+                        const auto repeat_live  = repeat_probs.index_select(0, rows);
+                        const auto delta        = (live_full - live_compact).abs();
+                        const auto repeat_delta = (live_full - repeat_live).abs();
+                        EXPECT_TRUE(torch::equal(live_full > 0, live_compact > 0));
+                        EXPECT_LE(delta.sum(-1).max().item<float>(), 1e-6f);
+                        std::cout << "[compact-topk-diagnostic] requests=" << requests << " mode=" << mode
+                                  << " round=" << round << " max_abs=" << delta.max().item<float>()
+                                  << " row_l1=" << delta.sum(-1).max().item<float>()
+                                  << " dense_repeat_max_abs=" << repeat_delta.max().item<float>()
+                                  << " dense_repeat_row_l1=" << repeat_delta.sum(-1).max().item<float>() << std::endl;
+                    }
+                    EXPECT_TRUE(torch::equal(full.logits.index_select(0, rows), compact.logits.index_select(0, rows)));
+                    EXPECT_TRUE(torch::allclose(compact_probs.sum(-1), torch::ones({dense_rows}, logits.options())));
+                    ASSERT_EQ(full_output.success.defined(), compact_output.success.defined());
+                    if (full_output.success.defined()) {
+                        EXPECT_TRUE(torch::equal(full_output.success.index_select(0, rows),
+                                                 compact_output.success.index_select(0, rows)));
+                    }
+                    for (int64_t request = 0; request < (use_default_generator ? 0 : requests); ++request) {
+                        EXPECT_TRUE(torch::equal(full_generators[request * width].get_state(),
+                                                 compact_generators[request * width].get_state()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, LargeVocabTopPRenormPreservesSupportAcrossRepeatsAndCompactRows) {
+    constexpr int64_t vocab = 200064, width = 8;
+    const auto        options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    const auto        stream  = at::cuda::getCurrentCUDAStream().stream();
+    for (int64_t requests : {3, 4, 16}) {
+        const auto           dense_rows = requests * width;
+        auto                 probs      = torch::softmax(torch::randn({dense_rows, vocab}, options), -1);
+        std::vector<int64_t> live;
+        for (int64_t request = 0; request < requests; ++request)
+            for (int64_t position = 0; position < 1 + request % width; ++position)
+                live.push_back(request * width + position);
+        auto rows          = torch::tensor(live, torch::kLong).cuda();
+        auto compact_probs = probs.index_select(0, rows);
+        for (float p : {0.8f, 0.95f, 1.0f}) {
+            SCOPED_TRACE(::testing::Message() << "requests=" << requests << " top_p=" << p);
+            auto reference = torch::empty_like(probs);
+            top_p_renorm_probs(probs, reference, std::nullopt, p, (int64_t)stream);
+            for (int repeat = 0; repeat < 5; ++repeat) {
+                auto actual  = torch::empty_like(probs);
+                auto compact = torch::empty_like(compact_probs);
+                top_p_renorm_probs(probs, actual, std::nullopt, p, (int64_t)stream);
+                top_p_renorm_probs(compact_probs, compact, std::nullopt, p, (int64_t)stream);
+                ASSERT_TRUE(torch::equal(reference, actual));
+                ASSERT_TRUE(torch::equal(reference.index_select(0, rows), compact));
+                ASSERT_TRUE(torch::isfinite(actual).all().item<bool>());
+                ASSERT_TRUE(torch::allclose(actual.sum(-1), torch::ones({dense_rows}, options)));
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, CompactVerifyRowsPreserveCappedRejectionPrefix) {
+    constexpr int64_t    batch = 4, gamma = 7, width = 8, vocab = 256, dense_rows = batch * width;
+    auto                 gpu_f32     = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                 gpu_i32     = gpu_f32.dtype(torch::kInt32);
+    auto                 lengths_cpu = torch::tensor({1, 3, 5, 8}, torch::kInt32);
+    auto                 lengths     = lengths_cpu.cuda();
+    std::vector<int64_t> live;
+    for (int64_t request = 0; request < batch; ++request)
+        for (int64_t position = 0; position < lengths_cpu.data_ptr<int32_t>()[request]; ++position)
+            live.push_back(request * width + position);
+    auto rows = torch::tensor(live, torch::kLong).cuda();
+    for (bool do_sample : {false, true}) {
+        for (bool full_agreement : {false, true}) {
+            for (int trial = 0; trial < 8; ++trial) {
+                auto frozen      = torch::randn({dense_rows, vocab}, gpu_f32);
+                auto make_params = [&]() {
+                    GreedyParams params{frozen.clone(),
+                                        pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                        pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                        torch::zeros({dense_rows, 1}, gpu_i32),
+                                        81920,
+                                        pinnedIntTensor(std::vector<int32_t>(dense_rows, do_sample ? 0 : 1)),
+                                        pinnedFloatTensor(std::vector<float>(dense_rows, 0.95f)),
+                                        pinnedFloatTensor(std::vector<float>(dense_rows, 0.7f)),
+                                        std::nullopt,
+                                        std::nullopt,
+                                        std::nullopt,
+                                        std::nullopt,
+                                        false,
+                                        torch::empty_like(frozen)};
+                    for (int64_t row = 0; row < dense_rows; ++row) {
+                        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+                        generator.set_current_seed(3200 + row + trial * dense_rows);
+                        params.generator.push_back(generator);
+                    }
+                    return params;
+                };
+                auto full           = make_params();
+                auto compact        = make_params();
+                compact.sample_rows = rows;
+                execSampleGreedy(full);
+                execSampleGreedy(compact);
+                auto                       target_probs = full.output_all_probs.value().reshape({batch, width, vocab});
+                auto                       draft_probs  = full_agreement ?
+                                                              target_probs.narrow(1, 0, gamma).contiguous() :
+                                                              normalizedRandomProbs(batch * gamma, vocab).reshape({batch, gamma, vocab});
+                auto                       draft_ids    = full_agreement ?
+                                                              full.token_ids.reshape({batch, width}).narrow(1, 0, gamma).contiguous() :
+                                                              torch::randint(vocab, {batch, gamma}, gpu_i32);
+                auto                       uniforms     = torch::rand({batch, width}, gpu_f32);
+                auto                       sample_mask  = torch::full({batch}, do_sample, gpu_f32.dtype(torch::kBool));
+                std::vector<torch::Tensor> tokens, accepted;
+                for (const auto& params : {full, compact}) {
+                    tokens.push_back(torch::zeros({batch, width}, gpu_i32));
+                    auto accept = torch::zeros({batch}, gpu_i32);
+                    execRejectionSampling({draft_probs,
+                                           draft_ids,
+                                           uniforms,
+                                           params.output_all_probs.value().reshape({batch, width, vocab}),
+                                           params.token_ids,
+                                           tokens.back(),
+                                           accept,
+                                           sample_mask,
+                                           false,
+                                           true});
+                    accepted.push_back(torch::minimum(accept, lengths));
+                }
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                EXPECT_TRUE(torch::equal(accepted[0], accepted[1]));
+                auto accepted_cpu = accepted[0].cpu();
+                for (int64_t request = 0; request < batch; ++request) {
+                    const auto count  = accepted_cpu.data_ptr<int32_t>()[request];
+                    const auto prefix = tokens[1][request].narrow(0, 0, count);
+                    EXPECT_TRUE(torch::equal(tokens[0][request].narrow(0, 0, count), prefix));
+                    EXPECT_TRUE(prefix.ge(0).logical_and(prefix.lt(vocab)).all().item<bool>());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, DISABLED_benchmarkCompactVerifySampling) {
+    constexpr int64_t width      = 8;
+    constexpr int64_t live_width = 5;
+    constexpr int64_t vocab      = 200064;
+    auto              gpu_f32    = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto              gpu_i32    = gpu_f32.dtype(torch::kInt32);
+    auto              flush      = torch::zeros({kL2FlushBytes / sizeof(float)}, gpu_f32);
+    for (int64_t requests : {1, 4, 16}) {
+        const auto           dense_rows = requests * width;
+        std::vector<int64_t> live;
+        for (int64_t request = 0; request < requests; ++request)
+            for (int64_t position = 0; position < live_width; ++position)
+                live.push_back(request * width + position);
+        auto rows = torch::tensor(live, torch::kLong).cuda();
+        // The real executor scatters compact logits into zero-filled dense
+        // rows, so skipped rows have an expensive uniform distribution.
+        auto frozen = torch::zeros({dense_rows, vocab}, gpu_f32);
+        frozen.index_copy_(0, rows, torch::randn({static_cast<int64_t>(live.size()), vocab}, gpu_f32));
+        for (float top_p : {0.95f, 1.0f}) {
+            auto make_params = [&]() {
+                return GreedyParams{frozen.clone(),
+                                    pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                    pinnedIntTensor(std::vector<int32_t>(dense_rows, 81920)),
+                                    torch::zeros({dense_rows, 1}, gpu_i32),
+                                    81920,
+                                    pinnedIntTensor(std::vector<int32_t>(dense_rows, 0)),
+                                    pinnedFloatTensor(std::vector<float>(dense_rows, top_p)),
+                                    pinnedFloatTensor(std::vector<float>(dense_rows, 0.7f)),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    false,
+                                    torch::empty_like(frozen)};
+            };
+            auto full           = make_params();
+            auto compact        = make_params();
+            compact.sample_rows = rows;
+            const auto old_path = [&]() {
+                full.logits.copy_(frozen);
+                execSampleGreedy(full);
+            };
+            const auto candidate_path = [&]() {
+                compact.logits.copy_(frozen);
+                execSampleGreedy(compact);
+            };
+            const auto full_us     = benchmarkCudaEventUs(old_path, flush, 3, 10);
+            const auto compact_us  = benchmarkCudaEventUs(candidate_path, flush, 3, 10);
+            auto       memory_cost = [&](const std::function<void()>& path) {
+                cudaDeviceSynchronize();
+                const auto device = at::cuda::current_device();
+                c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+                const auto before = c10::cuda::CUDACachingAllocator::getDeviceStats(device);
+                path();
+                cudaDeviceSynchronize();
+                const auto       after = c10::cuda::CUDACachingAllocator::getDeviceStats(device);
+                constexpr double mib   = 1024.0 * 1024.0;
+                return std::pair<double, double>{
+                    (after.allocated_bytes[0].peak - before.allocated_bytes[0].current) / mib,
+                    (after.reserved_bytes[0].current - before.reserved_bytes[0].current) / mib};
+            };
+            const auto full_mem    = memory_cost(old_path);
+            const auto compact_mem = memory_cost(candidate_path);
+            std::cout << "[compact-verify-sampling] requests=" << requests << " dense_rows=" << dense_rows
+                      << " live_rows=" << live.size() << " vocab=" << vocab << " top_p=" << top_p
+                      << " full_event_us=" << full_us << " compact_event_us=" << compact_us
+                      << " speedup=" << full_us / compact_us << " full_temporary_peak_mib=" << full_mem.first
+                      << " compact_temporary_peak_mib=" << compact_mem.first
+                      << " full_postwarm_reserved_delta_mib=" << full_mem.second
+                      << " compact_postwarm_reserved_delta_mib=" << compact_mem.second << std::endl;
+        }
+    }
+}
+
+// Diagnostic only: no production sampler change until numerical and matched
+// timeline evidence supports replacing the unrestricted top-p renormalizer.
+TEST_F(CudaSamplerTest, DISABLED_compareUnrestrictedProbabilityRenorm) {
+    constexpr int64_t vocab  = 200064;
+    auto              stream = at::cuda::getCurrentCUDAStream().stream();
+    auto              flush  = torch::zeros({kL2FlushBytes / sizeof(float)},
+                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    for (int64_t batch : {5, 8, 20, 32, 80, 128}) {
+        for (float scale : {0.0f, 1.0f, 10.0f, 100.0f}) {
+            auto probs          = torch::softmax(torch::randn({batch, vocab}, flush.options()) * scale, -1);
+            auto reference      = torch::empty_like(probs);
+            auto candidate      = torch::empty_like(probs);
+            auto top_p          = torch::ones({batch}, probs.options());
+            auto old_path       = [&]() { top_p_renorm_probs(probs, reference, top_p, 1.0, (int64_t)stream); };
+            auto candidate_path = [&]() {
+                top_k_renorm_probs(probs, candidate, std::nullopt, 1 << 30, (int64_t)stream);
+            };
+            old_path();
+            candidate_path();
+            cudaDeviceSynchronize();
+            ASSERT_TRUE(torch::isfinite(candidate).all().item<bool>());
+            const auto support_diff = ((reference > 0) != (candidate > 0)).sum().item<int64_t>();
+            const auto dropped_mass = probs.masked_select((reference == 0) & (probs > 0)).sum().item<float>();
+            // Non-fatal checks preserve the failing case while collecting the
+            // full diagnostic matrix. A support change forbids an exact-path claim.
+            EXPECT_EQ(support_diff, 0);
+            EXPECT_TRUE(torch::allclose(reference, candidate, 1e-5, 1e-8));
+            ASSERT_TRUE(torch::allclose(candidate.sum(-1), torch::ones({batch}, probs.options()), 1e-5, 1e-6));
+            const auto max_abs      = (reference - candidate).abs().max().item<float>();
+            const auto exact        = torch::equal(reference, candidate);
+            const auto old_us       = benchmarkCudaEventUs(old_path, flush, 3, 10);
+            const auto candidate_us = benchmarkCudaEventUs(candidate_path, flush, 3, 10);
+            std::cout << "[unrestricted-renorm] batch=" << batch << " vocab=" << vocab << " scale=" << scale
+                      << " exact=" << exact << " max_abs=" << max_abs << " support_diff=" << support_diff
+                      << " top_p_dropped_mass=" << dropped_mass << " top_p_us=" << old_us
+                      << " full_vocab_us=" << candidate_us << std::endl;
+        }
     }
 }
 

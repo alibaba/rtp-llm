@@ -25,6 +25,9 @@ public:
     void trackExternalTask();
     void finishExternalTask(std::exception_ptr exception = nullptr);
     void waitAllDone();
+    // Exception cleanup after the model stops submitting: idle is a no-op;
+    // running waits for both queued work and external store callbacks.
+    void drainIfRunning();
 
 private:
     enum class State {

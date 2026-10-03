@@ -6,6 +6,77 @@ import triton.language as tl
 
 
 @triton.jit
+def _dspark_gemma_rms_norm(
+    X,
+    W,
+    Y,
+    ROW_STRIDE: tl.constexpr,
+    D: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    x = tl.load(X + row * ROW_STRIDE + cols, cols < D, 0).to(tl.float32)
+    raw = tl.load(W + cols, cols < D, 0).to(tl.float32)
+    inverse_rms = tl.rsqrt(tl.sum(x * x, axis=0) / D + EPS)
+    # All arithmetic stays FP32 until the final BF16 store. In particular,
+    # (1 + raw) must never be materialized as a BF16 scale tensor.
+    y = (x * inverse_rms) * (1.0 + raw)
+    tl.store(Y + row * D + cols, y, cols < D)
+
+
+def dspark_gemma_rms_norm(x, raw_weight, eps):
+    """Draft-only BF16 RMSNorm with FP32 reduction and Gemma scale.
+
+    Matches normalize(x.float()) * (1 + raw_weight.float()), then BF16.
+    The reduction schedule is Triton's, not cuDNN training's bit-exact one.
+    Accepts [rows,channels] with padded/interleaved row strides; only the
+    output is allocated, with no per-forward FP32 scale tensor.
+    """
+    if x.ndim != 2 or raw_weight.shape != (x.shape[-1],):
+        raise ValueError("expected x [rows,channels] and raw_weight [channels]")
+    if not x.is_cuda or raw_weight.device != x.device:
+        raise ValueError("x and raw_weight must be on the same CUDA device")
+    if x.dtype != torch.bfloat16 or raw_weight.dtype != torch.bfloat16:
+        raise TypeError("draft Gemma RMSNorm requires BF16 activations/raw weights")
+    dim = x.shape[-1]
+    if dim <= 0 or dim > 16384 or x.stride(-1) != 1 or x.stride(0) < dim:
+        raise ValueError(
+            "requires nonoverlapping rows with 1..16384 contiguous channels"
+        )
+    if not raw_weight.is_contiguous():
+        raise ValueError("raw_weight must be contiguous")
+    output = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    if x.shape[0]:
+        block = triton.next_power_of_2(dim)
+        _dspark_gemma_rms_norm[(x.shape[0],)](
+            x,
+            raw_weight,
+            output,
+            x.stride(0),
+            dim,
+            eps,
+            block,
+            num_warps=4 if block <= 1024 else 8,
+            enable_fp_fusion=False,
+        )
+    return output
+
+
+class DSparkGemmaRMSNorm(torch.nn.Module):
+    """Keep raw checkpoint weights and apply the draft's FP32 Gemma equation."""
+
+    def __init__(self, raw_weight, eps):
+        super().__init__()
+        self.register_buffer("weight", raw_weight)
+        self.eps = eps
+
+    def forward(self, x):
+        return dspark_gemma_rms_norm(x, self.weight, self.eps)
+
+
+@triton.jit
 def _commit_paged_kv(
     K,
     V,
@@ -160,6 +231,10 @@ def _paged_swa(
         allowed &= pos[None, :] >= length + qr[:, None] - LEFT
         if CAUSAL:
             allowed &= pos[None, :] <= length + qr[:, None]
+        else:
+            # ENCODER_ONLY uses a symmetric sliding window, not an
+            # unlimited right window when the query block is longer than LEFT.
+            allowed &= pos[None, :] <= length + qr[:, None] + LEFT
         scores = tl.dot(q, tl.trans(k)) * SCALE
         scores = tl.where(allowed, scores, -float("inf"))
         new_max = tl.maximum(maximum, tl.max(scores, 1))
@@ -217,8 +292,9 @@ def paged_gqa_swa(
     context_lens[B] counts historical tokens, query_lens[B] counts live current
     rows (zero for padded requests). Int32/64 CUDA metadata updates in place
     are replay safe. Callers own valid lengths and mappings for historical KV.
-    Position p sees keys >= p-window_left, and <= p if causal, otherwise all
-    live current keys. Thus window_left=4095 means 4096 keys including self.
+    Position p sees keys >= p-window_left, and <= p if causal, otherwise
+    <= p+window_left (symmetric ENCODER_ONLY SWA). In the causal case,
+    window_left=4095 means 4096 keys including self.
     Invalid query rows are zero. This function never writes the cache.
     Provide out for a graph-stable allocation-free launch. Mask choice must
     come from the model reference; this primitive does not choose DSpark math.

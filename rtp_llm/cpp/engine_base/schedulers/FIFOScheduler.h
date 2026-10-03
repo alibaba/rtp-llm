@@ -99,6 +99,7 @@ protected:
     bool                                  cache_exposed_wait_active_ = false;
     std::chrono::steady_clock::time_point cache_exposed_wait_start_;
     int64_t                               cache_exposed_wait_us_total_ = 0;
+    int64_t                               cache_exposed_wait_count_    = 0;
     std::mutex                            lock_;
     std::condition_variable               cond_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;

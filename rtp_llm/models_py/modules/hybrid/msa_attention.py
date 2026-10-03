@@ -1,35 +1,28 @@
-"""MiniMax-M3 sparse attention (MSA) module.
+"""MiniMax-M3/M3.1 sparse attention (MSA) module.
 
-Wires the ported Triton MSA kernels (``rtp_llm/models_py/triton_kernels/
-sparse_msa``) into rtp-llm's GenericMoe decoder for MiniMax-M3 *sparse* layers
-(e.g. layers 3,4 in the 5-layer mini model). Dense layers keep using the
-shared FlashInfer FMHA impl; only sparse layers are routed here.
+The module keeps legacy M3 BF16/FP8 sparse paths and the M3.1 NVFP4 path.
+For M3.1 with ``nvfp4_kv_cache`` enabled, Prefill IndexScore consumes packed
+idx_K4 plus its E4M3 scales, Prefill sparse attention consumes packed main
+KV4 plus scales, and Decode/target-verify use the direct paged Q8K4 reader.
+Those M3.1 routes do not gather/dequantize the full history into BF16 working
+pages. The BF16/FP8 branches below remain for non-NVFP4 M3 compatibility and
+are not fallback routes for an M3.1 NVFP4 request.
 
-Design (paged-only store):
+All persistent KV/index data uses the cache-manager's paged pools; no
+per-layer side cache is introduced. Main K/V and index-K plus scales use the
+cache ABI described by ``NVFP4CacheLayout`` and the same physical page table,
+so they move together across PD separation. In CP Prefill, the full suffix is
+gathered for projection, but writes remain rank-sharded and Q stays
+rank-local; the FP4 IndexScore and sparse-attention operators consume the
+packed pages directly.
 
-* The persistent store for both the main K/V and the index-K is the standard
-  cache-manager paged pool — there is NO self-built per-layer side cache.
-  Main K/V live in ``kv_cache.kv_cache_base`` (HND paged pool) and idx_K lives
-  in that pool's scale region ``kv_cache.kv_scale_base`` (reinterpreted as
-  BF16). Both are addressed by the same block table and therefore travel
-  together under PD separation.
+The non-CP physical slot for ``(request b, token position p)`` is::
 
-* Prefill writes the persistent paged pool and gathers the active request pages
-  into HND working pages for sparse FMHA. The index-score operator consumes a
-  compact idx_K working tensor. Decode reads the persistent pages directly.
-
-* In the normal non-CP path the physical slot for ``(request b, token
-  position p)`` is the paged block table::
-
-      slot = block_table[b, p // page_size] * page_size + (p % page_size)
-
-* In CP prefill, K/V are all-gathered into full sequence order while Q stays
-  rank-local, then written into this rank's paged shard and HND working pages.
+    slot = block_table[b, p // page_size] * page_size + (p % page_size)
 
 The index branch (``index_q_proj`` / ``index_k_proj`` + per-head Gemma RMSNorm
-+ partial RoPE) only selects top-k blocks; with ``disable_index_value=True``
-(M3 default) it does not contribute to the attention value, so ``idx_v`` is
-``None`` and the index output ``idx_o`` is discarded.
++ partial RoPE) selects top-k blocks. With ``disable_index_value=True`` it
+does not contribute to the attention value.
 """
 
 import logging
@@ -51,6 +44,12 @@ _BF16_BYTES = 2
 _FP8_SCALE_BYTES = 4
 _FP8_E4M3_MAX = tl.constexpr(448.0)
 
+
+def _should_use_cp_compact_prefill(compact_enabled: bool, nvfp4_kv_cache: bool) -> bool:
+    """Keep the legacy BF16 compact path out of M3.1's packed-KV4 route."""
+    return bool(compact_enabled and not nvfp4_kv_cache)
+
+
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -70,6 +69,9 @@ from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     cache_layout as nvfp4_cache_layout,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    clear_packed_working_tail_scales,
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     quantize_main_index_rows as nvfp4_quantize_main_index_rows,
@@ -170,9 +172,33 @@ def _prepare_target_verify_addressing(
     total_tokens: int,
     device: torch.device,
     use_fused_cuda: bool = False,
+    is_ragged: bool = False,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build token-row MSA addressing, optionally using one CUDA launch."""
     batch_size = int(prefix_lengths.numel())
+    if is_ragged:
+        if batch_size <= 0 or int(input_lengths.numel()) != batch_size:
+            raise RuntimeError(
+                "ragged MSA target verify requires one input length per request: "
+                f"input_lengths={input_lengths.numel()}, batch={batch_size}"
+            )
+        if cu_seqlens is None or int(cu_seqlens.numel()) != batch_size + 1:
+            raise RuntimeError(
+                "ragged MSA target verify requires CUDA cu_seqlens [batch + 1]"
+            )
+        if not request_block_table.is_cuda:
+            raise RuntimeError("ragged MSA target verify requires CUDA addressing")
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        return tuple(
+            rtp_llm_ops.mtp_msa_target_verify_ragged_addressing_prepare(
+                request_block_table,
+                prefix_lengths,
+                cu_seqlens,
+                total_tokens,
+            )
+        )
     if batch_size <= 0 or total_tokens % batch_size != 0:
         raise RuntimeError(
             "MSA target verify expects flat [batch * verify_tokens, hidden] input; "
@@ -2023,6 +2049,7 @@ class MSAAttention(nn.Module):
     ) -> bool:
         return (
             not self.nvfp4_kv_cache
+            and self._m31_raw_attention_norms is None
             and self._can_use_mxfp8_fused_qkv_idx_decode
             and x_fp8 is not None
             and x_scale is not None
@@ -2162,6 +2189,18 @@ class MSAAttention(nn.Module):
         )
         self.o_proj.maybe_cache_quant_scale(1024)
 
+        raw_norm_keys = (
+            "minimax_m31.raw_q_norm",
+            "minimax_m31.raw_k_norm",
+            "minimax_m31.raw_index_q_norm",
+            "minimax_m31.raw_index_k_norm",
+        )
+        raw_norm_count = sum(key in weights for key in raw_norm_keys)
+        if raw_norm_count not in (0, 4):
+            raise ValueError("M3.1 fused norm/RoPE requires all four raw norm weights")
+        self._m31_raw_attention_norms = (
+            tuple(weights[key] for key in raw_norm_keys) if raw_norm_count else None
+        )
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
             self.qk_fuse_norm = FusedQKRMSNorm(
@@ -2445,6 +2484,8 @@ class MSAAttention(nn.Module):
                 total_tokens,
                 device,
                 use_fused_cuda=use_fused_cuda,
+                is_ragged=bool(getattr(attn_inputs, "is_ragged_target_verify", False)),
+                cu_seqlens=attn_inputs.cu_seqlens,
             )
         )
         addressing = (
@@ -2513,6 +2554,37 @@ class MSAAttention(nn.Module):
             self.idx_replica_size = self.tp_size // self.idx_head_tp_size
         self.idx_head_rank = self.tp_rank // self.idx_replica_size
         return self.total_idx_heads // self.idx_head_tp_size
+
+    def _fuse_m31_projected_norm_rope(self, qkv, idx_q, idx_k, positions):
+        """M3.1 raw-weight producer; callers must skip legacy norm and RoPE."""
+        raw_weights = getattr(self, "_m31_raw_attention_norms", None)
+        if raw_weights is None:
+            return False
+        if self._rope_interleave or self.head_dim != 128 or self.rotary_dim != 64:
+            raise ValueError("M3.1 fused norm/RoPE requires partial NeoX 64/128")
+        from rtp_llm.models_py.triton_kernels.minimax_m31_gemma_rope import (
+            minimax_m31_gemma_norm_rope_,
+        )
+
+        rows = qkv.shape[0]
+        minimax_m31_gemma_norm_rope_(
+            qkv,
+            idx_q.reshape(rows, self.num_idx_heads * self.idx_head_dim),
+            idx_k.reshape(rows, self.idx_head_dim),
+            raw_weights,
+            positions,
+            self.cos_sin_cache,
+            num_q_heads=self.head_num,
+            num_kv_heads=self.kv_head_num,
+            num_index_heads=self.num_idx_heads,
+            eps=self.layernorm_eps,
+        )
+        return True
+
+    def _legacy_index_norm(self, rows, weight, eps):
+        if getattr(self, "_m31_raw_attention_norms", None) is not None:
+            return rows
+        return _gemma_rmsnorm_per_head(rows, weight, eps)
 
     def _apply_rope(
         self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
@@ -2792,6 +2864,7 @@ class MSAAttention(nn.Module):
         prefix_dst_pages: torch.Tensor,
         prefix_gather_plan,
         attn_inputs: PyAttentionInputs,
+        kv_lens: torch.Tensor,
     ):
         """Persist rank-owned rows and build a packed FP4 CP working set.
 
@@ -2908,6 +2981,16 @@ class MSAAttention(nn.Module):
             idx_packed,
             idx_scales,
             page_size=self.page_size,
+        )
+        clear_packed_working_tail_scales(
+            main_scales[0],
+            main_scales[1],
+            idx_scales,
+            kv_lens,
+            int(self._scratch_seq_len),
+            self.kv_head_num,
+            self.head_dim,
+            ni,
         )
         return main, main_scales, idx_packed, idx_scales
 
@@ -3484,7 +3567,8 @@ class MSAAttention(nn.Module):
         physical_slots = torch.cat(slot_parts).contiguous()
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-        if self.qk_fuse_norm is not None:
+        m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+        if self.qk_fuse_norm is not None and not m31_fused:
             qkv = self.qk_fuse_norm(qkv)
         q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
@@ -3492,14 +3576,15 @@ class MSAAttention(nn.Module):
         v = v.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
         idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
         idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-        idx_q = _gemma_rmsnorm_per_head(
+        idx_q = self._legacy_index_norm(
             idx_q, self.idx_q_norm_w, self.layernorm_eps
         ).contiguous()
-        idx_k = _gemma_rmsnorm_per_head(
+        idx_k = self._legacy_index_norm(
             idx_k, self.idx_k_norm_w, self.layernorm_eps
         ).contiguous()
-        self._apply_rope(q, k, positions)
-        self._apply_rope(idx_q, idx_k, positions)
+        if not m31_fused:
+            self._apply_rope(q, k, positions)
+            self._apply_rope(idx_q, idx_k, positions)
         base = self._paged_kv_base_view(kv_cache)
         if (
             base is None
@@ -3579,7 +3664,7 @@ class MSAAttention(nn.Module):
                 self.topk_blocks,
                 use_fp8_kvcache=False,
             )
-            if m3_index_score_chunk_enabled(total_tokens):
+            if self.nvfp4_kv_cache or m3_index_score_chunk_enabled(total_tokens):
                 index_score_plan = {}
             else:
                 index_score_plan = build_index_score_plan(
@@ -3666,15 +3751,11 @@ class MSAAttention(nn.Module):
             )
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
             PrefillScoreHostMetadata,
-            m3_index_score_chunk_enabled,
-            m3_index_score_chunk_rows,
         )
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
-            build_index_score_plan,
             build_kv_page_indices,
             build_sparse_attn_plan,
             flash_prefill_topk_to_block_tables_fp4,
-            prepare_fmha_index_score_chunks,
             sparse_prefill_from_topk_fp4,
         )
 
@@ -3746,57 +3827,34 @@ class MSAAttention(nn.Module):
             self.topk_blocks,
             use_fp8_kvcache=False,
         )
-        if m3_index_score_chunk_enabled(total_tokens):
-            index_plan = {}
-            host = PrefillScoreHostMetadata(
-                tuple(inlen_cpu), tuple(kv_cpu), tuple(prefix_cpu), tuple(range(bsz))
-            )
-            prepare_fmha_index_score_chunks(
-                index_score_plan=index_plan,
-                cu_seqlens=cu_seqlens,
-                seq_lens=seq_lens,
-                prefix_lens=prefix_i32,
-                kv_indices=kv_indices,
-                chunk_rows=m3_index_score_chunk_rows(),
-                block_size_k=self.block_size,
-                num_heads=self.num_idx_heads,
-                idx_kv_heads=1,
-                total_q=total_tokens,
-                max_seqlen_k=max_kv,
-                host_metadata=host,
-                use_fp8_kvcache=False,
-            )
-            index_plan["_fp4_host_metadata"] = host
-        else:
-            index_plan = build_index_score_plan(
-                cu_seqlens,
-                seq_lens,
-                prefix_i32,
-                self.num_idx_heads,
-                1,
-                self.block_size,
-                use_fp8_kvcache=False,
-            )
+        host = PrefillScoreHostMetadata(
+            tuple(inlen_cpu), tuple(kv_cpu), tuple(prefix_cpu), tuple(range(bsz))
+        )
+        # Packed-KV4 IndexScore uses the RTP Q8K4 reader; the fmha-sm100
+        # Q4K4 plan is neither used nor allocated on this path.
+        index_plan = {"_fp4_host_metadata": host}
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-        if self.qk_fuse_norm is not None:
+        m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+        if self.qk_fuse_norm is not None and not m31_fused:
             qkv = self.qk_fuse_norm(qkv)
         q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
         k = k.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
         v = v.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
-        idx_q = _gemma_rmsnorm_per_head(
+        idx_q = self._legacy_index_norm(
             idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim),
             self.idx_q_norm_w,
             self.layernorm_eps,
         ).contiguous()
-        idx_k = _gemma_rmsnorm_per_head(
+        idx_k = self._legacy_index_norm(
             idx_k.reshape(total_tokens, 1, self.idx_head_dim),
             self.idx_k_norm_w,
             self.layernorm_eps,
         ).contiguous()
-        self._apply_rope(q, k, positions)
-        self._apply_rope(idx_q, idx_k, positions)
+        if not m31_fused:
+            self._apply_rope(q, k, positions)
+            self._apply_rope(idx_q, idx_k, positions)
         nk, ni = self.kv_size, self.idx_head_dim
         packed = torch.cat(
             (
@@ -3824,6 +3882,7 @@ class MSAAttention(nn.Module):
                 prefix_pages,
                 None,
                 attn_inputs,
+                seq_lens,
             )
         )
         del packed, qkv, k, v, idx_k
@@ -3884,14 +3943,14 @@ class MSAAttention(nn.Module):
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """CP prefill using paged persistent KV and BF16 working pages."""
+        """CP prefill with native NVFP4 or the legacy non-NVFP4 MSA path."""
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_sparse_prefill,
         )
 
         # Compact BF16 prefill remains an old-M3 memory option. M3.1 NVFP4
         # always takes the native packed-FP4 path below.
-        if _CP_COMPACT_PREFILL and not self.nvfp4_kv_cache:
+        if _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache):
             from .msa_cp_compact import validate_compact_mode
 
             validate_compact_mode(_CP_PACKED_KV_OVERLAP, _CP_PREFIX_PREFETCH)
@@ -3965,14 +4024,19 @@ class MSAAttention(nn.Module):
             need_build_new_meta = True
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-        if self.qk_fuse_norm is not None:
+        if self.qk_fuse_norm is not None and self._m31_raw_attention_norms is None:
             qkv = self.qk_fuse_norm(qkv)
         q = qkv[:, : self.q_size].reshape(local_tokens, self.head_num, self.head_dim)
 
         idx_q = idx_q.reshape(local_tokens, self.num_idx_heads, self.idx_head_dim)
         idx_k = idx_k.reshape(local_tokens, 1, self.idx_head_dim)
-        idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
-        idx_k = _gemma_rmsnorm_per_head(idx_k, self.idx_k_norm_w, self.layernorm_eps)
+        if self._m31_raw_attention_norms is None:
+            idx_q = _gemma_rmsnorm_per_head(
+                idx_q, self.idx_q_norm_w, self.layernorm_eps
+            )
+            idx_k = _gemma_rmsnorm_per_head(
+                idx_k, self.idx_k_norm_w, self.layernorm_eps
+            )
 
         if need_build_new_meta:
             torch.cuda.current_stream().synchronize()
@@ -4074,7 +4138,7 @@ class MSAAttention(nn.Module):
                 build_sparse_attn_plan,
             )
 
-            if index_score_chunk_enabled:
+            if self.nvfp4_kv_cache or index_score_chunk_enabled:
                 # Avoid the unusable full-Q OnlyScore plan: its int32 maxscore
                 # geometry can overflow on long contexts. The chunk plans are
                 # prepared below once the shared physical page table is ready.
@@ -4198,6 +4262,14 @@ class MSAAttention(nn.Module):
             kv_page_indices = build_kv_page_indices(
                 req_to_token_segments, seq_lens_i32, self.block_size
             )
+            if self.nvfp4_kv_cache:
+                from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+                    publish_fp4_prefill_metadata_table,
+                )
+
+                # This table is read-only across layers. Every rebuild publishes
+                # a fresh epoch; a new forward already owns a new score plan.
+                publish_fp4_prefill_metadata_table(index_score_plan, kv_page_indices)
             if prefix_sum > 0:
                 prefix_dst_pages = torch.cat(
                     [
@@ -4247,7 +4319,7 @@ class MSAAttention(nn.Module):
         else:
             prefix_gather_plan = None
 
-        if _CP_COMPACT_PREFILL:
+        if _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache):
             from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
                 m3_fmha_prefill_enabled,
             )
@@ -4263,7 +4335,9 @@ class MSAAttention(nn.Module):
                 total_q=local_tokens,
             ):
                 raise ValueError("compact CP prefill requires the native FMHA path")
-        if index_score_chunk_enabled:
+        # Native Q8K4 prepares its own score chunks in the FP4 reader below;
+        # FMHA OnlyScore plans are consumed only by the legacy cache path.
+        if index_score_chunk_enabled and not self.nvfp4_kv_cache:
             assert index_score_host_metadata is not None
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
                 prepare_fmha_index_score_chunks,
@@ -4285,14 +4359,31 @@ class MSAAttention(nn.Module):
                 use_fp8_kvcache=self.idx_k_fp8_mode == 2,
             )
 
-        idx_k = idx_k.contiguous()
-        dummy_idx = _ROPE_DUMMY_SCRATCH.acquire(
-            idx_k.shape[0], idx_k.shape[1], idx_k.shape[2], idx_k.dtype, idx_k.device
+        m31_fused = self._fuse_m31_projected_norm_rope(
+            qkv, idx_q, idx_k, local_positions
         )
-        self._apply_rope(idx_k, dummy_idx, local_positions)
+        idx_k = idx_k.contiguous()
+        if not m31_fused:
+            dummy_idx = _ROPE_DUMMY_SCRATCH.acquire(
+                idx_k.shape[0],
+                idx_k.shape[1],
+                idx_k.shape[2],
+                idx_k.dtype,
+                idx_k.device,
+            )
+            self._apply_rope(idx_k, dummy_idx, local_positions)
 
         can_fuse = self.cos_sin_cache is not None and not self._rope_interleave
-        if can_fuse:
+        if m31_fused:
+            packed_kv = torch.cat(
+                (
+                    qkv[:, self.q_size : self.q_size + nk],
+                    qkv[:, self.q_size + nk : self.q_size + 2 * nk],
+                    idx_k.reshape(local_tokens, ni),
+                ),
+                dim=-1,
+            )
+        elif can_fuse:
             packed_kv = torch.empty(
                 local_tokens, 2 * nk + ni, dtype=qkv.dtype, device=device
             )
@@ -4334,7 +4425,9 @@ class MSAAttention(nn.Module):
 
         q = _rows_to_contig(q)
         idx_q = idx_q.contiguous()
-        if self.head_dim == self.idx_head_dim:
+        if m31_fused:
+            pass  # Q and index Q were rotated together before the KV pack.
+        elif self.head_dim == self.idx_head_dim:
             self._apply_rope(q, idx_q, local_positions)
         else:
             dummy_q = torch.zeros_like(q[:, :1, :])
@@ -4346,13 +4439,13 @@ class MSAAttention(nn.Module):
         # index scoring and sparse attention instead of retaining it through
         # output projection. CUDA stream ordering keeps the queued pack safe.
         del qkv
-        if not can_fuse:
+        if not can_fuse and not m31_fused:
             del k_fb, v_fb
 
         if packed_kv_event is not None:
             torch.cuda.current_stream(all_packed.device).wait_event(packed_kv_event)
 
-        if _CP_COMPACT_PREFILL:
+        if _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache):
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
                 flash_prefill_topk_to_block_tables,
             )
@@ -4485,6 +4578,7 @@ class MSAAttention(nn.Module):
                     prefix_dst_pages,
                     prefix_gather_plan,
                     attn_inputs,
+                    kv_lens_i32,
                 )
             )
             del all_packed, packed_kv
@@ -4500,10 +4594,9 @@ class MSAAttention(nn.Module):
             groups = self.head_dim // NVFP4_GROUP_SIZE
             idx_groups = self.idx_head_dim // NVFP4_GROUP_SIZE
             k_fp4, v_fp4 = main[0], main[1]
-            # fmha_sm100's two public FP4 readers intentionally expose
-            # different dtype contracts for the same E4M3 scale bytes:
-            # sparse attention accepts raw uint8 bytes, while IndexScore
-            # requires a float8_e4m3fn tensor.  Preserve that API boundary.
+            # Main sparse attention accepts scale bytes as uint8. IndexScore
+            # receives the packed idxK and MMA-ordered scales directly through
+            # RTP's Q8K4 page reader.
             k_scale = (
                 main_scales[0]
                 .view(torch.uint8)
@@ -4671,7 +4764,8 @@ class MSAAttention(nn.Module):
             )
         else:
             qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-            if self.qk_fuse_norm is not None:
+            m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+            if self.qk_fuse_norm is not None and not m31_fused:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
                 qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1
@@ -4682,19 +4776,21 @@ class MSAAttention(nn.Module):
 
             idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
             idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-            idx_q = _gemma_rmsnorm_per_head(
+            idx_q = self._legacy_index_norm(
                 idx_q, self.idx_q_norm_w, self.layernorm_eps
             )
-            idx_k = _gemma_rmsnorm_per_head(
+            idx_k = self._legacy_index_norm(
                 idx_k, self.idx_k_norm_w, self.layernorm_eps
             )
 
             q = q.contiguous()
             k = k.contiguous()
-            self._apply_rope(q, k, positions)
+            if not m31_fused:
+                self._apply_rope(q, k, positions)
             idx_q = idx_q.contiguous()
             idx_k = idx_k.contiguous()
-            self._apply_rope(idx_q, idx_k, positions)
+            if not m31_fused:
+                self._apply_rope(idx_q, idx_k, positions)
             if self.nvfp4_kv_cache:
                 fuse_bf16_query_rounding = (
                     q.dtype == torch.bfloat16 and idx_q.dtype == torch.bfloat16
@@ -4732,6 +4828,7 @@ class MSAAttention(nn.Module):
                     score_type=self.score_type,
                     mma_scale_layout=True,
                     fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+                    max_seq_len=self._cuda_graph_max_seq_len,
                 )
                 attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
                 output = self.o_proj(attn_output)
@@ -4812,8 +4909,9 @@ class MSAAttention(nn.Module):
             use_fused_cuda=use_fused_addressing,
         )
         request_batch_size = int(request_block_table.shape[0])
+        is_ragged = bool(getattr(attn_inputs, "is_ragged_target_verify", False))
         write_seq_lens = seq_lens
-        score_block_table = request_block_table
+        score_block_table = phys_block_table if is_ragged else request_block_table
 
         if (
             self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale)
@@ -4841,7 +4939,8 @@ class MSAAttention(nn.Module):
             )
         else:
             qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-            if self.qk_fuse_norm is not None:
+            m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+            if self.qk_fuse_norm is not None and not m31_fused:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
                 qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1
@@ -4852,14 +4951,17 @@ class MSAAttention(nn.Module):
 
             idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
             idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-            idx_q = _gemma_rmsnorm_per_head(
+            idx_q = self._legacy_index_norm(
                 idx_q, self.idx_q_norm_w, self.layernorm_eps
             )
-            idx_k = _gemma_rmsnorm_per_head(
+            idx_k = self._legacy_index_norm(
                 idx_k, self.idx_k_norm_w, self.layernorm_eps
             )
 
-            if self.nvfp4_kv_cache:
+            if m31_fused:
+                q = q.contiguous()
+                k = k.contiguous()
+            elif self.nvfp4_kv_cache:
                 q, k = self._apply_rope_contiguous(q, k, positions)
             else:
                 q = q.contiguous()
@@ -4867,7 +4969,8 @@ class MSAAttention(nn.Module):
                 self._apply_rope(q, k, positions)
             idx_q = idx_q.contiguous()
             idx_k = idx_k.contiguous()
-            self._apply_rope(idx_q, idx_k, positions)
+            if not m31_fused:
+                self._apply_rope(idx_q, idx_k, positions)
             if self.nvfp4_kv_cache:
                 fuse_bf16_query_rounding = (
                     q.dtype == torch.bfloat16 and idx_q.dtype == torch.bfloat16
@@ -4907,8 +5010,15 @@ class MSAAttention(nn.Module):
                     fuse_bf16_query_rounding=fuse_bf16_query_rounding,
                     # Addressing expands one shared page table per request
                     # into contiguous query rows with individual causal lengths.
-                    query_width=total_tokens // request_batch_size,
+                    query_width=(
+                        1 if is_ragged else total_tokens // request_batch_size
+                    ),
+                    query_cu_seqlens=(attn_inputs.cu_seqlens if is_ragged else None),
+                    # Released M3.1 DSpARK has gamma=7, hence at most anchor +
+                    # seven proposal rows in one compact request group.
+                    max_query_width=(8 if is_ragged else 1),
                     valid_token_mask=valid_token_mask,
+                    max_seq_len=self._cuda_graph_max_seq_len,
                 )
                 attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
                 output = self.o_proj(attn_output)
@@ -4929,6 +5039,11 @@ class MSAAttention(nn.Module):
             max_seqlen_k = self._cuda_graph_max_kv(attn_inputs, request_block_table)
         else:
             max_seqlen_k = int(seq_lens.max().item())
+        score_seq_lens = (
+            seq_lens
+            if is_ragged
+            else seq_lens.view(request_batch_size, -1)[:, -1].contiguous()
+        )
         _idx_o, o = minimax_paged_sparse_decode(
             q=q,
             sink=None,
@@ -4947,8 +5062,8 @@ class MSAAttention(nn.Module):
             paged_idx_k=paged_idx_k,
             paged_idx_scale=paged_idx_scale,
             score_block_table=score_block_table,
-            score_seq_lens=seq_lens.view(request_batch_size, -1)[:, -1].contiguous(),
-            decode_query_len=total_tokens // request_batch_size,
+            score_seq_lens=score_seq_lens,
+            decode_query_len=(1 if is_ragged else total_tokens // request_batch_size),
         )
         o = torch.where(valid_token_mask[:, None, None], o, torch.zeros_like(o))
 

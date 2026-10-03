@@ -10,8 +10,13 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.modules import DenseMLP, LinearFactory, RMSNorm
+from rtp_llm.models_py.modules import DenseMLP, LinearFactory
+from rtp_llm.models_py.triton_kernels.dspark_gemma_rope import (
+    dspark_gemma_qk_norm_rope,
+    dspark_rope_inv_freq,
+)
 from rtp_llm.models_py.triton_kernels.dspark_swa import (
+    DSparkGemmaRMSNorm,
     commit_paged_gqa_kv,
     paged_gqa_swa,
 )
@@ -51,10 +56,19 @@ class MiniMaxM31DSparkLayer(nn.Module):
             W.attn_qkv_s: weights[W.attn_qkv_s][self.q_size :],
         }
         self.kv_proj = linear(kv_weights, W.attn_qkv_w, W.attn_qkv_s)
-        self.input_norm = RMSNorm(weights[W.pre_ln_gamma], config.layernorm_eps)
-        self.post_norm = RMSNorm(weights[W.post_ln_gamma], config.layernorm_eps)
-        self.q_norm = RMSNorm(weights[W.q_ln_gamma], config.layernorm_eps)
-        self.k_norm = RMSNorm(weights[W.k_ln_gamma], config.layernorm_eps)
+        self.input_norm = DSparkGemmaRMSNorm(
+            weights[W.pre_ln_gamma], config.layernorm_eps
+        )
+        self.post_norm = DSparkGemmaRMSNorm(
+            weights[W.post_ln_gamma], config.layernorm_eps
+        )
+        self.q_norm = DSparkGemmaRMSNorm(weights[W.q_ln_gamma], config.layernorm_eps)
+        self.k_norm = DSparkGemmaRMSNorm(weights[W.k_ln_gamma], config.layernorm_eps)
+        self.register_buffer(
+            "rope_inv_freq",
+            dspark_rope_inv_freq(float(self.rope_theta), weights[W.q_ln_gamma].device),
+            persistent=False,
+        )
         self.mlp = DenseMLP(
             config.activation_type,
             parallelism,
@@ -126,9 +140,19 @@ class MiniMaxM31DSparkLayer(nn.Module):
         residual = hidden.reshape(-1, hidden_dim)
         qkv = self.qkv_proj(self.input_norm(residual))
         q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
-        q = self.q_norm(q.reshape(-1, self.dim)).view(-1, self.heads, self.dim)
-        k = self.k_norm(k.reshape(-1, self.dim)).view(-1, self.kv_heads, self.dim)
-        self._rope(q, k, positions.reshape(-1))
+        # Query Q/K retain FP32 normalization through RoPE in the demo.
+        # Context injection intentionally keeps its separate BF16 K-norm path.
+        q, k = dspark_gemma_qk_norm_rope(
+            q.reshape(-1, self.heads, self.dim),
+            k.reshape(-1, self.kv_heads, self.dim),
+            self.q_norm.weight,
+            self.k_norm.weight,
+            positions.reshape(-1),
+            eps=self.q_norm.eps,
+            rope_theta=self.rope_theta,
+            rotary_dim=self.rope_dim,
+            inv_freq=self.rope_inv_freq,
+        )
         output = paged_gqa_swa(
             q.view(batch, width, self.heads, self.dim),
             k.view(batch, width, self.kv_heads, self.dim),

@@ -17,6 +17,14 @@ def _dspark_verify_tokens(value):
     return result
 
 
+def _dspark_verify_mode(value):
+    if value not in ("", "static", "adaptive"):
+        raise argparse.ArgumentTypeError(
+            "sp_dspark_verify_mode must be empty, static or adaptive"
+        )
+    return value
+
+
 def init_speculative_decoding_group_args(parser, sp_config):
     ##############################################################################################################
     # 投机采样配置
@@ -109,12 +117,28 @@ def init_speculative_decoding_group_args(parser, sp_config):
     )
 
     speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_mode",
+        env_name="SP_DSPARK_VERIFY_MODE",
+        bind_to=(sp_config, "sp_dspark_verify_mode"),
+        type=_dspark_verify_mode,
+        default="",
+        help="DSpARK verification: static verifies all gamma draft tokens plus anchor; adaptive uses confidence and the verify-token budget. Empty preserves legacy bool/budget settings.",
+    )
+    speculative_decoding_group.add_argument(
         "--sp_dspark_verify_tokens",
         env_name="SP_DSPARK_VERIFY_TOKENS",
         bind_to=(sp_config, "sp_dspark_verify_tokens"),
         type=_dspark_verify_tokens,
         default=0,
         help="DSpARK verify draft-token budget: 0 uses gen_num_per_cycle; otherwise 1..gamma. Draft width is unchanged.",
+    )
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_adaptive_verify",
+        env_name="SP_DSPARK_ADAPTIVE_VERIFY",
+        bind_to=(sp_config, "sp_dspark_adaptive_verify"),
+        type=str2bool,
+        default=False,
+        help="Use confidence-ranked compact target verification; SP_DSPARK_VERIFY_TOKENS is the initial average extra-row budget.",
     )
 
     speculative_decoding_group.add_argument(

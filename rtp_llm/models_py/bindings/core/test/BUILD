@@ -36,6 +36,7 @@ cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
     deps = [
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

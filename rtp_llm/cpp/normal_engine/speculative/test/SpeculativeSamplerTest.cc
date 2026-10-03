@@ -18,6 +18,7 @@
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #endif
 
@@ -877,6 +878,161 @@ TEST(DSparkSamplerTest, SevenTokenProposalPreservesConditionalProbabilities) {
             previous = output.token_ids.select(1, step).to(torch::kLong);
         }
     }
+}
+
+// A deterministic wiring gate, not a finite-sample distribution proof. Target
+// distributions are deliberately chosen after the REAL proposal draw so the
+// correction/bonus oracle is independent of which tokens the RNG produced.
+TEST(DSparkSamplerTest, RealMarkovConfidenceAdaptiveRejectionChain) {
+#if !USING_CUDA
+    GTEST_SKIP() << "The real DSpARK sampling chain requires CUDA";
+#else
+    if (!torch::cuda::is_available()) {
+        GTEST_SKIP() << "CUDA is required";
+    }
+    CudaGeneratorStateGuard rng_guard;
+    constexpr int64_t       gamma = 3, vocab = 2, hidden_dim = 2;
+    auto                    f32               = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                    i32               = f32.dtype(torch::kInt32);
+    auto                    boolean           = f32.dtype(torch::kBool);
+    auto                    w1                = torch::tensor({{-1.f, .5f}, {1.f, -.5f}}, f32).to(torch::kBFloat16);
+    auto                    w2                = torch::tensor({{.5f, .25f}, {-.25f, .5f}}, f32).to(torch::kBFloat16);
+    auto                    confidence_weight = torch::tensor({1.f, 0.f, .125f, 0.f}, f32).to(torch::kBFloat16);
+    auto                    confidence_bias   = torch::zeros({1}, f32).to(torch::kBFloat16);
+    SpeculativeSampler      sampler(torch::Tensor(), gamma, DraftProposalMode::SAMPLED);
+    for (int64_t batch : {3, 6}) {
+        for (int seed : {20261001, 20261002}) {
+            SCOPED_TRACE(::testing::Message() << "batch=" << batch << " seed=" << seed);
+            torch::manual_seed(seed);
+            auto base =
+                (torch::arange(batch * gamma * vocab, f32).reshape({batch * gamma, vocab}).remainder(7) - 3.f) / 8.f;
+            auto temperature = torch::linspace(.7f, 1.3f, batch, f32);
+            auto anchors     = torch::arange(batch, i32).remainder(vocab).contiguous();
+            auto draft       = sampler.sampleDSparkDraft(base, anchors, temperature, w1, w2, vocab);
+            ASSERT_EQ(draft.token_ids.sizes(), torch::IntArrayRef({batch, gamma}));
+            ASSERT_EQ(draft.all_probs.sizes(), torch::IntArrayRef({batch, gamma, vocab}));
+            auto ids_cpu = draft.token_ids.cpu();
+            ASSERT_TRUE(ids_cpu.ge(0).logical_and(ids_cpu.lt(vocab)).all().item<bool>());
+            auto previous = anchors.to(torch::kLong);
+            for (int64_t j = 0; j < gamma; ++j) {
+                // Mirror the BF16 GEMM output boundary, not the fused combine op.
+                auto bias     = torch::mm(w1.index_select(0, previous), w2.transpose(0, 1)).to(torch::kFloat32);
+                auto expected = torch::softmax(
+                    (base.view({batch, gamma, vocab}).select(1, j) + bias) / temperature.unsqueeze(1), -1);
+                EXPECT_TRUE(torch::allclose(draft.all_probs.select(1, j), expected, 1.e-5, 1.e-6));
+                previous = draft.token_ids.select(1, j).to(torch::kLong);
+            }
+            auto hidden_cpu = torch::zeros({batch, gamma, hidden_dim}, torch::kFloat32);
+            // High/medium/low survival bands guarantee caps [1,3,4] per group
+            // despite the actual previous-token Markov feature +/-0.125.
+            for (int64_t b = 0; b < batch; ++b)
+                hidden_cpu[b].select(1, 0).fill_(b % 3 == 0 ? -8.f : b % 3 == 1 ? 0.f : 4.f);
+            auto hidden     = hidden_cpu.reshape({batch * gamma, hidden_dim}).to(f32.device()).to(torch::kBFloat16);
+            auto confidence = sampler.computeDSparkConfidence(
+                hidden, anchors, draft.token_ids, w1, confidence_weight, confidence_bias);
+            auto prev = torch::cat({anchors.view({batch, 1}), draft.token_ids.narrow(1, 0, gamma - 1)}, 1)
+                            .reshape({-1})
+                            .to(torch::kLong);
+            auto features = torch::cat({hidden.to(torch::kFloat32), w1.index_select(0, prev).to(torch::kFloat32)}, 1);
+            auto confidence_reference = torch::sigmoid((features.matmul(confidence_weight.to(torch::kFloat32))
+                                                        + confidence_bias.to(torch::kFloat32))
+                                                           .to(torch::kBFloat16)
+                                                           .to(torch::kFloat32))
+                                            .reshape({batch, gamma});
+            EXPECT_TRUE(torch::allclose(confidence, confidence_reference, 1.e-6, 1.e-6));
+            auto plan     = execDSparkVerifyPlan(confidence, 5 * (batch / 3));
+            auto caps_cpu = plan.first.cpu(), mapping_cpu = plan.second.cpu();
+            int  compact = 0;
+            for (int64_t b = 0; b < batch; ++b) {
+                const int expected_cap = b % 3 == 0 ? 1 : b % 3 == 1 ? 3 : 4;
+                ASSERT_EQ(caps_cpu[b].item<int>(), expected_cap);
+                for (int j = 0; j < expected_cap; ++j)
+                    EXPECT_EQ(mapping_cpu[compact++].item<int>(), b * (gamma + 1) + j);
+            }
+            auto target = torch::zeros({batch, gamma + 1, vocab}, f32);
+            target.narrow(1, 0, gamma).copy_(draft.all_probs);
+            for (int64_t b = 0; b < batch; ++b) {
+                const int reject_position = b % 3 == 0 ? 0 : b % 3 == 1 ? 1 : -1;
+                if (reject_position >= 0) {
+                    int correction = 1 - ids_cpu[b][reject_position].item<int>();
+                    target[b][reject_position].zero_();
+                    target[b][reject_position][correction].fill_(1.f);
+                }
+                int bonus = 1 - ids_cpu[b][gamma - 1].item<int>();
+                target[b][gamma][bonus].fill_(1.f);
+            }
+            // Real target categorical sampling; one-hot correction/bonus rows
+            // give exact token oracles while q=p rows remain nontrivial draws.
+            auto target_ids =
+                execSampleFromProbs(target.reshape({batch * (gamma + 1), vocab})).reshape({batch * (gamma + 1), 1});
+            auto output    = torch::full({batch, gamma + 1}, -1, i32);
+            auto lengths   = torch::zeros({batch}, i32);
+            auto success   = torch::ones({batch}, boolean);
+            auto workspace = torch::empty({rtp_llm::rejectionValidationWorkspaceElements(batch, gamma, vocab)}, f32);
+            execRejectionSampling({draft.all_probs,
+                                   draft.token_ids,
+                                   torch::full({batch, gamma + 1}, .5f, f32),
+                                   target,
+                                   target_ids,
+                                   output,
+                                   lengths,
+                                   torch::ones({batch}, boolean),
+                                   false,
+                                   true,
+                                   success,
+                                   torch::ones({batch, gamma + 1}, boolean),
+                                   plan.first,
+                                   workspace});
+            // Same tensor operation as MtpExecutor::capDSparkVerifyLengths.
+            auto committed  = torch::minimum(lengths, plan.first).cpu();
+            auto output_cpu = output.cpu(), success_cpu = success.cpu();
+            for (int64_t b = 0; b < batch; ++b) {
+                ASSERT_TRUE(success_cpu[b].item<bool>());
+                int expected_length = b % 3 == 0 ? 1 : b % 3 == 1 ? 2 : 4;
+                ASSERT_EQ(committed[b].item<int>(), expected_length);
+                for (int j = 0; j < expected_length; ++j) {
+                    int expected = j == expected_length - 1 ? 1 - ids_cpu[b][j == gamma ? gamma - 1 : j].item<int>() :
+                                                              ids_cpu[b][j].item<int>();
+                    EXPECT_EQ(output_cpu[b][j].item<int>(), expected) << "b=" << b << " j=" << j;
+                }
+            }
+            // A second valid target gives raw full acceptance on every row,
+            // making the adaptive production cap observable (not a no-op).
+            target.narrow(1, 0, gamma).copy_(draft.all_probs);
+            target_ids =
+                execSampleFromProbs(target.reshape({batch * (gamma + 1), vocab})).reshape({batch * (gamma + 1), 1});
+            output.fill_(-1);
+            lengths.zero_();
+            success.fill_(true);
+            execRejectionSampling({draft.all_probs,
+                                   draft.token_ids,
+                                   torch::full({batch, gamma + 1}, .5f, f32),
+                                   target,
+                                   target_ids,
+                                   output,
+                                   lengths,
+                                   torch::ones({batch}, boolean),
+                                   false,
+                                   true,
+                                   success,
+                                   torch::ones({batch, gamma + 1}, boolean),
+                                   plan.first,
+                                   workspace});
+            auto raw_lengths = lengths.cpu();
+            committed        = torch::minimum(lengths, plan.first).cpu();
+            output_cpu       = output.cpu();
+            success_cpu      = success.cpu();
+            for (int64_t b = 0; b < batch; ++b) {
+                ASSERT_TRUE(success_cpu[b].item<bool>());
+                ASSERT_EQ(raw_lengths[b].item<int>(), gamma + 1);
+                ASSERT_EQ(committed[b].item<int>(), caps_cpu[b].item<int>());
+                for (int j = 0; j < committed[b].item<int>(); ++j)
+                    EXPECT_EQ(output_cpu[b][j].item<int>(),
+                              j < gamma ? ids_cpu[b][j].item<int>() : 1 - ids_cpu[b][gamma - 1].item<int>());
+            }
+        }
+    }
+#endif
 }
 
 }  // namespace

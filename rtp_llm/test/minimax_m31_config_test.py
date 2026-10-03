@@ -20,6 +20,53 @@ from rtp_llm.utils.model_weight import W
 
 
 class DSparkBackendTest(unittest.TestCase):
+    def test_draft_gemma_weights_stay_raw_and_main_loader_keeps_offset(self):
+        from rtp_llm.models.minimax_m3 import add_unit_offset
+        from rtp_llm.utils.model_weight import identity
+
+        norm_keys = (W.pre_ln_gamma, W.post_ln_gamma, W.q_ln_gamma, W.k_ln_gamma)
+        raw = torch.tensor([-0.99609375, 0.37109375], dtype=torch.bfloat16)
+        for cls in (MiniMaxM3Weight, MiniMaxM31DSparkWeight):
+            weight = object.__new__(cls)
+            weight.prefix = "language_model."
+            weight._hidden_size = 6144
+            weight._size_per_head = 128
+            weight._head_num = 64
+            weight._head_num_kv = 4
+            weight._use_qk_norm = True
+            weight._sparse_layer_set = set()
+            with patch.object(
+                weight, "_get_hf_ffn_layer_weight_info", return_value=[]
+            ), patch.object(weight, "_should_load_msa_index", return_value=False):
+                for layer_id in range(5):
+                    modules = weight._get_hf_layer_weight_info(layer_id)
+                    components = {
+                        c.name: c for m in modules for c in m.get_components()
+                    }
+                    for name in norm_keys:
+                        with self.subTest(
+                            model=cls.__name__, layer=layer_id, norm=name
+                        ):
+                            component = components[name]
+                            transform = (
+                                identity
+                                if cls is MiniMaxM31DSparkWeight
+                                else add_unit_offset
+                            )
+                            self.assertIs(component.process_fun, transform)
+                            torch.testing.assert_close(
+                                component.process_fun([raw]),
+                                transform([raw]),
+                                rtol=0,
+                                atol=0,
+                            )
+                            if cls is MiniMaxM31DSparkWeight:
+                                self.assertTrue(
+                                    component.weights[0].name.startswith(
+                                        "language_model.model.dspark.layers.{i}.decoder_layer."
+                                    )
+                                )
+
     def test_hip_rejected_before_model_construction(self):
         with patch.object(torch.version, "hip", "test-hip"):
             with self.assertRaisesRegex(RuntimeError, "requires the CUDA backend"):
@@ -78,8 +125,18 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
             sparse_attention_config=None,
             dspark_noise_token_id=200058,
             dspark_markov_rank=256,
+            dspark_block_size=7,
+            sliding_window=4096,
+            layer_types=["sliding_attention"] * 5,
+            use_gemma_norm=True,
         )
-        report = {"target_layer_ids": [3, 17, 31, 45, 59], "sliding_window": 4096}
+        report = {
+            "target_layer_ids": [3, 17, 31, 45, 59],
+            "block_size": 7,
+            "sliding_window": 4096,
+            "layer_types": ["sliding_attention"] * 5,
+            "use_gemma_norm": True,
+        }
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(raw))
             with patch(
@@ -94,18 +151,48 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
         self.assertEqual(config.moe_layer_index, [])
         self.assertIsNone(config.msa_sparse_config)
         self.assertEqual(config.dspark_target_layer_ids, [3, 17, 31, 45, 59])
+        self.assertEqual(config.dspark_checkpoint_metadata["block_size"], 7)
+        self.assertEqual(
+            config.dspark_checkpoint_metadata["layer_types"],
+            ["sliding_attention"] * 5,
+        )
+        self.assertTrue(config.dspark_checkpoint_metadata["use_gemma_norm"])
         self.assertEqual(config.dspark_checkpoint_metadata["sliding_window"], 4096)
         self.assertFalse(config.prepacked_nvfp4_moe)
-        self.assertFalse(config.mock_nvfp4_moe)
 
-    def test_dspark_execution_requires_reference_math(self):
-        with patch.object(torch.version, "hip", None), patch.dict(
-            os.environ, {"M31_DSPARK_CANDIDATE_MATH": ""}
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "training forward is not yet verified"
-            ):
-                MiniMaxM31DSpark._create_python_model(None)
+    def test_dspark_execution_uses_validated_checkpoint_math(self):
+        owner = SimpleNamespace(
+            model_config=SimpleNamespace(
+                gen_num_per_cycle=7,
+                dspark_sample_from_anchor=True,
+                dspark_target_layer_ids=[3, 17, 31, 45, 59],
+                dspark_checkpoint_metadata={
+                    "block_size": 7,
+                    "sliding_window": 4096,
+                    "layer_types": ["sliding_attention"] * 5,
+                    "use_gemma_norm": True,
+                },
+            ),
+            parallelism_config=Mock(),
+            weight=Mock(),
+            moe_config=Mock(),
+            max_generate_batch_size=16,
+            fmha_config=Mock(),
+            hw_kernel_config=Mock(),
+            device_resource_config=Mock(),
+        )
+        constructed = Mock()
+        with patch.object(torch.version, "hip", None), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_dspark.MiniMaxM31DSparkModel",
+            return_value=constructed,
+        ) as model:
+            MiniMaxM31DSpark._create_python_model(owner)
+        self.assertIs(owner.py_model, constructed)
+        math = model.call_args.kwargs["math_contract"]
+        self.assertTrue(math.hidden_norm_gemma)
+        self.assertTrue(math.final_norm_gemma)
+        self.assertFalse(math.causal_query)
+        self.assertEqual(math.window_left, 4095)
 
     def test_dspark_shares_target_weights_before_dynamic_loading(self):
         from rtp_llm.models.minimax_m31_dspark import TargetSharedDSparkWeight
@@ -205,7 +292,6 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
         self.assertEqual(config.moe_layer_index, list(range(3, 60)))
         self.assertEqual(config.msa_sparse_config["sparse_layer_ids"], list(range(60)))
         self.assertTrue(config.prepacked_nvfp4_moe)
-        self.assertFalse(config.mock_nvfp4_moe)
 
     def test_vl_registration_path_preserves_nvfp4_metadata(self):
         raw = _m31_config()
@@ -217,7 +303,6 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
         self.assertEqual(config.model_type, "minimax_m31_vl")
         self.assertTrue(config.mm_model_config.is_multimodal)
         self.assertTrue(config.prepacked_nvfp4_moe)
-        self.assertFalse(config.mock_nvfp4_moe)
         self.assertEqual(config.msa_sparse_config["sparse_layer_ids"], list(range(60)))
 
     def test_non_nvfp4_draft_is_not_marked_prepacked(self):
@@ -229,9 +314,8 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
             config = MiniMaxM31._create_config(tmpdir)
 
         self.assertFalse(config.prepacked_nvfp4_moe)
-        self.assertFalse(config.mock_nvfp4_moe)
 
-    def test_old_mock_flag_does_not_bypass_native_nvfp4(self):
+    def test_mock_nvfp4_moe_environment_variable_is_not_a_runtime_path(self):
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(_m31_config()))
             with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
@@ -239,7 +323,7 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
                     with self.subTest(model=model_cls.__name__):
                         config = model_cls._create_config(tmpdir)
                         self.assertTrue(config.prepacked_nvfp4_moe)
-                        self.assertFalse(config.mock_nvfp4_moe)
+                        self.assertFalse(hasattr(config, "mock_nvfp4_moe"))
                         self.assertIs(model_cls.get_weight_cls(), MiniMaxM31Weight)
 
     def test_legacy_m3_does_not_parse_m31_nvfp4_state(self):
@@ -251,8 +335,6 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
 
         self.assertFalse(text_config.prepacked_nvfp4_moe)
         self.assertFalse(vl_config.prepacked_nvfp4_moe)
-        self.assertFalse(text_config.mock_nvfp4_moe)
-        self.assertFalse(vl_config.mock_nvfp4_moe)
 
 
 class MiniMaxM31WeightContractTest(unittest.TestCase):

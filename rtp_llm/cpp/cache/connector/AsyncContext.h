@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -73,12 +75,14 @@ public:
     const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const;
     const std::shared_ptr<KVCacheResource>&   resource() const;
     const std::shared_ptr<Meta>&              meta() const;
+    int64_t                                   ageUs() const;
 
 private:
-    std::shared_ptr<FusedAsyncContext> fused_match_context_;
-    std::shared_ptr<FusedAsyncContext> fused_read_context_;
-    std::shared_ptr<KVCacheResource>   resource_;
-    std::shared_ptr<Meta>              meta_;
+    std::shared_ptr<FusedAsyncContext>          fused_match_context_;
+    std::shared_ptr<FusedAsyncContext>          fused_read_context_;
+    std::shared_ptr<KVCacheResource>            resource_;
+    std::shared_ptr<Meta>                       meta_;
+    const std::chrono::steady_clock::time_point created_at_{std::chrono::steady_clock::now()};
 
     std::atomic<bool>  read_ctx_set_{false};
     mutable std::mutex read_ctx_mutex_;

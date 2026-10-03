@@ -39,9 +39,9 @@ bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
-bool isCompactFullBlockList(const KVCacheResource& source,
+bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
-                            const CacheKeysType& selected_keys) {
+                            const CacheKeysType&    selected_keys) {
     return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
 }
 
@@ -132,17 +132,26 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     return selected;
 }
 
-
-class TieredEvictionMeta final : public Meta {
+class TieredEvictionMeta final: public Meta {
 public:
     TieredEvictionMeta(bool enable_memory, bool enable_remote, std::string trace_id):
         enable_memory_(enable_memory), enable_remote_(enable_remote), trace_id_(std::move(trace_id)) {}
 
-    bool enableMemoryCache() const override { return enable_memory_; }
-    bool enableRemoteCache() const override { return enable_remote_; }
-    const std::string& trace_id() const override { return trace_id_; }
-    const std::string& unique_id() const override { return empty_string_; }
-    const std::vector<int64_t>& tokens() const override { return empty_tokens_; }
+    bool enableMemoryCache() const override {
+        return enable_memory_;
+    }
+    bool enableRemoteCache() const override {
+        return enable_remote_;
+    }
+    const std::string& trace_id() const override {
+        return trace_id_;
+    }
+    const std::string& unique_id() const override {
+        return empty_string_;
+    }
+    const std::vector<int64_t>& tokens() const override {
+        return empty_tokens_;
+    }
 
 private:
     bool                 enable_memory_{false};
@@ -265,6 +274,7 @@ void KVCacheConnectorCoordinator::initUpdateThread() {
 std::shared_ptr<AsyncContext>
 KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto async_read_started = std::chrono::steady_clock::now();
     if (stop_.load()) {
         return nullptr;
     }
@@ -309,6 +319,24 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
     auto fused_read_context =
         std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
+    // No connector can read more blocks. Complete before returning so a full
+    // Device hit does not wait for the coordinator's periodic update pass.
+    if (std::all_of(fused_match_context->contexts().begin(),
+                    fused_match_context->contexts().end(),
+                    [](const auto& context) { return context == nullptr; })) {
+        fused_read_context->setFusedReadContext(
+            std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}));
+        if (metrics_reporter_) {
+            kmonitor::MetricsTags                   tags("stage", "coordinator_no_read_fast_path");
+            RtpLLMCachePrepareStageMetricsCollector collector;
+            collector.latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - async_read_started)
+                                       .count();
+            metrics_reporter_->report<RtpLLMCachePrepareStageMetrics, RtpLLMCachePrepareStageMetricsCollector>(
+                &tags, &collector);
+        }
+        return fused_read_context;
+    }
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_read_context_list_.push_back(fused_read_context);
@@ -439,24 +467,65 @@ void KVCacheConnectorCoordinator::updateOnce() {
 
 void KVCacheConnectorCoordinator::processReadContexts() {
     RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(update_mutex_);
-    for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
-        auto fused_read_context = *it;
-        if (fused_read_context->done()) {
-            fused_read_context->notifyDone();
-            it = fused_async_read_context_list_.erase(it);
-            continue;
-        }
-        // 没有 done 但是有 read context, 或者 match context 还没 done, 或者 match 失败 (下一轮调度处理), 继续等待
-        auto read_context  = fused_read_context->fusedReadContext();
-        auto match_context = fused_read_context->fusedMatchContext();
-        if (read_context || !match_context->done() || !match_context->success()) {
+    const auto lock_started = std::chrono::steady_clock::now();
+    struct NoReadTiming {
+        int64_t completion_us;
+        int64_t scan_elapsed_us;
+        int64_t process_us;
+    };
+    std::vector<NoReadTiming> no_read_timings_us;
+    int64_t                   lock_wait_us = 0;
+    {
+        std::lock_guard<std::mutex> lock(update_mutex_);
+        const auto                  processing_started = std::chrono::steady_clock::now();
+        lock_wait_us = std::chrono::duration_cast<std::chrono::microseconds>(processing_started - lock_started).count();
+        for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
+            auto fused_read_context = *it;
+            if (fused_read_context->done()) {
+                fused_read_context->notifyDone();
+                it = fused_async_read_context_list_.erase(it);
+                continue;
+            }
+            // Wait for match/read completion; a successful match without a read still needs this pass.
+            auto read_context  = fused_read_context->fusedReadContext();
+            auto match_context = fused_read_context->fusedMatchContext();
+            if (read_context || !match_context->done() || !match_context->success()) {
+                it = std::next(it);
+                continue;
+            }
+            const auto context_started = std::chrono::steady_clock::now();
+            asyncReadAfterMatch(fused_read_context);
+            if (fused_read_context->fusedReadContext()->contexts().empty()) {
+                const auto completed = std::chrono::steady_clock::now();
+                no_read_timings_us.push_back(
+                    {fused_read_context->ageUs(),
+                     std::chrono::duration_cast<std::chrono::microseconds>(completed - processing_started).count(),
+                     std::chrono::duration_cast<std::chrono::microseconds>(completed - context_started).count()});
+            }
             it = std::next(it);
-            continue;
         }
-        // match success, start read
-        asyncReadAfterMatch(fused_read_context);
-        it = std::next(it);
+    }
+    if (metrics_reporter_) {
+        auto report_stage = [this](const char* stage, int64_t latency_us) {
+            kmonitor::MetricsTags                   tags("stage", stage);
+            RtpLLMCachePrepareStageMetricsCollector collector;
+            collector.latency_us = latency_us;
+            metrics_reporter_->report<RtpLLMCachePrepareStageMetrics, RtpLLMCachePrepareStageMetricsCollector>(
+                &tags, &collector);
+        };
+        // Bound metrics on the 1 ms update loop: always capture long lock waits, and
+        // separately capture the lock wait on passes that complete a no-read context.
+        if (lock_wait_us >= 1000) {
+            report_stage("coordinator_lock_wait_ge_1ms", lock_wait_us);
+        }
+        if (!no_read_timings_us.empty()) {
+            report_stage("coordinator_lock_wait_on_no_read", lock_wait_us);
+        }
+        for (const auto& timing : no_read_timings_us) {
+            report_stage("coordinator_no_read_completion", timing.completion_us);
+            report_stage("coordinator_no_read_scan_elapsed", timing.scan_elapsed_us);
+            report_stage("coordinator_no_read_process", timing.process_us);
+        }
     }
 }
 
@@ -590,8 +659,8 @@ void KVCacheConnectorCoordinator::initTieredEvictionWorker() {
     // before memory pressure selects the first remote-eviction victim.
     if (metrics_reporter_) {
         RtpLLMMemoryRemoteEvictionMetricsCollector collector;
-        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
-                                  RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics, RtpLLMMemoryRemoteEvictionMetricsCollector>(
+            nullptr, &collector);
     }
     tiered_eviction_worker_ = std::thread([this]() {
         pthread_setname_np(pthread_self(), "MemRemoteEvict");
@@ -627,9 +696,8 @@ void KVCacheConnectorCoordinator::tieredEvictionLoop() {
         std::string trace_id;
         {
             std::unique_lock<std::mutex> lock(tiered_eviction_mutex_);
-            tiered_eviction_cv_.wait(lock, [this]() {
-                return tiered_eviction_stopping_ || !tiered_eviction_queue_.empty();
-            });
+            tiered_eviction_cv_.wait(lock,
+                                     [this]() { return tiered_eviction_stopping_ || !tiered_eviction_queue_.empty(); });
             if (tiered_eviction_queue_.empty()) {
                 if (tiered_eviction_stopping_) {
                     return;
@@ -650,8 +718,8 @@ void KVCacheConnectorCoordinator::tieredEvictionLoop() {
 }
 
 size_t KVCacheConnectorCoordinator::blocksAboveHighWatermark(size_t total_blocks,
-                                                               size_t free_blocks,
-                                                               int    high_watermark_ratio) {
+                                                             size_t free_blocks,
+                                                             int    high_watermark_ratio) {
     const size_t effective_free = std::min(total_blocks, free_blocks);
     const size_t ratio          = static_cast<size_t>(high_watermark_ratio);
     const size_t min_free       = (total_blocks * (100 - ratio) + 99) / 100;
@@ -659,9 +727,9 @@ size_t KVCacheConnectorCoordinator::blocksAboveHighWatermark(size_t total_blocks
 }
 
 size_t KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(size_t total_blocks,
-                                                                        size_t free_blocks,
-                                                                        size_t incoming_blocks,
-                                                                        int high_watermark_ratio) {
+                                                                      size_t free_blocks,
+                                                                      size_t incoming_blocks,
+                                                                      int    high_watermark_ratio) {
     const size_t effective_free = std::min(total_blocks, free_blocks);
     const size_t used           = total_blocks - effective_free;
     const size_t max_used       = total_blocks * static_cast<size_t>(high_watermark_ratio) / 100;
@@ -698,8 +766,7 @@ size_t KVCacheConnectorCoordinator::memoryBlocksAboveRemoteEvictionWatermark(siz
                                              kv_cache_config_.memory_cache_remote_eviction_watermark_ratio);
 }
 
-void KVCacheConnectorCoordinator::enforceMemoryHighWatermark(size_t incoming_blocks,
-                                                              const std::string& trace_id) {
+void KVCacheConnectorCoordinator::enforceMemoryHighWatermark(size_t incoming_blocks, const std::string& trace_id) {
     const size_t need = memoryBlocksAboveHighWatermark(incoming_blocks);
     if (need == 0 || !memory_connector_) {
         return;
@@ -708,8 +775,8 @@ void KVCacheConnectorCoordinator::enforceMemoryHighWatermark(size_t incoming_blo
     if (metrics_reporter_) {
         RtpLLMMemoryRemoteEvictionMetricsCollector collector;
         collector.memory_emergency_evict_block_count = evicted;
-        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
-                                  RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics, RtpLLMMemoryRemoteEvictionMetricsCollector>(
+            nullptr, &collector);
     }
     RTP_LLM_LOG_INFO(
         "tiered memory emergency eviction, trace_id=%s, hard_watermark_ratio=%d, memory_total_blocks=%zu, memory_free_blocks=%zu, requested=%zu, evicted=%zu, incoming=%zu",
@@ -734,11 +801,10 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                                       && kv_cache_config_.enable_remote_cache && remote_connector_ != nullptr
                                       && memory_connector_ != nullptr && cache_config_.groupNums() == 1;
     if (remote_spill_enabled) {
-        const size_t requested_remote_evict_blocks =
-            memoryBlocksAboveRemoteEvictionWatermark(estimated_d2h_blocks);
-        const size_t capped_remote_evict_blocks = std::min(
-            requested_remote_evict_blocks,
-            static_cast<size_t>(kv_cache_config_.memory_cache_remote_eviction_max_blocks));
+        const size_t requested_remote_evict_blocks = memoryBlocksAboveRemoteEvictionWatermark(estimated_d2h_blocks);
+        const size_t capped_remote_evict_blocks =
+            std::min(requested_remote_evict_blocks,
+                     static_cast<size_t>(kv_cache_config_.memory_cache_remote_eviction_max_blocks));
         RTP_LLM_LOG_INFO(
             "memory remote eviction decision, trace_id=%s, device_total_blocks=%zu, device_free_blocks=%zu, device_high_watermark_ratio=%d, estimated_d2h_blocks=%zu, memory_total_blocks=%zu, memory_free_blocks=%zu, memory_remote_eviction_watermark_ratio=%d, memory_high_watermark_ratio=%d, requested_remote_evict_blocks=%zu, capped_remote_evict_blocks=%zu, max_remote_evict_blocks=%d",
             trace_id.c_str(),
@@ -766,8 +832,9 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
             if (metrics_reporter_) {
                 RtpLLMMemoryRemoteEvictionMetricsCollector collector;
                 collector.memory_remote_evict_inflight_blocks = victims.size();
-                metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
-                                          RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+                metrics_reporter_
+                    ->report<RtpLLMMemoryRemoteEvictionMetrics, RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr,
+                                                                                                            &collector);
             }
             CacheKeysType        cache_keys;
             std::vector<int32_t> memory_block_ids;
@@ -800,18 +867,18 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                 estimated_d2h_blocks,
                 kv_cache_config_.memory_cache_remote_eviction_timeout_ms);
             const auto remote_evict_started = std::chrono::steady_clock::now();
-            bool remote_success = false;
+            bool       remote_success       = false;
             try {
                 auto lease = std::make_shared<std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem>>(victims);
                 auto meta  = std::make_shared<TieredEvictionMeta>(false, true, trace_id);
                 auto ctx   = remote_connector_->asyncWriteMemory(cache_keys, memory_block_ids, meta, lease);
                 if (ctx) {
-                    const auto started = std::chrono::steady_clock::now();
+                    const auto started        = std::chrono::steady_clock::now();
                     bool       timeout_logged = false;
                     while (!ctx->done()) {
                         if (!timeout_logged
-                            && std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   std::chrono::steady_clock::now() - started)
+                            && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()
+                                                                                     - started)
                                        .count()
                                    >= kv_cache_config_.memory_cache_remote_eviction_timeout_ms) {
                             RTP_LLM_LOG_WARNING(
@@ -825,8 +892,8 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                     remote_success = ctx->success();
                 }
             } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("memory remote eviction failed with exception, trace_id=%s, error=%s",
-                                    trace_id.c_str(), e.what());
+                RTP_LLM_LOG_WARNING(
+                    "memory remote eviction failed with exception, trace_id=%s, error=%s", trace_id.c_str(), e.what());
             } catch (...) {
                 RTP_LLM_LOG_WARNING("memory remote eviction failed with unknown exception, trace_id=%s",
                                     trace_id.c_str());
@@ -847,8 +914,9 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                 collector.memory_remote_evict_latency_us          = remote_evict_latency_us;
                 collector.memory_remote_evict_bytes               = remote_evict_bytes;
                 collector.memory_remote_evict_inflight_blocks     = 0;
-                metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
-                                          RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+                metrics_reporter_
+                    ->report<RtpLLMMemoryRemoteEvictionMetrics, RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr,
+                                                                                                            &collector);
             }
             RTP_LLM_LOG_INFO(
                 "memory remote eviction finished, trace_id=%s, attempted_blocks=%zu, success_blocks=%zu, failed_blocks=%zu, bytes=%zu, latency_us=%ld, inflight=0, success=%d",
@@ -871,13 +939,13 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
     }
     auto evicted_resource = allocator_->popBlocksFromCache(need_d2h_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
-        RTP_LLM_LOG_INFO("tiered Device->Memory eviction no-op, trace_id=%s, requested=%zu",
-                         trace_id.c_str(), need_d2h_blocks);
+        RTP_LLM_LOG_INFO(
+            "tiered Device->Memory eviction no-op, trace_id=%s, requested=%zu", trace_id.c_str(), need_d2h_blocks);
         return;
     }
 
-    const auto& source_resource = evicted_resource->cacheResource(0);
-    size_t actual_d2h_blocks = source_resource.cacheKeys().size();
+    const auto& source_resource   = evicted_resource->cacheResource(0);
+    size_t      actual_d2h_blocks = source_resource.cacheKeys().size();
     if (!source_resource.lastBlockAligned() && actual_d2h_blocks > 0) {
         --actual_d2h_blocks;
     }
@@ -895,8 +963,8 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                                 trace_id.c_str());
         }
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("tiered Device->Memory eviction failed with exception, trace_id=%s, error=%s",
-                            trace_id.c_str(), e.what());
+        RTP_LLM_LOG_WARNING(
+            "tiered Device->Memory eviction failed with exception, trace_id=%s, error=%s", trace_id.c_str(), e.what());
     } catch (...) {
         RTP_LLM_LOG_WARNING("tiered Device->Memory eviction failed with unknown exception, trace_id=%s",
                             trace_id.c_str());
@@ -911,11 +979,10 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
             }
         }
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("tiered Device->Memory wait failed with exception, trace_id=%s, error=%s",
-                            trace_id.c_str(), e.what());
+        RTP_LLM_LOG_WARNING(
+            "tiered Device->Memory wait failed with exception, trace_id=%s, error=%s", trace_id.c_str(), e.what());
     } catch (...) {
-        RTP_LLM_LOG_WARNING("tiered Device->Memory wait failed with unknown exception, trace_id=%s",
-                            trace_id.c_str());
+        RTP_LLM_LOG_WARNING("tiered Device->Memory wait failed with unknown exception, trace_id=%s", trace_id.c_str());
     }
     connector_resource.reset();
 
@@ -927,8 +994,8 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
     if (remote_task_started && metrics_reporter_) {
         RtpLLMMemoryRemoteEvictionMetricsCollector collector;
         collector.device_to_memory_after_remote_latency_us = device_to_memory_latency_us;
-        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
-                                  RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics, RtpLLMMemoryRemoteEvictionMetricsCollector>(
+            nullptr, &collector);
     }
     RTP_LLM_LOG_INFO(
         "tiered Device->Memory eviction finished, trace_id=%s, after_remote=%d, requested=%zu, actual=%zu, latency_us=%ld, hard_watermark_ratio=%d, memory_total_blocks=%zu, memory_free_blocks=%zu, success=%d",

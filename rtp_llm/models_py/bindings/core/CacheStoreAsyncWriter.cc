@@ -45,8 +45,8 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     pending_count_.fetch_add(1, std::memory_order_acq_rel);
 
     auto wrapped = [this, task = std::move(task)]() {
-        pinThreadToDeviceOnce(device_id_);
         try {
+            pinThreadToDeviceOnce(device_id_);
             task();
         } catch (...) {
             recordException(std::current_exception());
@@ -57,9 +57,17 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
         }
     };
 
-    auto rc = thread_pool_->pushTask(std::move(wrapped));
+    auto rc = autil::ThreadPoolBase::ERROR_NONE;
+    try {
+        rc = thread_pool_->pushTask(std::move(wrapped));
+    } catch (...) {
+        pending_count_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyIfDone();
+        throw;
+    }
     if (rc != autil::ThreadPoolBase::ERROR_NONE) {
         pending_count_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyIfDone();
         RTP_LLM_CHECK_WITH_INFO(false,
                                 "CacheStoreAsyncWriter: pushTask failed (rc=%d). "
                                 "Queue full or thread pool in bad state.",
@@ -122,6 +130,18 @@ void CacheStoreAsyncWriter::recordException(std::exception_ptr exception) {
     if (!stored_exception_) {
         stored_exception_ = exception;
     }
+}
+
+void CacheStoreAsyncWriter::drainIfRunning() {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == State::IDLE) {
+            return;
+        }
+    }
+    // The caller has joined all model producers. Preserve strict waitAllDone()
+    // semantics elsewhere, including propagation after every reader completes.
+    waitAllDone();
 }
 
 void CacheStoreAsyncWriter::notifyIfDone() {

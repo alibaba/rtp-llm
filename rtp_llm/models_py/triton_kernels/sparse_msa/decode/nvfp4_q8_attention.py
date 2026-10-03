@@ -155,6 +155,12 @@ def _q8kv4_selected_page_partial(
         scale_v_page_stride,
         MMA_SCALE_LAYOUT,
     )
+    # Unwritten/rejected future rows may contain stale E4M3 NaNs. The QK
+    # score mask alone cannot protect PV: zero probability * NaN is NaN.
+    # Sanitize only causally unread rows, never valid model activations.
+    readable = block * 128 + token < seq_len
+    key = tl.where(readable[:, None], key, 0.0).to(tl.float8e4nv)
+    value = tl.where(readable[:, None], value, 0.0).to(tl.float8e4nv)
     score = tl.dot(q, tl.trans(key), out_dtype=tl.float32)
     score = tl.where((block * 128 + token)[None, :] < seq_len, score, float("-inf"))
     maximum = tl.max(score, axis=1)
@@ -183,6 +189,133 @@ def _q8kv4_selected_page_partial(
         mask=active[:, None],
     )
     tl.store(lse_ptr + base, lse, mask=active)
+
+
+@triton.jit
+def _q8kv4_four_page_partial(
+    q_ptr,
+    packed_k_ptr,
+    packed_v_ptr,
+    scale_k_ptr,
+    scale_v_ptr,
+    block_table_ptr,
+    topk_ptr,
+    seq_lens_ptr,
+    partial_ptr,
+    lse_ptr,
+    counts_ptr,
+    packed_k_page_stride,
+    packed_v_page_stride,
+    scale_k_page_stride,
+    scale_v_page_stride,
+    q_batch_stride,
+    q_head_stride,
+    table_batch_stride,
+    topk_head_stride,
+    topk_batch_stride,
+    num_phys_pages,
+    max_pages,
+    ALPHA: tl.constexpr,
+    LN2: tl.constexpr,
+    C1: tl.constexpr,
+    C2: tl.constexpr,
+    C3: tl.constexpr,
+    RINT: tl.constexpr,
+    MMA_SCALE_LAYOUT: tl.constexpr,
+):
+    """Reuse Q across four slots without changing per-page reduction order."""
+    batch = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    page_group = tl.program_id(2)
+    if page_group == 0:
+        tl.store(counts_ptr + batch * 4 + kv_head, 16)
+    seq_len = tl.load(seq_lens_ptr + batch)
+    num_blocks = (seq_len + 127) // 128
+    rows = tl.arange(0, 64)
+    group = rows % 16
+    active = rows // 16 == 0
+    dim = tl.arange(0, 128)
+    token = tl.arange(0, 128)
+    q = tl.load(
+        q_ptr
+        + batch * q_batch_stride
+        + (kv_head * 16 + group[:, None]) * q_head_stride
+        + dim[None, :],
+        mask=active[:, None],
+        other=0.0,
+    )
+    # Runtime loop bounds intermediate K/V lifetime. An invalid slot cannot
+    # return from the CTA: subsequent slots may still contain valid pages.
+    for offset in range(4):
+        slot = page_group * 4 + offset
+        block = tl.load(
+            topk_ptr + kv_head * topk_head_stride + batch * topk_batch_stride + slot
+        )
+        valid = (block >= 0) & (block < num_blocks) & (block < max_pages)
+        page = tl.load(
+            block_table_ptr + batch * table_batch_stride + tl.where(valid, block, 0),
+            mask=valid,
+            other=-1,
+        ).to(tl.int64)
+        valid = valid & (page >= 0) & (page < num_phys_pages)
+        base = ((batch * 4 + kv_head) * 16 + slot) * 16 + group
+        if valid:
+            key = _load_main_page_fp8(
+                packed_k_ptr,
+                scale_k_ptr,
+                page,
+                kv_head,
+                packed_k_page_stride,
+                scale_k_page_stride,
+                MMA_SCALE_LAYOUT,
+            )
+            value = _load_main_page_fp8(
+                packed_v_ptr,
+                scale_v_ptr,
+                page,
+                kv_head,
+                packed_v_page_stride,
+                scale_v_page_stride,
+                MMA_SCALE_LAYOUT,
+            )
+            readable = block * 128 + token < seq_len
+            key = tl.where(readable[:, None], key, 0.0).to(tl.float8e4nv)
+            value = tl.where(readable[:, None], value, 0.0).to(tl.float8e4nv)
+            score = tl.dot(q, tl.trans(key), out_dtype=tl.float32)
+            score = tl.where(readable[None, :], score, float("-inf"))
+            maximum = tl.max(score, axis=1)
+            maximum_safe = tl.where(maximum == float("-inf"), 0.0, maximum)
+            exponent = tl.fma(score, ALPHA, maximum_safe[:, None] * (-ALPHA))
+            emulated_column = (token >= 32) & (token < 96) & ((token % 16) >= 12)
+            probability = tl.where(
+                emulated_column[None, :],
+                ex2_emulated(exponent, C1, C2, C3, RINT),
+                ex2_ftz(exponent),
+            )
+            denominator = tree_sum_128(probability, 64)
+            numerator = tl.dot(
+                probability.to(tl.float8e4nv), value, out_dtype=tl.float32
+            )
+            inverse = rcp_ftz(tl.where(denominator != 0.0, denominator, 1.0))
+            output = (numerator * inverse[:, None]).to(tl.bfloat16)
+            lse = tl.where(
+                denominator != 0.0,
+                tl.fma(maximum, ALPHA, lg2_ftz(denominator)) * LN2,
+                float("-inf"),
+            )
+            tl.store(
+                partial_ptr + base[:, None] * 128 + dim[None, :],
+                output,
+                mask=active[:, None],
+            )
+            tl.store(lse_ptr + base, lse, mask=active)
+        else:
+            tl.store(
+                partial_ptr + base[:, None] * 128 + dim[None, :],
+                0.0,
+                mask=active[:, None],
+            )
+            tl.store(lse_ptr + base, float("-inf"), mask=active)
 
 
 @triton.jit
@@ -305,7 +438,14 @@ def q8kv4_sparse_decode_attention(
     for packed in (packed_k, packed_v):
         if packed.data_ptr() % 4 or packed.stride(0) % 4:
             raise ValueError("packed main page base/stride must be 4-byte aligned")
-    _q8kv4_selected_page_partial[(batch, 4, 16)](
+    # Rows are query rows (compact verify tokens), not requests. Matched warm
+    # and cache-polluted gates show four-page reuse helps M>=64 but hurts M16/32.
+    # Keep the original small-row kernel and the identical partial workspace.
+    pages_per_cta = 4 if batch >= 64 else 1
+    partial_kernel = (
+        _q8kv4_four_page_partial if pages_per_cta == 4 else _q8kv4_selected_page_partial
+    )
+    partial_kernel[(batch, 4, 16 // pages_per_cta)](
         q,
         packed_k,
         packed_v,

@@ -623,6 +623,10 @@ def destroy_distributed_environment():
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
 
+    from rtp_llm.models_py.distributed.cpu_phase import destroy_cpu_phase_group
+
+    destroy_cpu_phase_group()
+
     from rtp_llm.models_py.utils.arch import is_cuda
 
     if is_cuda():
@@ -763,7 +767,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:

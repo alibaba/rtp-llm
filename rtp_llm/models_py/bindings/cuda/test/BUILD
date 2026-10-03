@@ -20,7 +20,6 @@ cc_test(
     srcs = ["CudaSpeculativeSamplingTest.cc"],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
         "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         "@com_google_googletest//:gtest",

@@ -1,19 +1,75 @@
 """MiniMax-M3.1 runtime model specializations."""
 
-import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
-from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.minimax_m3 import (
     MiniMaxM3DecoderLayer,
     MiniMaxM3Model,
 )
-from rtp_llm.models_py.modules import DenseMLP
-from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs
+
+
+class MiniMaxM31MoeLayer(GenericMoeLayer):
+    def prepare_prefill_router(self):
+        """Own exact gate parts only on the dedicated native-KV4 Prefill model."""
+        if not isinstance(self.gate, CudaF16Linear) or self.gate.bias is not None:
+            raise ValueError(
+                "M3.1 Prefill router requires a bias-free FP32 linear gate"
+            )
+        from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
+            expand_fp32_router_weight,
+        )
+
+        parts = expand_fp32_router_weight(self.gate.weight)
+        for name, tensor in zip(
+            ("_prefill_gate_high", "_prefill_gate_middle", "_prefill_gate_low"), parts
+        ):
+            self.register_buffer(name, tensor, persistent=False)
+
+    def clone_for_cuda_graph(self):
+        clone = super().clone_for_cuda_graph()
+        # Decode/verify clones share the raw FP32 gate, not Prefill-only parts.
+        clone._prefill_router_active = False
+        return clone
+
+    def _compute_router_logits(self, hidden_states):
+        if (
+            getattr(self, "_prefill_router_active", False)
+            and hasattr(self, "_prefill_gate_high")
+            and hidden_states.dtype == torch.bfloat16
+        ):
+            from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
+                minimax_m31_prefill_router_logits,
+            )
+
+            return minimax_m31_prefill_router_logits(
+                hidden_states.contiguous(),
+                (
+                    self._prefill_gate_high,
+                    self._prefill_gate_middle,
+                    self._prefill_gate_low,
+                ),
+            )
+        if (
+            getattr(self, "_batch_invariant_router", False)
+            and isinstance(self.gate, CudaF16Linear)
+            and self.gate.weight.dtype == torch.float32
+            and self.gate.bias is None
+        ):
+            from rtp_llm.models_py.triton_kernels.minimax_m31_router import (
+                minimax_m31_router_logits,
+            )
+
+            return minimax_m31_router_logits(
+                hidden_states.float().contiguous(), self.gate.weight
+            )
+        return super()._compute_router_logits(hidden_states)
 
 
 class _MiniMaxM31MSAQueryContext:
@@ -36,64 +92,91 @@ class _MiniMaxM31MSAQueryContext:
         return True
 
 
-class _MockNVFP4Moe(nn.Module):
-    """Shared expert only; skips unsupported M3.1 routed NVFP4 experts."""
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
-    ) -> None:
-        super().__init__()
-        self.shared_expert = DenseMLP(
-            config.activation_type,
-            parallelism_config,
-            weights,
-            config.quant_config,
-            swiglu_oai_params=(config.swiglu_alpha, config.swiglu_limit),
-        )
-
-    def forward(self, hidden_states: torch.Tensor, **_: Any) -> torch.Tensor:
-        return self.shared_expert(hidden_states)
-
-
 class MiniMaxM31DecoderLayer(MiniMaxM3DecoderLayer):
+    """M3.1 retains M3 experts, with fixed row routing for decode/verify."""
+
     def _create_mlp(
         self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
+        config,
+        parallelism_config,
+        weights,
         moe_config,
-        max_generate_batch_size: int,
-        enable_cuda_graph: bool,
-        hw_kernel_config: Optional[HWKernelConfig],
-        layer_idx: int,
-    ) -> nn.Module:
-        if bool(getattr(config, "mock_nvfp4_moe", False)) and (
-            layer_idx in config.moe_layer_index
-        ):
-            if layer_idx == config.moe_layer_index[0]:
-                logging.warning(
-                    "M3_M31_MOCK_NVFP4_MOE is active: routed NVFP4 experts are "
-                    "skipped and only the MXFP8 shared expert runs; this mode "
-                    "validates structure only"
-                )
-            return _MockNVFP4Moe(config, parallelism_config, weights)
-        return super()._create_mlp(
+        max_generate_batch_size,
+        enable_cuda_graph,
+        hw_kernel_config,
+        layer_idx,
+    ):
+        if layer_idx not in config.moe_layer_index:
+            return super()._create_mlp(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph,
+                hw_kernel_config,
+                layer_idx,
+            )
+        return MiniMaxM31MoeLayer(
             config,
             parallelism_config,
             weights,
             moe_config,
             max_generate_batch_size,
-            enable_cuda_graph,
-            hw_kernel_config,
-            layer_idx,
+            enable_cuda_graph=enable_cuda_graph,
+            hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
+        )
+
+    def _forward_attention(
+        self,
+        hidden_states,
+        fmha_impl,
+        kv_cache,
+        prev_topk_indices,
+        force_reuse_topk_indices,
+        attn_inputs,
+        x_fp8=None,
+        x_scale=None,
+    ):
+        # Set on this layer's actual MLP (including Graph clones), never on the
+        # shared gate module. Capture records fixed kernels; replay needs no
+        # Python flag mutation. Only an explicitly prepared Prefill model uses
+        # its exact FP32-weight expansion; Decode/PDFUSION allocate no parts.
+        if isinstance(self.mlp, MiniMaxM31MoeLayer):
+            self.mlp._prefill_router_active = (
+                attn_inputs is not None
+                and attn_inputs.is_prefill
+                and not getattr(attn_inputs, "is_target_verify", False)
+            )
+            self.mlp._batch_invariant_router = attn_inputs is not None and (
+                not attn_inputs.is_prefill
+                or getattr(attn_inputs, "is_target_verify", False)
+            )
+        return super()._forward_attention(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+            force_reuse_topk_indices,
+            attn_inputs,
+            x_fp8,
+            x_scale,
         )
 
 
 class MiniMaxM31Model(MiniMaxM3Model):
     decoder_layer_cls = MiniMaxM31DecoderLayer
+
+    def initialize(self, init_resource):
+        result = super().initialize(init_resource)
+        if self.parallelism_config.role_type == RoleType.PREFILL:
+            for layer in self.layers:
+                if isinstance(layer.mlp, MiniMaxM31MoeLayer) and getattr(
+                    layer.self_attn, "nvfp4_kv_cache", False
+                ):
+                    layer.mlp.prepare_prefill_router()
+        return result
 
     def _prepare_prefill_moe_chunk_plan(self, inputs, hidden_states, layers):
         from rtp_llm.models_py.model_desc.generic_moe import (

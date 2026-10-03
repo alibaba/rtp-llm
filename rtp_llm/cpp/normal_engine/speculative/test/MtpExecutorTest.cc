@@ -19,6 +19,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -145,6 +146,13 @@ public:
         return output_holder.get();
     }
 
+    void drainPendingCacheStore() override {
+        if (drain_hook) {
+            drain_hook();
+        }
+    }
+    std::function<void()> drain_hook;
+
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
         RTP_LLM_LOG_INFO("check %s", name);
         checkTensorEqual(actual, expected);
@@ -222,7 +230,8 @@ public:
 
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
-                                           SamplerOutput&                      target_sampler_output) override {
+                                           SamplerOutput&                      target_sampler_output,
+                                           const torch::Tensor&                active_verify_lengths = {}) override {
         return output_holder.get();
     }
 
@@ -539,6 +548,377 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, CompactVerifySamplingEligibilityFailsClosed) {
+    auto make_inputs = []() {
+        SamplerInputs inputs;
+        inputs.phase             = LogitsProcessorPhase::MTP_VERIFY;
+        inputs.compact_token_ids = true;
+        inputs.batch_size = inputs.batch_size_out = 8;
+        inputs.top_k                              = torch::zeros({8}, torch::kInt32);
+        inputs.all_probs                          = torch::zeros({8, 4}, torch::kFloat32);
+        return inputs;
+    };
+    for (int32_t top_k : {0, -1, 1, 5}) {
+        auto inputs = make_inputs();
+        inputs.top_k.fill_(top_k);
+        EXPECT_EQ(MtpExecutor::canSampleCompactVerifyRows(inputs), top_k <= 1);
+    }
+    for (int mode = 0; mode < 9; ++mode) {
+        auto inputs = make_inputs();
+        switch (mode) {
+            case 0:
+                inputs.compact_token_ids = false;
+                break;
+            case 1:
+                inputs.cum_log_probs = torch::zeros({8});
+                break;
+            case 2:
+                inputs.return_original_all_probs = true;
+                break;
+            case 3:
+                inputs.all_probs = torch::Tensor();
+                break;
+            case 4:
+                inputs.spec_cap_gpu = torch::ones({1});
+                break;
+            case 5:
+                inputs.spec_vocab_mask_gpu = torch::zeros({8, 4}, torch::kBool);
+                break;
+            case 6:
+                inputs.top_k[0] = 1;
+                break;  // mixed no-limit and greedy
+            case 7:
+                inputs.phase = LogitsProcessorPhase::NORMAL_DECODE;
+                break;
+            case 8:
+                inputs.batch_size_out = 9;
+                break;
+        }
+        EXPECT_FALSE(MtpExecutor::canSampleCompactVerifyRows(inputs)) << mode;
+    }
+}
+
+TEST_F(MtpExecutorTest, AdaptiveVerifyCapRefreshesBookkeepingMirror) {
+    const auto                     opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    spec::SpeculativeSamplerOutput output;
+    output.accept_len        = torch::tensor({8, 2, 8, 1}, opts);
+    output.accept_len_cpu    = torch::tensor({8, 2, 8, 1}, torch::kInt32);
+    output.accept_tokens     = torch::arange(32, opts).reshape({4, 8});
+    const auto tokens_before = output.accept_tokens.clone();
+    MtpExecutor::capDSparkVerifyLengths(output, torch::tensor({3, 5, 7, 1}, opts));
+    output.transfer_done_event->synchronize();
+    const auto expected = torch::tensor({3, 2, 7, 1}, torch::kInt32);
+    EXPECT_TRUE(torch::equal(output.accept_len_cpu, expected));
+    EXPECT_TRUE(torch::equal(output.accept_len.cpu(), expected));
+    EXPECT_TRUE(torch::equal(output.accept_tokens, tokens_before));
+    // A later round must not reuse the earlier CPU mirror or transfer event state.
+    MtpExecutor::capDSparkVerifyLengths(output, torch::ones({4}, opts));
+    output.transfer_done_event->synchronize();
+    EXPECT_TRUE(torch::equal(output.accept_len_cpu, torch::ones({4}, torch::kInt32)));
+}
+
+TEST_F(MtpExecutorTest, DSparkKvLeaseFiltersRetiredRowsAndPreservesEpPhase) {
+    auto  components                     = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor                       = *components.executor;
+    executor.parallelism_config_.dp_size = 4;
+    auto retired =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    auto healthy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    retired->setIsContextStream(false);
+    healthy->setIsContextStream(false);
+    retired->releaseResource();
+    std::vector<GenerateStreamPtr> leases;
+    leases.reserve(2);
+    auto active = executor.acquireKvExecutionStreams({retired, healthy}, leases);
+    ASSERT_EQ(active.size(), 1);
+    EXPECT_EQ(active.front(), healthy);
+    EXPECT_FALSE(active.front()->isFakeStream());
+    ASSERT_EQ(leases.size(), 1);
+    healthy->finishKvExecution(1);
+    leases.clear();
+    active = executor.acquireKvExecutionStreams({retired}, leases);
+    ASSERT_EQ(active.size(), 1);
+    EXPECT_TRUE(active.front()->isFakeStream());
+    EXPECT_FALSE(active.front()->isContextStream());
+    EXPECT_TRUE(leases.empty());
+    active = executor.acquireKvExecutionStreams({}, leases);
+    EXPECT_TRUE(active.empty());  // non-root empty input keeps the old protocol
+}
+
+TEST_F(MtpExecutorTest, DSparkKvWorkerExceptionAndLaunchRollbackRetainExecutionOwner) {
+    for (bool fail_launch : {false, true}) {
+        auto  components    = createMtpExecutorComponents(MtpExecutorTestConfig{});
+        auto& executor      = *components.executor;
+        executor.is_dspark_ = true;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_DSPARK;
+        sp_config.gen_num_per_cycle = 4;
+        CacheConfig cache;
+        cache.group_types = {CacheGroupType::FULL};
+        executor.setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(
+            components.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, sp_config, false));
+        auto resource          = components.resource_context;
+        resource.cache_manager = executor.cache_manager_;
+        auto stream = createContextStream(components.model_config, components.runtime_config, resource, {2, 3});
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        stream->setIsContextStream(false);
+        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
+        stream->setSPOutputBuffer(buffer);
+        ASSERT_TRUE(stream->tryAcquireKvExecution());
+        const auto                            free_before = executor.cache_manager_->freeBlocksNum();
+        speculative::SpeculativeSamplerOutput output;
+        output.accept_tokens_cpu = torch::tensor({{1, 0, 0, 0, 0}}, torch::kInt32);
+        output.accept_len_cpu    = torch::ones({1}, torch::kInt32);
+        output.accept_tokens     = output.accept_tokens_cpu.to(torch::kCUDA);
+        output.accept_len        = output.accept_len_cpu.to(torch::kCUDA);
+        output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+        if (fail_launch) {
+            executor.spec_bookkeeping_runner_.launch([] { throw std::runtime_error("previous worker failure"); });
+            EXPECT_THROW(executor.dispatchDecodeAsync(StreamGroups({stream}), output, MergedOutput{}, nullptr, nullptr),
+                         std::runtime_error);
+            EXPECT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+        } else {
+            // GPU mirrors remain valid; malformed CPU staging fails inside the
+            // real dispatch worker, after launch and dependency submission.
+            output.accept_tokens_cpu = torch::empty({1, 0}, torch::kInt32);
+            ASSERT_TRUE(
+                executor.dispatchDecodeAsync(StreamGroups({stream}), output, MergedOutput{}, nullptr, nullptr).ok());
+            EXPECT_TRUE(executor.spec_bookkeeping_runner_.joinAndDrain());
+            EXPECT_TRUE(stream->getPendingSwapDoneEvent());
+        }
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_EQ(executor.cache_manager_->freeBlocksNum(), free_before);
+        stream->reportError(ErrorCode::GENERATE_TIMEOUT, "test cancellation after failed dispatch");
+        stream->moveToNext();
+        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+        cuda_graph::graphGetCurrentStream().synchronize();
+        const torch::Stream producer = cuda_graph::graphGetCurrentStream();
+        stream->finishKvExecution(producer.hash());
+        EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+        EXPECT_GT(executor.cache_manager_->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(MtpExecutorTest, DSparkKvProcessExceptionDrainsPrepareBeforeDroppingLease) {
+    ScopedDisableCoreDumpOnException no_core;
+    auto                             components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto&                            executor   = *components.executor;
+    setupFakeModels(&executor,
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+    executor.is_dspark_    = true;
+    executor.role_type_    = RoleType::PREFILL;
+    auto resource          = components.resource_context;
+    resource.cache_manager = executor.cache_manager_;
+    auto stream            = createContextStream(components.model_config, components.runtime_config, resource, {2, 3});
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    const auto free_before = executor.cache_manager_->freeBlocksNum();
+    auto       scratch     = torch::zeros({64}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    cuda_graph::graphGetCurrentStream().synchronize();
+    executor.target_verify_prepare_runner_.launch([scratch] {
+        scratch.fill_(19);
+        throw std::runtime_error("injected prepare failure after GPU submission");
+    });
+    // The test model deliberately has no queued forward input/output, causing
+    // the real process body to fail. Its exception cleanup must still join the
+    // independently submitted prepare task and drain its actual GPU stream.
+    EXPECT_ANY_THROW(executor.processWithKvLease({stream}, 0));
+    EXPECT_TRUE(torch::equal(scratch.cpu(), torch::full({64}, 19, torch::kFloat32)));
+    EXPECT_FALSE(executor.target_verify_prepare_runner_.joinAndDrain());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 0);
+    EXPECT_EQ(executor.cache_manager_->freeBlocksNum(), free_before);
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "test cancellation after process error");
+    stream->moveToNext();
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_GT(executor.cache_manager_->freeBlocksNum(), free_before);
+}
+
+TEST_F(MtpExecutorTest, DSparkKvProcessExceptionDrainsExternalReadersBeforeLeaseRelease) {
+    ScopedDisableCoreDumpOnException no_core;
+    for (const bool fail_reader : {false, true}) {
+        auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+        auto& executor   = *components.executor;
+        auto* target     = components.fake_target_model.get();
+        auto* draft      = components.fake_draft_model.get();
+        setupFakeModels(&executor,
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler));
+        executor.is_dspark_    = true;
+        executor.role_type_    = RoleType::PREFILL;
+        auto resource          = components.resource_context;
+        resource.cache_manager = executor.cache_manager_;
+        auto stream = createContextStream(components.model_config, components.runtime_config, resource, {2, 3});
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        const auto            free_before = executor.cache_manager_->freeBlocksNum();
+        CacheStoreAsyncWriter writer;
+        writer.init();
+        writer.trackExternalTask();
+        std::atomic<bool> entered{false};
+        bool              draft_drained = false;
+        target->drain_hook              = [&] {
+            entered.store(true, std::memory_order_release);
+            writer.drainIfRunning();
+        };
+        draft->drain_hook = [&] { draft_drained = true; };
+        std::thread callback([&] {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+            EXPECT_TRUE(entered.load(std::memory_order_acquire));
+            EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 1);
+            EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+            writer.finishExternalTask(
+                fail_reader ? std::make_exception_ptr(std::runtime_error("reader completion failed")) : nullptr);
+        });
+        // Empty FakeModel input queue injects the forward failure. An outstanding
+        // real writer callback must finish while the real cache page remains leased.
+        EXPECT_ANY_THROW(executor.processWithKvLease({stream}, 0));
+        callback.join();
+        EXPECT_TRUE(draft_drained);
+        EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 0);
+        EXPECT_EQ(executor.cache_manager_->freeBlocksNum(), free_before);
+        stream->reportError(ErrorCode::GENERATE_TIMEOUT, "cancel after reader drain");
+        stream->moveToNext();
+        EXPECT_EQ(stream->streamCacheResource().isResourceReleased(), !fail_reader);
+        if (fail_reader) {
+            EXPECT_TRUE(stream->async_bookkeeping_->kv_execution.completion_failed);
+            EXPECT_EQ(executor.cache_manager_->freeBlocksNum(), free_before);
+        } else {
+            EXPECT_GT(executor.cache_manager_->freeBlocksNum(), free_before);
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, DSparkAsyncFailureRetainsGpuStateAndCommitsHealthyPeer) {
+    auto  components    = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor      = *components.executor;
+    executor.is_dspark_ = true;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 4;
+    CacheConfig cache;
+    cache.group_types = {CacheGroupType::FULL};
+    executor.setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(
+        components.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, sp_config, false));
+    auto failed =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    auto healthy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    const auto gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (const auto& stream : {failed, healthy}) {
+        stream->setIsContextStream(false);
+        stream->setNeedReleaseResource(false);
+        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
+        stream->setSPOutputBuffer(buffer);
+        GenerateStream::MtpAsyncDeviceState previous;
+        previous.accept_len_gpu    = torch::ones({1}, gpu);
+        previous.accept_tokens_gpu = torch::tensor({{3, 0, 0, 0, 0}}, gpu);
+        previous.next_seq_len_gpu  = torch::tensor({2}, gpu);
+        stream->setMtpAsyncDeviceState(std::move(previous));
+    }
+    const auto                            old_tokens = failed->getAcceptTokensGpu().clone();
+    const auto                            old_length = failed->getAcceptLenGpu().clone();
+    const auto                            old_seq    = failed->getNextSeqLenGpu().clone();
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_tokens_cpu = torch::tensor({{0, 0, 0, 0, 0}, {1, 0, 0, 0, 0}}, torch::kInt32);
+    output.accept_len_cpu    = torch::tensor({1, 1}, torch::kInt32);
+    output.success_cpu       = torch::tensor({false, true}, torch::kBool);
+    output.accept_tokens     = output.accept_tokens_cpu.to(torch::kCUDA);
+    output.accept_len        = output.accept_len_cpu.to(torch::kCUDA);
+    output.success           = output.success_cpu.to(torch::kCUDA);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    EXPECT_TRUE(
+        executor.dispatchDecodeAsync(StreamGroups({failed, healthy}), output, MergedOutput{}, nullptr, nullptr).ok());
+    executor.spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    EXPECT_TRUE(failed->hasError());
+    EXPECT_EQ(failed->seqLength(), 2);
+    EXPECT_TRUE(torch::equal(failed->getAcceptTokensGpu(), old_tokens));
+    EXPECT_TRUE(torch::equal(failed->getAcceptLenGpu(), old_length));
+    EXPECT_TRUE(torch::equal(failed->getNextSeqLenGpu(), old_seq));
+    EXPECT_EQ(failed->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), 3);
+    EXPECT_FALSE(healthy->hasError());
+    EXPECT_EQ(healthy->seqLength(), 3);
+}
+
+TEST_F(MtpExecutorTest, DSparkAsyncMixedPriorWidthAndMissingStateRetainAnchors) {
+    auto  components    = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor      = *components.executor;
+    executor.is_dspark_ = true;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 4;
+    CacheConfig cache;
+    cache.group_types = {CacheGroupType::FULL};
+    executor.setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(
+        components.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, sp_config, false));
+    auto changed =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    auto missing =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    auto healthy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    const auto gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (const auto& stream : {changed, missing, healthy}) {
+        stream->setIsContextStream(false);
+        stream->setNeedReleaseResource(false);
+        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
+        stream->setSPOutputBuffer(buffer);
+    }
+    GenerateStream::MtpAsyncDeviceState previous;
+    previous.accept_len_gpu    = torch::tensor({2}, gpu);
+    previous.accept_tokens_gpu = torch::tensor({{3, 7, 9}}, gpu);
+    previous.next_seq_len_gpu  = torch::tensor({2}, gpu);
+    changed->setMtpAsyncDeviceState(std::move(previous));
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_tokens_cpu = torch::tensor({{0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {1, 2, 3, 0, 0}}, torch::kInt32);
+    // Failed rows can have no accepted token. Their next anchor must come
+    // from retained state, never from a negative index into sampler output.
+    output.accept_len_cpu = torch::tensor({0, 0, 3}, torch::kInt32);
+    output.success_cpu    = torch::tensor({false, false, true}, torch::kBool);
+    output.accept_tokens  = output.accept_tokens_cpu.to(torch::kCUDA);
+    output.accept_len     = output.accept_len_cpu.to(torch::kCUDA);
+    output.success        = output.success_cpu.to(torch::kCUDA);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    auto rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    auto draft_event     = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    rejection_event->record(cuda_graph::graphGetCurrentStream());
+    draft_event->record(cuda_graph::graphGetCurrentStream());
+    EXPECT_TRUE(executor
+                    .dispatchDecodeAsync(
+                        StreamGroups({changed, missing, healthy}), output, MergedOutput{}, rejection_event, draft_event)
+                    .ok());
+    // The worker and published views must own their inputs independently of
+    // caller scope. Exercise a non-first failed row beside a multi-token peer.
+    output = speculative::SpeculativeSamplerOutput{};
+    rejection_event.reset();
+    draft_event.reset();
+    executor.spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    for (const auto& pair : {std::make_pair(changed, 7), std::make_pair(missing, 3)}) {
+        const auto& stream = pair.first;
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->seqLength(), 2);
+        EXPECT_TRUE(torch::equal(stream->getAcceptTokensGpu().cpu(), torch::full({1, 5}, pair.second, torch::kInt32)));
+        EXPECT_TRUE(torch::equal(stream->getAcceptLenGpu().cpu(), torch::ones({1}, torch::kInt32)));
+        EXPECT_EQ(stream->getNextSeqLenGpu().cpu().item<int>(), 2);
+        EXPECT_EQ(stream->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), pair.second);
+    }
+    EXPECT_FALSE(healthy->hasError());
+    EXPECT_EQ(healthy->seqLength(), 5);
+    EXPECT_EQ(healthy->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), 3);
+}
 
 TEST_F(MtpExecutorTest, DSparkVerifyBudgetDoesNotChangeProposalWidthOrLegacyMtp) {
     MtpExecutorTestConfig config;

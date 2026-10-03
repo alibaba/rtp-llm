@@ -146,6 +146,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("is_ragged_target_verify", &PyAttentionInputs::is_ragged_target_verify)
         .def_readwrite("is_mtp_draft_prefill", &PyAttentionInputs::is_mtp_draft_prefill)
         .def_readwrite("mtp_iteration_step", &PyAttentionInputs::mtp_iteration_step)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)

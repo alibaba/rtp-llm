@@ -127,4 +127,9 @@ const std::shared_ptr<Meta>& FusedAsyncReadContext::meta() const {
     return meta_;
 }
 
+int64_t FusedAsyncReadContext::ageUs() const {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - created_at_)
+        .count();
+}
+
 }  // namespace rtp_llm

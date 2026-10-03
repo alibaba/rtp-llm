@@ -1,5 +1,11 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <chrono>
+#include <set>
+
+#include "kmonitor/client/KMonitor.h"
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsCollector.h"
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -72,12 +78,12 @@ TEST(KVCacheConnectorCoordinatorWatermarkTest, SoftWatermarkSpillsBeforeHardWate
     const size_t free_blocks     = 80;
     const size_t incoming_blocks = 50;
 
-    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(
-                  total_blocks, free_blocks, incoming_blocks, 90),
-              70);
-    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(
-                  total_blocks, free_blocks, incoming_blocks, 95),
-              20);
+    EXPECT_EQ(
+        KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(total_blocks, free_blocks, incoming_blocks, 90),
+        70);
+    EXPECT_EQ(
+        KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(total_blocks, free_blocks, incoming_blocks, 95),
+        20);
 }
 
 class KVCacheConnectorCoordinatorTest: public ::testing::Test {
@@ -438,8 +444,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     auto req_resource = KVCacheResource{};
     req_resource.cacheKeys().assign({1, 2, 3});
 
-    // No connectors registered: asyncRead() still returns a fused read context; it will contain zero match contexts
-    // and will be processed/cleaned up by the coordinator update loop if enabled.
+    // No connectors registered: asyncRead() returns an already-complete fused context.
     // Use a plain shared_ptr here to avoid custom-deleter side effects in this no-connector path.
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
@@ -459,10 +464,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(meta));
 
-    // No connectors registered => returns a fused context and enqueues it.
+    // No connectors registered => returns a fused context without a background update.
     auto async_ctx = coordinator->asyncRead(ctx);
     ASSERT_NE(async_ctx, nullptr);
-    EXPECT_EQ(coordinator->fused_async_read_context_list_.size(), 1u);
+    EXPECT_TRUE(async_ctx->done());
+    EXPECT_TRUE(async_ctx->success());
+    EXPECT_TRUE(coordinator->fused_async_read_context_list_.empty());
 
     // Important: coordinator dtor waits until both lists become empty. Clear under lock to avoid races with the dtor.
     {
@@ -515,6 +522,56 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     mock_connector.reset();
     resource.reset();     // trigger auto-decr while allocator_ is alive
     coordinator.reset();  // ensure no lingering references before next tests
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_DeviceFullHitCompletesWithoutCoordinatorUpdate) {
+    auto monitor = std::make_shared<kmonitor::KMonitor>("coordinator_no_read_test", false);
+    monitor->SetServiceName("");
+    coordinator_->metrics_reporter_ = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto mock_connector             = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
+    coordinator_->connectors_       = {mock_connector};
+
+    KVCacheResource request_resource;
+    request_resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    auto referenced_resource     = std::make_shared<KVCacheResource>();
+    referenced_resource->setDeviceReuseBlockNum(2);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+        .WillOnce(testing::Return(referenced_resource));
+    // Memory asyncMatch returns no context when Device already owns every complete block.
+    EXPECT_CALL(*mock_connector, asyncMatch(testing::Eq(referenced_resource), testing::_))
+        .WillOnce(testing::Return(nullptr));
+    EXPECT_CALL(*mock_connector, asyncRead(testing::_, testing::_, testing::_, testing::_, testing::_)).Times(0);
+
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta =
+        std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(request_resource));
+    ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
+
+    auto async_ctx = coordinator_->asyncRead(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_TRUE(async_ctx->done());
+    EXPECT_TRUE(async_ctx->success());
+    EXPECT_TRUE(coordinator_->fused_async_read_context_list_.empty());
+    async_ctx->waitDone();
+
+    kmonitor::MetricsCollector collected;
+    const auto                 now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    monitor->GetMetrics(&collected, {kmonitor::NORMAL}, now_ms);
+    std::set<std::string> reported_stages;
+    for (const auto* record : collected.GetRecords().getRecords()) {
+        for (const auto* value : record->Values()) {
+            if (value->Name() == "rtp_llm_cache_prepare_stage_latency_us") {
+                reported_stages.insert(record->Tags()->FindTag("stage"));
+            }
+        }
+    }
+    EXPECT_TRUE(reported_stages.count("coordinator_no_read_fast_path"));
+
+    coordinator_->updateOnce();
+    EXPECT_TRUE(coordinator_->fused_async_read_context_list_.empty());
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
@@ -704,12 +761,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGroupsInCanonicalCoordinates) {
-    CacheConfig cp_cache_config                    = cache_config_;
-    cp_cache_config.layer_num                      = 2;
-    cp_cache_config.layer_all_num                  = 2;
-    cp_cache_config.seq_size_per_block             = 128;
-    cp_cache_config.layer_to_group_id              = {0, 1};
-    cp_cache_config.group_types                    = {CacheGroupType::FULL, CacheGroupType::SWA};
+    CacheConfig cp_cache_config              = cache_config_;
+    cp_cache_config.layer_num                = 2;
+    cp_cache_config.layer_all_num            = 2;
+    cp_cache_config.seq_size_per_block       = 128;
+    cp_cache_config.layer_to_group_id        = {0, 1};
+    cp_cache_config.group_types              = {CacheGroupType::FULL, CacheGroupType::SWA};
     cp_cache_config.group_seq_size_per_block = {128, 256};
 
     ParallelismConfig parallelism_config;
@@ -765,13 +822,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndCompactFixedGroups) {
-    CacheConfig cp_cache_config                    = cache_config_;
-    cp_cache_config.layer_num                      = 2;
-    cp_cache_config.layer_all_num                  = 2;
-    cp_cache_config.seq_size_per_block             = 128;
-    cp_cache_config.layer_to_group_id              = {0, 1};
-    cp_cache_config.group_types                    = {CacheGroupType::FULL, CacheGroupType::SWA};
-    cp_cache_config.group_seq_size_per_block       = {128, 256};
+    CacheConfig cp_cache_config              = cache_config_;
+    cp_cache_config.layer_num                = 2;
+    cp_cache_config.layer_all_num            = 2;
+    cp_cache_config.seq_size_per_block       = 128;
+    cp_cache_config.layer_to_group_id        = {0, 1};
+    cp_cache_config.group_types              = {CacheGroupType::FULL, CacheGroupType::SWA};
+    cp_cache_config.group_seq_size_per_block = {128, 256};
 
     ParallelismConfig parallelism_config;
     parallelism_config.role_type                          = RoleType::DECODE;

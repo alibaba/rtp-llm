@@ -16,5 +16,6 @@ py_library(
     deps = [
         ":request_headers",
         "//rtp_llm:vipserver",
+        "//rtp_llm/models_py/distributed:cpu_phase",
     ]
 )

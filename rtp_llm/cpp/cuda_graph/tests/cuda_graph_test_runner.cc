@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -63,21 +64,29 @@ public:
                      int64_t            tokens_per_block,
                      int64_t            kernel_tokens_per_block,
                      std::vector<int>   decode_capture_batch_sizes,
-                     const std::string& model_data_type) {
+                     const std::string& model_data_type,
+                     int64_t            num_tokens_per_bs,
+                     bool               is_target_verify,
+                     bool               is_ragged_target_verify,
+                     bool               require_exact_decode_geometry) {
         reset_runner();
         GraphParams params;
-        params.enable_cuda_graph_debug_mode = false;
-        params.is_prefill_cuda_graph_mode   = false;
-        params.max_seq_len                  = static_cast<int>(max_seq_len);
-        params.tokens_per_block             = static_cast<int>(tokens_per_block);
-        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = 1;
-        params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = parseModelDataType(model_data_type);
-        params.max_context_batch_size       = 128;
-        params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
-        params.kv_cache_group_num           = 0;
+        params.enable_cuda_graph_debug_mode  = false;
+        params.is_prefill_cuda_graph_mode    = false;
+        params.max_seq_len                   = static_cast<int>(max_seq_len);
+        params.tokens_per_block              = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block       = static_cast<int>(kernel_tokens_per_block);
+        params.num_tokens_per_bs             = static_cast<int>(num_tokens_per_bs);
+        params.sp_steps                      = std::max<int64_t>(num_tokens_per_bs - 1, 0);
+        params.is_target_verify              = is_target_verify;
+        params.is_ragged_target_verify       = is_ragged_target_verify;
+        params.require_exact_decode_geometry = require_exact_decode_geometry;
+        params.hidden_size                   = static_cast<size_t>(hidden_size);
+        params.model_data_type               = parseModelDataType(model_data_type);
+        params.max_context_batch_size        = 128;
+        params.decode_capture_batch_sizes    = std::move(decode_capture_batch_sizes);
+        params.kv_cache_layer_to_group       = {};  // test: no hybrid kv cache
+        params.kv_cache_group_num            = 0;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -137,7 +146,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("model_data_type"))
+             py::arg("model_data_type"),
+             py::arg("num_tokens_per_bs")             = 1,
+             py::arg("is_target_verify")              = false,
+             py::arg("is_ragged_target_verify")       = false,
+             py::arg("require_exact_decode_geometry") = false)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getMtpTargetHiddenStates", &CudaGraphTestRunner::getMtpTargetHiddenStates)

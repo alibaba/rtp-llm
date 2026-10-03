@@ -308,12 +308,15 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
     }
 }
 
-int64_t SpeculativeExecutionConfig::verifySteps() const {
+bool SpeculativeExecutionConfig::isAdaptiveVerify() const {
+    if (!sp_dspark_verify_mode.empty() && sp_dspark_verify_mode != "static" && sp_dspark_verify_mode != "adaptive") {
+        throw std::invalid_argument("sp_dspark_verify_mode must be empty, static or adaptive");
+    }
     if (type != SP_TYPE_DSPARK) {
-        if (sp_dspark_verify_tokens != 0) {
-            throw std::invalid_argument("sp_dspark_verify_tokens requires sp_type=dspark");
+        if (sp_dspark_verify_tokens != 0 || sp_dspark_adaptive_verify || !sp_dspark_verify_mode.empty()) {
+            throw std::invalid_argument("DSpARK verify settings require sp_type=dspark");
         }
-        return gen_num_per_cycle;
+        return false;
     }
     if (gen_num_per_cycle <= 0) {
         throw std::invalid_argument("dspark requires a positive gen_num_per_cycle");
@@ -321,7 +324,43 @@ int64_t SpeculativeExecutionConfig::verifySteps() const {
     if (sp_dspark_verify_tokens < 0 || sp_dspark_verify_tokens > gen_num_per_cycle) {
         throw std::invalid_argument("sp_dspark_verify_tokens must be 0 (default) or in [1, gen_num_per_cycle]");
     }
+    if (sp_dspark_verify_mode == "static") {
+        if (sp_dspark_adaptive_verify) {
+            throw std::invalid_argument("static DSpARK verification conflicts with sp_dspark_adaptive_verify=true");
+        }
+        if (sp_dspark_verify_tokens != 0 && sp_dspark_verify_tokens != gen_num_per_cycle) {
+            throw std::invalid_argument("static DSpARK verification requires sp_dspark_verify_tokens=0 or gamma");
+        }
+        return false;
+    }
+    return sp_dspark_verify_mode == "adaptive" || sp_dspark_adaptive_verify;
+}
+
+int64_t SpeculativeExecutionConfig::verifySteps() const {
+    const bool adaptive = isAdaptiveVerify();
+    return adaptive ? gen_num_per_cycle : verifyBudgetPerRequest();
+}
+
+int64_t SpeculativeExecutionConfig::verifyBudgetPerRequest() const {
+    isAdaptiveVerify();
+    if (type != SP_TYPE_DSPARK) {
+        return gen_num_per_cycle;
+    }
+    if (sp_dspark_verify_tokens < 0 || sp_dspark_verify_tokens > gen_num_per_cycle) {
+        throw std::invalid_argument("sp_dspark_verify_tokens must be 0 (default) or in [1, gen_num_per_cycle]");
+    }
     return sp_dspark_verify_tokens == 0 ? gen_num_per_cycle : sp_dspark_verify_tokens;
+}
+
+void SpeculativeExecutionConfig::validateVerifyBatchSize(int64_t max_batch) const {
+    if (!isAdaptiveVerify()) {
+        return;
+    }
+    // Match the CUDA planner's fixed shared-memory capacity without multiplying
+    // caller-controlled sizes. isAdaptiveVerify() has validated positive gamma.
+    if (max_batch < 0 || max_batch > 256 || max_batch > 1024 / gen_num_per_cycle) {
+        throw std::invalid_argument("adaptive DSpARK verify requires max_batch <= 256 and max_batch <= 1024 / gamma");
+    }
 }
 
 std::string SpeculativeExecutionConfig::to_string() const {
@@ -340,7 +379,9 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << "\n"
         << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << "\n"
-        << "sp_dspark_verify_tokens: " << sp_dspark_verify_tokens;
+        << "sp_dspark_verify_tokens: " << sp_dspark_verify_tokens << "\n"
+        << "sp_dspark_adaptive_verify: " << sp_dspark_adaptive_verify << "\n"
+        << "sp_dspark_verify_mode: " << sp_dspark_verify_mode;
     return oss.str();
 }
 

@@ -1,8 +1,8 @@
 """Preview2 real-weight DSpARK runner with an explicit math contract.
 
-Model construction requires explicit candidate opt-in while the checkpoint's
-norm/mask conventions remain unconfirmed. The runner uses real projections,
-paged KV, and the shared commit/propose protocol; there is no mock execution.
+The runner uses real projections, paged KV, and the shared commit/propose
+protocol; there is no mock execution. The wrapper derives norm, mask, and
+window semantics from the validated released checkpoint configuration.
 """
 
 from dataclasses import dataclass
@@ -28,7 +28,10 @@ from rtp_llm.models_py.modules.hybrid.minimax_m31_dspark_layer import (
 from rtp_llm.models_py.speculative.attention_inputs import primary_attention_inputs
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
 from rtp_llm.models_py.speculative.minimax_m31_dspark_context import map_cp_context_rows
-from rtp_llm.models_py.triton_kernels.dspark_swa import commit_paged_gqa_kv
+from rtp_llm.models_py.triton_kernels.dspark_swa import (
+    DSparkGemmaRMSNorm,
+    commit_paged_gqa_kv,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -108,14 +111,18 @@ class MiniMaxM31DSparkModel(DSparkProposerMixin, GptModelBase):
         )
         self.embedding = weight.global_weights[W.embedding]
         self.feature_projection = weight.global_weights[W.dspark_fc_w]
-        self.hidden_norm = RMSNorm(
-            weight.global_weights[DSPARK_HIDDEN_NORM]
-            + int(math_contract.hidden_norm_gemma),
+        hidden_norm_cls = (
+            DSparkGemmaRMSNorm if math_contract.hidden_norm_gemma else RMSNorm
+        )
+        final_norm_cls = (
+            DSparkGemmaRMSNorm if math_contract.final_norm_gemma else RMSNorm
+        )
+        self.hidden_norm = hidden_norm_cls(
+            weight.global_weights[DSPARK_HIDDEN_NORM],
             config.layernorm_eps,
         )
-        self.final_norm = RMSNorm(
-            weight.global_weights[DSPARK_FINAL_NORM]
-            + int(math_contract.final_norm_gemma),
+        self.final_norm = final_norm_cls(
+            weight.global_weights[DSPARK_FINAL_NORM],
             config.layernorm_eps,
         )
         cp = parallelism_config.prefill_cp_config

@@ -555,7 +555,13 @@ bool StreamCacheResource::loadCacheDone() {
                                             ErrorCode::LOAD_CACHE_TIMEOUT,
                                             "load cache failed after " + std::to_string(max_retry)
                                                 + " retries (transfer error)");
-            releaseResource();
+            if (stream_->kvExecutionProtected()) {
+                // loadCacheDone is called with the stream mutex held. Defer
+                // GPU completion waiting to the lock-free terminal finalizer.
+                stream_->requestKvReleaseLocked();
+            } else {
+                releaseResource();
+            }
             return true;
         }
         load_cache_retry_count_++;
@@ -563,7 +569,11 @@ bool StreamCacheResource::loadCacheDone() {
             RTP_LLM_LOG_WARNING("load cache retry submission failed, stream: [%ld]", stream_->streamId());
             stream_->reportEventWithoutLock(
                 StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "load cache retry submission failed");
-            releaseResource();
+            if (stream_->kvExecutionProtected()) {
+                stream_->requestKvReleaseLocked();
+            } else {
+                releaseResource();
+            }
             return true;
         }
         return false;

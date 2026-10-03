@@ -68,6 +68,13 @@ public:
 
     void setBaseLevel(const uint32_t base_level);
 
+    // Startup only, before logging threads start. The configuring DSO resolves
+    // the backend; its alog registry retains ownership of both old and new ones.
+    void bindBackendForStartup(alog::Logger* backend, uint32_t level) {
+        logger_         = backend;
+        base_log_level_ = level;
+    }
+
     template<typename... Args>
     void log(uint32_t          level,
              const std::string file,
@@ -131,8 +138,6 @@ private:
             flush();
         }
     }
-
-    uint32_t getLevelfromstr(const std::string& level_name);
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
         return "[RANK " + std::to_string(rank_) + "][" + ip_ + "][" + file + ":" + std::to_string(line) + "][" + func

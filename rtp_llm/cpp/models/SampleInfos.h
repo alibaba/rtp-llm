@@ -81,6 +81,10 @@ public:
     // DSpARK full-history verify rows carry actual token counts, including
     // their proposal prefix. The legacy ngram operator expects count - 1.
     bool token_history_lengths_are_counts = false;
+    // CUDA verify-only: sample these live dense row indices. Outputs retain
+    // dense layout; the caller must cap acceptance before any skipped row.
+    // Seed/offset generation still consumes every dense row in original order.
+    torch::Tensor verify_sample_rows;
 };
 
 struct SamplerOutput {

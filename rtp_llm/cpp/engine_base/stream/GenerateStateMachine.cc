@@ -177,6 +177,10 @@ void GenerateStateMachine::releaseResource() {
     // If a worker still owns KV blocks, mark deferred and let its dec path
     // perform the release after the pending count drains.
     GenerateStream* stream = stream_cache_resource_->stream();
+    if (stream != nullptr && stream->kvExecutionProtected()) {
+        stream->requestKvReleaseLocked();
+        return;
+    }
     if (stream != nullptr && stream->hasPendingAsyncBookkeeping()) {
         stream->markDeferredRelease();
         return;

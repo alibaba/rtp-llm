@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -26,6 +27,8 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    torch::Tensor success;
+    torch::Tensor success_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
 
@@ -59,7 +62,8 @@ public:
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
-                                             SamplerOutput&                      target_sampler_output);
+                                             SamplerOutput&                      target_sampler_output,
+                                             const torch::Tensor&                active_verify_lengths = {});
 
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
@@ -69,11 +73,19 @@ public:
                                     size_t               draft_vocab_size,
                                     size_t               sampled_prefix_steps = 0) const;
 
+    torch::Tensor computeDSparkConfidence(const torch::Tensor& draft_hidden,
+                                          const torch::Tensor& anchors,
+                                          const torch::Tensor& sampled_tokens,
+                                          const torch::Tensor& markov_w1,
+                                          const torch::Tensor& confidence_w,
+                                          const torch::Tensor& confidence_b) const;
+
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,
                      const std::list<GenerateStreamPtr>& streams,
                      SamplerOutput&                      draft_sampler_output,
-                     SamplerOutput&                      target_sampler_output) const;
+                     SamplerOutput&                      target_sampler_output,
+                     const torch::Tensor&                active_verify_lengths) const;
 
     void streamSample(SpeculativeSamplerOutput&           sample_output,
                       const std::list<GenerateStreamPtr>& streams,
@@ -89,6 +101,13 @@ protected:
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.
     mutable torch::Tensor draft_probs_padding_buffer_;
+    struct ValidationWorkspace {
+        torch::Tensor tensor;
+        bool          captured = false;
+    };
+    // Writable scratch has one owner per producer stream. Capture locks the
+    // reserved capacity/address; warm the maximum batch before capture.
+    mutable std::unordered_map<int64_t, ValidationWorkspace> validation_workspaces_;
 };
 
 }  // namespace speculative

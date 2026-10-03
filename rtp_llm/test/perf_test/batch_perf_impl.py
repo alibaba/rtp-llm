@@ -351,6 +351,8 @@ class BatchPerfImpl(object):
             "batch_size": local_batch_size,
             "mode": "decode" if self.is_decode else "prefill",
         }
+        if os.environ.get("PERF_REAL_OUTPUT", "0") == "1":
+            payload["real_output"] = True
         last_error = None
         for attempt in range(1, 21):
             try:
