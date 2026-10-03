@@ -197,6 +197,11 @@ public:
     void setPrefillMaxWaitTimeoutForTest(int64_t timeout_ms) {
         maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms = timeout_ms;
     }
+
+    void setPrefillKvShardsForTest(int64_t tp_size) {
+        maga_init_params_.parallelism_config.tp_size = tp_size;
+        maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    }
 };
 
 class PrefillRpcServerTest: public DeviceTestBase {
@@ -1111,6 +1116,21 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+    EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
 }
 
 }  // namespace rtp_llm

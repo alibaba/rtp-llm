@@ -67,6 +67,7 @@ public:
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        fixed_capacity_mtp_draft_prefill_(graph_params.fixed_capacity_mtp_draft_prefill),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -204,12 +205,11 @@ private:
         return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK propose/commit now run as construction-time-role decode graphs
-        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // DSpARK propose/commit run as decode graphs. HC-shaped drafts and
+        // model-declared rectangular draft attention retain the full physical
+        // capacity across every MTP draft-prefill capture bucket.
+        return isMtpDraftPrefillCudaGraph()
+               && (hc_mult_ > 1 || fixed_capacity_mtp_draft_prefill_);
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -255,6 +255,7 @@ private:
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
+    bool                    fixed_capacity_mtp_draft_prefill_{false};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

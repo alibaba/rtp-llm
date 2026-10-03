@@ -117,18 +117,36 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
     const auto append = [](const torch::Tensor& tensor, int64_t rows, int64_t value, int64_t dim = 0) {
         if (!tensor.defined() || tensor.numel() == 0 || rows == 0) return tensor;
         auto shape = tensor.sizes().vec();
-        shape[dim] = rows;
-        auto padded = torch::cat({tensor, torch::full(shape, value, tensor.options())}, dim);
-        // cat does not preserve pinned host allocation. The fused H2D copier
-        // requires it and retains this allocation until the copy completes.
+        const auto original_rows = shape[dim];
+        shape[dim] += rows;
+        // Allocate the final host buffer pinned from the start. Concatenating
+        // and then pinning copied every input twice, including long Prefill
+        // token arrays, on every rank before the first GPU kernel could run.
+        auto options = tensor.options();
         if (tensor.device().is_cpu() && tensor.is_pinned()) {
-            padded = padded.pin_memory();
+            options = options.pinned_memory(true);
         }
+        auto padded = torch::empty(shape, options);
+        padded.narrow(dim, 0, original_rows).copy_(tensor);
+        padded.narrow(dim, original_rows, rows).fill_(value);
         return padded;
     };
-    out.combo_tokens = append(source.combo_tokens, extra_tokens, 0);
+    const auto append_prefill_token = [this, &append, prefill](const torch::Tensor& tensor,
+                                                               int64_t              rows,
+                                                               int64_t              value) {
+        if (!prefill || !tensor.defined() || tensor.numel() == 0 || rows == 0 || !tensor.device().is_cpu()
+            || !tensor.is_pinned()) {
+            return append(tensor, rows, value);
+        }
+        // Keep the original pinned input alive while its H2D copy is queued.
+        // Padding on CUDA avoids copying the full token array into a second
+        // pinned host allocation before each Prefill forward.
+        buffer_holder_.hold_host(tensor);
+        return append(tensor.to(torch::kCUDA, /*non_blocking=*/true), rows, value);
+    };
+    out.combo_tokens = append_prefill_token(source.combo_tokens, extra_tokens, 0);
     out.last_hidden_states = append(source.last_hidden_states, extra_tokens, 0);
-    out.combo_position_ids = append(source.combo_position_ids, extra_tokens, 0);
+    out.combo_position_ids = append_prefill_token(source.combo_position_ids, extra_tokens, 0);
     out.combo_tokens_type_ids = append(source.combo_tokens_type_ids, extra_tokens, 0);
     out.text_tokens_mask = append(source.text_tokens_mask, extra_tokens, 1);
     out.input_lengths = append(source.input_lengths, extra_requests, dummy_width);

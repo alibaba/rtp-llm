@@ -237,9 +237,13 @@ def parse_args() -> argparse.Namespace:
         if args.suite == "main-text-64k-capped" and args.block_size != 4096:
             parser.error("the capped PD427 subset requires 4096-token cache blocks")
     args.case_deadline_s = 300 if args.suite in ("flow", "main-text-64k-capped") else None
-    if args.reuse_unit_tokens not in (0, args.block_size, 2 * args.block_size):
+    if args.reuse_unit_tokens and (
+        args.reuse_unit_tokens < args.block_size
+        or args.reuse_unit_tokens % args.block_size
+        or args.chunk_tokens % args.reuse_unit_tokens
+    ):
         parser.error(
-            "reuse-unit-tokens must be 0, one cache block, or two cache blocks"
+            "reuse-unit-tokens must be a cache-block multiple within the chunk budget"
         )
     if args.chunk_tokens % args.block_size:
         parser.error("chunk budget must be a multiple of the configured cache block")
@@ -1138,9 +1142,10 @@ class Runner:
         tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
         tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
         unit = self.reuse_unit_tokens
-        prompt_a, tokens_a = self.fit_prompt(
-            head, tail_a, unit * 2 + self.args.block_size
-        )
+        target_tokens = unit * 2 + self.args.block_size
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
+            target_tokens = min(target_tokens, 65536)
+        prompt_a, tokens_a = self.fit_prompt(head, tail_a, target_tokens)
         prompt_b = prompt_a[: -len(tail_a)] + tail_b
         tokens_b = self.tokenize(prompt_b)
         self.save_token_fixture(prompt_b, tokens_b)
@@ -1298,7 +1303,10 @@ class Runner:
             )
         )
         if self.args.suite == "main-text-64k-capped":
-            for boundary in decode_boundaries:
+            # The historical long-output deferral covers exactly these three
+            # boundaries. Larger cache stripes add short-answer coverage only.
+            deferred_boundaries = (page, 2 * page, self.args.chunk_tokens)
+            for boundary in deferred_boundaries:
                 for suffix, reason in (("cold", "historical runtime exceeds five minutes"),
                                        ("repeat", "explicitly deferred by user")):
                     self.skipped_cases.append({"name": f"decode-page-cross-{boundary}-{suffix}",
@@ -1306,7 +1314,7 @@ class Runner:
             for suffix in ("cold", "repeat"):
                 self.stages.append({"name": f"decode_page_cross_0_{suffix}", "passed": False,
                                     "skipped": True, "case_names":
-                                    [f"decode-page-cross-{b}-{suffix}" for b in decode_boundaries]})
+                                    [f"decode-page-cross-{b}-{suffix}" for b in deferred_boundaries]})
             # Cross one committed Decode page start with a short exact answer.
             # The original multi-page long-output cases remain explicitly skipped.
             for boundary in decode_boundaries:

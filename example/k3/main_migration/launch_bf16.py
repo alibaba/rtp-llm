@@ -67,7 +67,7 @@ def launch_config(args):
         "SP_ACT_TYPE": "BF16",
         "FT_DISABLE_CUSTOM_AR": "1",
         "GEN_NUM_PER_CIRCLE": "3",
-        "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
+        "RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS": "65536",
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),

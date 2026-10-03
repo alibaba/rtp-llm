@@ -64,10 +64,16 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
             inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
         } else {
-            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
+            // Fixed-capacity draft prefill captures a full Bmax*q rectangle
+            // for every graph key. The key only bounds the live tokens at
+            // replay; all capture-time metadata must cover the physical rows.
+            const int capture_tokens = usesFixedCapacityMtpDraftPrefillCudaGraph() ?
+                                           static_cast<int>(max_bs_) * num_tokens_per_bs_ : seq_len;
+            // Other draft models capture only the graph key's token count.
+            // Distribute those tokens across batches (max num_tokens_per_bs_ each).
             // All max_bs_ batches get the largest legal prefix so
             // prefix_len + q_len never exceeds max_seq_len_.
-            int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
+            int active_bs  = (capture_tokens + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
             // All batches get prefix_len to maximize buffer allocation during capture.
@@ -76,7 +82,7 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
-                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (capture_tokens - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 

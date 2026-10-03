@@ -49,6 +49,7 @@ public:
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
+    void updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len);
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;

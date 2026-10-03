@@ -47,3 +47,24 @@ py_binary(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "mla_page_rr_cache_test",
+    srcs = ["mla_page_rr_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "mla_page_rr_prefix_kernel_test",
+    srcs = ["mla_page_rr_prefix_kernel_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "mla_page_rr_prefill_params_test",
+    srcs = ["mla_page_rr_prefill_params_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)

@@ -101,7 +101,8 @@ def concat_and_cast_mha_k_kernel(
     nope_dim: tl.constexpr,
     rope_dim: tl.constexpr,
 ):
-    pid_loc = tl.program_id(0)
+    # A long prefix can make row * stride exceed signed 32-bit element offsets.
+    pid_loc = tl.program_id(0).to(tl.int64)
     head_range = tl.arange(0, head_block)
     valid_head = head_range[:, None] < head_cnt
 

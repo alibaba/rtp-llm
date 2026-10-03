@@ -401,6 +401,9 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // Physical Prefill KV shard count. Query CP may remain disabled.
+    // Zero from older senders means one unsharded source.
+    int32 prefill_cp_size = 13;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

@@ -83,10 +83,31 @@ def test_cp_virtual_reuse_unit_is_recorded(tmp_path, monkeypatch):
     )
 
 
+def test_page_rr_reuse_unit_keeps_original_long_output_deferrals(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=(
+        "--suite", "main-text-64k-capped", "--reuse-unit-tokens", "32768",
+    ))
+    runner = smoke.Runner(args)
+    stages = []
+    monkeypatch.setattr(runner, "fit_prompt", lambda h, t, n: (h + t, list(range(n))))
+    monkeypatch.setattr(runner, "run_stage", lambda name, cases, **kw: stages.append((name, cases)))
+    runner.run_cache_block_boundaries()
+    assert runner.reuse_unit_tokens == 32768
+    assert {row["name"] for row in runner.skipped_cases} == {
+        f"decode-page-cross-{boundary}-{suffix}"
+        for boundary in (4096, 8192, 65536)
+        for suffix in ("cold", "repeat")
+    }
+    assert any(
+        case.name == "decode-page-short-32768-repeat"
+        and case.expected_reuse_len == 0
+        for _, cases in stages for case in cases
+    )
+
+
 @pytest.mark.parametrize(
     "extra",
     [
-        ["--reuse-unit-tokens", "32768"],
         ["--reuse-unit-tokens", "6000"],
         ["--long-prefix-target-tokens", "70000"],
         ["--chunk-tokens", "32768"],
@@ -235,7 +256,10 @@ def test_capped_64k_profile_skips_known_long_cases_without_sending(tmp_path, mon
         for boundary in (4096, 8192, 65536)
         for suffix in ("cold", "repeat")
     }
-    assert all(not case.decode_crossings for case in sent)
+    assert all(
+        not case.decode_crossings or case.name.startswith("decode-page-short-")
+        for case in sent
+    )
     runner.save(True)
     saved = json.loads(args.output.read_text())
     assert saved["summary"]["skipped_case_count"] == 6

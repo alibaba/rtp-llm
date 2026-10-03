@@ -23,6 +23,9 @@ class PagedShortConvMetadata:
     batch_ptr: torch.Tensor
     token_chunk_offset_ptr: torch.Tensor
     total_chunks: int
+    # Keep the pinned sources alive until the queued H2D copies complete.
+    batch_ptr_host: torch.Tensor
+    token_chunk_offset_ptr_host: torch.Tensor
 
 
 def prepare_paged_short_conv_metadata(
@@ -46,10 +49,14 @@ def prepare_paged_short_conv_metadata(
     offsets = np.concatenate(
         [np.arange(count, dtype=np.int32) for count in chunk_counts]
     )
+    batch_host = torch.from_numpy(batch).pin_memory()
+    offsets_host = torch.from_numpy(offsets).pin_memory()
     return PagedShortConvMetadata(
-        batch_ptr=torch.from_numpy(batch).to(device=device),
-        token_chunk_offset_ptr=torch.from_numpy(offsets).to(device=device),
+        batch_ptr=batch_host.to(device=device, non_blocking=True),
+        token_chunk_offset_ptr=offsets_host.to(device=device, non_blocking=True),
         total_chunks=int(batch.size),
+        batch_ptr_host=batch_host,
+        token_chunk_offset_ptr_host=offsets_host,
     )
 
 

@@ -40,9 +40,10 @@ def merge_mla_states_in_place(
     partial: torch.Tensor,
     partial_lse: torch.Tensor,
 ) -> None:
-    """Merge two [query, heads, value_dim] BF16 states on one CUDA stream."""
+    """Merge a BF16 partial into a BF16 or FP32 canonical state."""
     if (output.ndim != 3 or partial.shape != output.shape
-            or output.dtype != torch.bfloat16 or partial.dtype != torch.bfloat16
+            or output.dtype not in (torch.bfloat16, torch.float32)
+            or partial.dtype != torch.bfloat16
             or output_lse.shape != output.shape[:2]
             or partial_lse.shape != output_lse.shape
             or output_lse.dtype != torch.float32
