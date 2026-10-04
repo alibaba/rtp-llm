@@ -36,6 +36,7 @@ py_test (
 )
 
 test_deps = [
+    "//rtp_llm/cpp/engine_base/sleep/test:bound_sleep_controller",
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",

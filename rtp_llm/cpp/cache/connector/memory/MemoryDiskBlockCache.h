@@ -75,6 +75,7 @@ public:
 
     bool                      empty() const;
     size_t                    size() const;
+    bool                      hasInFlightReferences() const;
     std::vector<CacheKeyType> cacheKeys() const;
 
     // Sleep/wake_up: drop every cache entry in place (keeps the object address stable so

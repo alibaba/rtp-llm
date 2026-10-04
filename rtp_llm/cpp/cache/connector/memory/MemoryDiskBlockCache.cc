@@ -251,6 +251,16 @@ size_t MemoryDiskBlockCache::size() const {
     return items_.size();
 }
 
+bool MemoryDiskBlockCache::hasInFlightReferences() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (const auto& [_, item] : items_) {
+        if (item.in_flight_ref != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     std::vector<CacheItem>              removed;

@@ -64,6 +64,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# On-demand backend execution coordination, independent of model collectives.
+cc_library(
+    name = "cpu_quiesce_coordinator",
+    hdrs = ["CpuQuiesceCoordinator.h"],
+    srcs = ["CpuQuiesceCoordinator.cc"],
+    copts = copts(),
+    deps = torch_deps() + ["@com_google_absl//absl/status:statusor"],
+    visibility = ["//visibility:public"],
+)
+
 # Main engine base class
 cc_library(
     name = "engine_base",
@@ -77,6 +87,7 @@ cc_library(
     ],
     deps = [
         ":executor",
+        ":cpu_quiesce_coordinator",
         ":profiler",
         ":worker_status_info",
         "//rtp_llm/cpp/engine_base/sleep",

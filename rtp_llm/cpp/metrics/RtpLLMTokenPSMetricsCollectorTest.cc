@@ -7,6 +7,23 @@
 
 namespace rtp_llm {
 
+TEST(RtpLLMTokenPSMetricsCollectorTest, WakeWindowIncludesFirstStep) {
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> reporter(nullptr);
+    ASSERT_TRUE(setKmonitorReportingEnabled(false));
+    ASSERT_TRUE(setKmonitorReportingEnabled(true));
+    const auto resumed = kmonitorReportingState().resumed_at;
+    auto       active  = reporter.makeActiveGuard();
+    // No reporting tick observes wake before the first step finishes.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    RtpLLMTokenPSMetricsCollector step;
+    step.addTokenSize(100, 100, 0, 100, 200000);
+    reporter.report(&step);
+    RtpLLMTokenPSMetricsCollector window;
+    reporter.takeReportCollector(resumed + std::chrono::seconds(1), window);
+    EXPECT_EQ(window.reportWindowUs(), 1000000);
+    EXPECT_DOUBLE_EQ(window.contextWallTPS(), 100.0);
+}
+
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
 

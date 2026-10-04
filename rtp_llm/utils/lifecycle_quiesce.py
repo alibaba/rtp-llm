@@ -1,4 +1,4 @@
-"""On-demand, host-only coordination of a common executor stopping round."""
+"""Frontend phase barriers; execution-round coordination belongs to backends."""
 
 import asyncio
 
@@ -18,14 +18,14 @@ def _check_coverage(results, addresses, phase):
     return [result for result in results if "error" in result]
 
 
-async def prepare_sleep_rounds(
+async def prepare_sleep_quiesce(
     request, addresses, statuses, call, broadcast, rpc_timeout_s
 ):
-    """Drain all peers, freeze their admitted rounds, then catch up to max(round).
+    """Drain all peers, freeze, then ask backends to establish a safe boundary.
 
     The caller owns the instance lease and must roll back this token on ANY
-    pre-commit failure/cancellation. Never run a collective from a serving thread.
-    Freeze ACKs must be collected before ANY target is sent, including target 0.
+    pre-commit failure/cancellation. No round IDs cross the frontend boundary.
+    Freeze ACKs must be collected before backends enter CPU group coordination.
     Both drain stages receive the full request budget; the RPC timeout separately
     includes transport headroom and must not extend the backend drain budget.
     """
@@ -37,13 +37,13 @@ async def prepare_sleep_rounds(
     for status in statuses:
         if (
             status.get("state") != "RUNNING"
-            or int(status.get("quiesce_protocol", 0)) != 1
+            or int(status.get("quiesce_protocol", 0)) != 2
             or not status.get("worker_incarnation")
         ):
             return [
                 {
                     "address": status["address"],
-                    "error": "all ranks must be RUNNING and support sleep round-fence protocol 1",
+                    "error": "all ranks must be RUNNING and support backend CPU quiesce protocol 2",
                     "grpc_status": "FAILED_PRECONDITION",
                 }
             ]
@@ -69,6 +69,7 @@ async def prepare_sleep_rounds(
         pb2.SleepQuiesceRequestPB(
             token=request.quiesce_token,
             freeze_only=True,
+            protocol=2,
             timeout_ms=drain_timeout_ms,
         ),
         rpc_timeout_s,
@@ -76,21 +77,10 @@ async def prepare_sleep_rounds(
     failures = _check_coverage(frozen, addresses, "freeze")
     if failures:
         return failures
-    try:
-        rounds = [int(result["frozen_round"]) for result in frozen]
-        if any(round_ < 0 or round_ >= 1 << 63 for round_ in rounds):
-            raise ValueError("round out of range")
-    except (KeyError, TypeError, ValueError) as error:
-        return [
-            {
-                "error": f"invalid freeze acknowledgement: {error}",
-                "grpc_status": "FAILED_PRECONDITION",
-            }
-        ]
     results = await broadcast(
         "QuiesceSleep",
         pb2.SleepQuiesceRequestPB(
-            token=request.quiesce_token, target_round=max(rounds), timeout_ms=60000
+            token=request.quiesce_token, protocol=2, timeout_ms=60000
         ),
         max(75.0, rpc_timeout_s),
     )

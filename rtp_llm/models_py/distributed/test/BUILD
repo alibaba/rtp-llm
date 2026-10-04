@@ -13,6 +13,13 @@ py_test (
 )
 
 py_test(
+    name = "lifecycle_group_test",
+    srcs = ["lifecycle_group_test.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch"],
+    timeout = "short",
+)
+
+py_test(
     name = "sleep_quiesce_host_collective_test",
     srcs = ["sleep_quiesce_host_collective_test.py"],
     deps = [
