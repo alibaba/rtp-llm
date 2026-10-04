@@ -230,7 +230,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    workerStatus.getMetricIpPort(), roleType.name(), startTime);
+                    workerStatus, startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
                     workerStatus, successfulIntervalUs);
         } catch (Throwable e) {

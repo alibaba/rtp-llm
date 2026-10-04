@@ -10,19 +10,124 @@ import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EngineAddressResolverTest {
+
+    @Test
+    void initialDiscoveryExceptionPreventsStartupAndListenerRegistration() {
+        Endpoint endpoint = endpoint("vip-a");
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        IllegalStateException discoveryFailure = new IllegalStateException("unreachable");
+        when(discovery.getHosts(endpoint)).thenThrow(discoveryFailure);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> new EngineAddressResolver(discovery, modelConfig(endpoint)));
+
+        assertTrue(failure.getMessage().contains("vip-a"));
+        assertSame(discoveryFailure, failure.getCause());
+        verify(discovery, never()).listen(any(Endpoint.class), any());
+    }
+
+    @Test
+    void anyInitiallyEmptyEndpointPreventsStartupAndListenerRegistration() {
+        Endpoint first = endpoint("vip-a");
+        Endpoint second = endpoint("vip-b");
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        when(discovery.getHosts(first)).thenReturn(List.of(workerHost("10.0.0.1", 8080)));
+        when(discovery.getHosts(second)).thenReturn(List.of());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> new EngineAddressResolver(discovery, modelConfig(first, second)));
+
+        assertTrue(failure.getMessage().contains("vip-b"));
+        verify(discovery).getHosts(first);
+        verify(discovery).getHosts(second);
+        verify(discovery, never()).listen(any(Endpoint.class), any());
+    }
+
+    @Test
+    void initiallyNullHostsPreventStartupAndListenerRegistration() {
+        Endpoint endpoint = endpoint("vip-a");
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        when(discovery.getHosts(endpoint)).thenReturn(null);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> new EngineAddressResolver(discovery, modelConfig(endpoint)));
+
+        assertTrue(failure.getMessage().contains("vip-a"));
+        verify(discovery, never()).listen(any(Endpoint.class), any());
+    }
+
+    @Test
+    void discoversEveryEndpointBeforeRegisteringListenersAndPublishingInitialHosts() {
+        Endpoint first = endpoint("vip-a");
+        Endpoint second = endpoint("vip-b");
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        WorkerHost a = workerHost("10.0.0.1", 8080);
+        WorkerHost b = workerHost("10.0.0.2", 8080);
+        when(discovery.getHosts(first)).thenReturn(List.of(a));
+        when(discovery.getHosts(second)).thenReturn(List.of(b));
+
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, modelConfig(first, second));
+
+        InOrder order = inOrder(discovery);
+        order.verify(discovery).getHosts(first);
+        order.verify(discovery).getHosts(second);
+        order.verify(discovery).listen(eq(first), any());
+        order.verify(discovery).listen(eq(second), any());
+        EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(listener);
+        verify(listener).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, b))));
+    }
+
+    @Test
+    void periodicDiscoveryFailurePreservesHostsContinuesOtherEndpointsAndRecovers() {
+        Endpoint first = endpoint("vip-a");
+        Endpoint second = endpoint("vip-b");
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        WorkerHost a = workerHost("10.0.0.1", 8080);
+        WorkerHost b = workerHost("10.0.0.2", 8080);
+        WorkerHost c = workerHost("10.0.0.3", 8080);
+        WorkerHost d = workerHost("10.0.0.4", 8080);
+        when(discovery.getHosts(first)).thenReturn(List.of(a))
+                .thenThrow(new IllegalStateException("unreachable")).thenReturn(List.of(c));
+        when(discovery.getHosts(second)).thenReturn(List.of(b), List.of(d));
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, modelConfig(first, second));
+
+        assertDoesNotThrow(resolver::periodicHostUpdate);
+        EngineAddressResolver.Listener failedSnapshot = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(failedSnapshot);
+        verify(failedSnapshot).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, d))));
+
+        assertDoesNotThrow(resolver::periodicHostUpdate);
+        EngineAddressResolver.Listener recoveredSnapshot = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(recoveredSnapshot);
+        verify(recoveredSnapshot).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(c, d))));
+        verify(discovery, times(3)).getHosts(first);
+        verify(discovery, times(3)).getHosts(second);
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -149,6 +254,20 @@ class EngineAddressResolverTest {
         EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
         resolver.subscribe(listener);
         verify(listener).onAddressUpdate(argThat(hosts -> hosts.size() == 2));
+    }
+
+    private ModelMetaConfig modelConfig(Endpoint... endpoints) {
+        ServiceRoute route = mock(ServiceRoute.class);
+        when(route.getAllEndpoints()).thenReturn(List.of(endpoints));
+        ModelMetaConfig config = mock(ModelMetaConfig.class);
+        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        return config;
+    }
+
+    private Endpoint endpoint(String address) {
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress(address);
+        return endpoint;
     }
 
     private void assertWorkerHost(WorkerHost host, String ip, int grpcPort, int workerStatusPort) {

@@ -53,6 +53,9 @@ public class MetricConstant {
 
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
+    public static final String ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL =
+            "app.engine.balancing.master.worker.select.detail";
+
     public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON = "app.engine.balancing.master.dispatch.reason";
 
     /**
@@ -213,6 +216,11 @@ public class MetricConstant {
     public static final String ZK_MASTER_EVENT = "app.engine.zk.master.event";
 
     /**
+     * Latest occurrence time, in epoch milliseconds, for each master-election event.
+     */
+    public static final String ZK_MASTER_EVENT_TIME_MS = "app.engine.zk.master.event.time.ms";
+
+    /**
      * Load balancing service thread pool status
      */
     public static final String ENGINE_BALANCING_THREAD_POOL_INFO = "app.engine.balancing.thread.pool.info";
@@ -234,10 +242,6 @@ public class MetricConstant {
      */
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
-    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
-            "app.engine.worker.status.observed.decision.to.waiting.ms";
-    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS =
-            "app.engine.worker.status.observed.waiting.to.running.ms";
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS =
             "app.engine.worker.status.engine.waiting.to.running.ms";
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS =

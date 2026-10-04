@@ -626,6 +626,7 @@ enum KvCacheGroupModePB {
 
 // Latest completed nonempty scheduler step.
 message WorkerStepMetricsPB {
+    // Field 1 is unused; keep the published field numbers below unchanged.
     int64 step_id = 2;
     int64 completed_time_ms = 3;
     int64 total_scheduled_tokens = 4;

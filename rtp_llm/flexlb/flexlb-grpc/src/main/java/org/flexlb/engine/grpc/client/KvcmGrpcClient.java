@@ -59,6 +59,7 @@ public class KvcmGrpcClient {
     private final AtomicInteger consecutiveHeartbeatFailures = new AtomicInteger();
     private final AtomicInteger consecutiveHeartbeatSuccesses = new AtomicInteger();
     private final AtomicInteger consecutiveQueryFailures = new AtomicInteger();
+    private final AtomicInteger consecutiveQuerySuccesses = new AtomicInteger();
     private final AtomicLong lastHeartbeatSuccessTimeMs = new AtomicLong();
     private final AtomicLong lastHeartbeatFailureTimeMs = new AtomicLong();
     private final AtomicReference<String> lastStateChangeReason =
@@ -270,6 +271,7 @@ public class KvcmGrpcClient {
         if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
                 && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
             consecutiveQueryFailures.set(0);
+            consecutiveQuerySuccesses.set(0);
             recordHealthTransition("heartbeat recovery threshold reached");
         }
     }
@@ -277,6 +279,7 @@ public class KvcmGrpcClient {
     private void recordHeartbeatFailure(long currentTimeMs) {
         lastHeartbeatFailureTimeMs.set(currentTimeMs);
         consecutiveHeartbeatSuccesses.set(0);
+        consecutiveQuerySuccesses.set(0);
         int failures = consecutiveHeartbeatFailures.incrementAndGet();
         if (failures >= configuration.getKvcmRuntimeConfig().getHeartbeatFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
@@ -286,16 +289,30 @@ public class KvcmGrpcClient {
 
     private void recordQuerySuccess() {
         consecutiveQueryFailures.set(0);
+        if (!applicationWarmupState.isWarmupFinished()
+                || healthState.get() == KvcmHealthState.HEALTHY) {
+            consecutiveQuerySuccesses.set(0);
+            return;
+        }
+        int successes = consecutiveQuerySuccesses.incrementAndGet();
+        if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
+                && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
+            consecutiveHeartbeatFailures.set(0);
+            consecutiveHeartbeatSuccesses.set(0);
+            recordHealthTransition("cache query recovery threshold reached");
+            notifyHealthSnapshotListener();
+        }
     }
 
     private void recordQueryFailure() {
+        consecutiveQuerySuccesses.set(0);
         if (!applicationWarmupState.isWarmupFinished()) {
             return;
         }
+        consecutiveHeartbeatSuccesses.set(0);
         int failures = consecutiveQueryFailures.incrementAndGet();
         if (failures >= configuration.getKvcmRuntimeConfig().getQueryFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
-            consecutiveHeartbeatSuccesses.set(0);
             recordHealthTransition("cache query failure threshold reached");
             notifyHealthSnapshotListener();
         }
@@ -305,8 +322,8 @@ public class KvcmGrpcClient {
         lastStateChangeReason.set(reason);
         KvcmHealthSnapshot snapshot = healthSnapshot();
         if (snapshot.isHealthy()) {
-            log.info("KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}",
-                    reason, snapshot.consecutiveHeartbeatSuccesses());
+            log.info("KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
+                    reason, snapshot.consecutiveHeartbeatSuccesses(), consecutiveQuerySuccesses.get());
         } else {
             log.warn("KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
                             + "consecutiveQueryFailures={}",

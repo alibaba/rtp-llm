@@ -22,6 +22,7 @@ import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,116 @@ import static org.mockito.Mockito.when;
 class KvcmGrpcClientTest {
 
     private KvcmGrpcClient client;
+
+    @Test
+    void querySuccessesRecoverUnhealthyClientAtTheExistingRecoveryThreshold() throws Exception {
+        createHealthTestClient();
+        failQuery();
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        succeedQuery();
+        succeedQuery();
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+
+        succeedQuery();
+
+        assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
+        assertEquals("cache query recovery threshold reached", client.healthSnapshot().lastStateChangeReason());
+        assertEquals(0, client.healthSnapshot().consecutiveQueryFailures());
+        assertEquals(0, client.healthSnapshot().consecutiveHeartbeatFailures());
+    }
+
+    @Test
+    void successfulQueriesAndHeartbeatsDoNotCombineIntoEarlyRecovery() throws Exception {
+        createHealthTestClient();
+        failQuery();
+        succeedQuery();
+        client.refreshKvcmServiceStateSafely();
+        succeedQuery();
+        client.refreshKvcmServiceStateSafely();
+
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        assertEquals(2, client.healthSnapshot().consecutiveHeartbeatSuccesses());
+        client.refreshKvcmServiceStateSafely();
+        assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
+        assertEquals("heartbeat recovery threshold reached", client.healthSnapshot().lastStateChangeReason());
+    }
+
+    @Test
+    void eitherFailureInterruptsBothRecoverySuccessSequences() throws Exception {
+        KvcmLeaderResolver leader = createHealthTestClient();
+        failQuery();
+        succeedQuery();
+        succeedQuery();
+        when(leader.refresh()).thenReturn(false);
+        client.refreshKvcmServiceStateSafely();
+        succeedQuery();
+        succeedQuery();
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+
+        when(leader.refresh()).thenReturn(true);
+        client.refreshKvcmServiceStateSafely();
+        client.refreshKvcmServiceStateSafely();
+        failQuery();
+        assertEquals(0, client.healthSnapshot().consecutiveHeartbeatSuccesses());
+        succeedQuery();
+        succeedQuery();
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        succeedQuery();
+        assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
+    }
+
+    @Test
+    void queryRecoveryPublishesOneHealthTransitionAndIgnoresWarmupSuccesses() throws Exception {
+        createHealthTestClient();
+        failQuery();
+        java.util.ArrayList<org.flexlb.dao.kvcm.KvcmHealthSnapshot> updates = new java.util.ArrayList<>();
+        client.setHealthSnapshotListener(updates::add);
+        ApplicationWarmupState warmup = (ApplicationWarmupState) ReflectionTestUtils.getField(client, "applicationWarmupState");
+        warmup.setWarmupFinished(false);
+        for (int query = 0; query < 5; query++) {
+            succeedQuery();
+        }
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        warmup.setWarmupFinished(true);
+        succeedQuery();
+        succeedQuery();
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        succeedQuery();
+        succeedQuery();
+        assertEquals(1, updates.size());
+        assertTrue(updates.getFirst().isHealthy());
+    }
+
+    private KvcmLeaderResolver createHealthTestClient() throws InterruptedException {
+        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        runtimeConfig.setRecoverySuccessThreshold(3);
+        runtimeConfig.setQueryFailureThreshold(1);
+        runtimeConfig.setHeartbeatFailureThreshold(1);
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
+        KvcmLeaderResolver leader = mock(KvcmLeaderResolver.class);
+        when(leader.refresh()).thenReturn(true);
+        KvcmWorkerMetadataResolver metadata = mock(KvcmWorkerMetadataResolver.class);
+        CountDownLatch initialRefresh = new CountDownLatch(1);
+        doAnswer(ignored -> {
+            initialRefresh.countDown();
+            return null;
+        }).when(metadata).refreshNamespacesAndQueryTypes();
+        client = createClient(configuration, mock(KvcmMetaServiceClient.class), leader, metadata, mock(GrpcReporter.class));
+        assertTrue(initialRefresh.await(2, TimeUnit.SECONDS));
+        return leader;
+    }
+
+    private void failQuery() {
+        ReflectionTestUtils.invokeMethod(client, "recordQueryFailure");
+    }
+
+    private void succeedQuery() {
+        ReflectionTestUtils.invokeMethod(client, "recordQuerySuccess");
+    }
 
     @AfterEach
     void tearDown() {

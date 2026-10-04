@@ -41,8 +41,13 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
 完成，也不会更新快照。成功的非空结果替换快照，允许正常的部分缩容与节点更换。
 
-`EngineAddressResolver` 的定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
-避免关闭现有 channel 或清除已有 worker cache。真实 worker 失效 由健康探测处理。
+`EngineAddressResolver` 在构造阶段同步查询所有 Endpoint。每个查询必须成功且返回非空机器列表，
+全部检查通过后才发布初始地址并注册地址监听；任一查询失败或返回空/null 时抛出异常，阻止 Master 启动。
+定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
+避免关闭现有 channel 或清除已有 worker cache。无论空列表持续多久，都不把它作为撤销通知；
+真实 worker 失效由健康探测处理。
+
+Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不覆盖旧地址。
 
 `OptimizerClient` 保留可显式调用的 trace 接口，当前调度链路没有调用该接口。初始化仅注册指标，
 首次具备 block keys 与有效 namespace 的 `traceQuery` 才启动 `OptimizerAddressResolver`；
@@ -72,7 +77,7 @@ worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，�
 | raw engine index | `engineIndex` | 逻辑引擎序号 |
 | physical IP-port | `ip:port` | 共享 frontend 身份、发现侧 cache 退役匹配 |
 | logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
-| metric IP-port | N=1 为 `ip:port`；N>1 为 `ip:port@index` | 可从 `WorkerStatus` / `ServerStatus` 归属的 `engineIp` 指标标签 |
+| metric IP-port | N=1 为 `ip:port`；N>1 为 `ip:port@index` | Encoder、step、阶段耗时与缓存预测对照的 `engineIp` 标签 |
 
 `WorkerHost` 在服务发现展开时持有该 identity；N=1 的内部 logical identity 仍保留 `@0`。仅在
 metrics 边界通过 `WorkerStatus.getMetricIpPort()`（或 `ServerStatus` 对应方法）选择兼容地址，
@@ -119,8 +124,9 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 在引擎确认或首次 Finished 上报后清除本地可回滚记录，victim 的声明与 KV hold 继续等待其完成证据。
 
 `EngineHealthReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
-及执行时间；`0` 表示未知并跳过。Master 观察到的状态转换耗时上报方法目前没有生产调用链，
-不能将这些方法视为已经接线的 Master/Engine 延迟对账功能。
+及执行时间；时间戳 `0` 表示未知并跳过，但合法耗时 `0` 可以上报。
+阶段耗时取 WorkerStatus 携带的引擎时间戳，不使用 Master 首次探测到状态的时间。
+即使轮询跳过中间阶段，完成任务包含完整时间戳时仍能计算该阶段耗时。
 请求超时与清理由请求生命周期和 endpoint 状态管理，见 [请求生命周期](02-queue-scheduling.md)。
 
 ## Cache 状态同步（LOCAL_SYNC 路径，仅 KVCM 关闭时）
@@ -173,8 +179,11 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `KvcmGrpcClient` 与 `KvcmMetaServiceClient` 各自关闭自己的后台任务和通道，前者不负责关闭注入的后者。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
-  `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；
-  预热期（warmup）失败忽略。健康变化通知监听者。
+  `queryFailureThreshold(10)` 判不健康。连续 `recoverySuccessThreshold(3)` 次心跳成功或查询
+  成功均可恢复，两种成功计数独立，不混合累加；失败会重置恢复成功计数。
+  心跳与查询并发更新使用原子计数和状态 CAS，不做串行化；并发完成时允许计数和健康判断
+  短暂偏差，后续查询或心跳继续更新，周期心跳持续通知最新健康状态。
+  降级后没有查询流量时仍依赖心跳恢复。预热期（warmup）失败忽略。健康变化通知监听者。
 - 参数热更新：`CacheMatchConfiguration` 注册 `ConfigService` 更新监听器，用 volatile 字段发布
   最新的 `KvcmCacheMatchingConfig`；`KvcmGrpcClient` 与 `KvcmLeaderResolver` 不再缓存构造期快照，
   因此 `requestTimeoutMs`、`maxQueryRetryCount`、健康阈值与三个查询参数在更新后即时生效。

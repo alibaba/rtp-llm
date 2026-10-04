@@ -40,7 +40,7 @@ public class EngineAddressResolver {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceEndpoints = initServiceEndpoints(modelMetaConfig);
         log.info("EngineAddressResolver start subscribe endpoints:{} ", serviceEndpoints);
-        fetchAllDomainsHosts();
+        initializeDomainHosts();
         setupListeners(serviceDiscovery, serviceEndpoints);
     }
 
@@ -55,6 +55,25 @@ public class EngineAddressResolver {
             ServiceHostListener addressListener = hosts -> updateEndpointHosts(endpoint, hosts);
             serviceDiscovery.listen(endpoint, addressListener);
         }
+    }
+
+    private void initializeDomainHosts() {
+        Map<Endpoint, List<WorkerHost>> initialHosts = new LinkedHashMap<>();
+        for (Endpoint endpoint : serviceEndpoints) {
+            List<WorkerHost> hosts;
+            try {
+                hosts = serviceDiscovery.getHosts(endpoint);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "Failed to fetch initial engine hosts for endpoint: " + endpoint.getAddress(), e);
+            }
+            if (hosts == null || hosts.isEmpty()) {
+                throw new IllegalStateException(
+                        "No initial engine hosts discovered for endpoint: " + endpoint.getAddress());
+            }
+            initialHosts.put(endpoint, List.copyOf(hosts));
+        }
+        initialHosts.forEach(this::updateEndpointHosts);
     }
 
     private void fetchAllDomainsHosts() {

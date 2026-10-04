@@ -17,6 +17,12 @@ Spring 按标准规则读取环境变量，例如 `SERVER_PORT` 对应 `server.p
 `FLEXLB_MONITOR_PROVIDER` 对应 `flexlb.monitor.provider`。内源部署通过
 `FLEXLB_MONITOR_PROVIDER=kmonitor` 启用 KMonitor 指标上报。
 
+容器启动脚本以物理内存和 cgroup 限额的较小值计算 JVM 内存预算；至少 16GiB 的容器
+保留 2GiB direct memory 上限，小规格继续按比例分配。默认堆同时受 direct memory、
+metaspace、code cache 以及容器内存的 1/8 native 余量约束。显式堆覆盖也校验初始堆不超过最大堆，
+且上述预算总和不超过限额；超配时启动脚本报错。该校验约束 JVM 内存池配置，线程栈和
+native allocation 的实际占用仍取决于负载。
+
 ## FlexlbConfig 加载与动态更新
 
 `ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
@@ -197,6 +203,7 @@ UniConfig / Nacos 的 v3 部分更新示例：
   本次请求是否匹配，不影响已经上报的 Counter。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
+  持续空结果保留已有地址，不按空结果次数或持续时间撤销 worker。
 - `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
   （`medium` / `globalKvsHostCount` / `enableP2p`）和 Local Standby 参数。
 - `optimizer`：启用开关和服务发现轮询间隔。
@@ -265,7 +272,9 @@ PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达�
 
 `totalUs` 是入口到记录 PV 前的单调时钟耗时；`arrivalMs` 是服务入口时间减调用方
 `requestTimeMs`，受两端时钟偏差影响。gRPC 路径记录收到的
-`requestMessageBytes`（protobuf 序列化大小，不含 gRPC framing/compression）。
+`requestMessageBytes`（gRPC 接收的未压缩 protobuf 字节数，不含帧头）。transport tracer
+累计已读取/解压的字节，并通过 gRPC Context 传到入口；调度线程不为监控额外遍历 PB。
+`app.request.message.bytes` 保留该 Message 口径；绕过 transport 的直接调用不制造 0 样本。
 `cacheMatchCount/cacheMatchUs`累计实际缓存查询尝试，角色的缓存选择和决策记录反映最近一次路由尝试。
 
 路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
@@ -312,18 +321,29 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
-WorkerStatus 的容量与健康指标使用 `engineIp` 区分 worker：单 Engine 为 `ip:port`，
-多 Engine 为 `ip:port@engineIndex`；同一物理 IP 上的实例分别上报，按角色汇总时应聚合该维度。
-缓存预测对照事件使用完整的逻辑身份，单 Engine 也保留 `@0`。选点详情指标另外包含有限枚举的
-`reason`，按角色统计总 QPS 时应汇总 `reason` 和 `engineIp`。
+既有 WorkerStatus/cache 的轮询成功周期、RPC 耗时、运行队列时间、任务列表大小、cache key 数
+和 KV 容量指标保留裸 IP 的 `engineIp` 标签。同 IP 多实例使用相同标签上报，Gauge 是逐样本值，
+不表示 IP 合计。缓存预测对照使用实际 WorkerStatus 的实例数选择精确身份：单 Engine 为
+`ip:port`，多 Engine 为 `ip:port@engineIndex`；PV 和路由/cache 内部继续使用完整 logical identity。
+对照的绝对 Token 差值不依赖分母，输入 Token 数缺失或非正时仍可记录；Counter 和比例仅在
+输入 Token 数为正时报告，不能将绝对差值的样本数量当作加权命中率的分母。
+
+`app.engine.balancing.master.select.detail` 保留原有 `role/success/code` 标签；独立的
+`app.engine.balancing.master.worker.select.detail` 增加有限枚举 `reason` 和精确 `engineIp`。
 `app.cache.hit.count` 和 `app.cache.input.tokens` 是按所选 worker 累计的 Token Counter，
 全局命中率使用同一窗口内的命中 Token 增量除以输入 Token 增量，不能求单请求命中率的平均值。
-`app.engine.zk.master.event` 是按事件类型记录最近发生时刻的 epoch-ms Gauge，用于展示主选举
-事件时间，不作为事件次数或 QPS 使用。
+`app.engine.zk.master.event` 保留按事件类型上报 `1.0` 的既有 Gauge 口径；
+独立的 `app.engine.zk.master.event.time.ms` 用 epoch-ms Gauge 展示最近事件时间。
 `app.engine.worker.status.scheduler.to.running.ms` 中的 scheduler 是 Engine 调度器；该值
 与 `app.engine.worker.status.engine.waiting.to.running.ms` 相同，均取 Engine 的
 `running_entered_time_ms - waiting_entered_time_ms`。前者保留已有展示口径，后者显式标明观测来源；
 不能将二者相加或作为 Master 与 Engine 的两端耗时比较。
+`remote_kv_wait_ms` 是引擎报告的时长，0ms 可以表示没有远程 KV 等待，仍作为有效样本。
+phase 时间戳的 0 表示未知，缺少时间戳时不报告相减得到的耗时。
+
+Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine 自己记录的
+阶段时间戳计算。轮询间隔影响 Master 收到样本的时间，不用探测到状态的时间估算阶段耗时；
+完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
 
 gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
@@ -402,8 +422,9 @@ frontend HTTP/gRPC 仍为共享物理地址。protocol 只解释 frontend discov
 N=1 沿用 discovery 的 legacy gRPC port，因而兼容未配置 `worker_status_port` 的 RTP-LLM。
 
 逻辑 worker identity 为 `ip:http_port@engineIndex`，包括 N=1 的 `@0`。
-经 `WorkerStatus` 或 `ServerStatus` 归属的引擎与 cache 指标的 `engineIp` 在 N=1 使用 physical
-`ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`。网络连接仍使用
+Encoder、step、阶段耗时及缓存预测对照的 `engineIp` 在 N=1 使用 physical
+`ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`；上述兼容指标保留裸 IP。
+网络连接仍使用
 物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 仍保留 index 0。
 
 ### Scheduler step 采样

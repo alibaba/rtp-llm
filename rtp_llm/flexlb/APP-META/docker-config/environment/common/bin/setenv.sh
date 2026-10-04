@@ -59,6 +59,10 @@ available_memory_mb() {
 
 configure_default_jvm_memory() {
     local total_mb=$1
+    local heap_limit_mb
+    # Thread stacks, GC bookkeeping and native libraries are not covered by the
+    # explicit JVM pools below. Reserve one eighth of the container for them.
+    NATIVE_MEMORY_HEADROOM_MB=$((total_mb / 8))
     maxMetaspace=512m
     reservedCodeCache=512m
     if [ "$total_mb" -le 2048 ]; then
@@ -69,20 +73,73 @@ configure_default_jvm_memory() {
     elif [ "$total_mb" -le 16384 ]; then
         DEFAULT_JVM_XMS="$((total_mb * 5 / 8))m"
         maxDirectMemory="$((total_mb / 16))m"
+        if [ "$total_mb" -eq 16384 ]; then
+            maxDirectMemory=2g
+        fi
         maxMetaspace="$((total_mb / 32))m"
         reservedCodeCache="$((total_mb / 32))m"
     elif [ "$total_mb" -le 24576 ]; then
         # The 12c24g ASI pool exposes about 19GiB to the container.
         DEFAULT_JVM_XMS=12g
-        maxDirectMemory=1g
+        maxDirectMemory=2g
     elif [ "$total_mb" -le 32768 ]; then
         DEFAULT_JVM_XMS=18g
-        maxDirectMemory=1g
+        maxDirectMemory=2g
     else
         DEFAULT_JVM_XMS=32g
         maxDirectMemory=2g
     fi
+    heap_limit_mb=$((total_mb - NATIVE_MEMORY_HEADROOM_MB
+        - $(jvm_memory_mb "$maxDirectMemory") - $(jvm_memory_mb "$maxMetaspace")
+        - $(jvm_memory_mb "$reservedCodeCache")))
+    if [ "$(jvm_memory_mb "$DEFAULT_JVM_XMS")" -gt "$heap_limit_mb" ]; then
+        # A cgroup limit just above a profile boundary must not inherit a heap
+        # that consumes the whole container before direct/native allocations.
+        DEFAULT_JVM_XMS="${heap_limit_mb}m"
+    fi
     DEFAULT_JVM_XMX=$DEFAULT_JVM_XMS
+}
+
+jvm_memory_mb() {
+    local size=$1 number unit
+    if [[ ! "$size" =~ ^([0-9]{1,12})([kKmMgG]?)$ ]]; then
+        return 1
+    fi
+    number=$((10#${BASH_REMATCH[1]}))
+    unit=${BASH_REMATCH[2]}
+    if [ "$number" -le 0 ]; then
+        return 1
+    fi
+    case "$unit" in
+        g|G) echo "$((number * 1024))" ;;
+        m|M) echo "$number" ;;
+        k|K) echo "$(((number + 1023) / 1024))" ;;
+        *) echo "$(((number + 1048575) / 1048576))" ;;
+    esac
+}
+
+validate_jvm_memory_budget() {
+    local total_mb=$1 heap_start=$2 heap_max=$3
+    local heap_start_mb heap_max_mb budget_mb
+    heap_start_mb=$(jvm_memory_mb "$heap_start") || {
+        echo "ERROR: invalid JVM initial heap size: $heap_start" >&2
+        return 1
+    }
+    heap_max_mb=$(jvm_memory_mb "$heap_max") || {
+        echo "ERROR: invalid JVM maximum heap size: $heap_max" >&2
+        return 1
+    }
+    if [ "$heap_start_mb" -gt "$heap_max_mb" ]; then
+        echo "ERROR: JVM initial heap $heap_start exceeds maximum heap $heap_max" >&2
+        return 1
+    fi
+    budget_mb=$((heap_max_mb + $(jvm_memory_mb "$maxDirectMemory")
+        + $(jvm_memory_mb "$maxMetaspace") + $(jvm_memory_mb "$reservedCodeCache")
+        + NATIVE_MEMORY_HEADROOM_MB))
+    if [ "$budget_mb" -gt "$total_mb" ]; then
+        echo "ERROR: JVM memory budget ${budget_mb}MB exceeds container limit ${total_mb}MB: heap=$heap_max direct=$maxDirectMemory metaspace=$maxMetaspace code_cache=$reservedCodeCache native_headroom=${NATIVE_MEMORY_HEADROOM_MB}MB" >&2
+        return 1
+    fi
 }
 
 # SETENV_SETTED promise run this only once.
@@ -169,6 +226,7 @@ if [ -z $SETENV_SETTED ]; then
         FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
         SERVICE_JVM_XMS=${FLEXLB_JVM_XMS:-${MASTER_JVM_XMS:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMS}}}}
         SERVICE_JVM_XMX=${FLEXLB_JVM_XMX:-${MASTER_JVM_XMX:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMX}}}}
+        validate_jvm_memory_budget "$memTotal" "$SERVICE_JVM_XMS" "$SERVICE_JVM_XMX" || exit 1
         echo "INFO: JVM heap config: -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
         SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 

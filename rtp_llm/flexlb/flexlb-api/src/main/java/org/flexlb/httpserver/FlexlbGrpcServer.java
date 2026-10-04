@@ -110,6 +110,7 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
+                .addStreamTracerFactory(grpcServerTimingInterceptor.requestSizeTracerFactory())
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)

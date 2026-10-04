@@ -385,7 +385,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     }
                     try {
                         LoggerFactory.getLogger("pvLogger").info(org.flexlb.util.JsonUtils.toStringOrEmpty(comparison));
-                        engineHealthReporter.reportCacheHitComparisonMetrics(comparison);
+                        engineHealthReporter.reportCacheHitComparisonMetrics(workerStatus, comparison);
                     } catch (RuntimeException failure) {
                         logger.warn("Cache comparison telemetry failed at {}", ipPort, failure);
                     }
@@ -403,8 +403,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerStatus.StepMetrics previousStep) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    workerStatus.getMetricIpPort(),
-                    observation.role().name(), startTime);
+                    workerStatus, startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     workerStatus,
                     endpoint,
