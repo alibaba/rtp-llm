@@ -9,6 +9,7 @@ import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -17,6 +18,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PvLogDataTest {
+
+    @Test
+    void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
+        BalanceContext context = new BalanceContext();
+        context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);
+        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
+                "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 1, 1, false, Map.of(), List.of(
+                        new RoutingDecision.Candidate(null, true, 90L, 20L, 70L, 512L, 512L,
+                                1L, null, null, null, "MODELED", 1L)), null));
+
+        PvLogData data = new PvLogData(context);
+
+        assertEquals(1, data.getCacheMatchSelections().size());
+        assertEquals("10.0.0.2", data.getCacheMatchSelections().getFirst().selectedIp());
+    }
 
     @Test
     void includesPhaseToDistinguishTwoDecisionsWithTheSameRequestId() throws Exception {

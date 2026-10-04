@@ -138,6 +138,7 @@ public class PvLogData {
         return routingDecisions.stream().filter(decision -> decision.role() == selection.role())
                 .flatMap(decision -> decision.candidates().stream())
                 .anyMatch(candidate -> candidate.selected()
+                        && candidate.endpoint() != null
                         && candidate.endpoint().startsWith(selection.selectedIp() + ":")
                         && java.util.Objects.equals(candidate.routingMatchTokens(), selection.hitCacheTokens()));
     }

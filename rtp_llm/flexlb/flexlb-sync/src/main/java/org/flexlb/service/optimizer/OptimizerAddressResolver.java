@@ -54,6 +54,10 @@ public class OptimizerAddressResolver {
             long pollIntervalMs) {
         this.serviceDiscovery = serviceDiscovery;
         this.endpoint = endpoint;
+        if (endpoint.getDiscovery() == null || endpoint.getDiscovery().getType() == null) {
+            throw new IllegalArgumentException(
+                    "Optimizer discovery type must be configured for address: " + endpoint.getAddress());
+        }
         this.address = endpoint.getAddress();
         this.port = port;
         this.pollIntervalMs = pollIntervalMs;

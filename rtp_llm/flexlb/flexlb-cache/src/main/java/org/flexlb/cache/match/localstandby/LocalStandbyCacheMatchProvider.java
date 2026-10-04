@@ -97,7 +97,8 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
 
     public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
         if (!enabled || request == null || request.getBlockSize() <= 0
-                || request.getBlockCacheKeys() == null || request.getBlockCacheKeys().isEmpty()) {
+                || request.getBlockCacheKeys() == null || request.getBlockCacheKeys().isEmpty()
+                || selectedWorkers == null || selectedWorkers.isEmpty()) {
             return;
         }
         List<Long> blockCacheKeys = List.copyOf(request.getBlockCacheKeys());

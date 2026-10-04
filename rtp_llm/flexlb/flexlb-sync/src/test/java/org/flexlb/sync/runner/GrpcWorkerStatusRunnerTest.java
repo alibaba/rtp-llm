@@ -34,9 +34,9 @@ import static org.mockito.Mockito.when;
 class GrpcWorkerStatusRunnerTest {
 
     @ParameterizedTest
-    @CsvSource({"DECODE,false", "PREFILL,true", "PDFUSION,true"})
-    void repeatedRpcFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
-            RoleType role, boolean needsCacheKeys) {
+    @CsvSource({"DECODE,false,false", "PREFILL,true,false", "PDFUSION,true,false", "PREFILL,true,true"})
+    void repeatedStatusCheckFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
+            RoleType role, boolean needsCacheKeys, boolean malformedTaskId) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
@@ -50,8 +50,13 @@ class GrpcWorkerStatusRunnerTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(
                 anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(
-                        io.grpc.Status.UNAVAILABLE.asRuntimeException()));
+                .thenReturn(malformedTaskId
+                        ? CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
+                                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                                .setStatusVersion(1L).setAlive(true)
+                                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" "))
+                                .build())
+                        : CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         for (int failure = 1; failure <= 3; failure++) {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();

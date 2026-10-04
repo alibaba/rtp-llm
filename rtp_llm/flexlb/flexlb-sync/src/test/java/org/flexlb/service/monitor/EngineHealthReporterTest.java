@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -465,7 +466,8 @@ class EngineHealthReporterTest {
         WorkerStatus decode = workerStatus("10.0.0.2", RoleType.DECODE, 800L, 1000L,
                 CacheStatus.builder().blockSize(128).build());
         when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
-                .thenReturn(List.of(workerStatus("10.0.0.3", RoleType.PREFILL), prefill, prefill));
+                .thenReturn(List.of(WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, null, "10.0.0.3", 8080, 8081, "test-site"), prefill, prefill));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null)).thenReturn(List.of(decode));
 
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
@@ -476,9 +478,12 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldSkipWorkerBlockSizeBeforeStatusIsAvailable() {
-        when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of());
+        when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
+                .thenReturn(List.of(WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, null, "10.0.0.1", 8080, 8081, "test-site")));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null))
-                .thenReturn(List.of(workerStatus("10.0.0.2", RoleType.DECODE)));
+                .thenReturn(List.of(WorkerStatus.createDiscovered(
+                        RoleType.DECODE, null, "10.0.0.2", 8080, 8081, "test-site")));
 
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
 
@@ -518,6 +523,23 @@ class EngineHealthReporterTest {
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
+    }
+
+    @Test
+    void shouldReportActualCacheHitsWithoutPredictions() {
+        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0), "running", 200, 120,
+                null, null, null);
+
+        reporter.reportCacheHitComparisonMetrics(comparison);
+
+        verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
+                any(FlexMetricTags.class), eq(200.0));
+        verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
+                any(FlexMetricTags.class), eq(120.0));
+        verify(monitor, never()).report(eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
+                any(FlexMetricTags.class), anyDouble());
     }
 
     @Test

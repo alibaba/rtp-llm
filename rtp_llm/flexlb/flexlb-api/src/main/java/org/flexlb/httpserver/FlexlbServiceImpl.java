@@ -654,7 +654,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // RouteService's side-effect callback may run after this dependent stage.
             // Publish the result before response completion reports balancing metrics.
             ctx.setResponse(response);
-            if (response.isSuccess() && cacheAwareService != null) {
+            if (response != null && response.isSuccess() && cacheAwareService != null) {
                 try {
                     cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());
                 } catch (RuntimeException error) {

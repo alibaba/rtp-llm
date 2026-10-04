@@ -376,10 +376,11 @@ public class EngineHealthReporter {
 
     public void reportCacheStatusCheckerFail(WorkerStatus workerStatus,
                                              BalanceStatusEnum errorEnum) {
+        RoleType role = workerStatus.getRole();
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "engineIp", workerStatus.getMetricIpPort(),
                 "code", String.valueOf(errorEnum.getCode()),
-                "role", workerStatus.getRole().getCode());
+                "role", role == null ? "" : role.getCode());
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
@@ -741,8 +742,10 @@ public class EngineHealthReporter {
         CacheHitComparisonResult.CachePrediction sourcePrediction = kvcmPrediction != null
                 ? kvcmPrediction
                 : localSyncPrediction != null ? localSyncPrediction : localStandbyPrediction;
-        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
-                comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
+        if (sourcePrediction != null) {
+            monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
+                    comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
+        }
         if (kvcmPrediction != null && kvcmPrediction.localPredictionTokens() >= 0) {
             monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, tags,
                     comparison.actualHitTokens() - kvcmPrediction.localPredictionTokens());

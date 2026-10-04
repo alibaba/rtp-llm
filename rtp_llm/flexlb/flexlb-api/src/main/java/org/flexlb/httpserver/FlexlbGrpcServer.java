@@ -25,6 +25,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
+import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -69,7 +70,7 @@ public class FlexlbGrpcServer {
         this.quietPeriodNanos = TimeUnit.MILLISECONDS.toNanos(
                 configService.loadBalanceConfig().getGrpcServer().getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
-        this.monitor = monitor;
+        this.monitor = Objects.requireNonNull(monitor, "monitor");
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
         this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }

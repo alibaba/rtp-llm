@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
@@ -27,6 +28,22 @@ class OptimizerAddressResolverTest {
     private static final String DOMAIN = "optimizer.test.domain.com";
     private static final int PORT = 8082;
     private static final long POLL_INTERVAL_MS = 10L;
+
+    @Test
+    void rejectsMissingDiscoveryConfigurationBeforeStartingResolver() {
+        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
+        Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
+        endpoint.setDiscovery(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS));
+
+        endpoint.setDiscovery(new DiscoveryConfig());
+        endpoint.getDiscovery().setType(null);
+        assertThrows(IllegalArgumentException.class, () ->
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS));
+        verifyNoInteractions(serviceDiscovery);
+    }
 
     @Test
     void vipserver_should_refresh_by_polling_without_installing_private_listener() throws Exception {

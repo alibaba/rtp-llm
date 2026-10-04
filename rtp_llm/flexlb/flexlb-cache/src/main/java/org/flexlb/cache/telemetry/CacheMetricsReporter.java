@@ -183,7 +183,9 @@ public class CacheMetricsReporter {
      * @param hitRatio    Hit fraction for this request
      */
     public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
-
+        if (roleType == null) {
+            return;
+        }
         FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
 
         // Report hit token count and hit percentage
@@ -196,6 +198,9 @@ public class CacheMetricsReporter {
     }
 
     public void reportKvcmPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+        if (roleType == null) {
+            return;
+        }
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
         monitor.report(CACHE_KVCM_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0) {
@@ -204,6 +209,9 @@ public class CacheMetricsReporter {
     }
 
     public void reportLocalStandbyPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+        if (roleType == null) {
+            return;
+        }
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
         monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0) {

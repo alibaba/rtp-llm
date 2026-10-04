@@ -93,7 +93,7 @@ public class EngineAddressResolver {
      * @param hostList Host list
      */
     private void updateEndpointHosts(Endpoint endpoint, List<WorkerHost> hostList) {
-        if (hostList.isEmpty()) {
+        if (hostList == null || hostList.isEmpty()) {
             // Empty discovery must not retire existing channels or worker caches.
             return;
         }

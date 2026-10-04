@@ -70,6 +70,49 @@ import static org.mockito.Mockito.when;
 class FlexlbServiceImplTest {
 
     @Test
+    void returnsExplicitErrorWhenLocalRouterCompletesWithoutResponse() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(null));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("missing-route-response").build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getValue().getCode());
+        assertEquals("null schedule response", response.getValue().getErrorMessage());
+    }
+
+    @Test
+    void serializesNullPreemptionIdsAsEmptyRepeatedField() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus selected = new ServerStatus();
+        selected.setRole(RoleType.PREFILL);
+        selected.setServerIp("10.0.0.1");
+        selected.setPreemptRequestIds(null);
+        Response routed = new Response();
+        routed.setSuccess(true);
+        routed.setServerStatus(List.of(selected));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(routed));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("empty-preemption-ids").build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertTrue(response.getValue().getSuccess());
+        assertEquals(1, response.getValue().getServerStatusCount());
+        assertEquals(0, response.getValue().getServerStatus(0).getPreemptRequestIdsCount());
+    }
+
+    @Test
     void schedulePassesDistinctRequestedRolesAndEncoderPhaseToRouter() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
