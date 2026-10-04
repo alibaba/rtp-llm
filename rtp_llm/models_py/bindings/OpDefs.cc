@@ -87,7 +87,9 @@ void registerPyOpDefs(pybind11::module& m) {
         [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
         "Convert TypeMeta to scalar type");
 
-    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
+        .def(pybind11::init<>())
+        .def_readonly("request_id", &PyCacheStoreInputs::request_id);
 
     pybind11::class_<rtp_llm::CacheStoreWriter, std::shared_ptr<rtp_llm::CacheStoreWriter>>(m, "CacheStoreWriter")
         .def("write", &rtp_llm::CacheStoreWriter::write);

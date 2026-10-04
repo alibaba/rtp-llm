@@ -92,6 +92,12 @@ class Fp8CollectiveProjection:
             )
             self.deep_gemm = deep_gemm
 
+    def can_run_ag(self, local_rows: int) -> bool:
+        return 0 < local_rows and local_rows * self.world_size <= self.max_m
+
+    def can_run_rs(self, rows: int) -> bool:
+        return 0 < rows <= self.max_m and rows % self.world_size == 0
+
     def all_gather_gemm(self, local_input: torch.Tensor | Fp8Activation, projection):
         """Gather FP8 values and scales, projecting each source rank's rows."""
         if not self.enable_ag:
@@ -99,7 +105,7 @@ class Fp8CollectiveProjection:
         if (
             local_input.device != self.device
             or local_input.shape[1] != self.hidden_size
-            or local_input.shape[0] * self.world_size > self.max_m
+            or not self.can_run_ag(local_input.shape[0])
             or not projection.scale_ue8m0
             or projection.K != self.hidden_size
         ):
@@ -164,8 +170,7 @@ class Fp8CollectiveProjection:
         if (
             values.dtype != torch.float8_e4m3fn
             or values.device != self.device
-            or m > self.max_m
-            or m % self.world_size
+            or not self.can_run_rs(m)
             or k != projection.K
             or projection.N != self.hidden_size
             or not projection.scale_ue8m0

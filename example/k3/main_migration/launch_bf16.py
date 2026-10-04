@@ -26,6 +26,7 @@ def launch_config(args):
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
     debug_four_layer = getattr(args, "debug_four_layer", False)
+    orthogonal_smoke = bool(getattr(args, "orthogonal_smoke", False))
     expected_layers = 4 if debug_four_layer else 93
     if text.get("num_hidden_layers") != expected_layers:
         raise ValueError(f"Selected BF16 profile requires {expected_layers} target layers")
@@ -41,6 +42,9 @@ def launch_config(args):
     reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", 14336)
     if reserve_runtime_mem_mb <= 0:
         raise ValueError("Runtime memory reserve must be positive")
+    kv_cache_mem_mb = getattr(args, "kv_cache_mem_mb", None)
+    if kv_cache_mem_mb is not None and kv_cache_mem_mb <= 0:
+        raise ValueError("Explicit KV cache capacity must be positive")
     socket.inet_aton(args.peer_ip)
     route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -84,6 +88,14 @@ def launch_config(args):
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
     }
+    if orthogonal_smoke:
+        environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
+        environment["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"] = "6.0"
+        if args.role == "DECODE":
+            # NCCL graph registration hangs on the SM103 DCP collective path
+            # at the 64-request capture bucket; the fixed feat smoke uses 0.
+            environment["NCCL_GRAPH_REGISTER"] = "0"
+            environment["NCCL_MAX_CTAS"] = "8"
     if getattr(args, "allow_hf3fs_root", None):
         # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
         # target and draft checkpoints; nogds failed during MoE scale conversion.
@@ -97,14 +109,15 @@ def launch_config(args):
         "world_size": 8,
         "local_world_size": 8,
         "world_rank": 0,
-        "prefill_cp_kv_cache_sharded": 0,
-        "prefill_cp_size": 1,
+        "prefill_cp_kv_cache_sharded": int(orthogonal_smoke),
+        "prefill_cp_size": 8 if orthogonal_smoke and args.role == "DECODE" else 1,
         "remote_server_port": args.peer_port,
         "use_local": 1,
-        "max_seq_len": 262144,
-        "max_context_batch_size": 16,
-        "max_batch_tokens_size": 65536,
-        "concurrency_limit": 16,
+        "max_seq_len": 2097152 if orthogonal_smoke else 262144,
+        "max_context_batch_size": 64 if orthogonal_smoke and args.role == "PREFILL" else 16,
+        "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
+        **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
+        "concurrency_limit": 64 if orthogonal_smoke else 16,
         "seq_size_per_block": 4096,
         "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
         "linear_step": 1,
@@ -112,6 +125,7 @@ def launch_config(args):
         "fp8_kv_cache": int(fp8_kv_cache),
         "reuse_cache": 1,
         "enable_device_cache": 1,
+        "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
         "moe_strategy": "mega_moe",
         "enable_cuda_graph": int(args.role == "DECODE"),
         "cache_store_rdma_mode": 1,
@@ -124,8 +138,14 @@ def launch_config(args):
         "warm_up": 0,
         "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
     }
+    if orthogonal_smoke and args.role == "PREFILL":
+        options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)
+    if kv_cache_mem_mb is not None:
+        options["kv_cache_mem_mb"] = kv_cache_mem_mb
     if args.role == "DECODE":
-        options["decode_capture_config"] = "1,2,3,4,7,8,9,16"
+        options["decode_capture_config"] = (
+            "1,2,4,8,16,32,64" if orthogonal_smoke else "1,2,3,4,7,8,9,16"
+        )
     command = [str(Path(args.server).resolve(strict=True))]
     for key, value in options.items():
         command.extend(["--" + key, str(value)])
@@ -265,7 +285,8 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
         raise RuntimeError("Insufficient free GPU memory for the complete TP8 profile; reselect hosts")
     selected_uuids = {row[1].strip() for row in rows if int(row[0]) in range(8)}
     occupied = [row for row in csv.reader(process_text.splitlines(), skipinitialspace=True)
-                if row and row[0].strip() in selected_uuids]
+                if len(row) >= 2 and row[0].strip() in selected_uuids
+                and row[1].strip().isdigit()]
     if occupied and not allow_shared_accuracy:
         raise RuntimeError("GPUs occupied; reselect hosts or explicitly allow shared accuracy validation")
 
@@ -293,6 +314,12 @@ def main():
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
     parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
+    parser.add_argument("--orthogonal-smoke", action="store_true",
+                        help="Enable the optional 64K PageRR, Host cache, DCP and Graph boundary profile")
+    parser.add_argument("--memory-cache-size-mb", type=int, default=32768,
+                        help="Per-rank Prefill Host cache capacity in the orthogonal profile")
+    parser.add_argument("--kv-cache-mem-mb", type=int,
+                        help="Explicit per-rank Device KV cache capacity for bounded smoke profiles")
     parser.add_argument("--allow-shared-accuracy", action="store_true",
                         help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
     parser.add_argument("--min-free-gib", type=float, default=250,
@@ -342,7 +369,8 @@ def main():
         ("draft", args.draft_checkpoint),
     ):
         require_checkpoint_source(checkpoint, args.allow_hf3fs_root)
-        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint]
+        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint,
+                         "--load-method", "fastsafetensors"]
         if args.allow_hf3fs_root:
             guard_command.extend(["--allow-hf3fs-root", args.allow_hf3fs_root])
         else:

@@ -4,7 +4,9 @@ import types
 import unittest
 from unittest.mock import patch
 
-from example.k3.main_migration.text_smoke import Case, Runner, SmokeFailure
+from example.k3.main_migration.text_smoke import (
+    Case, Runner, SmokeFailure, prefill_cache_tiers,
+)
 
 
 def formal_response_fixture():
@@ -48,6 +50,39 @@ def formal_response_fixture():
 
 
 class CappedDecodePageTest(unittest.TestCase):
+    def test_prefill_cache_tier_does_not_misclassify_memory_as_device(self):
+        counters = {
+            "prefill_total_reuse_len": 8192,
+            "prefill_local_reuse_len": 8192,
+            "prefill_memory_reuse_len": 4096,
+            "prefill_disk_reuse_len": 0,
+        }
+        self.assertEqual(prefill_cache_tiers(counters)["device"], 4096)
+        smoke, case, response = formal_response_fixture()
+        response["aux_info"].update(counters, input_len=12288, reuse_len=8192)
+        case = Case(case.name, case.prompt, case.expected_regex, "partial",
+                    expected_json=case.expected_json, expected_cache_tier="memory")
+        with self.assertRaisesRegex(SmokeFailure, "expected memory"):
+            smoke.validate(case, response, 0.1, 32)
+        response["aux_info"].update(
+            prefill_memory_reuse_len=8192, prefill_local_reuse_len=8192
+        )
+        result = smoke.validate(case, response, 0.1, 32)
+        self.assertEqual(result["prefill_cache_tiers"]["device"], 0)
+        self.assertEqual(result["prefill_cache_tiers"]["memory"], 8192)
+
+    def test_long_history_requires_actual_uncached_q_below_64k(self):
+        smoke, case, response = formal_response_fixture()
+        case = Case(case.name, case.prompt, case.expected_regex, "hit",
+                    expected_json=case.expected_json, allow_long_history=True)
+        response["aux_info"].update(input_len=2_065_000, reuse_len=1_998_848)
+        with self.assertRaisesRegex(SmokeFailure, "uncached Q tokens"):
+            smoke.validate(case, response, 0.1, 32)
+        response["aux_info"].update(input_len=2_063_000)
+        self.assertEqual(
+            smoke.validate(case, response, 0.1, 32)["input_len"], 2_063_000
+        )
+
     def test_formal_response_rejects_length_finish_reason(self):
         smoke, case, response = formal_response_fixture()
         response["choices"][0]["finish_reason"] = "length"
