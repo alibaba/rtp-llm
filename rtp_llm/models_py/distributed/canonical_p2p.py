@@ -27,6 +27,7 @@ class CanonicalPeerAllReduce:
         self.handle = handle
         self.peers = peers
         self.kernel = kernel
+        self.max_elements = buffer.numel()
 
     def should_use(self, tensor: torch.Tensor) -> bool:
         return (
@@ -34,7 +35,7 @@ class CanonicalPeerAllReduce:
             and tensor.device == self.device
             and tensor.dtype == torch.bfloat16
             and tensor.is_contiguous()
-            and 0 < tensor.numel() <= _MAX_ELEMENTS
+            and 0 < tensor.numel() <= self.max_elements
         )
 
     def all_reduce(self, tensor: torch.Tensor, *, inplace: bool = True):
@@ -74,6 +75,10 @@ def init_canonical_p2p(
     # disabled locally. A missing flag on one rank must not split the backend.
     if not _agree_across_group(group, requested, "canonical_p2p_enabled"):
         return None
+    large = _agree_across_group(
+        group, os.getenv("RTP_LLM_CANONICAL_P2P_LARGE") == "1", "canonical_p2p_large"
+    )
+    max_elements = 40960 if large else _MAX_ELEMENTS
     symm = None
     buffer = None
     kernel = None
@@ -96,7 +101,7 @@ def init_canonical_p2p(
             )
 
             kernel = _canonical_peer_sum
-            buffer = symm.empty(_MAX_ELEMENTS, dtype=torch.bfloat16, device=device)
+            buffer = symm.empty(max_elements, dtype=torch.bfloat16, device=device)
     except Exception as error:
         logging.warning("Canonical P2P allocation unavailable: %s", error)
         local_ok = False
@@ -106,7 +111,7 @@ def init_canonical_p2p(
     try:
         handle = symm.rendezvous(buffer, group)
         peers = [
-            handle.get_buffer(r, (_MAX_ELEMENTS,), torch.bfloat16) for r in range(8)
+            handle.get_buffer(r, (max_elements,), torch.bfloat16) for r in range(8)
         ]
         communicator = CanonicalPeerAllReduce(
             group, device, buffer, handle, peers, kernel
@@ -120,5 +125,7 @@ def init_canonical_p2p(
         communicator = None
     if not _agree_across_group(group, communicator is not None, "canonical_p2p_ready"):
         return None
-    logging.info("Canonical P2P all-reduce ready: BF16 TP8, at most 40 KiB")
+    logging.info(
+        "Canonical P2P all-reduce ready: BF16 TP8, at most %d KiB", max_elements // 512
+    )
     return communicator
