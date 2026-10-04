@@ -61,10 +61,11 @@ public class EngineStatusConverter {
                     .build());
         }
 
-        List<EngineRpcService.TaskInfoPB> runningTaskInfoList =
-                workerStatusPB.getRunningTaskInfoList();
-        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList =
-                runningTaskInfoList.stream()
+        List<EngineRpcService.TaskInfoPB> allTaskInfoList = workerStatusPB.getRunningTaskInfoList();
+        List<EngineRpcService.TaskInfoPB> runningTaskInfoList = allTaskInfoList.stream()
+                        .filter(taskInfoPB -> resolvePhase(taskInfoPB) == TaskPhase.RUNNING)
+                        .toList();
+        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList = allTaskInfoList.stream()
                         .filter(taskInfoPB -> resolvePhase(taskInfoPB)
                                 != TaskPhase.RUNNING)
                         .toList();

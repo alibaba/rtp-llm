@@ -127,10 +127,11 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
-    @Test
-    void selectedPrefillReportsInputTokensAlongsideHitTokens() {
+    @ParameterizedTest
+    @ValueSource(strings = {"10.0.0.1:8080@0", "10.0.0.1:8080"})
+    void selectedPrefillReportsInputTokensAlongsideHitTokens(String cacheWorkerKey) {
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
-                Map.of("10.0.0.1:8080", HostCacheMatch.local(2)),
+                Map.of(cacheWorkerKey, HostCacheMatch.local(2)),
                 CacheMatchSource.KVCM, 0L, 100L));
 
         try (SelectedRole ignored = select()) {

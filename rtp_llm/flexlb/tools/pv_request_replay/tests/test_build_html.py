@@ -23,6 +23,69 @@ build_html = BUILD_HTML_MODULE.build_html
 
 
 class BuildHtmlTest(unittest.TestCase):
+    def test_request_and_host_text_is_escaped_in_all_replay_panels(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required to execute the replay renderers")
+        template = (TOOL_DIR / "replay_template.html").read_text()
+        attack = '\"><img src=x onerror=alert(1)>&'
+        requests = [
+            {"id": attack + suffix, "requestId": attack + suffix, "host": attack,
+             "reason": attack, "percentile": attack, "route": 1000,
+             "enqueue": 1000, "drain": drain, "firstToken": 10000, "uncache": 1000}
+            for suffix, drain in (("-running", 1000), ("-waiting", 2000))
+        ]
+        replay = {"meta": {"start": 1000, "end": 10000, "requestCount": 2,
+                           "hostCount": 1, "source": "test"},
+                  "hosts": [attack], "requests": requests,
+                  "candidates": {request["id"]: [{"host": attack, "port": 8001,
+                                                   "selected": True, "rank": 1}]
+                                 for request in requests}}
+        script = template.split("<script>", 1)[1].split("</script>", 1)[0]
+        script = script.replace("__REPLAY_DATA__", json.dumps(replay))
+        before, after = script.rsplit("  })();", 1)
+        checks = '''
+        for (const selector of ['#summary', '#request-detail', '#host-grid',
+                                '#decision-microscope', '#host-filter']) {
+          const html = nodes.get(selector).innerHTML;
+          if (html.includes('<img')) throw new Error('Unescaped HTML in ' + selector);
+          if (!html.includes('&lt;img')) throw new Error('Missing escaped text in ' + selector);
+        }
+        const request = requests[0];
+        if (requestTooltip(request, 'running').includes('<img'))
+          throw new Error('Unescaped tooltip');
+        const encodedHost = escaped(request.host);
+        if (!nodes.get('#host-grid').innerHTML.includes('data-host="' + encodedHost + '"'))
+          throw new Error('Unescaped host attribute');
+        for (const item of requests) {
+          if (!nodes.get('#host-grid').innerHTML.includes('data-request-id="' + escaped(item.id) + '"'))
+            throw new Error('Unescaped request attribute');
+        }
+        REPLAY.candidates[currentRequest().id][0].schema = 'routingDecisions';
+        renderDecisionMicroscope();
+        if (nodes.get('#decision-microscope').innerHTML.includes('<img'))
+          throw new Error('Unescaped current candidate');
+        '''
+        bootstrap = '''
+        const nodes = new Map();
+        const context = new Proxy({}, {get: () => () => {}});
+        const element = () => ({innerHTML: '', textContent: '', value: '', style: {},
+          clientWidth: 100, clientHeight: 42, addEventListener() {}, append() {}, remove() {},
+          classList: {add() {}, remove() {}, toggle() {}}, getContext: () => context});
+        global.document = {
+          querySelector(selector) {
+            if (!nodes.has(selector)) nodes.set(selector, element());
+            return nodes.get(selector);
+          }, addEventListener() {}, createElement: element
+        };
+        global.window = {addEventListener() {}};
+        global.devicePixelRatio = 1;
+        global.setTimeout = () => 0;
+        '''
+        result = subprocess.run([node, "-e", bootstrap + before + checks + "  })();" + after],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_builds_self_contained_replay_from_workbook(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

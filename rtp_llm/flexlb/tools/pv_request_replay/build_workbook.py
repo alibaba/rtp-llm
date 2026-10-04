@@ -306,10 +306,10 @@ def get_route_cache_selection(route: dict[str, Any] | None) -> dict[str, Any]:
     if selection:
         return selection
     decision = get_prefill_decision(route)
-    for candidate in decision.get("candidates", []):
+    for candidate in decision.get("workers", []):
         if candidate.get("selected"):
             return {"hitCacheTokens": candidate.get("routingMatchTokens"),
-                    "selectedIp": candidate.get("endpoint", "").split(":")[0]}
+                    "selectedIp": candidate.get("ip")}
     return {}
 
 

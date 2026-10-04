@@ -88,12 +88,12 @@ public class RequestRegistry {
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
     }
 
-    void attachGlobalQueue(GlobalQueueCoordinator queue) {
+    synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
         if (globalQueue != null) { throw new IllegalStateException("global queue already attached"); }
         globalQueue = Objects.requireNonNull(queue, "queue");
     }
 
-    void attachEncoderQueue(EncoderQueueCoordinator queue) {
+    synchronized void attachEncoderQueue(EncoderQueueCoordinator queue) {
         if (encoderQueue != null) { throw new IllegalStateException("Encoder queue already attached"); }
         encoderQueue = Objects.requireNonNull(queue, "queue");
     }

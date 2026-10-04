@@ -105,6 +105,16 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
 
 
 class CurrentRoutingDecisionTest(unittest.TestCase):
+    def test_selected_ipv6_candidate_uses_the_normalized_host(self):
+        for endpoint, host in (("10.0.0.8:8001@1", "10.0.0.8"),
+                               ("[2001:db8::1]:8001@1", "2001:db8::1")):
+            with self.subTest(endpoint=endpoint):
+                route = {"routingDecisions": [{"role": "PREFILL", "candidates": [
+                    {"endpoint": endpoint, "selected": True, "routingMatchTokens": 512}]}]}
+
+                self.assertEqual(workbook_module.get_route_cache_selection(route),
+                                 {"hitCacheTokens": 512, "selectedIp": host})
+
     def test_compact_pv_uses_top_level_outcome_and_selected_candidate(self):
         route = route_record("compact", epoch_ms(1, 45), "10.0.0.8")
         route["code"] = 200

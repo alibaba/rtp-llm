@@ -4,12 +4,13 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.function.LongSupplier;
 
 /**
  * Fixed-size recent cache-key pool for request-level theory cache hit metrics.
  * Each cache key occupies one pool entry and remains available until its most recent occurrence expires.
- * Request block cache keys are unique.
+ * Request hits are counted against the pool before the request's keys are retained.
  */
 @Slf4j
 public class RecentCacheKeyWindow {
@@ -32,9 +33,15 @@ public class RecentCacheKeyWindow {
     private int uniqueSize;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
+        if (timeWindowMs <= 0L) {
+            throw new IllegalArgumentException("timeWindowMs must be positive");
+        }
+        if (maxCacheKeys <= 0L || maxCacheKeys > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("maxCacheKeys must be between 1 and " + Integer.MAX_VALUE);
+        }
         this.timeWindowMs = timeWindowMs;
         this.maxCacheKeys = Math.toIntExact(maxCacheKeys);
-        this.nowSupplier = nowSupplier;
+        this.nowSupplier = Objects.requireNonNull(nowSupplier, "nowSupplier");
 
         int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
         this.tableMask = hashTableCapacity - 1;
@@ -62,8 +69,14 @@ public class RecentCacheKeyWindow {
                     continue;
                 }
                 requestOccurrences++;
-                if (retainCacheKey(cacheKey, nowMs)) {
+                if (findSlot(cacheKey) >= 0) {
                     requestHitOccurrences++;
+                }
+            }
+            for (int i = 0; i < size; i++) {
+                Long cacheKey = cacheKeys.get(i);
+                if (cacheKey != null) {
+                    retainCacheKey(cacheKey, nowMs);
                 }
             }
         }
@@ -74,12 +87,12 @@ public class RecentCacheKeyWindow {
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
     }
 
-    private boolean retainCacheKey(long cacheKey, long nowMs) {
+    private void retainCacheKey(long cacheKey, long nowMs) {
         int existingSlot = findSlot(cacheKey);
         if (existingSlot >= 0) {
             tableLastSeenTimestampMs[existingSlot] = nowMs;
             siftExpirationHeapDown(tableHeapIndexes[existingSlot]);
-            return true;
+            return;
         }
         if (uniqueSize == maxCacheKeys) {
             evictOldestCacheKey();
@@ -90,7 +103,6 @@ public class RecentCacheKeyWindow {
         tableStates[newSlot] = USED;
         addToExpirationHeap(newSlot);
         uniqueSize++;
-        return false;
     }
 
     private void evictExpired(long nowMs) {

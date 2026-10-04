@@ -433,11 +433,11 @@
     function requestTooltip(request, phase) {
       const p = lifecycle(request);
       const step = runningStep(request, state.time, phase);
-      return `<div class="tooltip-title">${shortId(request.requestId || request.id)} · ${request.host}</div>
+      return `<div class="tooltip-title">${escaped(shortId(request.requestId || request.id))} · ${escaped(request.host)}</div>
         <div class="tooltip-grid">
           <span>路由决策时刻 <b>${timeText(request.route)}</b></span>
           <span>预测 / 实际命中率 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 Token <b>${work(predictedUncache(request))} / ${work(request.uncache)}</b></span>
-          <span>路由策略 <b>${strategyLabel(request.reason)}（${request.reason || '—'}）</b></span><span>引擎首 Token 耗时 <b>${duration(request.engineTtft)}</b></span>
+          <span>路由策略 <b>${escaped(strategyLabel(request.reason))}（${escaped(request.reason || '—')}）</b></span><span>引擎首 Token 耗时 <b>${duration(request.engineTtft)}</b></span>
           <span>调度等待 <b>${duration(request.schedulerWait)}</b></span><span>执行到首 Token <b>${duration(request.runningToFirst)}</b></span>
           <span>执行步数 <b>${step ? `${step.current}/${step.total}${step.id == null ? '' : ` · #${step.id}`}` : `${number(request.stepCount)} 步`}</b></span><span>本地 HBM / 远端 KV 命中 <b>${work(request.hbmLocal)} / ${work(request.remoteKvAdded)}</b></span>
           <span>进入队列到出队 <b>${duration(p.drain - p.enqueue)}</b></span><span>首 Token 时刻 <b>${timeText(request.firstToken)}</b></span>
@@ -462,7 +462,7 @@
           ? ['所选机器的预测首 Token 耗时', milliseconds(selected.projectedTtftMs), `预测排空 ${milliseconds(selected.projectedDrainMs)} · pending ${number(selected.pendingRequests)}`]
           : ['所选机器的预测首 Token 前工作量（Token）', selected ? tokenWork(selected.estimatedTtft) : '—', selected ? `候选第 ${selected.rank} 名 · 路由前排队工作 ${tokenWork(selected.queueWork)}` : '—'],
       ];
-      $('#summary').innerHTML = cards.map(([label, value, note], index) => `<div class="metric ${index === 3 ? 'selection' : ''}"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`).join('');
+      $('#summary').innerHTML = cards.map(([label, value, note], index) => `<div class="metric ${index === 3 ? 'selection' : ''}"><div class="label">${escaped(label)}</div><div class="value">${escaped(value)}</div><div class="note">${escaped(note)}</div></div>`).join('');
     }
 
     function renderCacheComparison(request) {
@@ -481,7 +481,7 @@
       const p = lifecycle(request);
       const step = runningStep(request, state.time, phase);
       $('#request-detail').innerHTML = `
-        <div class="request-id">${request.requestId || request.id}</div>
+        <div class="request-id">${escaped(request.requestId || request.id)}</div>
         <div class="kv-grid">
           <div class="kv"><div class="key">预测 / 实际命中率</div><div class="val">${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</div></div>
           <div class="kv"><div class="key">预测 / 实际未命中 Token</div><div class="val">${tokenWork(predictedUncache(request))} / ${tokenWork(request.uncache)}</div></div>
@@ -528,14 +528,14 @@ ${escaped(candidate.rejections)}</pre></details>
       const text = candidates.map((candidate) => {
         const special = candidate.cacheLeader || candidate.shortest || candidate.selected;
         const symbols = `${candidate.selected ? '✓' : ''}${candidate.cacheLeader ? '★' : ''}${candidate.shortest ? 'ϟ' : ''}` || '·';
-        return `<div class="candidate ${candidate.selected ? 'selected' : ''} ${special ? 'special' : ''}" data-candidate-host="${candidate.host}">
-          <div class="candidate-top"><span class="rank">${candidate.rank}</span><span class="host">${candidate.host}:${candidate.port || 8001}</span><span class="symbols">${symbols}</span></div>
+        return `<div class="candidate ${candidate.selected ? 'selected' : ''} ${special ? 'special' : ''}" data-candidate-host="${escaped(candidate.host)}">
+          <div class="candidate-top"><span class="rank">${number(candidate.rank)}</span><span class="host">${escaped(candidate.host)}:${escaped(candidate.port || 8001)}</span><span class="symbols">${symbols}</span></div>
           <div class="candidate-bar"><span style="width:${Math.max(3, (candidate.estimatedTtft || 0) / maxTtft * 100)}%"></span></div>
           <div class="candidate-numbers"><span>路由前排队工作<b>${tokenWork(candidate.queueWork)}</b></span><span>本请求未命中 Token<b>${tokenWork(candidate.uncache)}</b></span><span>预测首 Token 前工作量<b>${tokenWork(candidate.estimatedTtft)}</b></span></div>
           <div class="candidate-numbers" style="margin-top:4px"><span>预测命中率<b>${pct(candidate.hitRate)}</b></span><span>已有未命中积压<b>${tokenWork(candidate.outstanding)}</b></span><span>引擎等待 / 执行中剩余<b>${tokenWork(candidate.engineWaiting)} / ${tokenWork(candidate.engineRunningRemaining)}</b></span></div>
         </div>`;
       }).join('');
-      $('#decision-microscope').innerHTML = `<div class="muted">${timeText(request.route)} · ${shortId(request.requestId || request.id)} · 共记录 ${candidates.length} 个候选；★ 缓存命中最多 · ϟ 预估首 Token 工作量最小 · ✓ 最终选中</div>${text}`;
+      $('#decision-microscope').innerHTML = `<div class="muted">${timeText(request.route)} · ${escaped(shortId(request.requestId || request.id))} · 共记录 ${candidates.length} 个候选；★ 缓存命中最多 · ϟ 预估首 Token 工作量最小 · ✓ 最终选中</div>${text}`;
     }
 
     function chipsForHost(host) {
@@ -560,7 +560,7 @@ ${escaped(candidate.rejections)}</pre></details>
           const remainingPercent = original > 0 ? Math.max(0, Math.min(100, remaining / original * 100)) : 0;
           const step = runningStep(request, state.time, phase);
           const elapsed = runningElapsed(request);
-          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
+          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${escaped(request.id)}" aria-label="${escaped(request.requestId || request.id)}">
             <div class="gauge-space"><div class="gauge-shell running-gauge" style="height:${originHeight}px" title="初始未命中 Token：${tokenWork(original)}；当前剩余：${tokenWork(remaining)}"><div class="gauge-fill" style="height:${remainingPercent}%"></div></div></div>
             <div class="bar-caption"><b>剩余 ${tokenWork(remaining)}</b><span>初始 ${tokenWork(original)}</span><span>${step ? `第 ${step.current}/${step.total} 步` : '步数 —'}</span><span>已执行 ${duration(elapsed)}</span></div>
           </div>`;
@@ -571,13 +571,13 @@ ${escaped(candidate.rejections)}</pre></details>
           const actualRate = request.actualHitRate ?? 0;
           const colorRate = state.cacheMode === 'actual' ? actualRate : predictedRate;
           const height = requestBarHeight(remaining, 16, 64);
-          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
+          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${escaped(request.id)}" aria-label="${escaped(request.requestId || request.id)}">
             <div class="gauge-space"><div class="gauge-shell waiting-gauge" style="height:${height}px"><div class="gauge-fill" style="height:100%;background:${hitColor(colorRate)}"></div></div></div>
             <div class="bar-caption"><b>待执行 ${tokenWork(remaining)}</b><span>预测命中 ${pct(predictedRate)}</span><span>实际命中 ${pct(actualRate)}</span><span>已等待 ${duration(waitingElapsed(request))}</span></div>
           </div>`;
         }).join('') : '<div class="lane-empty">无等待执行请求</div>';
-        return `<article class="host-card ${candidate ? 'decision-sampled' : ''} ${focused ? 'focus' : ''}" data-host="${host}">
-          <div class="host-card-header"><span class="host-name">${host}</span><span class="host-count">${chips.length} 个活跃请求</span><span class="host-work" title="待执行 Token">待执行 ${tokenWork(sum)}</span><div class="host-work-breakdown" title="执行中剩余 / 尚未开始执行"><span>执行中 ${tokenWork(runningWork)}</span><span>未开始 ${tokenWork(waitingWork)}</span></div></div>
+        return `<article class="host-card ${candidate ? 'decision-sampled' : ''} ${focused ? 'focus' : ''}" data-host="${escaped(host)}">
+          <div class="host-card-header"><span class="host-name">${escaped(host)}</span><span class="host-count">${chips.length} 个活跃请求</span><span class="host-work" title="待执行 Token">待执行 ${tokenWork(sum)}</span><div class="host-work-breakdown" title="执行中剩余 / 尚未开始执行"><span>执行中 ${tokenWork(runningWork)}</span><span>未开始 ${tokenWork(waitingWork)}</span></div></div>
           <div class="work-lanes">
             <section class="work-lane running-lane"><div class="lane-header"><span class="lane-title">执行中</span><span class="lane-count">${runningChips.length} 个请求</span><span class="lane-work">剩余 ${tokenWork(runningWork)}</span></div><div class="lane-bucket"><div class="lane-bars">${runningHtml}</div></div></section>
             <section class="work-lane waiting-lane"><div class="lane-header"><span class="lane-title">等待执行</span><span class="lane-count">${waitingChips.length} 个请求</span><span class="lane-work">待执行 ${tokenWork(waitingWork)} <span class="lane-note">· 柱色表示实际命中率</span></span></div><div class="lane-bucket"><div class="lane-bars">${waitingHtml}</div></div></section>
@@ -688,7 +688,7 @@ ${escaped(candidate.rejections)}</pre></details>
     function hideTooltip() { tooltip.classList.remove('visible'); }
 
     $('#subtitle').textContent = `${REPLAY.meta.source} · ${number(REPLAY.meta.requestCount)} 个请求 · ${number(REPLAY.meta.hostCount)} 个 Prefill 主机`;
-    hostFilter.innerHTML = `<option value="all">全部主机</option>${hosts.map((host) => `<option value="${host}">${host}</option>`).join('')}`;
+    hostFilter.innerHTML = `<option value="all">全部主机</option>${hosts.map((host) => `<option value="${escaped(host)}">${escaped(host)}</option>`).join('')}`;
     speedSelect.value = String(state.speed);
     $('#time-range').min = REPLAY.meta.start; $('#time-range').max = REPLAY.meta.end; $('#time-range').step = 10; $('#time-range').value = state.time;
     $('#play').addEventListener('click', togglePlay);

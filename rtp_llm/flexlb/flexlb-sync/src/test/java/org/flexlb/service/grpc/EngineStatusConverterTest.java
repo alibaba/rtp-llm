@@ -7,12 +7,34 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
+
+    @Test
+    void waitingTasksAreSeparateFromRunningTasksInTheResponseDto() {
+        var status = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId("running").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId("received").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId("allocated").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId("legacy-waiting").setIsWaiting(true))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId("legacy-running"))
+                .build();
+
+        var response = EngineStatusConverter.convertToWorkerStatusResponse(status);
+
+        assertEquals(Set.of("running", "legacy-running"), response.getRunningTaskInfo().keySet());
+        assertEquals(Set.of("received", "allocated", "legacy-waiting"), response.getWaitingTaskInfo().keySet());
+    }
 
     @Test
     void distinctWireStringIdsSurviveRunningAndFinishedTaskConversion() throws Exception {

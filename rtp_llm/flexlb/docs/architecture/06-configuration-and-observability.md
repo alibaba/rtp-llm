@@ -176,7 +176,7 @@ UniConfig / Nacos 的 v1 部分更新示例：
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
   指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
-  等待队列最多容纳 256 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
+  等待队列最多容纳 100,000 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
   `recentKeyWindow.maxKeyOccurrences` 默认 `1000000`，限制保留的唯一 key 数量；
   `durationMs` 默认 `1800000`。实际容量取配置上限与 `10 × Prefill 数量 × (单台总 KV Token / blockSize)`
   的较小值。Prefill 的最大 KV Cache 和 blockSize 相同，只读取第一台的容量；该台上报容量后，

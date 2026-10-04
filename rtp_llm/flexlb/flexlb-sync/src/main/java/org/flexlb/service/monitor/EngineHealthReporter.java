@@ -303,12 +303,6 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportStatusCheckRemoteInfo(String role, Long startTime) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "role", role);
-        monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
-    }
-
     public void reportStatusCheckRemoteInfo(
             String engineIp, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
@@ -316,13 +310,6 @@ public class EngineHealthReporter {
                 "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags,
                 (double) System.nanoTime() / 1000 - startTime);
-    }
-
-    public void reportCacheStatusCheckRemoteInfo(String role, Long startTime) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "role", role);
-        monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
-        monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
     public void reportCacheStatusCheckRemoteInfo(

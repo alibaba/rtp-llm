@@ -17,7 +17,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -538,23 +537,24 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         String engineIp = getStatus().getMetricIpPort();
+        String role = getStatus().getRole().name();
         int queueSize = runtime.queueSize();
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), engineIp, queueSize);
+        reporter.reportBatcherQueueSize(role, engineIp, queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
                 runtime.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(role, engineIp, 0, 0);
         } else {
             sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, priority, size));
+                    reporter.reportBatcherQueueDepthByPriority(role, engineIp, priority, size));
         }
         PrefillState.Stats stats = prefillState.stats();
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engineIp, stats.batchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engineIp, stats.inflightRequests());
+        reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
+        reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
         reporter.reportInflightMaxAgeMs(
-                RoleType.PREFILL.name(),
+                role,
                 engineIp,
                 stats.maxObservedAgeMs());
     }

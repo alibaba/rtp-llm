@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -75,7 +76,7 @@ class RequestRegistryTest {
 
     @Test
     void distinctStringIdsKeepTheirOriginalLifecycleIdentity() throws Exception {
-        Map<String, CompletableFuture<Response>> responses = new java.util.HashMap<>();
+        Map<String, CompletableFuture<Response>> responses = new HashMap<>();
         for (String requestId : List.of("00123", "123", "req-abc", "9223372036854775808")) {
             BalanceContext context = RequestLifecycleTestSupport.context(config, requestId);
             CompletableFuture<Response> future = lifecycle.register(context);

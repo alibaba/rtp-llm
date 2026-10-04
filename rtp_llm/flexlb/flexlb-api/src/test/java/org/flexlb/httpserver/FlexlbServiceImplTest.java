@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 
@@ -68,6 +69,28 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t"})
+    void stateAndCancelRejectMissingIdsWithoutRoutingOrForwarding(String requestId) {
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> stateObserver = mock(StreamObserver.class);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> cancelObserver = mock(StreamObserver.class);
+
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(requestId).build(), stateObserver);
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId(requestId).build(), cancelObserver);
+
+        ArgumentCaptor<Throwable> stateError = ArgumentCaptor.forClass(Throwable.class);
+        ArgumentCaptor<Throwable> cancelError = ArgumentCaptor.forClass(Throwable.class);
+        verify(stateObserver).onError(stateError.capture());
+        verify(cancelObserver).onError(cancelError.capture());
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(stateError.getValue()).getCode());
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(cancelError.getValue()).getCode());
+        verify(stateObserver, never()).onNext(any());
+        verify(cancelObserver, never()).onNext(any());
+        verifyNoInteractions(routeService, grpcForwarder);
+    }
 
     @Test
     void returnsExplicitErrorWhenLocalRouterCompletesWithoutResponse() {
@@ -346,6 +369,7 @@ class FlexlbServiceImplTest {
         routeResult.complete(response);
 
         assertSame(response, observedResponse.get());
+        verify(engineHealthReporter).reportRequestPayload(any());
     }
 
     @Test
@@ -646,6 +670,7 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getSuccess());
         assertTrue(resp.getEnqueuedByMaster());
         assertTrue(pvAppender.list.isEmpty());
+        verify(engineHealthReporter, never()).reportRequestPayload(any());
     }
 
     @Test

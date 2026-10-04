@@ -91,6 +91,7 @@ public class CostBasedPrefillStrategy {
                         + " rejections={}",
                     requestId,
                     rejections);
+            balanceContext.recordSelectionReason(roleType, "NO_AVAILABLE_CANDIDATES");
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                     -1, "NO_AVAILABLE_CANDIDATES", rejections);
             RoleType poolWideBlocker = provenPoolWideBlocker(

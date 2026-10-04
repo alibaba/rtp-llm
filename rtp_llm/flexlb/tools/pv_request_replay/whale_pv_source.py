@@ -393,6 +393,10 @@ def fetch_pod_window(
         raise ValueError("page_lines must be positive")
     window_start = _as_log_time(start)
     window_end = _as_log_time(end)
+    if window_start > window_end:
+        raise ValueError("window start must not be later than window end")
+    if window_end > _as_log_time(datetime.now().astimezone()):
+        raise ValueError("window end must not be in the future")
     names = _list_log_files(runner, pod, container, log_dir, log_name)
     files: list[dict[str, Any]] = []
     lines: list[str] = []

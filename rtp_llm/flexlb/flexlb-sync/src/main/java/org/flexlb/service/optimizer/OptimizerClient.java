@@ -161,22 +161,27 @@ public class OptimizerClient {
     }
 
     private void reportSkipped(String reason) {
-        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricTags.of("reason", reason), 1.0);
+        reportMetric(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, reason);
         log.warn("Optimizer trace query skipped: reason={}", reason);
     }
 
     private void reportFailed(String reason) {
-        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", reason), 1.0);
+        reportMetric(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, reason);
         log.warn("Optimizer trace query failed: reason={}", reason);
     }
 
     private void reportFailed(String reason, String requestId, URI uri, Throwable error) {
-        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", reason), 1.0);
+        reportMetric(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, reason);
         log.warn("Optimizer trace query failed: reason={}, requestId={}, uri={}",
                 reason, requestId, uri, error);
+    }
+
+    private void reportMetric(String metric, String reason) {
+        try {
+            monitor.report(metric, FlexMetricTags.of("reason", reason), 1.0);
+        } catch (RuntimeException error) {
+            log.warn("Optimizer metric report failed: metric={}, reason={}", metric, reason, error);
+        }
     }
 
     private String resolveInstanceId(Request request, ServerStatus selectedWorker) {
