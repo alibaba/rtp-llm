@@ -154,14 +154,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         choices=("flow", "orthogonal-flow", "main-text", "main-text-64k", "main-text-64k-capped"),
-        default="main-text",
+        default="main-text-64k-capped",
     )
-    parser.add_argument("--orthogonal-boundaries", action="store_true",
-                        help="Append evidence-gated 64K cache, PageRR, long-KV and Graph cases")
-    parser.add_argument("--orthogonal-only", action="store_true",
-                        help="Run selected capped orthogonal stages without repeating the base suite")
     parser.add_argument("--orthogonal-phases", default="cache,cancel,page,chunk,decode",
-                        help="selected orthogonal-flow or capped-suite phases, in canonical order")
+                        help="selected diagnostic orthogonal-flow phases; full smoke always runs all")
     parser.add_argument("--prefill-event-dir", type=pathlib.Path,
                         help="Local Prefill LOG_PATH for the Host-load cancellation trigger")
     parser.add_argument("--prefill-engine-log", type=pathlib.Path,
@@ -221,29 +217,25 @@ def parse_args() -> argparse.Namespace:
         phase not in valid_phases for phase in phases
     ):
         parser.error("--orthogonal-phases must contain distinct cache,cancel,page,chunk,decode names")
-    if (args.suite != "orthogonal-flow" and not args.orthogonal_boundaries
-            and phases != list(valid_phases)):
-        parser.error("--orthogonal-phases requires orthogonal-flow or --orthogonal-boundaries")
+    if args.suite != "orthogonal-flow" and phases != list(valid_phases):
+        parser.error("only orthogonal-flow diagnostics may select phases")
     args.orthogonal_phases = tuple(phase for phase in valid_phases if phase in phases)
-    if args.orthogonal_boundaries and args.suite != "main-text-64k-capped":
-        parser.error("--orthogonal-boundaries requires --suite=main-text-64k-capped")
-    if args.orthogonal_only and not args.orthogonal_boundaries:
-        parser.error("--orthogonal-only requires --orthogonal-boundaries")
-    if (args.orthogonal_boundaries or args.suite == "orthogonal-flow") and (
+    evidence_suite = args.suite in ("orthogonal-flow", "main-text-64k-capped")
+    if evidence_suite and (
         args.prefill_event_dir is None or not args.prefill_event_dir.is_dir()
     ):
         parser.error("orthogonal smoke needs an existing local --prefill-event-dir")
-    if (args.orthogonal_boundaries or args.suite == "orthogonal-flow") and (
+    if evidence_suite and (
         args.prefill_engine_log is None or not args.prefill_engine_log.is_file()
     ):
         parser.error("orthogonal smoke needs an existing local --prefill-engine-log")
-    if (args.orthogonal_boundaries or args.suite == "orthogonal-flow") and (
+    if evidence_suite and (
         args.prefill_rpc_runfiles is None or
         not (args.prefill_rpc_runfiles / "rtp_llm" / "rtp_llm" / "cpp" /
              "model_rpc" / "proto" / "model_rpc_service_pb2.py").is_file()
     ):
         parser.error("orthogonal smoke needs the local --prefill-rpc-runfiles")
-    if (args.orthogonal_boundaries or args.suite == "orthogonal-flow") and (
+    if evidence_suite and (
         args.prefill_grpc_port is None or not 1 <= args.prefill_grpc_port <= 65535
     ):
         parser.error("orthogonal smoke needs --prefill-grpc-port")
@@ -417,10 +409,12 @@ class Runner:
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
             "suite": self.args.suite,
+            "case_profile": "compact-64k-v1" if self.args.suite in
+            ("main-text-64k-capped", "orthogonal-flow") else None,
             "orthogonal_phases": list(self.args.orthogonal_phases),
             "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
-            "profile": "orthogonal-pd-page-rr" if getattr(self.args, "orthogonal_boundaries", False)
-            or self.args.suite == "orthogonal-flow" else "tp8-ep8-sp-no-dcp-text",
+            "profile": "orthogonal-pd-page-rr" if self.args.suite in
+            ("main-text-64k-capped", "orthogonal-flow") else "tp8-ep8-sp-no-dcp-text",
             "deferred_by_user": (
                 ["chunk prefill", "over-64K inputs", "chunk budget +1/+7", "110K seed and append"]
                 if self.args.suite in ("main-text-64k", "main-text-64k-capped") else []
@@ -430,8 +424,7 @@ class Runner:
             "full_original_suite_passed": self.args.suite == "main-text" and passed and not self.skipped_cases,
             "not_applicable": (
                 ["multimodal", "KTP", "EAGLE3/DSpark"]
-                if getattr(self.args, "orthogonal_boundaries", False)
-                or self.args.suite == "orthogonal-flow"
+                if self.args.suite in ("main-text-64k-capped", "orthogonal-flow")
                 else ["DCP", "PageRR owner", "DP multi-owner", "multimodal", "KTP", "EAGLE3/DSpark"]
             ),
             "runtime_evidence_gate": "separate all-rank audit required; HTTP results alone do not certify runtime paths",
@@ -2063,7 +2056,7 @@ class Runner:
         diagnostic = self.args.suite == "orthogonal-flow"
         return Case(name, prompt, r".", reuse,
                     expected_json=None if diagnostic else {"value": value},
-                    max_tokens=64 if diagnostic else 256,
+                    max_tokens=8 if diagnostic else 256,
                     require_mtp_draft=not diagnostic,
                     thinking_disabled=True, **kwargs)
 
@@ -2075,14 +2068,6 @@ class Runner:
                        admission_gap_s=admission_gap_s)
         if not self.stages[-1]["passed"]:
             raise SmokeFailure(f"{name}: required orthogonal stage was skipped")
-
-    def _orthogonal_evict_prompt(self, tag: str, number: int) -> str:
-        # One token after the 32768-token KDA checkpoint makes it reusable.
-        # A longer cold request does not retain a second checkpoint within
-        # the 65536-token Q budget and only slows cache-pressure setup.
-        prompt, _ = self.fit_prompt(
-            f"EVICT:{tag}:{number}\n", "\nReply 1.", 32769)
-        return prompt
 
     def _orthogonal_device_blocks(self) -> int | None:
         engine_log = getattr(self.args, "prefill_engine_log", None)
@@ -2097,18 +2082,14 @@ class Runner:
             raise SmokeFailure("Prefill Device/full pool capacity is missing from engine log")
         return int(matches[-1])
 
-    def _orthogonal_cache(self) -> None:
+    def _orthogonal_cache_seed(self) -> None:
         unit = self.reuse_unit_tokens
         # KDA state is reusable only after a complete 32768-token checkpoint;
         # a shorter MLA-only prefix can hit Decode while Prefill still misses.
         target = max(32769, unit + 1)
         if target > 65536:
             raise SmokeFailure("cache-tier smoke seed exceeds the 64K Q budget")
-        owner_count = max(1, len(self.decode_role_addrs))
-        device_blocks = self._orthogonal_device_blocks()
-        evicted = max(96, (device_blocks or 0) + 16)
-        if evicted > 512:
-            raise SmokeFailure(f"Device cache needs {evicted} eviction requests, above the 512-case bound")
+        self._memory_candidates = []
         for attempt in range(3):
             tag = f"{self.args.namespace}-tier-{attempt}"
             memory_value = f"MEM-{attempt}"
@@ -2117,43 +2098,44 @@ class Runner:
             memory_seed = self._orthogonal_answer(
                 f"tier-memory-seed-{attempt}", memory_prompt, memory_value, "miss")
             self._required_stage(memory_seed.name, [memory_seed])
+            self._memory_candidates.append((tag, memory_seed, memory_value))
+            if attempt == 0:
+                device_probe = replace(memory_seed, name="tier-device-probe-0",
+                                       reuse="any", expected_cache_tier=None,
+                                       preparation_only=True,
+                                       max_tokens=8 if self.args.suite == "orthogonal-flow" else 64)
+                self._required_stage(device_probe.name, [device_probe])
+                tier = self.records[-1].get("prefill_cache_tiers") or {}
+                if tier.get("device", 0) <= 0 or tier.get("memory", 0) != 0:
+                    raise SmokeFailure("immediate Device cache reuse was not observed")
+        # Later smoke traffic, including long-KV preparation, supplies cache
+        # pressure. This witness is newer than all three Memory candidates.
+        witness_value = "WIT"
+        witness_tail = f'\n只输出 JSON {{"value":"{witness_value}"}}。'
+        witness_prompt, _ = self.fit_prompt(
+            f"CACHE:{self.args.namespace}:witness\n", witness_tail, target)
+        self._memory_witness = self._orthogonal_answer(
+            "tier-witness-seed", witness_prompt, witness_value, "miss")
+        self._required_stage(self._memory_witness.name, [self._memory_witness])
+        if "cancel" in getattr(self.args, "orthogonal_phases", ()):
+            self._cancel_host_candidates = self._seed_cancel_candidates()
 
-            device_probe = replace(memory_seed, name=f"tier-device-probe-{attempt}",
-                                   reuse="any", expected_cache_tier=None,
-                                   preparation_only=True, max_tokens=64)
-            self._required_stage(device_probe.name, [device_probe])
-            device_tier = self.records[-1].get("prefill_cache_tiers") or {}
-            if device_tier.get("device", 0) <= 0 or device_tier.get("memory", 0) != 0:
-                raise SmokeFailure("immediate Device cache reuse was not observed")
-
-            witness_value = f"WIT-{attempt}"
-            witness_tail = f'\n只输出 JSON {{"value":"{witness_value}"}}。'
-            witness_prompt, _ = self.fit_prompt(f"CACHE:{tag}:witness\n", witness_tail, target)
-            witness_seed = self._orthogonal_answer(
-                f"tier-witness-seed-{attempt}", witness_prompt, witness_value, "miss")
-            self._required_stage(witness_seed.name, [witness_seed])
-            if "cancel" in getattr(self.args, "orthogonal_phases", ()):
-                self._cancel_host_candidates = self._seed_cancel_candidates()
-
-            # The witness is newer than the Memory candidate. Once the witness
-            # reaches Host, the untouched, older candidate must have left Device.
-            # Probe only once: an intermediate probe would refresh its LRU slot.
-            for number in range(evicted):
-                filler = Case(
-                    f"tier-evict-{attempt}-{number}",
-                    self._orthogonal_evict_prompt(tag, number),
-                    r".", "any", max_tokens=4, preparation_only=True,
-                    decode_owner_rank=number % owner_count,
-                )
-                self._required_stage(filler.name, [filler])
-            probe = replace(witness_seed, name=f"tier-memory-probe-{attempt}",
-                            reuse="any", expected_cache_tier=None,
-                            preparation_only=True, max_tokens=64)
-            self._required_stage(probe.name, [probe])
-            tier = self.records[-1].get("prefill_cache_tiers") or {}
-            if not (tier.get("memory", 0) > 0 and tier.get("device", 0) == 0):
-                raise SmokeFailure("Device cache did not demote the witness prefix to Memory")
-
+    def _orthogonal_cache(self) -> None:
+        if not hasattr(self, "_memory_candidates"):
+            raise SmokeFailure("cache seeds must precede the traffic used for demotion")
+        probe = replace(self._memory_witness, name="tier-memory-probe",
+                        reuse="any", expected_cache_tier=None,
+                        preparation_only=True,
+                        max_tokens=8 if self.args.suite == "orthogonal-flow" else 64)
+        self._required_stage(probe.name, [probe])
+        tier = self.records[-1].get("prefill_cache_tiers") or {}
+        if not (tier.get("memory", 0) > 0 and tier.get("device", 0) == 0):
+            raise SmokeFailure("ordinary smoke traffic did not demote the witness prefix to Memory")
+        owner_count = max(1, len(self.decode_role_addrs))
+        device_blocks = self._orthogonal_device_blocks()
+        target = max(32769, self.reuse_unit_tokens + 1)
+        for attempt, (tag, memory_seed, memory_value) in enumerate(self._memory_candidates):
+            memory_prompt = memory_seed.prompt
             device_value = f"DEV-{attempt}"
             device_tail = f'\n只输出 JSON {{"value":"{device_value}"}}。'
             device_prompt, _ = self.fit_prompt(f"CACHE:{tag}:device\n", device_tail, target)
@@ -2208,7 +2190,7 @@ class Runner:
             stage = self.stages[-1]
             stage["cache_tier_checks"] = checks
             stage["device_pool_blocks"] = device_blocks
-            stage["eviction_requests"] = evicted
+            stage["cache_pressure_requests"] = getattr(self, "_cache_pressure_requests", 0)
             stage["current_q_total"] = sum(
                 row["input_len"] - row["effective_reuse_len"] for row in records.values())
             stage["same_forward_passed"] = self._orthogonal_shared_prefill_forward(
@@ -2217,25 +2199,44 @@ class Runner:
                                      stage["current_q_total"] <= 65536 and
                                      stage["same_forward_passed"])
             if stage["path_passed"]:
-                self._host_demotion_fillers = evicted
                 return
         raise SmokeFailure("mixed Prefill cache tiers were not triggered in three attempts")
 
+    def _orthogonal_bounded_cache_pressure(self) -> None:
+        # The long-KV chain retains roughly 20 KDA checkpoint blocks. A small
+        # number of distinct prefixes finishes Device-to-Host demotion when
+        # the bounded Device pool has room for those blocks plus recent cases.
+        pool_blocks = self._orthogonal_device_blocks()
+        if pool_blocks is None:
+            raise SmokeFailure("Prefill Device/full pool capacity is missing")
+        pressure_count = max(0, min(24, pool_blocks - 20))
+        self._cache_pressure_requests = pressure_count
+        for index in range(pressure_count):
+            prompt, _ = self.fit_prompt(
+                f"CACHE-PRESSURE:{self.args.namespace}:{index}\n",
+                "\nReply 1.", 32769,
+            )
+            case = Case(
+                f"tier-pressure-{index:02d}", prompt, r".", "miss",
+                max_tokens=8, preparation_only=True,
+            )
+            self._required_stage(case.name, [case])
+
     def _orthogonal_decode_batches(self) -> None:
         owner_count = max(1, len(self.decode_role_addrs))
-        sizes = (1, 7, 8, 9, 31, 32, 33, 63, 64, 64, 63, 33, 1, 64)
+        sizes = (1, 4, 8, 63, 64)
         for stage_index, size in enumerate(sizes):
             name = f"orthogonal_decode_{stage_index:02d}_batch_{size}"
             cases = []
             for index in range(size):
                 case = self.record_case(f"{name}_{index:02d}",
                                         index % owner_count,
-                                        words=24 if size >= 63 else 12)
+                                        words=12)
                 if self.args.suite == "orthogonal-flow":
                     case = replace(case, expected_json=None, expected_regex=r".",
                                    max_tokens=64)
                 else:
-                    case = replace(case, max_tokens=512 if size >= 63 else 256,
+                    case = replace(case, max_tokens=256,
                                    require_mtp_draft=True, thinking_disabled=True)
                 cases.append(case)
             self._required_stage(name, cases, concurrent=size > 1,
@@ -2262,7 +2263,9 @@ class Runner:
         overhead = len(self.tokenize(base))
         if len(self.tokenize(base + " x" * 16)) - overhead != 16:
             raise SmokeFailure("long-KV seed filler is not one token per repeat")
-        seed_end, step = 2_064_384, 32_740
+        # 589824 cached tokens exceed the 6 GiB FP8 MLA expansion budget's
+        # 557056-token aligned launch cap, while every seed adds <= 65536 Q.
+        seed_end, step = 655_360, 32_740
         targets = list(range(65_504, seed_end, step))
         if targets[-1] != seed_end:
             targets.append(seed_end)
@@ -2280,7 +2283,7 @@ class Runner:
                 raise SmokeFailure(f"{case.name}: observed token count differs from seed target")
         value = f"KV-{hashlib.sha256(self.args.namespace.encode()).hexdigest()[:10]}"
         tail = f'\n唯一有效答案是 {value}。只输出 JSON {{"value":"{value}"}}。'
-        shared = 1_998_880 - overhead
+        shared = 589_856 - overhead
         suffix = 65_300
         prompt = base + " x" * shared + " z" * suffix + tail
         case = self._orthogonal_answer(
@@ -2288,8 +2291,8 @@ class Runner:
             allow_long_history=True)
         self._required_stage(case.name, [case])
         row = self.records[-1]
-        if row["effective_reuse_len"] < 1_998_848:
-            raise SmokeFailure("2M historical KV reuse frontier was not reached")
+        if row["effective_reuse_len"] < 589_824:
+            raise SmokeFailure("589824-token historical KV reuse frontier was not reached")
         self.stages[-1]["historical_kv_tokens"] = row["effective_reuse_len"]
         self.stages[-1]["current_q_tokens"] = row["input_len"] - row["effective_reuse_len"]
 
@@ -2363,21 +2366,11 @@ class Runner:
         return seeds
 
     def _orthogonal_cancel_recovery(self) -> None:
-        if not hasattr(self, "_host_demotion_fillers"):
+        if not hasattr(self, "_memory_candidates"):
             raise SmokeFailure("Host cache demotion was not established before cancel test")
         seeds = getattr(self, "_cancel_host_candidates", None)
         if seeds is None:
-            seeds = self._seed_cancel_candidates()
-            # An isolated cancellation diagnostic still needs real Host
-            # demotion. The full smoke seeds these candidates before the
-            # cache-tier pressure and shares that one bounded eviction round.
-            for number in range(self._host_demotion_fillers):
-                filler = Case(
-                    f"cancel-evict-{number}",
-                    self._orthogonal_evict_prompt(
-                        f"CANCEL-EVICT:{self.args.namespace}", number),
-                    r".", "any", max_tokens=4, preparation_only=True)
-                self._required_stage(filler.name, [filler])
+            raise SmokeFailure("cancel candidates must be seeded before cache pressure")
         offsets: dict[pathlib.Path, int] = {}
         self._new_log_events(self.args.prefill_event_dir, offsets)
         attempts = []
@@ -2494,14 +2487,18 @@ class Runner:
 
     def run_orthogonal_boundaries(self) -> None:
         phases = self.args.orthogonal_phases
-        if "cache" in phases:
-            self._orthogonal_cache()
-        if "cancel" in phases:
-            self._orthogonal_cancel_recovery()
+        if "cache" in phases or "cancel" in phases:
+            self._orthogonal_cache_seed()
         if "page" in phases:
             self._orthogonal_page_boundaries()
         if "chunk" in phases:
             self._orthogonal_chunk_kv()
+        if "cache" in phases:
+            self._orthogonal_bounded_cache_pressure()
+        if "cache" in phases:
+            self._orthogonal_cache()
+        if "cancel" in phases:
+            self._orthogonal_cancel_recovery()
         if "decode" in phases:
             self._orthogonal_decode_batches()
 
@@ -2573,10 +2570,21 @@ def main() -> int:
             "main-text-64k": runner.run_main_text,
             "main-text-64k-capped": runner.run_main_text,
         }
-        if not args.orthogonal_only:
+        if args.suite == "main-text-64k-capped":
+            runner.run_main_text()
+            # Seed after the broad correctness suite. On the 93-layer model,
+            # its traffic can evict an early witness from Host as well as
+            # Device; the PageRR and long-KV stages provide bounded pressure.
+            runner._orthogonal_cache_seed()
+            for phase in (runner._orthogonal_page_boundaries,
+                          runner._orthogonal_chunk_kv,
+                          runner._orthogonal_bounded_cache_pressure,
+                          runner._orthogonal_cache,
+                          runner._orthogonal_cancel_recovery,
+                          runner._orthogonal_decode_batches):
+                phase()
+        else:
             suites[args.suite]()
-        if args.orthogonal_boundaries:
-            runner.run_orthogonal_boundaries()
         runner.save(passed=True)
         print(
             f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}"

@@ -1,16 +1,20 @@
-"""Offline failure gates for the optional K3 orthogonal smoke."""
+"""Offline failure gates for the complete K3 PD smoke."""
 
 import pathlib
 import json
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
+import sys
+import contextlib
+import io
 
 from example.k3.main_migration.audit_orthogonal_smoke import (
     answer_from_question, audit, audit_raw_answers, cancel_host_load_evidence, frontend_ids,
     independent_answer_check, read_events,
 )
-from example.k3.main_migration.text_smoke import Runner, SmokeFailure
+from example.k3.main_migration.text_smoke import Runner, SmokeFailure, parse_args
 
 
 def runner():
@@ -24,6 +28,39 @@ def runner():
 
 
 class OrthogonalSmokeOfflineTest(unittest.TestCase):
+    def test_default_full_smoke_cannot_omit_an_orthogonal_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "config.json").write_text('{"num_hidden_layers":93}')
+            events = root / "events"
+            events.mkdir()
+            engine = root / "engine.log"
+            engine.touch()
+            proto = (root / "runfiles/rtp_llm/rtp_llm/cpp/model_rpc/proto/"
+                     "model_rpc_service_pb2.py")
+            proto.parent.mkdir(parents=True)
+            proto.touch()
+            argv = ["text_smoke.py", "--base-url", "http://127.0.0.1:1",
+                    "--decode-health-url", "http://127.0.0.1:2/health",
+                    "--decode-role-addr", "127.0.0.1:2:3", "--output",
+                    str(root / "result.json"), "--namespace", "test",
+                    "--block-size", "4096", "--require-mtp",
+                    "--long-prefix-checkpoint", str(checkpoint),
+                    "--prefill-event-dir", str(events), "--prefill-engine-log",
+                    str(engine), "--prefill-rpc-runfiles", str(root / "runfiles"),
+                    "--prefill-grpc-port", "4"]
+            with patch.object(sys, "argv", argv):
+                args = parse_args()
+            self.assertEqual(args.suite, "main-text-64k-capped")
+            self.assertEqual(args.orthogonal_phases,
+                             ("cache", "cancel", "page", "chunk", "decode"))
+            with patch.object(sys, "argv", argv + ["--orthogonal-phases", "cache"]):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args()
+
     def test_cancel_requires_server_ack_inside_host_load_window(self):
         started = {"event": "host_cache_load_started", "request_id": 7,
                    "time_ns": 100}
@@ -119,10 +156,10 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         smoke._required_stage = lambda *args, **kwargs: (_ for _ in ()).throw(
             SmokeFailure("stop after seed"))
         with self.assertRaisesRegex(SmokeFailure, "stop after seed"):
-            smoke._orthogonal_cache()
+            smoke._orthogonal_cache_seed()
         self.assertEqual(targets, [32769])
 
-    def test_cache_pressure_filler_stays_within_64k_q(self):
+    def test_cache_seed_stays_within_64k_q(self):
         smoke = runner()
         targets = []
 
@@ -131,35 +168,35 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             return head + tail, [0] * target
 
         smoke.fit_prompt = fit_prompt
-        self.assertIn("EVICT:test:0", smoke._orthogonal_evict_prompt("test", 0))
+        smoke._required_stage = lambda *args, **kwargs: (_ for _ in ()).throw(
+            SmokeFailure("stop after seed"))
+        with self.assertRaisesRegex(SmokeFailure, "stop after seed"):
+            smoke._orthogonal_cache_seed()
         self.assertEqual(targets, [32769])
 
-    def test_cache_probe_does_not_keep_seed_hot_during_eviction(self):
+    def test_cache_probe_rejects_missing_host_hit_without_extra_pressure(self):
         smoke = runner()
         smoke.fit_prompt = lambda head, tail, target: (head + tail, [0] * target)
-        smoke._orthogonal_device_blocks = lambda: 266
         names = []
 
         def stage(name, cases, concurrent=False):
             names.append(name)
             if name.startswith("tier-device-probe-"):
-                self.assertEqual(cases[0].max_tokens, 64)
+                self.assertEqual(cases[0].max_tokens, 8)
                 smoke.records.append({"prefill_cache_tiers": {
                     "device": 32768, "memory": 0}})
-            if name.startswith("tier-evict-"):
-                self.assertEqual(cases[0].max_tokens, 4)
-            if name.startswith("tier-memory-probe-"):
-                self.assertEqual(cases[0].max_tokens, 64)
-                raise SmokeFailure("stop at first probe")
+            if name == "tier-memory-probe":
+                self.assertEqual(cases[0].max_tokens, 8)
+                smoke.records.append({"prefill_cache_tiers": {
+                    "device": 32768, "memory": 0}})
 
         smoke._required_stage = stage
-        with self.assertRaisesRegex(SmokeFailure, "stop at first probe"):
+        smoke._orthogonal_cache_seed()
+        with self.assertRaisesRegex(SmokeFailure, "did not demote"):
             smoke._orthogonal_cache()
-        self.assertEqual(names[:3], ["tier-memory-seed-0", "tier-device-probe-0",
-                                     "tier-witness-seed-0"])
-        self.assertEqual(sum(name.startswith("tier-evict-0-") for name in names), 282)
-        self.assertFalse(any(name.startswith("tier-redemote-") for name in names))
-        self.assertEqual(names[-1], "tier-memory-probe-0")
+        self.assertEqual(names[:2], ["tier-memory-seed-0", "tier-device-probe-0"])
+        self.assertFalse(any("evict" in name for name in names))
+        self.assertEqual(names[-1], "tier-memory-probe")
 
     def test_long_history_seed_never_exceeds_uncached_64k_budget(self):
         smoke = runner()
@@ -179,14 +216,14 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             length = len(smoke.tokenize(case.prompt))
             reuse = 0 if len(calls) == 1 else ((length - 32740) // 32768) * 32768
             if name == "orthogonal_kv_final":
-                reuse = 1_998_848
+                reuse = 589_824
             smoke.records.append({"input_len": length, "effective_reuse_len": reuse})
             smoke.stages.append({"name": name})
 
         smoke._required_stage = stage
         smoke._orthogonal_chunk_kv()
         seeds = [case for case in calls if case.preparation_only]
-        self.assertGreaterEqual(len(seeds), 60)
+        self.assertLessEqual(len(seeds), 20)
         self.assertTrue(all(case.max_tokens == 4 for case in seeds))
         self.assertTrue(all(case.allow_long_history for case in calls))
         self.assertTrue(all(
@@ -202,15 +239,15 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         smoke._required_stage = lambda name, cases, **kwargs: groups.append((name, cases, kwargs))
         smoke._orthogonal_decode_batches()
         self.assertEqual([len(cases) for _, cases, _ in groups],
-                         [1, 7, 8, 9, 31, 32, 33, 63, 64, 64, 63, 33, 1, 64])
-        self.assertEqual([sum(case.decode_owner_rank == rank for case in groups[8][1])
+                         [1, 4, 8, 63, 64])
+        self.assertEqual([sum(case.decode_owner_rank == rank for case in groups[4][1])
                           for rank in (0, 1)], [32, 32])
-        self.assertEqual(groups[8][2]["admission_wave_size"], 8)
-        self.assertEqual(groups[8][1][0].max_tokens, 64)  # four-layer diagnostic
+        self.assertEqual(groups[4][2]["admission_wave_size"], 8)
+        self.assertEqual(groups[4][1][0].max_tokens, 64)  # four-layer diagnostic
         smoke.args.suite = "main-text-64k-capped"
         groups.clear()
         smoke._orthogonal_decode_batches()
-        self.assertEqual(groups[8][1][0].max_tokens, 512)
+        self.assertEqual(groups[4][1][0].max_tokens, 256)
 
     def test_answer_audit_rejects_duplicate_json_and_truncation(self):
         row = {"name": "x", "phase": "formal", "pd_sep": True,
@@ -272,13 +309,17 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         self.assertFalse(verdict["passed"])
         self.assertIn("orthogonal smoke has no executed phase", verdict["errors"])
 
-    def test_capped_suite_uses_raw_answer_gate_without_orthogonal_stages(self):
+    def test_capped_suite_requires_orthogonal_paths_and_raw_answers(self):
         empty = {rank: [] for rank in range(8)}
-        result = {"passed": True, "suite": "main-text-64k-capped", "cases": [], "stages": []}
+        result = {"passed": True, "suite": "main-text-64k-capped",
+                  "case_profile": "compact-64k-v1", "cases": [], "stages": []}
         with tempfile.TemporaryDirectory() as tmp:
             verdict = audit(result, empty, empty, decode_dp=1,
                             request_dir=pathlib.Path(tmp))
-            self.assertTrue(verdict["passed"])
+            self.assertFalse(verdict["passed"])
+            self.assertIn("missing runtime stage: chunk_kv_executed", verdict["errors"])
+            self.assertIn("missing runtime stage: orthogonal_decode_01_batch_4",
+                          verdict["errors"])
             result["cases"] = [{"name": "case", "phase": "formal", "pd_sep": True,
                                 "finish_reason": "stop", "content": "6561",
                                 "expected_regex": "6561", "output_len": 2}]

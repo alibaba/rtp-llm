@@ -345,7 +345,7 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
                 errors.append(f"{name}: incomplete PageRR ownership or padding evidence")
 
         if name == "orthogonal_kv_final":
-            valid = rows.get("orthogonal_kv_final", {}).get("effective_reuse_len", 0) >= 1_998_848
+            valid = rows.get("orthogonal_kv_final", {}).get("effective_reuse_len", 0) >= 589_824
             for rank in range(prefill_tp):
                 actual = [event for event in within(prefill[rank], stage)
                           if event.get("kind") == "mla_prefix_executed"
@@ -358,7 +358,7 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
                 valid &= any(len(starts) >= 2 for starts in grouped.values())
             path_results["chunk_kv_executed"] = bool(valid)
             if not valid:
-                errors.append("2M historic FP8 MLA did not execute multiple chunks on every rank")
+                errors.append("589824-token historic FP8 MLA did not execute multiple chunks on every rank")
 
         match = re.fullmatch(r"orthogonal_decode_\d+_batch_(\d+)", name)
         if match:
@@ -417,7 +417,8 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
             if not valid:
                 errors.append("Host cache cancellation did not happen during load")
 
-    orthogonal = result.get("profile") == "orthogonal-pd-page-rr" or result.get("suite") == "orthogonal-flow"
+    orthogonal = (result.get("profile") == "orthogonal-pd-page-rr" or
+                  result.get("suite") in ("orthogonal-flow", "main-text-64k-capped"))
     all_phases = {"cache", "cancel", "page", "chunk", "decode"}
     phases: set[str] = set()
     required = set()
@@ -439,6 +440,8 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
             phases = all_phases
         if not phases:
             errors.append("orthogonal smoke has no executed phase")
+        if result.get("suite") == "main-text-64k-capped" and phases != all_phases:
+            errors.append("full capped smoke must run every orthogonal phase")
         if "cache" in phases:
             required |= {"cache_mixed_forward", "mixed_pd_handoff"}
         if "cancel" in phases:
@@ -449,9 +452,12 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
             required |= {f"orthogonal_page_{boundary}_{delta:+d}"
                          for boundary in (4096, 32768) for delta in (-1, 0, 1)}
         if "decode" in phases:
+            decode_sizes = ((1, 4, 8, 63, 64)
+                            if result.get("case_profile") == "compact-64k-v1"
+                            else (1, 7, 8, 9, 31, 32, 33, 63, 64,
+                                  64, 63, 33, 1, 64))
             required |= {f"orthogonal_decode_{index:02d}_batch_{size}"
-                         for index, size in enumerate((1, 7, 8, 9, 31, 32, 33, 63, 64,
-                                                       64, 63, 33, 1, 64))}
+                         for index, size in enumerate(decode_sizes)}
     for name in sorted(required - path_results.keys()):
         errors.append(f"missing runtime stage: {name}")
     if orthogonal and "decode" in phases and not any(

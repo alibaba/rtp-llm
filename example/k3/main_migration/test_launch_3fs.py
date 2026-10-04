@@ -63,6 +63,36 @@ class CheckpointSourceTest(unittest.TestCase):
                     self.assertEqual(options["--decode_capture_config"],
                                      "1,2,4,8,16,32,64")
 
+    def test_complete_prefill_smoke_bounds_device_cache_for_host_demotion(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target, draft = root / "target", root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            for role in ("PREFILL", "DECODE"):
+                args = SimpleNamespace(
+                    checkpoint=str(target), draft_checkpoint=str(draft),
+                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                    role=role, server="/bin/true", orthogonal_smoke=True,
+                )
+                _, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                if role == "PREFILL":
+                    self.assertEqual(options["--kv_cache_mem_mb"], "4096")
+                else:
+                    self.assertEqual(options["--kv_cache_mem_mb"], "34000")
+            (target / "config.json").write_text(json.dumps({
+                "num_hidden_layers": 4, "attn_res_block_size": 12,
+                "linear_attn_config": {"kda_layers": [1, 2, 3],
+                                       "full_attn_layers": [4]},
+            }))
+            args.role = "PREFILL"
+            args.debug_four_layer = True
+            _, command = launch.launch_config(args)
+            self.assertEqual(dict(zip(command[1::2], command[2::2]))["--kv_cache_mem_mb"],
+                             "256")
+
     def test_rpc_self_address_bypasses_proxy(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp)
