@@ -16,6 +16,22 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_legacy_bf16_decode_reuse_setting_is_unchanged(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target, draft = root / "target", root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            args = SimpleNamespace(
+                checkpoint=str(target), draft_checkpoint=str(draft),
+                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                role="DECODE", server="/bin/true", orthogonal_smoke=False,
+            )
+            _, command = launch.launch_config(args)
+            options = dict(zip(command[1::2], command[2::2]))
+            self.assertEqual(options["--reuse_cache"], "1")
+
     def test_asymmetric_pd_topologies_and_sixteen_card_planning(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp)
@@ -71,12 +87,18 @@ class CheckpointSourceTest(unittest.TestCase):
                     checkpoint=str(target), draft_checkpoint=str(draft),
                     start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
                     role=role, server="/bin/true", orthogonal_smoke=True,
+                    fp8_gemm=True, fp8_kv_cache=True,
                     memory_cache_size_mb=8192, kv_cache_mem_mb=4096,
                 )
                 env, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
                 self.assertEqual(env["KIMI_K3_SMOKE_EVIDENCE"], "1")
                 self.assertEqual(env["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"], "6.0")
+                self.assertEqual(env["QUANTIZATION"], "FP8_PER_BLOCK")
+                self.assertEqual(env["FP8_KV_CACHE"], "1")
+                self.assertEqual(env["SP_TYPE"], "mtp")
+                self.assertEqual(env["SP_ACT_TYPE"], "BF16")
+                self.assertEqual(options["--moe_strategy"], "mega_moe")
                 self.assertEqual(options["--max_seq_len"], "2097152")
                 self.assertEqual(options["--max_batch_tokens_size"], "262144")
                 self.assertEqual(options["--max_batch_tokens_without_cache"], "65536")
@@ -84,6 +106,11 @@ class CheckpointSourceTest(unittest.TestCase):
                 self.assertEqual(options["--kv_cache_mem_mb"], "4096")
                 self.assertEqual(options["--enable_memory_cache"],
                                  "1" if role == "PREFILL" else "0")
+                self.assertEqual(options["--reuse_cache"],
+                                 "1" if role == "PREFILL" else "0")
+                self.assertEqual(options["--enable_cuda_graph"],
+                                 "0" if role == "PREFILL" else "1")
+                self.assertEqual(options["--fp8_kv_cache"], "1")
                 if role == "PREFILL":
                     self.assertEqual(options["--max_context_batch_size"], "64")
                     self.assertEqual(options["--memory_cache_size_mb"], "8192")

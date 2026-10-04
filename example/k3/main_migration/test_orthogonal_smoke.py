@@ -22,13 +22,45 @@ def runner():
         base_url="http://127.0.0.1:1", decode_health_url="http://127.0.0.1:2/health",
         decode_role_addrs=[], namespace="offline-orthogonal", block_size=4096,
         reuse_unit_tokens=32768, chunk_tokens=65536, max_tokens=32,
+        mtp_chunk_max_tokens=32,
         suite="orthogonal-flow",
     )
     return Runner(args)
 
 
 class OrthogonalSmokeOfflineTest(unittest.TestCase):
-    def test_default_full_smoke_cannot_omit_an_orthogonal_phase(self):
+    def test_four_layer_flow_seeds_a_reusable_kda_stripe_with_short_output(self):
+        smoke = runner()
+        smoke.args.require_mtp = True
+        smoke.decode_role_addrs = [{"role": "DECODE"}, {"role": "DECODE"}]
+        smoke.fit_prompt = lambda head, tail, target: (head + tail, [1] * target)
+        stages = []
+        smoke.run_stage = lambda name, cases, concurrent=False: stages.append(
+            (name, cases))
+        smoke.run_flow()
+        seed = stages[0][1][0]
+        self.assertEqual(seed.expected_input_len, 32769)
+        self.assertEqual(seed.max_tokens, 8)
+        self.assertEqual([stages[owner + 1][1][0].decode_owner_rank
+                          for owner in (0, 1)], [0, 1])
+        self.assertTrue(all(case.max_tokens == 8
+                            for _, cases in stages[3:5] for case in cases))
+
+    def test_four_layer_cache_pressure_can_fill_its_device_pool(self):
+        smoke = runner()
+        smoke._orthogonal_device_blocks = lambda: 69
+        smoke.fit_prompt = lambda head, tail, target: (head + tail, [1] * target)
+        stages = []
+        smoke._required_stage = lambda name, cases: stages.append((name, cases))
+        smoke._orthogonal_bounded_cache_pressure()
+        self.assertEqual(len(stages), 49)
+        self.assertTrue(all(cases[0].preparation_only for _, cases in stages))
+        smoke.args.suite = "main-text-64k-capped"
+        stages.clear()
+        smoke._orthogonal_bounded_cache_pressure()
+        self.assertEqual(len(stages), 24)
+
+    def test_checkpoint_selects_only_four_layer_or_full_smoke(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             checkpoint = root / "checkpoint"
@@ -54,13 +86,27 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             with patch.object(sys, "argv", argv):
                 args = parse_args()
             self.assertEqual(args.suite, "main-text-64k-capped")
+            self.assertEqual(args.run_kind, "full-93")
+            self.assertEqual(args.decode_dp_size, 1)
             self.assertTrue(args.require_mtp)
             self.assertEqual(args.orthogonal_phases,
                              ("cache", "cancel", "page", "chunk", "decode"))
-            with patch.object(sys, "argv", argv + ["--orthogonal-phases", "cache"]):
-                with contextlib.redirect_stderr(io.StringIO()):
-                    with self.assertRaises(SystemExit):
-                        parse_args()
+            for option in (["--orthogonal-phases", "cache"],
+                           ["--suite", "flow"], ["--require-mtp"],
+                           ["--decode-dp-size", "1"]):
+                with self.subTest(option=option), patch.object(sys, "argv", argv + option):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            parse_args()
+            (checkpoint / "config.json").write_text('{"num_hidden_layers":4}')
+            with patch.object(sys, "argv", argv):
+                args = parse_args()
+            self.assertEqual(args.run_kind, "four-layer")
+            self.assertEqual(args.suite, "orthogonal-flow")
+            with patch.object(sys, "argv", argv + ["--decode-role-addr",
+                                                  "127.0.0.1:5:6"]):
+                args = parse_args()
+            self.assertEqual(args.decode_dp_size, 2)
 
     def test_cancel_requires_server_ack_inside_host_load_window(self):
         started = {"event": "host_cache_load_started", "request_id": 7,
@@ -249,6 +295,69 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         groups.clear()
         smoke._orthogonal_decode_batches()
         self.assertEqual(groups[4][1][0].max_tokens, 256)
+
+    def test_cached_64k_crosses_decode_dp_owner_without_extra_requests(self):
+        smoke = runner()
+        smoke.args.reuse_unit_tokens = 4096
+        smoke.decode_role_addrs = [{"role": "DECODE"}, {"role": "DECODE"}]
+        smoke.fit_prompt = lambda head, tail, target: (head + tail, [1] * target)
+        stages = []
+        smoke.run_stage = lambda name, cases, concurrent=False: stages.append(
+            (name, cases))
+        smoke._required_stage = smoke.run_stage
+        smoke.run_single_prefill_64k()
+        self.assertEqual(sum(len(cases) for _, cases in stages), 6)
+        name, cases = stages[1]
+        self.assertEqual(name, "decode_dp_cross_owner_cached_64k")
+        self.assertEqual(cases[0].decode_owner_rank, 1)
+        self.assertEqual(cases[0].expected_reuse_len, 61440)
+        self.assertTrue(cases[0].require_mtp)
+
+    def test_dp_cross_owner_audit_checks_isolation_and_kda_mla_mapping(self):
+        cold = "prefill_64k_single_0_cold"
+        switched = "decode_dp_cross_owner_cached_64k"
+        stages = [{"name": cold, "start_time_ns": 0, "end_time_ns": 10},
+                  {"name": switched, "start_time_ns": 20, "end_time_ns": 30}]
+        cases = [{"name": cold, "phase": "preparation", "decode_owner_rank": 0},
+                 {"name": switched, "phase": "preparation", "decode_owner_rank": 1,
+                  "effective_reuse_len": 61440}]
+        prefill = {rank: [] for rank in range(8)}
+        prefill[0] = [
+            {"event": "frontend_request", "case": cold, "request_id": 101,
+             "time_ns": 1},
+            {"event": "frontend_request", "case": switched, "request_id": 202,
+             "time_ns": 21},
+        ]
+        decode = {rank: [] for rank in range(8)}
+        for rank in range(8):
+            owner, attention_rank = divmod(rank, 4)
+            decode[rank].append({"event": "pd_cache_loaded", "dp_rank": owner,
+                                 "request_id": 101 if owner == 0 else 202})
+            if owner == 1:
+                for source in range(8):
+                    decode[rank].append({
+                        "event": "pd_transfer_submitted", "request_id": 202,
+                        "dp_rank": 1, "attn_tp_rank": attention_rank,
+                        "source_tp_rank": source, "source_tp": 8,
+                        "destination_tp": 4, "mla_pages": 1,
+                        "first_mla_page": source, "last_mla_page": source,
+                        "kda_blocks": int(source // 2 == attention_rank),
+                        "kda_source_partitions": 1,
+                        "kda_destination_partitions": 2,
+                        "kda_destination_partition": source % 2,
+                    })
+        result = {"passed": True, "suite": "main-text-64k-capped",
+                  "cases": cases, "stages": stages}
+        with tempfile.TemporaryDirectory() as tmp:
+            verdict = audit(result, prefill, decode, decode_dp=2,
+                            request_dir=pathlib.Path(tmp))
+            self.assertTrue(verdict["path_results"]["decode_dp_cross_owner_handoff"])
+            decode[5] = [event for event in decode[5]
+                         if not (event.get("event") == "pd_transfer_submitted"
+                                 and event.get("source_tp_rank") == 2)]
+            verdict = audit(result, prefill, decode, decode_dp=2,
+                            request_dir=pathlib.Path(tmp))
+            self.assertFalse(verdict["path_results"]["decode_dp_cross_owner_handoff"])
 
     def test_answer_audit_rejects_duplicate_json_and_truncation(self):
         row = {"name": "x", "phase": "formal", "pd_sep": True,

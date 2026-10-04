@@ -145,7 +145,9 @@ def launch_config(args):
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
         "fp8_kv_cache": int(fp8_kv_cache),
-        "reuse_cache": 1,
+        # In the orthogonal PD profile, Decode receives the Prefill state
+        # through transfer and must not reuse its own previous prefix.
+        "reuse_cache": int(not orthogonal_smoke or args.role == "PREFILL"),
         "enable_device_cache": 1,
         "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
         "moe_strategy": "mega_moe",

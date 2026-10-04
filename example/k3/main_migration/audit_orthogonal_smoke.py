@@ -324,6 +324,48 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
                         errors.append(f"{case}: missing Decode rank {rank} PD handoff")
             path_results["mixed_pd_handoff"] = handoff_ok
 
+        if name == "decode_dp_cross_owner_cached_64k":
+            case = name
+            cold = "prefill_64k_single_0_cold"
+            request_id = prefill_ids.get(case)
+            cold_id = prefill_ids.get(cold)
+            valid = bool(
+                decode_dp == 2 and request_id is not None and cold_id is not None
+                and rows.get(case, {}).get("decode_owner_rank") == 1
+                and rows.get(cold, {}).get("decode_owner_rank") == 0
+                and rows[case].get("effective_reuse_len", 0) > 0
+            )
+            for rank in range(8):
+                owner, attention_rank = divmod(rank, decode_tp)
+                loaded = {event.get("request_id") for event in decode[rank]
+                          if event.get("event") == "pd_cache_loaded"}
+                valid &= (cold_id in loaded) == (owner == 0)
+                valid &= (request_id in loaded) == (owner == 1)
+                if owner != 1:
+                    continue
+                transfers = {
+                    event.get("source_tp_rank"): event for event in decode[rank]
+                    if event.get("event") == "pd_transfer_submitted"
+                    and event.get("request_id") == request_id
+                }
+                valid &= set(transfers) == set(range(8))
+                for source_rank, event in transfers.items():
+                    valid &= (event.get("source_tp") == 8
+                              and event.get("destination_tp") == 4
+                              and event.get("dp_rank") == 1
+                              and event.get("attn_tp_rank") == attention_rank
+                              and event.get("kda_source_partitions") == 1
+                              and event.get("kda_destination_partitions") == 2
+                              and event.get("kda_destination_partition") == source_rank % 2)
+                    valid &= (event.get("kda_blocks", 0) > 0) == (
+                        source_rank // 2 == attention_rank)
+                    if event.get("mla_pages", 0) > 0:
+                        valid &= (event.get("first_mla_page", -1) % 8 == source_rank
+                                  and event.get("last_mla_page", -1) % 8 == source_rank)
+            path_results["decode_dp_cross_owner_handoff"] = bool(valid)
+            if not valid:
+                errors.append("Decode DP owner switch lacks isolated MLA PageRR/KDA TP handoff")
+
         if name.startswith("orthogonal_page_"):
             actual = []
             for rank in range(prefill_tp):
@@ -465,6 +507,8 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
                                   64, 63, 33, 1, 64))
             required |= {f"orthogonal_decode_{index:02d}_batch_{size}"
                          for index, size in enumerate(decode_sizes)}
+        if decode_dp == 2 and result.get("suite") == "main-text-64k-capped":
+            required.add("decode_dp_cross_owner_handoff")
     for name in sorted(required - path_results.keys()):
         errors.append(f"missing runtime stage: {name}")
     if orthogonal and "decode" in phases and not any(

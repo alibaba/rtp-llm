@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""RTP main text-only smoke, adapted from K3 dev 64c6aff3666402228950f1f09031e228c3734277.
+"""Four-layer preflight or complete 93-layer K3 PD smoke, selected by checkpoint.
 
+Adapted from K3 dev 64c6aff3666402228950f1f09031e228c3734277.
 This is not the original dev all suite. Runtime evidence is a separate gate.
 """
 
@@ -10,7 +11,6 @@ import argparse
 import gzip
 import hashlib
 import json
-import math
 import pathlib
 import re
 import subprocess
@@ -22,20 +22,6 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-
-try:
-    from .long_prefix_case import (
-        DEFAULT_TARGET_TOKENS,
-        LongPrefixCase,
-        expanded_bytes_per_token,
-    )
-except ImportError:  # Direct script entry from the role launcher.
-    from long_prefix_case import (
-        DEFAULT_TARGET_TOKENS,
-        LongPrefixCase,
-        expanded_bytes_per_token,
-    )
-
 
 @dataclass(frozen=True)
 class Case:
@@ -143,21 +129,7 @@ def parse_args() -> argparse.Namespace:
             "repeat once per DP rank"
         ),
     )
-    parser.add_argument(
-        "--decode-dp-size",
-        type=int,
-        default=1,
-        choices=(1, 2),
-        help="number of Decode DP owners; TP-only uses 1",
-    )
     parser.add_argument("--output", required=True, type=pathlib.Path)
-    parser.add_argument(
-        "--suite",
-        choices=("flow", "orthogonal-flow", "main-text", "main-text-64k", "main-text-64k-capped"),
-        default="main-text-64k-capped",
-    )
-    parser.add_argument("--orthogonal-phases", default="cache,cancel,page,chunk,decode",
-                        help="selected diagnostic orthogonal-flow phases; full smoke always runs all")
     parser.add_argument("--prefill-event-dir", type=pathlib.Path,
                         help="Local Prefill LOG_PATH for the Host-load cancellation trigger")
     parser.add_argument("--prefill-engine-log", type=pathlib.Path,
@@ -181,11 +153,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-exact-max-tokens", type=int, default=128)
     parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
     parser.add_argument(
-        "--require-mtp",
-        action="store_true",
-        help="include the native MTP draft-acceptance case",
-    )
-    parser.add_argument(
         "--rdma-prewarm-attempts",
         type=int,
         default=0,
@@ -202,43 +169,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rdma-prewarm-backoff-s", type=float, default=5.0)
     parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
-    parser.add_argument("--long-prefix-checkpoint", type=pathlib.Path, required=True)
-    parser.add_argument("--long-prefix-tp-size", type=int, default=8)
-    parser.add_argument(
-        "--long-prefix-target-tokens", type=int, default=DEFAULT_TARGET_TOKENS
-    )
-    parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
-    parser.add_argument("--expanded-kv-budget-gib", type=float, default=6.0)
+    parser.add_argument("--checkpoint", "--long-prefix-checkpoint",
+                        dest="long_prefix_checkpoint", type=pathlib.Path, required=True)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
-    if args.suite == "main-text-64k-capped":
-        # The default complete smoke always checks native MTP acceptance.
-        args.require_mtp = True
-    phases = args.orthogonal_phases.split(",")
-    valid_phases = ("cache", "cancel", "page", "chunk", "decode")
-    if not phases or len(phases) != len(set(phases)) or any(
-        phase not in valid_phases for phase in phases
-    ):
-        parser.error("--orthogonal-phases must contain distinct cache,cancel,page,chunk,decode names")
-    if args.suite != "orthogonal-flow" and phases != list(valid_phases):
-        parser.error("only orthogonal-flow diagnostics may select phases")
-    args.orthogonal_phases = tuple(phase for phase in valid_phases if phase in phases)
-    evidence_suite = args.suite in ("orthogonal-flow", "main-text-64k-capped")
-    if evidence_suite and (
+    # The checkpoint chooses one of two fixed runs; phases and MTP cannot be
+    # disabled from the command line.
+    config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
+    text_config = config.get("text_config", config)
+    layers = text_config.get("num_hidden_layers")
+    if layers not in (4, 93):
+        parser.error("smoke requires a four-layer or 93-layer checkpoint")
+    args.suite = "orthogonal-flow" if layers == 4 else "main-text-64k-capped"
+    args.run_kind = "four-layer" if layers == 4 else "full-93"
+    args.require_mtp = True
+    args.orthogonal_phases = ("cache", "cancel", "page", "chunk", "decode")
+    if (
         args.prefill_event_dir is None or not args.prefill_event_dir.is_dir()
     ):
         parser.error("orthogonal smoke needs an existing local --prefill-event-dir")
-    if evidence_suite and (
+    if (
         args.prefill_engine_log is None or not args.prefill_engine_log.is_file()
     ):
         parser.error("orthogonal smoke needs an existing local --prefill-engine-log")
-    if evidence_suite and (
+    if (
         args.prefill_rpc_runfiles is None or
         not (args.prefill_rpc_runfiles / "rtp_llm" / "rtp_llm" / "cpp" /
              "model_rpc" / "proto" / "model_rpc_service_pb2.py").is_file()
     ):
         parser.error("orthogonal smoke needs the local --prefill-rpc-runfiles")
-    if evidence_suite and (
+    if (
         args.prefill_grpc_port is None or not 1 <= args.prefill_grpc_port <= 65535
     ):
         parser.error("orthogonal smoke needs --prefill-grpc-port")
@@ -254,52 +214,23 @@ def parse_args() -> argparse.Namespace:
         "single_exact_max_tokens",
         "mtp_chunk_max_tokens",
         "timeout",
-        "long_prefix_tp_size",
-        "long_prefix_target_tokens",
-        "long_prefix_kernel_page_size",
         "rdma_prewarm_timeout",
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
-    if args.suite == "main-text" and (
-        not math.isfinite(args.expanded_kv_budget_gib)
-        or args.expanded_kv_budget_gib <= 0
-    ):
-        parser.error(
-            "all suite needs a positive expansion budget for the long prefix case"
-        )
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
-    if args.decode_dp_size is not None and args.decode_dp_size <= 0:
-        parser.error("--decode-dp-size must be positive")
-    expected_owners = (
-        (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
-    )
-    if args.suite in ("orthogonal-flow", "main-text", "main-text-64k", "main-text-64k-capped") and len(args.decode_role_addrs) not in expected_owners:
-        parser.error(
-            f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
-        )
+    if len(args.decode_role_addrs) not in (1, 2):
+        parser.error("smoke requires one or two ordered Decode owner addresses")
+    args.decode_dp_size = len(args.decode_role_addrs)
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
-    if args.suite in ("main-text", "main-text-64k", "main-text-64k-capped"):
-        config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
-        config = config.get("text_config", config)
-        if config.get("num_hidden_layers") != 93:
-            parser.error(
-                "main-text requires the full 93-layer checkpoint; use flow only for preflight"
-            )
-        if not args.require_mtp:
-            parser.error("main-text requires --require-mtp (real acceptance)")
-        if args.suite == "main-text" and args.long_prefix_target_tokens < DEFAULT_TARGET_TOKENS:
-            parser.error("main-text cannot reduce the 110K long-prefix gate")
-        if args.chunk_tokens < 65536:
-            parser.error("main-text requires a chunk budget of at least 65536")
-        if args.suite in ("main-text-64k", "main-text-64k-capped") and args.chunk_tokens != 65536:
-            parser.error("main-text-64k requires a 65536-token single-prefill budget")
-        if args.suite == "main-text-64k-capped" and args.block_size != 4096:
-            parser.error("the capped PD427 subset requires 4096-token cache blocks")
-    args.case_deadline_s = 300 if args.suite in ("flow", "orthogonal-flow", "main-text-64k-capped") else None
+    if args.chunk_tokens != 65536:
+        parser.error("smoke requires a 65536-token single-prefill budget")
+    if args.block_size != 4096:
+        parser.error("smoke requires 4096-token cache blocks")
+    args.case_deadline_s = 300
     if args.reuse_unit_tokens and (
         args.reuse_unit_tokens < args.block_size
         or args.reuse_unit_tokens % args.block_size
@@ -411,6 +342,8 @@ class Runner:
 
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
+            "run_kind": getattr(self.args, "run_kind", "four-layer" if self.args.suite ==
+                                "orthogonal-flow" else "full-93"),
             "suite": self.args.suite,
             "case_profile": "compact-64k-v1" if self.args.suite in
             ("main-text-64k-capped", "orthogonal-flow") else None,
@@ -1706,19 +1639,20 @@ class Runner:
             )
 
     def run_flow(self) -> None:
-        # Four layers only check flow, chunk boundaries and cache reuse.
+        # The four-layer preflight checks PD, uneven batches, reuse and MTP
+        # before the same orthogonal phases. Model-level chunking is excluded.
         prompt, tokens = self.fit_prompt(
-            f"流程 {self.args.namespace}/chunk。\n",
+            f"流程 {self.args.namespace}/short。\n",
             "\n请回复任意一个非空字符。",
-            self.args.chunk_tokens + 1,
+            self.reuse_unit_tokens + 1,
         )
         seed = Case(
-            "chunkwise_rdma_flow_miss",
+            "four_layer_pd_flow_miss",
             prompt,
             r".",
             "miss",
-            require_chunk=True,
             expected_input_len=len(tokens),
+            max_tokens=8,
         )
         self.run_stage(seed.name, [seed])
         owners = max(1, len(self.decode_role_addrs))
@@ -1752,6 +1686,7 @@ class Runner:
                     "miss",
                     decode_owner_rank=owner,
                     expected_input_len=len(tokens),
+                    max_tokens=8,
                 )
             )
         self.run_stage("flow_uneven_miss", batch, concurrent=True)
@@ -1962,97 +1897,9 @@ class Runner:
             concurrent=True,
         )
 
-        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
-            self.run_single_prefill_64k()
-            self.run_prefix_branches()
-            self.run_cache_block_boundaries()
-            return
-
-        single_prompt = make_whole_chunk_prompt(
-            self.args.namespace, "whole-chunk-single", 61
-        )
-        self.run_stage(
-            "whole_chunk_single_miss",
-            [
-                Case(
-                    "whole_chunk_single_miss",
-                    single_prompt,
-                    numbered_answer_pattern(3721),
-                    "miss",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                )
-            ],
-        )
-        self.run_stage(
-            "whole_chunk_single_hit",
-            [
-                Case(
-                    "whole_chunk_single_hit",
-                    single_prompt,
-                    numbered_answer_pattern(3721),
-                    "hit",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                )
-            ],
-        )
-
-        chunk_batch_size = min(2, self.args.batch_size)
-        chunk_prompts = [
-            make_whole_chunk_prompt(
-                self.args.namespace, f"whole-chunk-batch-{idx}", 70 + idx
-            )
-            for idx in range(chunk_batch_size)
-        ]
-        self.run_stage(
-            "whole_chunk_batch_miss",
-            [
-                Case(
-                    f"whole_chunk_batch_miss_{idx}",
-                    prompt,
-                    numbered_answer_pattern((70 + idx) ** 2),
-                    "miss",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
-                )
-                for idx, prompt in enumerate(chunk_prompts)
-            ],
-            concurrent=True,
-        )
-        self.run_stage(
-            "whole_chunk_batch_hit",
-            [
-                Case(
-                    f"whole_chunk_batch_hit_{idx}",
-                    prompt,
-                    numbered_answer_pattern((70 + idx) ** 2),
-                    "hit",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
-                )
-                for idx, prompt in enumerate(chunk_prompts)
-            ],
-            concurrent=True,
-        )
+        self.run_single_prefill_64k()
         self.run_prefix_branches()
-        self.run_padding_boundaries()
         self.run_cache_block_boundaries()
-        self.run_long_prefix_case()
 
     def _orthogonal_answer(self, name: str, prompt: str, value: str, reuse: str,
                            **kwargs) -> Case:
@@ -2212,7 +2059,11 @@ class Runner:
         pool_blocks = self._orthogonal_device_blocks()
         if pool_blocks is None:
             raise SmokeFailure("Prefill Device/full pool capacity is missing")
-        pressure_count = max(0, min(24, pool_blocks - 20))
+        # Four-layer traffic has fewer ordinary cases before this stage, so
+        # allow more probes to fill its Device pool. The full smoke keeps its
+        # smaller cap because preceding correctness cases add pressure.
+        limit = 50 if self.args.suite == "orthogonal-flow" else 24
+        pressure_count = max(0, min(limit, pool_blocks - 20))
         self._cache_pressure_requests = pressure_count
         for index in range(pressure_count):
             prompt, _ = self.fit_prompt(
@@ -2524,56 +2375,25 @@ class Runner:
                     max_tokens=max(self.args.max_tokens, self.args.mtp_chunk_max_tokens),
                 ))
             self.run_stage(f"prefill_64k_{label}_cold", cases, concurrent=count > 1)
-            self.run_stage(f"prefill_64k_{label}_reuse", [
+            reuse_cases = [
                 replace(case, name=case.name.replace("_cold", "_reuse"), reuse="hit",
                         expected_reuse_len=65535 // self.reuse_unit_tokens * self.reuse_unit_tokens)
                 for case in cases
-            ], concurrent=count > 1)
-
-    def run_long_prefix_case(self) -> None:
-        self.health("long_prefix_cached_dialog")
-        stage = dict(name="long_prefix_cached_dialog", concurrent=False, passed=False)
-        self.stages.append(stage)
-        case = LongPrefixCase(
-            self.args.base_url,
-            self.args.output.parent / "long-prefix",
-            self.args.namespace,
-            timeout=self.args.timeout,
-            budget=int(self.args.expanded_kv_budget_gib * 1024**3),
-            page_size=self.args.block_size,
-            kernel_page_size=self.args.long_prefix_kernel_page_size,
-            bytes_per_token=expanded_bytes_per_token(
-                self.args.long_prefix_checkpoint, self.args.long_prefix_tp_size
-            ),
-            target_tokens=self.args.long_prefix_target_tokens,
-            reuse_unit_tokens=self.reuse_unit_tokens,
-            decode_role_addrs=self.decode_role_addrs,
-        )
-        try:
-            result = case.run()
-            stage.update(
-                passed=True,
-                case_names=[row["name"] for row in result["cases"]],
-                planned_prefix_blocks=result["planned_prefix_blocks"],
-                evidence=str(case.output / "RESULT.json"),
-            )
-        finally:
-            self.records.extend(case.records)
-        self.health("long_prefix_cached_dialog")
-
+            ]
+            reuse_stage = f"prefill_64k_{label}_reuse"
+            if label == "single" and len(self.decode_role_addrs) == 2:
+                # Reuse the existing request budget: cold state goes to DP0,
+                # the same cached Prefill state then crosses to DP1.
+                reuse_stage = "decode_dp_cross_owner_cached_64k"
+                reuse_cases[0] = replace(reuse_cases[0], name=reuse_stage,
+                                         decode_owner_rank=1)
+            self.run_stage(reuse_stage, reuse_cases, concurrent=count > 1)
 
 def main() -> int:
     args = parse_args()
     runner = Runner(args)
     try:
-        suites: dict[str, Callable[[], None]] = {
-            "flow": runner.run_flow,
-            "orthogonal-flow": runner.run_orthogonal_boundaries,
-            "main-text": runner.run_main_text,
-            "main-text-64k": runner.run_main_text,
-            "main-text-64k-capped": runner.run_main_text,
-        }
-        if args.suite == "main-text-64k-capped":
+        if args.run_kind == "full-93":
             runner.run_main_text()
             # Seed after the broad correctness suite. On the 93-layer model,
             # its traffic can evict an early witness from Host as well as
@@ -2587,10 +2407,11 @@ def main() -> int:
                           runner._orthogonal_decode_batches):
                 phase()
         else:
-            suites[args.suite]()
+            runner.run_flow()
+            runner.run_orthogonal_boundaries()
         runner.save(passed=True)
         print(
-            f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}"
+            f"PASS: run={args.run_kind} cases={len(runner.records)} artifacts={args.output}"
         )
         return 0
     except Exception as exc:

@@ -2,6 +2,8 @@
 
 import types
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from example.k3.main_migration.text_smoke import Case, Runner, SmokeFailure, parse_args
@@ -24,17 +26,33 @@ def runner(*, require_mtp=True):
 
 class FourLayerMtpFlowTest(unittest.TestCase):
     def test_flow_has_five_minute_case_deadline(self):
-        with patch(
-            "sys.argv",
-            [
-                "text_smoke.py", "--base-url", "http://127.0.0.1:1",
-                "--decode-health-url", "http://127.0.0.1:2/health",
-                "--output", "/tmp/unused-k3-flow.json", "--suite", "flow",
-                "--namespace", "deadline-test", "--block-size", "4096",
-                "--long-prefix-checkpoint", "/tmp/unused-k3-checkpoint",
-            ],
-        ):
-            self.assertEqual(parse_args().case_deadline_s, 300)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "config.json").write_text('{"num_hidden_layers":4}')
+            events = root / "events"
+            events.mkdir()
+            engine = root / "engine.log"
+            engine.touch()
+            proto = (root / "runfiles/rtp_llm/rtp_llm/cpp/model_rpc/proto/"
+                     "model_rpc_service_pb2.py")
+            proto.parent.mkdir(parents=True)
+            proto.touch()
+            argv = ["text_smoke.py", "--base-url", "http://127.0.0.1:1",
+                    "--decode-health-url", "http://127.0.0.1:2/health",
+                    "--decode-role-addr", "127.0.0.1:2:3",
+                    "--output", str(root / "result.json"),
+                    "--namespace", "deadline-test", "--block-size", "4096",
+                    "--long-prefix-checkpoint", str(checkpoint),
+                    "--prefill-event-dir", str(events),
+                    "--prefill-engine-log", str(engine),
+                    "--prefill-rpc-runfiles", str(root / "runfiles"),
+                    "--prefill-grpc-port", "4"]
+            with patch("sys.argv", argv):
+                args = parse_args()
+            self.assertEqual(args.case_deadline_s, 300)
+            self.assertEqual(args.run_kind, "four-layer")
 
     def test_flow_includes_short_draft_coverage_when_requested(self):
         smoke = runner()
