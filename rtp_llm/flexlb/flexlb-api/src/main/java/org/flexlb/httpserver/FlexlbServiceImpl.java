@@ -718,8 +718,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             throw deliveryError;
         } finally {
             try {
-                serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
                 if (ctx != null) {
+                    serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
                     engineHealthReporter.reportRequestPayload(ctx);
                 }
             } finally {

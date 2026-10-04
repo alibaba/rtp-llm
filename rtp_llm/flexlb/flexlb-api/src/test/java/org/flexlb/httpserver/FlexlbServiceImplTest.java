@@ -1224,6 +1224,8 @@ class FlexlbServiceImplTest {
         assertFalse(resp.getSuccess());
         assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), resp.getCode());
         assertTrue(resp.getErrorMessage().contains("test error"));
+        verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+        verify(engineHealthReporter).reportRequestPayload(any(BalanceContext.class));
     }
 
     @Test
@@ -1274,6 +1276,8 @@ class FlexlbServiceImplTest {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
             assertFalse(resp.getSuccess());
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), resp.getCode());
+            verify(serverLatencyRecorder, never()).recordCompletion(any(), anyLong());
+            verify(engineHealthReporter, never()).reportRequestPayload(any());
 
             // The interceptor owns the span lifecycle; nothing is exported yet.
             assertEquals(0, exporter.spans.size());
