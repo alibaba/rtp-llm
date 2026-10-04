@@ -560,19 +560,35 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
     # only suitable for the original dense Qwen3 disaggregation path.
     load_layer_weights_on_attn_rank = True
 
-    def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_config, parallelism_config, *args, **kwargs):
+        super().__init__(model_config, parallelism_config, *args, **kwargs)
         self._has_stacked_ckpt = False
         if self.uses_fastafd_weight_partition:
             # The serving world is represented as DP/EP ranks for scheduling,
-            # but each AG needs a full attention copy and the single EG owns
-            # all routed experts.  The checkpoint loader must see a local
-            # TP=DP=EP=1 view, independent of the global process layout.
-            self.ep_size = 1
-            self.ep_rank = 0
+            # but each AG needs a full attention copy. EGs divide the expert
+            # dimension only; the intermediate dimension remains unsplit.
+            ffn = parallelism_config.ffn_disaggregate_config
+            expert_parallel_size = ffn.ffn_tp_size * ffn.ffn_dp_size
+            first_expert_rank = ffn.attention_tp_size * ffn.attention_dp_size
+            self.ep_size = expert_parallel_size if self.is_ffn_service else 1
+            self.ep_rank = (
+                parallelism_config.world_rank - first_expert_rank
+                if self.is_ffn_service
+                else 0
+            )
+            if (
+                self.ep_size < 1
+                or not 0 <= self.ep_rank < self.ep_size
+                or self.expert_num_ % self.ep_size != 0
+            ):
+                raise ValueError(
+                    "FastAFD requires a valid expert-group rank and expert_num "
+                    "divisible by ffn_expert_parallel_size"
+                )
             self.dp_size = 1
             self.dp_rank = 0
             self.num_nodes = 1
+            self._moe_pure_tp_mode = False
 
     @property
     def uses_fastafd_weight_partition(self) -> bool:

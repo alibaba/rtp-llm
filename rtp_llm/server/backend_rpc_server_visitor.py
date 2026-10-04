@@ -114,6 +114,13 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            fast_afd=bool(
+                getattr(
+                    getattr(parallelism_config, "ffn_disaggregate_config", None),
+                    "enable_ffn_disaggregate",
+                    False,
+                )
+            ),
         )
 
         host_args = HostServiceArgs.create_from_env()

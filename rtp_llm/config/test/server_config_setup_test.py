@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import pickle
 import re
 import sys
 import unittest
@@ -68,6 +69,55 @@ class Qwen35AFDSetupTest(TestCase):
             self.assertTrue(parallelism.ffn_disaggregate_config.enable_ffn_disaggregate)
             self.assertEqual(parallelism.ffn_disaggregate_config.is_ffn_rank, rank == 3)
             self.assertEqual(parallelism.ffn_disaggregate_config.attention_dp_size, 3)
+
+    def test_expert_parallel_group_keeps_attention_and_server_tp_one(self):
+        for rank in range(4):
+            with self.subTest(rank=rank):
+                config = self._config(world_size=4)
+                config.ffn_disaggregate_config.ffn_expert_parallel_size = 2
+                config.ffn_disaggregate_config = pickle.loads(
+                    pickle.dumps(config.ffn_disaggregate_config)
+                )
+                config.parallelism_config.world_rank = rank
+                setup_default_args(config)
+                parallelism = config.parallelism_config
+                ffn = parallelism.ffn_disaggregate_config
+                self.assertEqual((parallelism.tp_size, parallelism.ffn_tp_size), (1, 1))
+                self.assertEqual((parallelism.dp_size, parallelism.ep_size), (4, 4))
+                self.assertEqual((ffn.attention_dp_size, ffn.attention_tp_size), (2, 1))
+                self.assertEqual((ffn.ffn_tp_size, ffn.ffn_dp_size), (2, 1))
+                self.assertEqual(ffn.is_ffn_rank, rank >= 2)
+
+    def test_rejects_empty_attention_or_expert_group(self):
+        for size in (0, -1, 4, 5):
+            with self.subTest(size=size):
+                config = self._config(world_size=4)
+                config.ffn_disaggregate_config.ffn_expert_parallel_size = size
+                with self.assertRaisesRegex(ValueError, "ffn_expert_parallel_size"):
+                    setup_default_args(config)
+
+    def test_expert_parallel_option_requires_qwen35_fastafd(self):
+        for model_type, enabled in (("qwen35_moe", False), ("qwen3", True)):
+            with self.subTest(model_type=model_type, enabled=enabled):
+                config = self._config(world_size=4)
+                config.model_args.model_type = model_type
+                config.ffn_disaggregate_config.enable_ffn_disaggregate = enabled
+                config.ffn_disaggregate_config.ffn_expert_parallel_size = 2
+                with self.assertRaisesRegex(ValueError, "requires Qwen3.5 MoE FastAFD"):
+                    setup_default_args(config)
+
+    def test_expert_parallel_cli_and_environment(self):
+        for args, env in (
+            (["--ffn_expert_parallel_size", "2"], {}),
+            ([], {"FFN_EXPERT_PARALLEL_SIZE": "2"}),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args(args)
+                self.assertEqual(
+                    config.ffn_disaggregate_config.ffn_expert_parallel_size, 2
+                )
 
     def test_micro_batch_split_is_optional_for_both_roles(self):
         for split in (0, 1):

@@ -941,14 +941,16 @@ class BackendTest(JitCacheTestBase):
             stack.enter_context(mock.patch.object(target, name, **kwargs))
         return stack
 
-    def test_fast_afd_registers_attention_before_expert_shutdown_group(self):
+    def _assert_fast_afd_shutdown_groups(self, expert_parallel_size):
         self.clear_local_world_size()
-        configs = self.make_configs(world_size=3)
+        world_size = 2 + expert_parallel_size
+        configs = self.make_configs(world_size=world_size)
         configs.model_args.model_type = "qwen35_moe"
         configs.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        configs.ffn_disaggregate_config.ffn_expert_parallel_size = expert_parallel_size
         configs.parallelism_config.world_rank = 0
         configs.distribute_config.fake_gang_env = False
-        ranks = [mock.Mock(name=f"rank-{rank}") for rank in range(3)]
+        ranks = [mock.Mock(name=f"rank-{rank}") for rank in range(world_size)]
         for rank, proc in enumerate(ranks):
             proc.name = f"rank-{rank}"
 
@@ -956,7 +958,7 @@ class BackendTest(JitCacheTestBase):
             processes.extend(ranks)
 
         manager = mock.Mock()
-        with self.patched_backend(device_count=3), mock.patch.object(
+        with self.patched_backend(device_count=world_size), mock.patch.object(
             backend.multiprocessing, "get_context"
         ), mock.patch.object(
             backend, "_create_rank_processes", side_effect=create_ranks
@@ -972,12 +974,22 @@ class BackendTest(JitCacheTestBase):
             manager_type.call_args.kwargs["backend_post_frontend_drain_seconds"],
             0,
         )
-        manager.add_processes.assert_called_once_with(
-            ranks[:2], shutdown_group="frontend"
+        self.assertEqual(
+            manager.add_processes.call_args_list,
+            [
+                mock.call(ranks[:2], shutdown_group="frontend"),
+                mock.call(ranks[2:], shutdown_group="backend"),
+            ],
         )
-        manager.add_process.assert_called_once_with(ranks[2], shutdown_group="backend")
+        manager.add_process.assert_not_called()
         manager.set_processes.assert_not_called()
         manager.monitor_and_release_processes.assert_called_once_with()
+
+    def test_fast_afd_registers_attention_before_expert_shutdown_group(self):
+        self._assert_fast_afd_shutdown_groups(expert_parallel_size=1)
+
+    def test_fast_afd_registers_every_expert_after_attention_shutdown_group(self):
+        self._assert_fast_afd_shutdown_groups(expert_parallel_size=2)
 
     def test_fast_afd_rejects_cross_node_before_spawning(self):
         self.clear_local_world_size()

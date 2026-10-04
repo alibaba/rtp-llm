@@ -17,7 +17,6 @@ from rtp_llm.ops import (
     DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
-    FfnDisAggregateConfig,
     FMHAConfig,
     GrammarConfig,
     GrpcConfig,
@@ -661,6 +660,20 @@ class GrammarAdmissionConfig:
         )
 
 
+@dataclass
+class PyFfnDisaggregateConfig:
+    """Server options; resolved rank topology is stored in ParallelismConfig."""
+
+    enable_ffn_disaggregate: bool = False
+    ffn_expert_parallel_size: int = 1
+
+    def to_string(self):
+        return (
+            f"enable_ffn_disaggregate: {self.enable_ffn_disaggregate}\n"
+            f"ffn_expert_parallel_size: {self.ffn_expert_parallel_size}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -689,7 +702,7 @@ class PyEnvConfigs:
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_config: ParallelismConfig = ParallelismConfig()
-        self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
+        self.ffn_disaggregate_config = PyFfnDisaggregateConfig()
         self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()
         self.misc_config = PyMiscellaneousConfig()

@@ -3,11 +3,11 @@ import logging
 import os
 import socket
 import subprocess
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, PyFfnDisaggregateConfig
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
@@ -249,7 +249,9 @@ def _apply_auto_deepep_config(
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
-    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    py_ffn_disaggregate_config: Optional[
+        Union[PyFfnDisaggregateConfig, FfnDisAggregateConfig]
+    ] = None,
     py_prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Update rank-related fields in ParallelismConfig from a given world_rank.
@@ -324,16 +326,19 @@ def set_parallelism_config(
         assert (
             parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
         ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-        attention_dp_size = parallelism_config.world_size - 1
+        expert_parallel_size = getattr(
+            py_ffn_disaggregate_config, "ffn_expert_parallel_size", 1
+        )
+        if not 1 <= expert_parallel_size < parallelism_config.world_size:
+            raise ValueError(
+                "ffn_expert_parallel_size must be positive and smaller than world_size"
+            )
+        attention_dp_size = parallelism_config.world_size - expert_parallel_size
         attention_tp_size = 1
-        ffn_tp_size = 1
-        assert (
-            attention_tp_size == ffn_tp_size
-        ), "attention_tp_size must be equal to ffn_tp_size"
         parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
         parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
         parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
-        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
+        parallelism_config.ffn_disaggregate_config.ffn_tp_size = expert_parallel_size
         parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
             parallelism_config.world_rank >= attention_tp_size * attention_dp_size
@@ -402,16 +407,21 @@ def setup_default_args(py_env_configs):
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
 
-    if (
+    expert_parallel_size = (
+        py_env_configs.ffn_disaggregate_config.ffn_expert_parallel_size
+    )
+    fast_afd_qwen35 = (
         py_env_configs.model_args.model_type == "qwen35_moe"
         and py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate
-    ):
+    )
+    if expert_parallel_size != 1 and not fast_afd_qwen35:
+        raise ValueError("ffn_expert_parallel_size requires Qwen3.5 MoE FastAFD")
+    if fast_afd_qwen35:
         parallelism = py_env_configs.parallelism_config
         # The union process group remains a pure-DP topology for the server,
-        # scheduler and point-to-point transport. Rank world_size - 1 is the
-        # sole expert service; the other ranks each own a full attention model.
-        # The expert service constructs a separate rank-local EP=1 adapter for
-        # its fused MoE implementation.
+        # scheduler and point-to-point transport. The final N ranks form the
+        # expert group; each earlier rank owns a full attention model. Expert
+        # execution uses a separate EP topology and explicit expert-only groups.
         if (
             parallelism.world_size < 2
             or parallelism.tp_size != 1
@@ -423,7 +433,7 @@ def setup_default_args(py_env_configs):
             raise ValueError(
                 "Qwen3.5 MoE AFD requires world_size >= 2, tp_size = 1, "
                 "dp_size = world_size, ep_size = world_size (or 0 for auto), "
-                "pp_size = ffn_sp_size = 1; the last rank serves experts"
+                "pp_size = ffn_sp_size = 1; the final expert group serves experts"
             )
         if not 0 <= parallelism.world_rank < parallelism.world_size:
             raise ValueError("Qwen3.5 MoE AFD world_rank must be in [0, world_size)")
@@ -746,15 +756,14 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs.model_args.model_type == "qwen35_moe"
         and py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate
     ):
-        # The union world includes Attention ranks, but its one Expert rank
-        # owns all routed experts. World-size based DeepEP defaults would
+        # The union world includes Attention ranks. World-size based DeepEP defaults would
         # select an EP router that requires peers on the Attention ranks.
         py_env_configs.moe_config.use_deepep_moe = False
         py_env_configs.moe_config.use_deepep_low_latency = False
         py_env_configs.moe_config.use_deepep_internode = False
         py_env_configs.moe_config.use_mori_ep = False
-        # The expert rank executes every expert locally. Pure-TP MoE routers
-        # (including the FP8 per-block path) require this flag even at TP=1.
+        # The expert-only group uses the existing TP==EP router with an
+        # explicit service-level reduction. The same router handles EP=1.
         py_env_configs.moe_config.use_all_gather = True
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)

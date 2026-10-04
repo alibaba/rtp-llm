@@ -701,6 +701,108 @@ class FastAFDProtocolTest(unittest.TestCase):
                 [1], {0: _FakeFusedMoe()}, 4, 2, "cpu", torch.float16, 4
             )
 
+    def test_multi_expert_topology_rejects_gaps_duplicates_and_wrong_leader(self):
+        for expert_ranks in ([], [2, 4], [2, 2], [3, 4], [3, 2]):
+            with (
+                self.subTest(expert_ranks=expert_ranks),
+                patch.object(fast_afd, "_ExpertTeam") as team,
+            ):
+                with self.assertRaisesRegex(ValueError, "contiguous expert ranks"):
+                    fast_afd.FastAFDClient(
+                        2,
+                        4,
+                        2,
+                        "cpu",
+                        torch.float16,
+                        4,
+                        control_transport=_TestControlTransport(),
+                        expert_ranks=expert_ranks,
+                    )
+                with self.assertRaisesRegex(ValueError, "contiguous expert ranks"):
+                    fast_afd.FastAFDExpertService(
+                        [0, 1],
+                        {0: _FakeFusedMoe()},
+                        4,
+                        2,
+                        "cpu",
+                        torch.float16,
+                        4,
+                        control_transport=_TestControlTransport(),
+                        expert_ranks=expert_ranks,
+                    )
+                team.assert_not_called()
+
+    def test_multi_expert_topology_matches_world_and_endpoint_roles(self):
+        for rank in range(4):
+            with (
+                self.subTest(rank=rank),
+                patch.object(torch.distributed, "is_initialized", return_value=True),
+                patch.object(torch.distributed, "get_world_size", return_value=4),
+                patch.object(torch.distributed, "get_rank", return_value=rank),
+                patch.object(fast_afd, "_ExpertTeam") as team,
+            ):
+                kwargs = {
+                    "hidden_size": 4,
+                    "top_k": 2,
+                    "device": "cpu",
+                    "activation_dtype": torch.float16,
+                    "expert_count": 4,
+                    "control_transport": _TestControlTransport(),
+                    "expert_ranks": [2, 3],
+                }
+                if rank < 2:
+                    endpoint = fast_afd.FastAFDClient(2, **kwargs)
+                    with self.assertRaisesRegex(ValueError, "on an expert rank"):
+                        fast_afd.FastAFDExpertService(
+                            [0, 1], {0: _FakeFusedMoe()}, **kwargs
+                        )
+                else:
+                    endpoint = fast_afd.FastAFDExpertService(
+                        [0, 1], {0: _FakeFusedMoe()}, **kwargs
+                    )
+                    with self.assertRaisesRegex(ValueError, "on an attention rank"):
+                        fast_afd.FastAFDClient(2, **kwargs)
+                self.assertEqual(endpoint.expert_ranks, (2, 3))
+                # Even AG ranks must participate in ordered process-group
+                # creation, although only EG ranks execute its collectives.
+                team.assert_called_once_with((2, 3), torch.device("cpu"))
+
+        with (
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "get_world_size", return_value=5),
+            patch.object(fast_afd, "_ExpertTeam") as team,
+            self.assertRaisesRegex(ValueError, "final world rank"),
+        ):
+            fast_afd.FastAFDClient(
+                2,
+                4,
+                2,
+                "cpu",
+                torch.float16,
+                4,
+                control_transport=_TestControlTransport(),
+                expert_ranks=[2, 3],
+            )
+        team.assert_not_called()
+
+    def test_expert_shards_must_partition_all_experts_evenly(self):
+        with (
+            patch.object(fast_afd, "_ExpertTeam") as team,
+            self.assertRaisesRegex(ValueError, "divide evenly"),
+        ):
+            fast_afd.FastAFDExpertService(
+                [0, 1],
+                {0: _FakeFusedMoe()},
+                4,
+                2,
+                "cpu",
+                torch.float16,
+                4,
+                control_transport=_TestControlTransport(),
+                expert_ranks=[2, 3, 4],
+            )
+        team.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

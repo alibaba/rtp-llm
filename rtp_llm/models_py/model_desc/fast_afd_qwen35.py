@@ -54,6 +54,7 @@ class Qwen35AFDAttentionModel(Qwen35Model):
         service_rank = ffn_config.attention_dp_size * ffn_config.attention_tp_size
         client = FastAFDClient(
             service_rank=service_rank,
+            expert_ranks=tuple(range(service_rank, parallelism_config.world_size)),
             hidden_size=model_config.hidden_size,
             top_k=model_config.moe_k,
             device=torch.device(weights.device),
@@ -97,7 +98,7 @@ class Qwen35AFDAttentionModel(Qwen35Model):
 
 
 class Qwen35AFDExpertModel(GptModelBase):
-    """One-rank routed expert service for all Qwen3.5 MoE layers."""
+    """Expert-parallel routed service for all Qwen3.5 MoE layers."""
 
     requires_micro_batch_forward = True
 
@@ -121,20 +122,35 @@ class Qwen35AFDExpertModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
-        # The transport uses the union world (N attention ranks + this rank),
-        # but this one expert rank owns the complete routed expert set. MoE
-        # strategy selection must see a rank-local execution topology.
+        ffn_config = parallelism_config.ffn_disaggregate_config
+        attention_rank_count = (
+            ffn_config.attention_dp_size * ffn_config.attention_tp_size
+        )
+        expert_parallel_size = ffn_config.ffn_tp_size * ffn_config.ffn_dp_size
+        expert_rank = parallelism_config.world_rank - attention_rank_count
+        if (
+            expert_parallel_size < 1
+            or attention_rank_count + expert_parallel_size
+            != parallelism_config.world_size
+            or not 0 <= expert_rank < expert_parallel_size
+        ):
+            raise ValueError(
+                "FastAFD expert rank is outside the configured expert group"
+            )
+        # Every EG receives the same inputs and owns a disjoint expert range.
+        # TP==EP selects the existing local FP8 remapping/execution path; the
+        # service suppresses its default TP reduction and uses the EG subgroup.
         local_expert_parallelism = ParallelismConfig()
-        local_expert_parallelism.tp_size = 1
-        local_expert_parallelism.tp_rank = 0
+        local_expert_parallelism.tp_size = expert_parallel_size
+        local_expert_parallelism.tp_rank = expert_rank
         local_expert_parallelism.dp_size = 1
         local_expert_parallelism.dp_rank = 0
-        local_expert_parallelism.ep_size = 1
-        local_expert_parallelism.ep_rank = 0
-        local_expert_parallelism.ffn_tp_size = 1
-        local_expert_parallelism.ffn_tp_rank = 0
-        local_expert_parallelism.world_size = 1
-        local_expert_parallelism.world_rank = 0
+        local_expert_parallelism.ep_size = expert_parallel_size
+        local_expert_parallelism.ep_rank = expert_rank
+        local_expert_parallelism.ffn_tp_size = expert_parallel_size
+        local_expert_parallelism.ffn_tp_rank = expert_rank
+        local_expert_parallelism.world_size = expert_parallel_size
+        local_expert_parallelism.world_rank = expert_rank
         local_expert_parallelism.local_rank = parallelism_config.local_rank
         local_expert_parallelism.local_world_size = parallelism_config.local_world_size
         if len(weights.weights) != model_config.num_layers:
@@ -169,12 +185,11 @@ class Qwen35AFDExpertModel(GptModelBase):
                 )
             self.layers.append(fused_moe)
 
-        ffn_config = parallelism_config.ffn_disaggregate_config
-        attention_rank_count = (
-            ffn_config.attention_dp_size * ffn_config.attention_tp_size
-        )
         self.fast_afd_service = FastAFDExpertService(
             attention_ranks=list(range(attention_rank_count)),
+            expert_ranks=tuple(
+                range(attention_rank_count, parallelism_config.world_size)
+            ),
             fused_moe_by_layer=dict(enumerate(self.layers)),
             hidden_size=model_config.hidden_size,
             top_k=model_config.moe_k,

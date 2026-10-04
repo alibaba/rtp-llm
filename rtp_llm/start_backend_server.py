@@ -349,8 +349,16 @@ def multi_rank_start(
                 raise ValueError("FastAFD rank process count does not match world_size")
             # This order applies to shutdowns managed by this parent process;
             # direct signals to every rank bypass its staged groups.
-            manager.add_processes(processes[:-1], shutdown_group="frontend")
-            manager.add_process(processes[-1], shutdown_group="backend")
+            expert_rank_count = (
+                py_env_configs.ffn_disaggregate_config.ffn_expert_parallel_size
+            )
+            attention_rank_count = local_world_size - expert_rank_count
+            manager.add_processes(
+                processes[:attention_rank_count], shutdown_group="frontend"
+            )
+            manager.add_processes(
+                processes[attention_rank_count:], shutdown_group="backend"
+            )
         else:
             manager.set_processes(processes, shutdown_group="backend")
         _send_pipe_status(

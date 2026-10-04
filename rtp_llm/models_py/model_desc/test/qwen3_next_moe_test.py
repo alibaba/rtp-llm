@@ -200,6 +200,96 @@ class Qwen3NextRoutedOnlyTest(TestCase):
         self.assertEqual(set(model.fast_afd_service.fused_moe_by_layer), {0})
         self.assertTrue(model.requires_micro_batch_forward)
 
+    def test_expert_parallel_ranks_have_disjoint_local_expert_topology(self):
+        for rank in (2, 3):
+            with self.subTest(rank=rank):
+                config = ModelConfig()
+                config.num_layers = 1
+                config.hidden_size = 8
+                config.max_seq_len = 16
+                config.activation_type = "SiGLU"
+                Qwen35Moe._parse_moe_config(
+                    {
+                        "num_experts": 4,
+                        "num_experts_per_tok": 2,
+                        "moe_intermediate_size": 4,
+                        "shared_expert_intermediate_size": 4,
+                    },
+                    config,
+                )
+                parallelism = ParallelismConfig()
+                parallelism.world_size = 4
+                parallelism.world_rank = rank
+                parallelism.local_rank = rank
+                parallelism.local_world_size = 4
+                parallelism.dp_size = 4
+                parallelism.ep_size = 4
+                ffn = parallelism.ffn_disaggregate_config
+                ffn.attention_dp_size = 2
+                ffn.ffn_tp_size = 2
+                weights = ModelWeights(1, "cpu", torch.bfloat16)
+                weights.set_layer_weight(0, W.moe_w1, torch.zeros(1))
+                weights.set_layer_weight(0, W.moe_w2, torch.zeros(1))
+                with (
+                    patch.object(
+                        generic_moe.FusedMoeFactory,
+                        "create_fused_moe",
+                        return_value=_RoutedBackend(),
+                    ) as create_moe,
+                    patch(
+                        "rtp_llm.models_py.model_desc.fast_afd_qwen35.FastAFDExpertService"
+                    ) as service,
+                ):
+                    model = Qwen35AFDExpertModel(
+                        config, parallelism, weights, MoeConfig(), 1
+                    )
+                adapter = create_moe.call_args.args[0]
+                self.assertEqual(
+                    (adapter.tp_size, adapter.ep_size, adapter.dp_size), (2, 2, 1)
+                )
+                self.assertEqual(
+                    (adapter.world_size, adapter.world_rank), (2, rank - 2)
+                )
+                self.assertEqual(
+                    (adapter.ep_rank, adapter.n_local_experts), (rank - 2, 2)
+                )
+                self.assertEqual(adapter.local_expert_start, (rank - 2) * 2)
+                self.assertEqual(adapter.local_rank, rank)
+                self.assertEqual(adapter.n_shared_experts, 0)
+                self.assertEqual(service.call_args.kwargs["expert_ranks"], (2, 3))
+                self.assertEqual(service.call_args.kwargs["attention_ranks"], [0, 1])
+                self.assertEqual(parallelism.tp_size, 1)
+                self.assertIs(model.fast_afd_service, service.return_value)
+
+    def test_attention_client_uses_first_expert_rank_and_full_expert_group(self):
+        parallelism = ParallelismConfig()
+        parallelism.world_size = 4
+        parallelism.ffn_disaggregate_config.attention_dp_size = 2
+        parallelism.ffn_disaggregate_config.ffn_tp_size = 2
+        config = ModelConfig()
+        config.hidden_size = 8
+        config.moe_k = 2
+        config.expert_num = 4
+        with (
+            patch.object(
+                qwen3_next.Qwen35Model,
+                "__init__",
+                lambda instance, *args, **kwargs: nn.Module.__init__(instance),
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.fast_afd_qwen35.FastAFDClient"
+            ) as client,
+        ):
+            Qwen35AFDAttentionModel(
+                config,
+                parallelism,
+                ModelWeights(1, "cpu", torch.bfloat16),
+                MoeConfig(),
+                1,
+            )
+        self.assertEqual(client.call_args.kwargs["service_rank"], 2)
+        self.assertEqual(client.call_args.kwargs["expert_ranks"], (2, 3))
+
     def test_attention_step_aborts_after_forward_error(self):
         model = Qwen35AFDAttentionModel.__new__(Qwen35AFDAttentionModel)
         nn.Module.__init__(model)

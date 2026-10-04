@@ -1,3 +1,4 @@
+import copy
 import functools
 import logging
 import re
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
     QuantizationConfig,
@@ -118,11 +120,18 @@ class ModelWeightInfo:
                 weights.append(weight.create(weight, quant_config))
         layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = []
         if self.layer_weights:
-            for weight in self.layer_weights:
+            for layer_id, weight in enumerate(self.layer_weights):
                 if isinstance(weight, list):
+                    layer_quant_config = quant_config
+                    if (
+                        isinstance(quant_config, Fp8BlockWiseQuantConfig)
+                        and quant_config.exclude_modules
+                    ):
+                        layer_quant_config = copy.copy(quant_config)
+                        layer_quant_config._weight_layer_id = layer_id
                     layer_weight = []
                     for w in weight:
-                        layer_weight.append(w.create(w, quant_config))
+                        layer_weight.append(w.create(w, layer_quant_config))
                     layer_weights.append(layer_weight)
                 else:
                     layer_weights.append(weight.create(weight, quant_config))

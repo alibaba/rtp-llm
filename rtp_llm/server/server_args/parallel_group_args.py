@@ -77,6 +77,14 @@ def init_parallel_group_args(
         help="启用AF分离功能。",
     )
     parallel_group.add_argument(
+        "--ffn_expert_parallel_size",
+        env_name="FFN_EXPERT_PARALLEL_SIZE",
+        bind_to=(ffn_disaggregate_config, "ffn_expert_parallel_size"),
+        type=int,
+        default=1,
+        help="Qwen3.5 FastAFD 专家组 GPU 数；最后 N 个 rank 按专家分片，其余 rank 执行 Attention。",
+    )
+    parallel_group.add_argument(
         "--cp_rotate_method",
         env_name="CP_ROTATE_METHOD",
         bind_to=(prefill_cp_config, "method"),

@@ -627,6 +627,12 @@ TEST_F(KVCacheManagerTest, FastAFDAttentionCapacityIgnoresExpertCandidate) {
     EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false, 3));
 }
 
+TEST_F(KVCacheManagerTest, FastAFDAttentionCapacityIgnoresAllExpertGroupCandidates) {
+    const int candidates[] = {11, 7, 2, 2};
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 4, false, 2), 7u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 4, true, 2), 2u);
+}
+
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
     auto config  = makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                            /*block_num=*/1,

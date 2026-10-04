@@ -12,6 +12,9 @@ from rtp_llm.model_loader.linear_attn_weight import (
     W8A8Fp8PerBlockLinearAttnAtomicWeight,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+    _ckpt_base_matches_quant_exclude,
+)
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -331,6 +334,30 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # (V4PerBlockFp8Weight) — keep the base class out of contention so the
         # registry's "must be exactly one match" check passes.
         if is_v4_weight(src_weight_info):
+            return False
+        excluded = []
+        layer_id = quant_config._weight_layer_id
+        for ckpt_weight in src_weight_info.weights:
+            base_name = ckpt_weight.name.rsplit(".", 1)[0]
+            template_excluded = base_name in quant_config.exclude_modules
+            if layer_id is not None:
+                base_name = base_name.replace("{i}", str(layer_id))
+            is_excluded = template_excluded or _ckpt_base_matches_quant_exclude(
+                base_name, quant_config.exclude_modules
+            )
+            if is_excluded and "{i}" in base_name and not template_excluded:
+                raise ValueError(
+                    f"FP8 per-block exclusion for {base_name} requires a layer "
+                    "index; expand layer weights before quantization conversion"
+                )
+            excluded.append(is_excluded)
+        if any(excluded):
+            if not all(excluded):
+                raise ValueError(
+                    f"FP8 per-block weight {name} mixes excluded and quantized "
+                    "checkpoint modules; all components of a fused weight must "
+                    "use the same quantization format"
+                )
             return False
         return True
 

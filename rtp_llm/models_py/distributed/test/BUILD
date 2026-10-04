@@ -14,6 +14,7 @@ py_test(
 py_test(
     name = "fast_afd_transport_integration_test",
     srcs = ["fast_afd_transport_integration_test.py"],
+    args = ["FastAFDTransportIntegrationTest"],
     deps = [
         "//rtp_llm:ops",
         "//rtp_llm:torch",
@@ -25,6 +26,26 @@ py_test(
     env = {"GPU_COUNT": "3"},
     tags = ["open_skip"],
     exec_properties = {"gpu": "A10", "gpu_count": "3"},
+)
+
+# Two attention ranks and two expert shards exercise expert-only broadcast /
+# reduction plus follower failure propagation. No model weights are needed.
+py_test(
+    name = "fast_afd_multi_expert_transport_integration_test",
+    srcs = ["fast_afd_transport_integration_test.py"],
+    main = "fast_afd_transport_integration_test.py",
+    args = ["FastAFDMultiExpertTransportIntegrationTest"],
+    deps = [
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:fast_afd",
+    ],
+    timeout = "moderate",
+    env = {"GPU_COUNT": "4"},
+    tags = ["open_skip"],
+    exec_properties = {"gpu": "A10", "gpu_count": "4"},
 )
 
 py_test (

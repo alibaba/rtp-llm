@@ -1,7 +1,7 @@
-"""Point-to-point routed MoE execution for the first FastAFD topology.
+"""Point-to-point routed MoE execution with an expert-parallel service.
 
-The attention ranks own attention, routing and shared experts. One expert rank
-owns routed experts. Each attention rank sends one request at a time and waits
+The attention ranks own attention, routing and shared experts. The final ranks
+shard routed experts; their leader receives and batches attention requests. Each attention rank sends one request at a time and waits
 for its result. The expert rank visits active attention ranks in rank order,
 which permits different microbatch counts and layer positions on each rank.
 
@@ -12,8 +12,10 @@ Headers and statuses use a dedicated CPU Gloo group, so interpreting control
 messages does not synchronize the CUDA stream. Payloads remain on NCCL.
 """
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import IntEnum
 from typing import Protocol
 
@@ -142,6 +144,162 @@ def _send_status(transport: _ControlTransport, rank: int, status: _Status) -> No
     )
 
 
+def _expert_topology(
+    service_rank: int, expert_ranks: Sequence[int] | None
+) -> tuple[int, ...]:
+    ranks = tuple(expert_ranks) if expert_ranks is not None else (service_rank,)
+    if not ranks or ranks != tuple(range(service_rank, service_rank + len(ranks))):
+        raise ValueError(
+            "FastAFD requires contiguous expert ranks after attention ranks"
+        )
+    if (
+        torch.distributed.is_initialized()
+        and ranks[-1] != torch.distributed.get_world_size() - 1
+    ):
+        raise ValueError("FastAFD expert ranks must end at the final world rank")
+    return ranks
+
+
+class _ExpertAgreementError(RuntimeError):
+    """A recoverable error observed by every rank in the expert group."""
+
+
+class _ExpertTeam:
+    """Leader dispatch and explicit reductions inside the expert-only group.
+
+    Every WORLD rank constructs this object in the same order. Attention ranks
+    never use the resulting groups. In particular, the outer TP group is not
+    used: attention TP remains one while the expert group shards full experts.
+    CPU agreements precede payload collectives so a caught allocation/execution
+    failure on a follower does not strand its peers in a GPU broadcast/reduce.
+    """
+
+    _RUN = 1
+    _STEP_END = 2
+    _COMMAND_SIZE = 6
+
+    def __init__(self, ranks: tuple[int, ...], device: torch.device) -> None:
+        self.leader = ranks[0]
+        self.rank = torch.distributed.get_rank()
+        self.is_leader = self.rank == self.leader
+        self.control = torch.distributed.new_group(
+            ranks=list(ranks), backend="gloo", timeout=timedelta(days=36500)
+        )
+        self.data = torch.distributed.new_group(
+            ranks=list(ranks),
+            backend="nccl" if device.type == "cuda" else "gloo",
+            timeout=timedelta(days=36500),
+        )
+
+    def _command(self, values: list[int] | None = None) -> list[int]:
+        command = (
+            torch.tensor(values, dtype=torch.int64, device="cpu")
+            if values is not None
+            else torch.empty(self._COMMAND_SIZE, dtype=torch.int64, device="cpu")
+        )
+        torch.distributed.broadcast(command, src=self.leader, group=self.control)
+        return command.tolist()
+
+    def _agree(self, status: _Status) -> None:
+        value = torch.tensor([int(status)], dtype=torch.int64, device="cpu")
+        torch.distributed.all_reduce(
+            value, op=torch.distributed.ReduceOp.MAX, group=self.control
+        )
+        agreed = _Status(int(value.item()))
+        if agreed != _Status.OK:
+            raise _ExpertAgreementError(f"FastAFD expert team failed: {agreed.name}")
+
+    def execute(
+        self,
+        service: "FastAFDExpertService",
+        layer_idx: int,
+        token_count: int,
+        ids_code: int,
+        hidden: torch.Tensor | None = None,
+        ids: torch.Tensor | None = None,
+        weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.is_leader:
+            self._command([self._RUN, layer_idx, token_count, ids_code, 0, 0])
+        status = _Status.OK
+        try:
+            if not self.is_leader:
+                hidden = torch.empty(
+                    (token_count, service.hidden_size),
+                    device=service.device,
+                    dtype=service.activation_dtype,
+                )
+                ids = torch.empty(
+                    (token_count, service.top_k),
+                    device=service.device,
+                    dtype=_CODE_IDS[ids_code],
+                )
+                weights = torch.empty(
+                    (token_count, service.top_k),
+                    device=service.device,
+                    dtype=torch.float32,
+                )
+        except Exception:
+            logging.exception(
+                "FastAFD expert rank %s could not allocate a batch", self.rank
+            )
+            status = _Status.RESOURCE_FAILED
+        self._agree(status)
+        for tensor in (hidden, ids, weights):
+            torch.distributed.broadcast(tensor, src=self.leader, group=self.data)
+        status = _Status.OK
+        result = None
+        try:
+            fused_moe = service.fused_moe_by_layer[layer_idx]
+            result = fused_moe(
+                hidden_states=hidden,
+                topk_ids=ids.to(dtype=fused_moe.topk_ids_dtype),
+                topk_weights=weights,
+                activation="SiGLU",
+                skip_tp_allreduce=True,
+            )
+            if (
+                not isinstance(result, torch.Tensor)
+                or result.shape != (token_count, service.hidden_size)
+                or result.dtype != service.activation_dtype
+                or result.device != service.device
+            ):
+                status = _Status.BAD_OUTPUT
+            else:
+                result = result.contiguous()
+        except Exception:
+            logging.exception(
+                "FastAFD expert rank %s layer %s execution failed", self.rank, layer_idx
+            )
+            status = _Status.EXPERT_FAILED
+        self._agree(status)
+        torch.distributed.reduce(result, dst=self.leader, group=self.data)
+        return result
+
+    def finish_step(self, stopped: bool, idle: bool, failed: bool) -> None:
+        self._command([self._STEP_END, int(stopped), int(idle), int(failed), 0, 0])
+
+    def serve(self, service: "FastAFDExpertService") -> bool:
+        while True:
+            kind, first, second, third, _, _ = self._command()
+            if kind == self._STEP_END:
+                service.global_idle = bool(second)
+                service._step_id += 1
+                if third:
+                    raise RuntimeError(
+                        "FastAFD expert leader ended a failed step: STEP_FAILED"
+                    )
+                return bool(first)
+            if kind != self._RUN:
+                raise RuntimeError("FastAFD expert leader sent an invalid command")
+            try:
+                self.execute(service, first, second, third)
+            except _ExpertAgreementError:
+                # All expert peers have agreed on failure. The leader reports
+                # it to AG clients, drains the step, and sends STEP_END.
+                continue
+
+
 class FastAFDClient:
     """Synchronous routed-expert proxy for one attention rank.
 
@@ -161,6 +319,7 @@ class FastAFDClient:
         topk_ids_dtype: torch.dtype = torch.int32,
         *,
         control_transport: _ControlTransport | None = None,
+        expert_ranks: Sequence[int] | None = None,
     ) -> None:
         self.device = _check_common(
             hidden_size, top_k, expert_count, device, activation_dtype
@@ -169,13 +328,12 @@ class FastAFDClient:
             raise ValueError("service_rank must be the rank after attention ranks")
         if topk_ids_dtype not in _IDS_CODE:
             raise ValueError("FastAFD top-k ids must be int32 or int64")
-        if torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
-            if service_rank != world_size - 1 or rank >= service_rank:
-                raise ValueError(
-                    "FastAFD requires N attention ranks and one final expert rank"
-                )
+        self.expert_ranks = _expert_topology(service_rank, expert_ranks)
+        if (
+            torch.distributed.is_initialized()
+            and torch.distributed.get_rank() >= service_rank
+        ):
+            raise ValueError("FastAFD client must run on an attention rank")
         self.service_rank = service_rank
         self.hidden_size = hidden_size
         self.top_k = top_k
@@ -186,6 +344,11 @@ class FastAFDClient:
             control_transport
             if control_transport is not None
             else _GlooControlTransport()
+        )
+        self._expert_team = (
+            _ExpertTeam(self.expert_ranks, self.device)
+            if len(self.expert_ranks) > 1
+            else None
         )
         self._finished = True
         self._step_id = -1
@@ -376,7 +539,7 @@ class FastAFDClient:
 
 
 class FastAFDExpertService:
-    """Run prebuilt routed FusedMoe modules on a single expert rank."""
+    """Run routed FusedMoe shards on the final expert ranks."""
 
     def __init__(
         self,
@@ -389,6 +552,7 @@ class FastAFDExpertService:
         expert_count: int,
         *,
         control_transport: _ControlTransport | None = None,
+        expert_ranks: Sequence[int] | None = None,
     ) -> None:
         self.device = _check_common(
             hidden_size, top_k, expert_count, device, activation_dtype
@@ -398,11 +562,16 @@ class FastAFDExpertService:
             raise ValueError(
                 "FastAFD requires contiguous attention ranks starting at zero"
             )
-        if torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
-            if world_size != len(ranks) + 1 or rank != len(ranks):
-                raise ValueError("FastAFD expert service must be the final world rank")
+        self.expert_ranks = _expert_topology(len(ranks), expert_ranks)
+        if expert_count % len(self.expert_ranks):
+            raise ValueError(
+                "FastAFD expert count must divide evenly across expert ranks"
+            )
+        if (
+            torch.distributed.is_initialized()
+            and torch.distributed.get_rank() not in self.expert_ranks
+        ):
+            raise ValueError("FastAFD expert service must run on an expert rank")
         if not fused_moe_by_layer:
             raise ValueError("FastAFD requires at least one routed MoE layer")
         if any(not isinstance(layer, int) or layer < 0 for layer in fused_moe_by_layer):
@@ -430,8 +599,14 @@ class FastAFDExpertService:
             if control_transport is not None
             else _GlooControlTransport()
         )
+        self._expert_team = (
+            _ExpertTeam(self.expert_ranks, self.device)
+            if len(self.expert_ranks) > 1
+            else None
+        )
         self._step_id = 0
         self._live_attention_ranks = set(ranks)
+        self._all_stopped = False
         self.global_idle = False
 
     def _validate_header(self, values: list[int]) -> _Status:
@@ -518,12 +693,23 @@ class FastAFDExpertService:
                 ids = torch.cat([request.ids for request in batch], dim=0)
                 weights = torch.cat([request.weights for request in batch], dim=0)
             ids = ids.to(dtype=getattr(fused_moe, "topk_ids_dtype"))
-            result = fused_moe(
-                hidden_states=hidden,
-                topk_weights=weights,
-                topk_ids=ids,
-                activation="SiGLU",
-            )
+            if self._expert_team is not None:
+                result = self._expert_team.execute(
+                    self,
+                    layer_idx,
+                    total_tokens,
+                    _IDS_CODE[ids.dtype],
+                    hidden,
+                    ids,
+                    weights,
+                )
+            else:
+                result = fused_moe(
+                    hidden_states=hidden,
+                    topk_weights=weights,
+                    topk_ids=ids,
+                    activation="SiGLU",
+                )
         except Exception as exc:
             failures.append(
                 f"layer {layer_idx} ranks {[request.rank for request in batch]} "
@@ -583,6 +769,24 @@ class FastAFDExpertService:
 
     def serve_until_done(self) -> bool:
         """Serve one step; return true after every attention rank has stopped."""
+        if self._all_stopped:
+            return True
+        team = self._expert_team
+        if team is not None and not team.is_leader:
+            self._all_stopped = team.serve(self)
+            return self._all_stopped
+        try:
+            stopped = self._serve_leader_step()
+        except Exception:
+            if team is not None:
+                team.finish_step(False, False, True)
+            raise
+        if team is not None:
+            team.finish_step(stopped, self.global_idle, False)
+        self._all_stopped = stopped
+        return stopped
+
+    def _serve_leader_step(self) -> bool:
         if not self._live_attention_ranks:
             return True
         active = set(self._live_attention_ranks)

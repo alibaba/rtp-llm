@@ -631,14 +631,17 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const bool fast_afd_qwen35 =
         ffn_disaggregate_config.enable_ffn_disaggregate && model_config_.model_type == "qwen35_moe";
-    // The one expert rank has no attention state. Block 0 is reserved, and the
+    // Expert ranks have no attention state. Block 0 is reserved, and the
     // block pool requires at least one allocatable block in addition to it.
     const auto local_block_num =
         fast_afd_qwen35 && ffn_disaggregate_config.is_ffn_service() ?
             2u :
             CacheConfigCreator::computeLocalBlockNum(
                 config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto attention_rank_count = fast_afd_qwen35 ? static_cast<size_t>(parallelism_config.world_size - 1) : 0;
+    const auto attention_rank_count =
+        fast_afd_qwen35 ?
+            static_cast<size_t>(ffn_disaggregate_config.attention_dp_size * ffn_disaggregate_config.attention_tp_size) :
+            0;
     const auto confirmed_block_num =
         CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, attention_rank_count);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);

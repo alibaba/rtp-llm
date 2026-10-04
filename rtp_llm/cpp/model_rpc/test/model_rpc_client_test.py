@@ -62,6 +62,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
     ErrorDetailsPB,
     GenerateConfigPB,
     GenerateInputPB,
@@ -195,6 +196,160 @@ def _prefill_role_addr(ip="prefill", grpc_port=9000):
 
 def _decode_role_addr(ip="decode", grpc_port=9001):
     return RoleAddr(role=RoleType.DECODE, ip=ip, http_port=8001, grpc_port=grpc_port)
+
+
+class _DispatchRecordingStub:
+    def __init__(self):
+        self.request_ids = []
+
+    def GenerateStreamCall(self, request, **kwargs):
+        self.request_ids.append([request.request_id])
+        return _FakeResponseIterator([_make_response()])
+
+    def FetchResponse(self, request, **kwargs):
+        self.request_ids.append([request.request_id])
+        return _FakeResponseIterator([_make_response()])
+
+    async def BatchGenerateCall(self, request, **kwargs):
+        self.request_ids.append([item.request_id for item in request.inputs])
+        response = BatchGenerateOutputsPB()
+        for _ in request.inputs:
+            response.results.add().final_output.CopyFrom(_make_response())
+        return response
+
+
+class ModelRpcClientFastAFDRoutingTest(TestCase):
+    addresses = [f"attention-{rank}:9000" for rank in range(6)]
+
+    @staticmethod
+    def _input(request_id, **kwargs):
+        return GenerateInput(
+            request_id=request_id,
+            token_ids=torch.tensor([1, 2, 3]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(timeout_ms=1000),
+            **kwargs,
+        )
+
+    @staticmethod
+    async def _enqueue(client, request):
+        return [response async for response in client.enqueue(request)]
+
+    def _run(self, client, task):
+        client._channel_pool = _FakeChannelPool()
+        stub = _DispatchRecordingStub()
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                return_value=(None, []),
+            ),
+        ):
+            result = asyncio.run(task())
+        return client._channel_pool.targets, stub.request_ids, result
+
+    def test_six_attention_ranks_balance_mixed_batches_and_streams(self):
+        client = ModelRpcClient(self.addresses, {}, fast_afd=True)
+        # Different millisecond timestamps can produce the same remainder for
+        # six AGs. This sequence deliberately reproduces that collision.
+        request_ids = [
+            ((9_000_000_000 + 3 * (index * index + 1)) << 24) | (3 << 12)
+            for index in range(18)
+        ]
+        self.assertEqual({request_id % 6 for request_id in request_ids}, {0})
+        batches = [
+            (
+                [self._input(request_id + offset) for offset in range(3)]
+                if index % 2
+                else [self._input(request_id)]
+            )
+            for index, request_id in enumerate(request_ids)
+        ]
+        original_ids = [[item.request_id for item in batch] for batch in batches]
+
+        async def dispatch():
+            return await asyncio.gather(
+                *(
+                    (
+                        client.batch_enqueue(batch)
+                        if len(batch) > 1
+                        else self._enqueue(client, batch[0])
+                    )
+                    for batch in batches
+                )
+            )
+
+        targets, serialized_ids, results = self._run(client, dispatch)
+        self.assertEqual(targets, self.addresses * 3)
+        self.assertEqual(serialized_ids, original_ids)
+        self.assertEqual(
+            [[item.request_id for item in batch] for batch in batches], original_ids
+        )
+        self.assertEqual([len(result) for result in results], [len(b) for b in batches])
+
+    def test_address_count_changes_and_empty_batches_preserve_dispatch_sequence(self):
+        client = ModelRpcClient(list(self.addresses), {}, fast_afd=True)
+
+        async def dispatch():
+            self.assertEqual(await client.batch_enqueue([]), [])
+            await self._enqueue(client, self._input(100))
+            client._addresses = self.addresses[:3]
+            await client.batch_enqueue([self._input(200), self._input(201)])
+            client._addresses = self.addresses[:1]
+            await self._enqueue(client, self._input(300))
+            client._addresses = list(self.addresses)
+            await client.batch_enqueue([self._input(400)])
+            client._addresses = []
+            with self.assertRaisesRegex(ValueError, "No address found"):
+                await client.batch_enqueue([self._input(500)])
+            client._addresses = list(self.addresses)
+            await self._enqueue(client, self._input(600))
+
+        targets, _, _ = self._run(client, dispatch)
+        self.assertEqual(targets, [self.addresses[index] for index in (0, 1, 0, 3, 4)])
+
+    def test_disabled_fastafd_keeps_request_id_routing(self):
+        client = ModelRpcClient(self.addresses, {})
+
+        async def dispatch():
+            await self._enqueue(client, self._input(17))
+            await client.batch_enqueue([self._input(20), self._input(21)])
+            await self._enqueue(client, self._input(17))
+
+        targets, serialized_ids, _ = self._run(client, dispatch)
+        self.assertEqual(targets, [self.addresses[index] for index in (5, 2, 5)])
+        self.assertEqual(serialized_ids, [[17], [20, 21], [17]])
+
+    def test_explicit_and_fetch_routes_do_not_consume_local_dispatch_sequence(self):
+        client = ModelRpcClient(self.addresses, {}, fast_afd=True)
+        pinned = self._input(17)
+        pinned.generate_config.role_addrs = [_prefill_role_addr("pinned", 9000)]
+        fetched = self._input(21, enqueued_by_master=True)
+        fetched.generate_config.role_addrs = [
+            _prefill_role_addr("fetch-first", 9000),
+            _prefill_role_addr("fetch-second", 9000),
+        ]
+
+        async def dispatch():
+            await self._enqueue(client, self._input(101))
+            await self._enqueue(client, pinned)
+            await self._enqueue(client, fetched)
+            await client.batch_enqueue([self._input(400), self._input(401)])
+
+        targets, serialized_ids, _ = self._run(client, dispatch)
+        self.assertEqual(
+            targets,
+            [
+                self.addresses[0],
+                "pinned:9000",
+                "fetch-second:9000",
+                self.addresses[1],
+            ],
+        )
+        self.assertEqual(serialized_ids, [[101], [17], [21], [400, 401]])
 
 
 class ModelRpcClientTest(TestCase):

@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import itertools
 import json
 import logging
 import math
@@ -886,6 +887,8 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        *,
+        fast_afd: bool = False,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -895,10 +898,14 @@ class ModelRpcClient(object):
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
+            fast_afd: Balance local attention-rank dispatch independently of
+                request IDs. Each batch stays on one attention rank.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._fast_afd = fast_afd
+        self._fast_afd_dispatch_sequence = itertools.count()
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -912,6 +919,21 @@ class ModelRpcClient(object):
 
     async def close(self) -> None:
         await self._channel_pool.close()
+
+    def _select_target_address(
+        self, request_id: int, addresses: list[str], *, local_dispatch: bool = True
+    ) -> str:
+        if not addresses:
+            raise ValueError(f"No address found for request: {request_id}")
+        # Timestamp bits in global request IDs are not an even sequence modulo
+        # non-power-of-two AG counts. Single requests and atomic batches share
+        # this client-local sequence, without changing their correlation IDs.
+        index = (
+            next(self._fast_afd_dispatch_sequence)
+            if self._fast_afd and local_dispatch
+            else request_id
+        )
+        return addresses[index % len(addresses)]
 
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (
@@ -1025,12 +1047,14 @@ class ModelRpcClient(object):
                         selected_role = role_addr.role
                         break
 
-        if not address_list:
-            raise ValueError(f"No address found for request: {input_py.request_id}")
         # Select target address before entering the try block so it is always
         # available to the error handlers below (surfaced in logs only)
         # details to identify which backend peer dropped the connection).
-        target_address = address_list[input_py.request_id % len(address_list)]
+        target_address = self._select_target_address(
+            input_py.request_id,
+            address_list,
+            local_dispatch=not use_fetch_response and selected_role is None,
+        )
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
@@ -1271,7 +1295,9 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        target_address = self._select_target_address(
+            inputs[0].request_id, self._addresses
+        )
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
