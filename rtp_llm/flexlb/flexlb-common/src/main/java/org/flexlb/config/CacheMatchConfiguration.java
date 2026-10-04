@@ -123,20 +123,16 @@ public class CacheMatchConfiguration {
                     kvcmRuntimeConfig.getMedium());
         }
         if (localStandbyEnabled) {
-            log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "
+            log.info("Local standby cache configuration: autoSwitch={}, "
                             + "ttlMs={}, minimumTtlMs={}, ttlReductionStartRatio={}, "
-                            + "maximumEntries={}, capacityMultiplier={}, asyncQueueCapacity={}, "
-                            + "hashThreadCount={}, hashQueueCapacity={}",
+                            + "maximumEntries={}, capacityMultiplier={}, asyncQueueCapacity={}",
                     localStandbyConfig.isAutoSwitch(),
-                    localStandbyConfig.getBlockSize(),
                     localStandbyConfig.getTtlMs(),
                     localStandbyConfig.getMinimumTtlMs(),
                     localStandbyConfig.getTtlReductionStartRatio(),
                     localStandbyConfig.getMaximumEntries(),
                     localStandbyConfig.getCapacityMultiplier(),
-                    localStandbyConfig.getAsyncQueueCapacity(),
-                    localStandbyConfig.getHashThreadCount(),
-                    localStandbyConfig.getHashQueueCapacity());
+                    localStandbyConfig.getAsyncQueueCapacity());
         }
     }
 }

@@ -195,7 +195,6 @@ UniConfig / Nacos 的 v1 部分更新示例：
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
-- `blockHashStrategy`：cache block hash 策略。
 - `enableFallback`：默认 `false`；启用时调度入口在转发和路由前返回错误码 `8600`，
   由调用方执行 domain fallback。
 - `fallbackBatchTokenCapacity`：默认 `1048576`；Engine 未声明
@@ -251,18 +250,18 @@ gRPC Schedule 在校验请求 ID 前创建基础上下文，记录入口时间�
 
 本地 Schedule 的正常完成、异常、取消和 RPC deadline 到期统一经过处理链完成回调。
 `completeOnce` 的完成门闩保证收尾只执行一次，`finally` 负责耗时记录、PV 输出、取消监听器
-移除和请求计数释放。取消监听器只触发取消；处理链完成前不读取 PV。哈希阶段收到取消时，
-哈希回调完成后跳过选路；选路阶段的取消由调度器在释放处理权后完成结果 Future。
+移除和请求计数释放。取消监听器只触发取消；处理链完成前不读取 PV。
+选路阶段的取消由调度器在释放处理权后完成结果 Future。
 已取消的 RPC 不发送响应，PV 保留取消或超时结果及收尾前完成的遥测。
 PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达同一终态；准入拒绝原因仅在
 确有准入拒绝时记录，成功、取消、超时和其他无准入拒绝原因的结果省略该字段。
 
 `totalUs` 是入口到记录 PV 前的单调时钟耗时；`arrivalMs` 是服务入口时间减调用方
-`requestTimeMs`，受两端时钟偏差影响。gRPC 路径记录收到的 `inputIdsCount` 与
+`requestTimeMs`，受两端时钟偏差影响。gRPC 路径记录收到的
 `requestMessageBytes`（protobuf 序列化大小，不含 gRPC framing/compression）。
 `cacheMatchCount/cacheMatchUs`累计实际缓存查询尝试，角色的缓存选择和决策记录反映最近一次路由尝试。
 
-哈希和路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
+路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
 终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。
 PV 读取时创建不可变 `RoutingTelemetry` 快照，选路中的次数与原因读取不创建快照。
 WorkerBatcher 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
@@ -303,7 +302,7 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - engine health、worker status 与状态转换时延；
 - routing、queue、dispatch、forward-to-master；
 - cache hit、KVCM retry/failure、Local Standby capacity/fallback/comparison；
-- block hash、线程池、graceful lifecycle；
+- 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
 gRPC 服务端执行器与批次发送执行器通过 `FlexMonitor` 每 2 秒上报忙碌线程数、总线程数和

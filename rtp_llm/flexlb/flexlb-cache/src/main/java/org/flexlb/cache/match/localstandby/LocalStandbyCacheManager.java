@@ -40,7 +40,6 @@ public class LocalStandbyCacheManager {
     private final Collection<ServiceRoute> serviceRoutes;
     private final long configuredMaximumEntries;
     private final double capacityMultiplier;
-    private final long configuredBlockSize;
     private final LocalStandbyCacheIndex cacheIndex;
     private volatile long nextCapacityWarningNanos;
 
@@ -58,7 +57,6 @@ public class LocalStandbyCacheManager {
         this.capacityMultiplier = enabled
                 ? config.getCapacityMultiplier()
                 : LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER;
-        this.configuredBlockSize = enabled ? config.getBlockSize() : 0;
         long ttlMs = enabled
                 ? config.getTtlMs()
                 : LocalStandbyConfig.DEFAULT_TTL_MS;
@@ -284,8 +282,7 @@ public class LocalStandbyCacheManager {
             return 0;
         }
 
-        long blockSize = configuredBlockSize > 0 ? configuredBlockSize : cacheStatus.getBlockSize();
-        return divideRoundUp(cacheStatus.getTotalKvCache(), blockSize);
+        return divideRoundUp(cacheStatus.getTotalKvCache(), cacheStatus.getBlockSize());
     }
 
     private long divideRoundUp(long value, long divisor) {

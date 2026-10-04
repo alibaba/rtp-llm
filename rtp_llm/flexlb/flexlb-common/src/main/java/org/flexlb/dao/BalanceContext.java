@@ -200,11 +200,6 @@ public class BalanceContext {
         this.totalTimeUs = (System.nanoTime() - serviceStartNanos) / 1_000;
     }
 
-    public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
-        routingTelemetryState.hashWaitUs = queueWaitTimeUs;
-        routingTelemetryState.hashUs = executionTimeUs;
-    }
-
     public void recordCacheQuery(String source, long queryTimeUs) {
         routingTelemetryState.cacheSource = source;
         routingTelemetryState.cacheQueryUs += Math.max(0L, queryTimeUs);
@@ -246,8 +241,6 @@ public class BalanceContext {
 
     public RoutingTelemetry getRoutingTelemetry() {
         return new RoutingTelemetry(
-                routingTelemetryState.hashWaitUs,
-                routingTelemetryState.hashUs,
                 routingTelemetryState.cacheSource,
                 routingTelemetryState.cacheQueryUs,
                 routingTelemetryState.cacheQueryCount,
@@ -258,8 +251,6 @@ public class BalanceContext {
     }
 
     private static final class RoutingTelemetryState {
-        private long hashWaitUs;
-        private long hashUs;
         private String cacheSource;
         private long cacheQueryUs;
         private int cacheQueryCount;
@@ -274,8 +265,6 @@ public class BalanceContext {
     }
 
     public record RoutingTelemetry(
-            long hashWaitUs,
-            long hashUs,
             String cacheSource,
             long cacheQueryUs,
             int cacheQueryCount,

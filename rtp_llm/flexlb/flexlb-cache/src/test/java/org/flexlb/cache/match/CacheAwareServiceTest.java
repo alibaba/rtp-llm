@@ -4,15 +4,12 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -35,19 +32,16 @@ class CacheAwareServiceTest {
     private final CacheMetadataUpdateOrchestrator updateOrchestrator =
             mock(CacheMetadataUpdateOrchestrator.class);
     private final LocalStandbyComparisonService comparisonService = mock(LocalStandbyComparisonService.class);
-    private final RequestBlockHashService requestBlockHashService =
-            mock(RequestBlockHashService.class);
     private final CacheAwareService service = new CacheAwareService(
             metricsReporter,
             queryOrchestrator,
             comparisonService,
-            updateOrchestrator,
-            requestBlockHashService);
+            updateOrchestrator);
 
     @Test
     void delegatesCacheQueriesToOrchestrator() {
         CacheMatchQuery query = new CacheMatchQuery(
-                "1", List.of(11L), 2192L, List.of(), 0,
+                "1", List.of(11L), 2192L,
                 RoleType.PREFILL, "default");
         CacheMatchResult expected = new CacheMatchResult(
                 Map.of("127.0.0.1:8080", HostCacheMatch.local(1)),
@@ -77,20 +71,9 @@ class CacheAwareServiceTest {
     }
 
     @Test
-    void delegatesRequestBlockHashPreparation() {
-        BalanceContext context = new BalanceContext();
-        when(requestBlockHashService.prepareBlockCacheKeys(context))
-                .thenReturn(Mono.empty());
-
-        service.prepareBlockCacheKeys(context).join();
-
-        verify(requestBlockHashService).prepareBlockCacheKeys(context);
-    }
-
-    @Test
     void convertsUnexpectedQueryFailureToFailedResult() {
         CacheMatchQuery query = new CacheMatchQuery(
-                "2", List.of(11L), 2192L, List.of(), 0,
+                "2", List.of(11L), 2192L,
                 RoleType.PREFILL, "default");
         when(queryOrchestrator.findMatchingEngines(query))
                 .thenThrow(new IllegalStateException("failed"));

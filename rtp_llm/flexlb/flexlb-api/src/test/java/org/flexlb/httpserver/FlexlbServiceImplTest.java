@@ -1522,6 +1522,40 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void scheduleRejectsClientKeysWithoutBlockSize() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("missing-block-size")
+                .addBlockCacheKeys(100L)
+                .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void scheduleWithoutClientKeysRoutesWithoutDerivingBlockSize() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("no-client-keys").setSeqLen(4096).build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertTrue(context.getValue().getRequest().getBlockCacheKeys().isEmpty());
+        assertEquals(0, context.getValue().getRequest().getBlockSize());
+    }
+
+    @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
         FlexlbConfig queueConfig = ConfigService.parse("""
                 {

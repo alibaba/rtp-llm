@@ -54,7 +54,7 @@ public class LocalStandbyComparisonService {
         if (!canTrack(query)) {
             return;
         }
-        if (query.localStandbyBlockCacheKeys() != null && query.localStandbyBlockCacheKeys().isEmpty()) {
+        if (query.blockCacheKeys() != null && query.blockCacheKeys().isEmpty()) {
             storePrediction(query, CompletableFuture.completedFuture(new StandbyPrediction(Collections.emptyMap(), 0)));
             return;
         }
@@ -134,7 +134,7 @@ public class LocalStandbyComparisonService {
     }
 
     private boolean canTrack(CacheMatchQuery query) {
-        return enabled && query != null && query.localStandbyBlockSize() > 0;
+        return enabled && query != null && query.blockSize() > 0;
     }
 
     private void storePrediction(CacheMatchQuery query, CompletableFuture<StandbyPrediction> prediction) {

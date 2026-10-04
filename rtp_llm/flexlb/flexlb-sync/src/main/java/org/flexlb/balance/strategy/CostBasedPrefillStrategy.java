@@ -572,8 +572,6 @@ public class CostBasedPrefillStrategy {
                         String.valueOf(balanceContext.getRequestId()),
                         request.getBlockCacheKeys(),
                         blockSize,
-                        request.getLocalStandbyBlockCacheKeys(),
-                        request.getLocalStandbyBlockSize(),
                         roleType,
                         group));
         CacheMatchResult observed = result == null

@@ -17,6 +17,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FlexlbScheduleProtocolTest {
 
     @Test
+    void scheduleReservesRemovedInputIdsAndPreservesClientKeys() throws Exception {
+        var descriptor = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor();
+        assertNull(descriptor.findFieldByName("input_ids"));
+        assertTrue(descriptor.isReservedNumber(16));
+        assertTrue(descriptor.isReservedName("input_ids"));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        CodedOutputStream coded = CodedOutputStream.newInstance(output);
+        coded.writeString(1, "client-keys");
+        coded.writeInt64(3, 123L);
+        coded.writeInt64(13, 4096L);
+        coded.writeInt32(16, 99);
+        coded.flush();
+
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(output.toByteArray());
+        assertEquals(java.util.List.of(123L), request.getBlockCacheKeysList());
+        assertEquals(4096L, request.getCacheKeyBlockSize());
+        assertTrue(request.getUnknownFields().hasField(16));
+        assertEquals(request, FlexlbScheduleProtocol.FlexlbScheduleRequestPB
+                .parseFrom(request.toByteArray()));
+    }
+
+    @Test
     void scheduleContractIsSeparatedButKeepsOriginalWireServiceName() {
         assertNull(EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));
         assertNull(EngineRpcService.getDescriptor().findServiceByName("FlexlbService"));
