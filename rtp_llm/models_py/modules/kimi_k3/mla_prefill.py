@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+import time
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import MlaFlashInferPrefillOp
@@ -374,6 +375,16 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
                 qo_indptr=q_indptr, kv_indptr=kv_indptr,
                 max_q=q_len, max_k=segment.length, causal=False,
             )
+            if os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1":
+                logging.info("[K3_SMOKE_EVENT] %s", json.dumps({
+                    "kind": "mla_prefix_executed", "backend": "fp8_tokenspeed",
+                    "layer_id": layer_id, "rank": (
+                        self.page_rr_adapter.shard_rank
+                        if self.page_rr_adapter is not None else 0
+                    ), "owner": owner, "start": segment.start,
+                    "length": segment.length, "query_tokens": q_len,
+                    "time_ns": time.time_ns(),
+                }, sort_keys=True))
             merge_mla_states_in_place(
                 output.narrow(0, q_start, q_len),
                 output_lse.narrow(0, q_start, q_len),
@@ -643,6 +654,18 @@ class KimiK3MlaPrefillImpl(MlaFlashInferPrefillImpl):
             table,
             valid_token_count=logical if physical > logical else None,
         )
+        if os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1":
+            owned = int((params.slot_mapping[:logical] >= 0).sum().item())
+            padding_slots = int((params.slot_mapping[logical:] >= 0).sum().item())
+            logging.info("[K3_SMOKE_EVENT] %s", json.dumps({
+                "kind": "mla_page_rr_prefill", "rank": self._page_rr_adapter.shard_rank,
+                "shards": self._page_rr_adapter.shard_size,
+                "page_tokens": self._page_rr_adapter.page_tokens,
+                "logical_tokens": logical, "physical_tokens": physical,
+                "padding_rows": max(0, physical - logical),
+                "owned_token_rows": owned, "padding_owned_slots": padding_slots,
+                "time_ns": time.time_ns(),
+            }, sort_keys=True))
         params.slot_mapping.record_stream(
             torch.cuda.current_stream(params.slot_mapping.device)
         )

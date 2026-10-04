@@ -24,6 +24,15 @@ class Projection:
 
 
 class Fp8CollectiveProjectionTest(unittest.TestCase):
+    def test_collective_capacity_checks_padded_batch(self):
+        collective = object.__new__(Fp8CollectiveProjection)
+        collective.world_size = 8
+        collective.max_m = 65536
+        self.assertTrue(collective.can_run_ag(8192))
+        self.assertFalse(collective.can_run_ag(8193))
+        self.assertTrue(collective.can_run_rs(65536))
+        self.assertFalse(collective.can_run_rs(65544))
+
     def test_prequantized_input_reaches_consumer_without_requantization(self):
         values = torch.full((4, 512), 2, dtype=torch.float8_e4m3fn)
         scale_wire = torch.full((1, 4), 0x7F7F7F7F, dtype=torch.int32)

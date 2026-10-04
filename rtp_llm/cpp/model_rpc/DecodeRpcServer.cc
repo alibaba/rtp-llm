@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <memory>
@@ -1580,6 +1581,21 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
     response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));
     response->set_done_time_us(currentTimeUs());
+    const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+    if (smoke_evidence != nullptr && std::strcmp(smoke_evidence, "1") == 0
+        && load_result.error_info.ok()) {
+        const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        RTP_LLM_LOG_INFO(
+            "[K3_SMOKE_EVENT] {\"event\":\"pd_cache_loaded\",\"request_id\":%ld,"
+            "\"dp_rank\":%d,\"attn_tp_rank\":%d,\"partition_id\":%d,"
+            "\"partition_count\":%d,\"loaded_blocks\":%ld,\"time_ns\":%ld}",
+            static_cast<long>(request->request_id()),
+            static_cast<int>(maga_init_params_.parallelism_config.dp_rank),
+            static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank()),
+            request->partition_id(), request->partition_count(),
+            static_cast<long>(load_result.loaded_cache_block_count), static_cast<long>(time_ns));
+    }
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }

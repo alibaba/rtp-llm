@@ -13,6 +13,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     _get_group,
     all_gather,
 )
+from rtp_llm.models_py.distributed.fp8_collective_projection import Fp8Activation
 from rtp_llm.models_py.model_desc.kimi_linear import (
     KimiLinearKDADecode,
     KimiLinearKDAPrefill,
@@ -134,7 +135,8 @@ class KimiK3KDA(nn.Module):
         use_fused_ag = (
             self._fp8_collective is not None
             and self._fp8_collective.enable_ag
-            and hidden.shape[0] >= 4096
+            and (hidden.shape[0] >= 4096 or isinstance(hidden, Fp8Activation))
+            and self._fp8_collective.can_run_ag(hidden.shape[0])
             and attention_inputs.is_prefill
             and not metadata.is_target_verify
             and not getattr(attention_inputs, "is_mtp_draft_update", False)
@@ -150,6 +152,8 @@ class KimiK3KDA(nn.Module):
             and not metadata.is_target_verify
             and not torch.cuda.is_current_stream_capturing()
         )
+        if isinstance(hidden, Fp8Activation) and not use_fused_ag:
+            raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
         if use_fused_ag:
             with profile_scope("RTP::attention.fp8_ag_gemm"):
                 fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
@@ -214,6 +218,7 @@ class KimiK3KDA(nn.Module):
             and self._fp8_collective.enable_rs
             and self._fp8_output_norm
             and values.shape[0] >= 512
+            and self._fp8_collective.can_run_rs(values.shape[0])
             and attention_inputs.is_prefill
             and not metadata.is_target_verify
             and not getattr(attention_inputs, "is_mtp_draft_update", False)
@@ -323,13 +328,16 @@ class KimiK3MLA(nn.Module):
         use_fused_ag = (
             self._fp8_collective is not None
             and self._fp8_collective.enable_ag
-            and hidden.shape[0] >= 4096
+            and (hidden.shape[0] >= 4096 or isinstance(hidden, Fp8Activation))
+            and self._fp8_collective.can_run_ag(hidden.shape[0])
             and attention_inputs is not None
             and attention_inputs.is_prefill
             and not getattr(metadata, "is_target_verify", False)
             and not getattr(attention_inputs, "is_mtp_draft_update", False)
             and not torch.cuda.is_current_stream_capturing()
         )
+        if isinstance(hidden, Fp8Activation) and not use_fused_ag:
+            raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
         if use_fused_ag:
             with profile_scope("RTP::attention.fp8_ag_gemm"):
                 fused_input = self._fp8_collective.all_gather_gemm(hidden, self.input)
@@ -383,6 +391,7 @@ class KimiK3MLA(nn.Module):
             and self._fp8_collective.enable_rs
             and self._fp8_output_gate
             and values.shape[0] >= 512
+            and self._fp8_collective.can_run_rs(values.shape[0])
             and attention_inputs is not None
             and attention_inputs.is_prefill
             and not getattr(metadata, "is_target_verify", False)

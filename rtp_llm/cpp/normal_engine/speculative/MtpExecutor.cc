@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 #if USING_CUDA
@@ -2028,6 +2029,19 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify = true;
+    static const bool smoke_evidence = [] {
+        const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (smoke_evidence) {
+        RTP_LLM_LOG_INFO(
+            "[K3_SMOKE_EVENT] {\"event\":\"mtp_target_verify_forward\","
+            "\"input_rows\":%ld,\"stream_count\":%zu,\"token_rows\":%ld,\"time_ns\":%ld}",
+            model_input.input_lengths.size(0), stream_groups.allStreams().size(),
+            model_input.combo_tokens.numel(),
+            static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()));
+    }
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
         model_input.input_lengths.size(0),
@@ -2532,6 +2546,18 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
+    static const bool smoke_evidence = [] {
+        const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (smoke_evidence) {
+        RTP_LLM_LOG_INFO(
+            "[K3_SMOKE_EVENT] {\"event\":\"mtp_draft_decode_forward\","
+            "\"input_rows\":%zu,\"stream_count\":%zu,\"propose_step\":%d,\"time_ns\":%ld}",
+            batch_size, stream_groups.allStreams().size(), propose_step_,
+            static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()));
+    }
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
         auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);

@@ -16,6 +16,83 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_gpu_process_placeholder_is_not_an_occupier(self):
+        gpu_rows = "".join(f"{index}, GPU-{index}, 274114\n" for index in range(8))
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(launch.subprocess, "check_output", side_effect=[
+                gpu_rows, "GPU-0, [N/A], [N/A]\n",
+            ]):
+                launch.require_gpu_capacity(Path(tmp), min_free_gib=250)
+            self.assertTrue((Path(tmp) / "gpu-preflight.json").is_file())
+
+    def test_orthogonal_profile_enables_cache_graph_and_evidence_by_role(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            draft = root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
+            for role in ("PREFILL", "DECODE"):
+                args = SimpleNamespace(
+                    checkpoint=str(target), draft_checkpoint=str(draft),
+                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                    role=role, server="/bin/true", orthogonal_smoke=True,
+                    memory_cache_size_mb=8192, kv_cache_mem_mb=4096,
+                )
+                env, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                self.assertEqual(env["KIMI_K3_SMOKE_EVIDENCE"], "1")
+                self.assertEqual(env["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"], "6.0")
+                self.assertEqual(options["--max_seq_len"], "2097152")
+                self.assertEqual(options["--max_batch_tokens_size"], "262144")
+                self.assertEqual(options["--max_batch_tokens_without_cache"], "65536")
+                self.assertEqual(options["--concurrency_limit"], "64")
+                self.assertEqual(options["--kv_cache_mem_mb"], "4096")
+                self.assertEqual(options["--enable_memory_cache"],
+                                 "1" if role == "PREFILL" else "0")
+                if role == "PREFILL":
+                    self.assertEqual(options["--max_context_batch_size"], "64")
+                    self.assertEqual(options["--memory_cache_size_mb"], "8192")
+                    self.assertEqual(options["--prefill_cp_kv_cache_sharded"], "1")
+                else:
+                    self.assertEqual(env["NCCL_GRAPH_REGISTER"], "0")
+                    self.assertEqual(env["NCCL_MAX_CTAS"], "8")
+                    self.assertEqual(options["--prefill_cp_kv_cache_sharded"], "1")
+                    self.assertEqual(options["--prefill_cp_size"], "8")
+                    self.assertEqual(options["--decode_capture_config"],
+                                     "1,2,4,8,16,32,64")
+
+    def test_complete_prefill_smoke_bounds_device_cache_for_host_demotion(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target, draft = root / "target", root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            for role in ("PREFILL", "DECODE"):
+                args = SimpleNamespace(
+                    checkpoint=str(target), draft_checkpoint=str(draft),
+                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                    role=role, server="/bin/true", orthogonal_smoke=True,
+                )
+                _, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                if role == "PREFILL":
+                    self.assertEqual(options["--kv_cache_mem_mb"], "4096")
+                else:
+                    self.assertEqual(options["--kv_cache_mem_mb"], "34000")
+            (target / "config.json").write_text(json.dumps({
+                "num_hidden_layers": 4, "attn_res_block_size": 12,
+                "linear_attn_config": {"kda_layers": [1, 2, 3],
+                                       "full_attn_layers": [4]},
+            }))
+            args.role = "PREFILL"
+            args.debug_four_layer = True
+            _, command = launch.launch_config(args)
+            self.assertEqual(dict(zip(command[1::2], command[2::2]))["--kv_cache_mem_mb"],
+                             "256")
+
     def test_rpc_self_address_bypasses_proxy(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp)
