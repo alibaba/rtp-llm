@@ -48,7 +48,17 @@ def _worker():
         if smaller is None or smaller.max_elements != 20480:
             raise RuntimeError("large flag mismatch must retain the40KiB backend")
         del smaller
-        with patch.dict(os.environ, {"RTP_LLM_CANONICAL_P2P_LARGE": "1"}):
+        with patch.dict(
+            os.environ, {"RTP_LLM_CANONICAL_P2P_PINGPONG": "1" if rank != 7 else "0"}
+        ):
+            unpipelined = init_canonical_p2p(group, device)
+        if unpipelined is None or unpipelined.slot is not None:
+            raise RuntimeError("pingpong flag mismatch must retain two-barrier backend")
+        del unpipelined
+        with patch.dict(
+            os.environ,
+            {"RTP_LLM_CANONICAL_P2P_LARGE": "1", "RTP_LLM_CANONICAL_P2P_PINGPONG": "1"},
+        ):
             communicator = init_canonical_p2p(group, device)
     if communicator is None:
         raise RuntimeError("requested supported communicator unavailable")
@@ -102,10 +112,14 @@ def _worker():
             raise RuntimeError("non-SUM or non-TP callback selected canonical path")
     # The model uses full tiles. Dynamic masks previously split each BF16 pair
     # into scalar peer reads; verify the optimized specialization's PTX.
-    compiled = communicator.kernel.warmup(
+    if communicator.slot is None:
+        raise RuntimeError("requested pingpong backend unavailable")
+    compiled = communicator.pingpong_kernels[1].warmup(
         *communicator.peers,
         torch.empty(2560, dtype=torch.bfloat16, device=device),
+        communicator.slot,
         2560,
+        CAPACITY=communicator.max_elements,
         BLOCK=256,
         ALIGNED=True,
         num_warps=4,
@@ -167,6 +181,30 @@ def _worker():
                         output, torch.full_like(output, expected), atol=0, rtol=0
                     )
                 del graph
+    # Different captured roles can contain odd counts and arbitrary shapes.
+    # GPU state must select the staging slot at replay, with no extra epoch.
+    import time
+
+    captures = {}
+    for count in (1, 257, 2560, 10240, 20480, 40960):
+        x = torch.empty(count, dtype=torch.bfloat16, device=device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = collective.all_reduce(x, collective.Group.TP, inplace=False)
+        captures[count] = (x, output, graph)
+    for iteration in range(96):
+        count = (40960, 1, 10240, 257, 20480, 2560)[iteration % 6]
+        x, output, graph = captures[count]
+        x.fill_((rank + iteration) % 9 - 4)
+        if rank == iteration % 8:
+            time.sleep(0.002)
+        graph.replay()
+        torch.cuda.synchronize()
+        expected = sum((r + iteration) % 9 - 4 for r in range(8))
+        torch.testing.assert_close(
+            output, torch.full_like(output, expected), atol=0, rtol=0
+        )
+    del captures
     # Unsupported inputs retain the existing backend, including its errors.
     fallback_contracts = []
     for x in (
@@ -219,6 +257,9 @@ def _worker():
                     changing_graph_replays=384,
                     initialization_fallback_cases=4,
                     large_mismatch_cases=1,
+                    pingpong_mismatch_cases=1,
+                    pingpong=True,
+                    changing_shape_skew_replays=96,
                     max_elements=communicator.max_elements,
                     unsupported_cases=3,
                     cpp_sum_cases=2,
@@ -229,6 +270,7 @@ def _worker():
             )
         )
         print("integration GPU gates passed", flush=True)
+    communicator.close()
     collective._canonical_p2p = None
     del communicator
     dist.destroy_process_group()

@@ -680,6 +680,8 @@ def destroy_distributed_environment():
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
+    if _canonical_p2p is not None:
+        _canonical_p2p.close()
     _canonical_p2p = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
