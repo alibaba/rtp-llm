@@ -5,12 +5,19 @@ from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.attention import linear
 from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.utils.model_weight import W
 
 
 class KimiK3MtpModel(KimiK3Model):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         weights = self.weight.weights[0]
+        # The BF16 MLA prefix path uses skip-head-mid KV-up. Keep its source
+        # [in, out] weight contiguous so the linear's [out, in] transpose has
+        # the layout required by the packed GEMM, including after Host reuse.
+        kv_up = weights[W.mla_kv_b_w]
+        if kv_up.dtype == torch.bfloat16 and not kv_up.is_contiguous():
+            weights[W.mla_kv_b_w] = kv_up.contiguous()
         eps = self.config.layernorm_eps
         self.enorm = RMSNorm(weights["kimi_k3.mtp.enorm"], eps)
         self.hnorm = RMSNorm(weights["kimi_k3.mtp.hnorm"], eps)

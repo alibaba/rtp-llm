@@ -329,6 +329,74 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             self.assertFalse(verdict["answer_passed"])
             self.assertFalse(verdict["passed"])
 
+    def test_dp2_decode_graph_accepts_exact_draft_and_requires_verify_padding(self):
+        prefill = {rank: [] for rank in range(8)}
+        decode = {rank: [] for rank in range(8)}
+        cases = [{"name": f"single_{i}", "phase": "prepare", "decode_owner_rank": 0}
+                 for i in range(1)]
+        cases.extend({"name": f"uneven_{i}", "phase": "prepare",
+                      "decode_owner_rank": i % 2} for i in range(63))
+        stages = []
+        for name, names, start in (
+            ("orthogonal_decode_00_batch_1", ["single_0"], 100),
+            ("orthogonal_decode_03_batch_63", [f"uneven_{i}" for i in range(63)], 300),
+        ):
+            stages.append({"name": name, "case_names": names,
+                           "start_time_ns": start, "end_time_ns": start + 90})
+            for rank in range(8):
+                local = sum((case["decode_owner_rank"] == rank // 4)
+                            for case in cases if case["name"] in names)
+                if not local:
+                    continue
+                verify_bucket = 32 if local == 31 else local
+                decode[rank].extend([
+                    {"event": "mtp_target_verify_forward", "input_rows": local,
+                     "stream_count": local, "time_ns": start + 10},
+                    {"event": "cuda_graph_replay", "role": 2,
+                     "real_batch": local, "bucket": verify_bucket,
+                     "padding_rows": verify_bucket - local, "time_ns": start + 20},
+                    {"event": "mtp_draft_decode_forward", "input_rows": local,
+                     "stream_count": local, "time_ns": start + 30},
+                    {"event": "cuda_graph_replay", "role": 4,
+                     "real_batch": local, "real_tokens": local * 4,
+                     "bucket": local * 4, "padding_rows": 0,
+                     "time_ns": start + 40},
+                ])
+        result = {"passed": True, "suite": "orthogonal-flow", "cases": cases,
+                  "stages": stages, "orthogonal_phases": ["decode"]}
+        verdict = audit(result, prefill, decode, decode_dp=2)
+        for stage in stages:
+            self.assertTrue(verdict["path_results"][stage["name"]])
+        for event in decode[4]:
+            if event.get("role") == 2 and event["time_ns"] == 320:
+                event["padding_rows"] = 0
+        verdict = audit(result, prefill, decode, decode_dp=2)
+        self.assertFalse(verdict["path_results"]["orthogonal_decode_03_batch_63"])
+
+    def test_dp1_decode_graph_virtual_row_counts_as_padding(self):
+        cases = [{"name": f"case_{i}", "phase": "prepare", "decode_owner_rank": 0}
+                 for i in range(63)]
+        stage = {"name": "orthogonal_decode_03_batch_63",
+                 "case_names": [case["name"] for case in cases],
+                 "start_time_ns": 0, "end_time_ns": 100}
+        result = {"passed": True, "suite": "orthogonal-flow", "cases": cases,
+                  "stages": [stage], "orthogonal_phases": ["decode"]}
+        events = [
+            {"event": "mtp_target_verify_forward", "input_rows": 63,
+             "stream_count": 63, "time_ns": 10},
+            {"event": "cuda_graph_replay", "role": 2, "real_batch": 64,
+             "bucket": 64, "padding_rows": 0, "time_ns": 20},
+            {"event": "mtp_draft_decode_forward", "input_rows": 63,
+             "stream_count": 63, "time_ns": 30},
+            {"event": "cuda_graph_replay", "role": 4, "real_batch": 64,
+             "real_tokens": 256, "bucket": 256, "padding_rows": 0,
+             "time_ns": 40},
+        ]
+        prefill = {rank: [] for rank in range(8)}
+        decode = {rank: [dict(event) for event in events] for rank in range(8)}
+        verdict = audit(result, prefill, decode, decode_dp=1)
+        self.assertTrue(verdict["path_results"][stage["name"]])
+
     def test_frontend_ids_ignore_prior_run_with_same_case_name(self):
         events = {rank: [] for rank in range(8)}
         events[0] = [

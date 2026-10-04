@@ -395,12 +395,19 @@ def audit(result: dict[str, Any], prefill: dict[int, list[dict[str, Any]]],
                                 else:
                                     rows_used = event.get("real_tokens", 0)
                                 physical_batch = event.get("real_batch", 0)
-                                needs_virtual = local == 1 or bool(local & (local - 1))
+                                # A one-request owner can replay bucket 1.
+                                # Verify can expose padding as a physical
+                                # virtual row (DP1: 63 -> real_batch 64) or
+                                # as Graph bucket padding (DP2: 31 -> 32).
+                                # Draft may capture its exact MTP token count.
+                                needs_padding = (role == 2 and local > 1
+                                                 and bool(local & (local - 1)))
                                 if (physical_batch >= local
-                                        and (not needs_virtual or physical_batch > local)
                                         and rows_used > 0 and event.get("bucket", 0) >= rows_used
                                         and event.get("padding_rows") ==
-                                            event["bucket"] - rows_used):
+                                            event["bucket"] - rows_used
+                                        and (not needs_padding or physical_batch > local
+                                             or event["padding_rows"] > 0)):
                                     return True
                         return False
 
