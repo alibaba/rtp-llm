@@ -147,8 +147,12 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
   global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
   请求侧 `medium` 默认空列表（空表示匹配全部介质，取值原样透传给 KVCM）；
-  `globalKvsHostCount` 默认 3，按 local 降序取前 N 个逻辑引擎计算远端命中，0 表示只算本地；
-  `enableP2p` 默认 `false`，与 `globalKvsHostCount` 相互独立；查询失败重试至 `maxQueryRetryCount`。
+  `globalKvsHostCount` 默认 3，映射到 PB 的 `global_kvs_host_count = 7`（int32），按 local
+  降序取前 N 个逻辑引擎计算远端命中，0 表示只算本地；`enableP2p` 默认 `false`，
+  映射到 PB 的 `enable_p2p = 8`（bool）。PB 与已部署 KVCM 的
+  `alibaba/tair-kvcache@f9196aaff4f0dad3520b9523ae55721eb4955b2f` 保持一致。
+  PB 不再声明 `p2p_host_count`、`p2p_1_fetch`、`p2p_1_total_match`；返回结果只消费 `local/global`。
+  查询失败重试至 `maxQueryRetryCount`。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
   `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；
