@@ -188,3 +188,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "small_moe_gemv_test",
+    srcs = ["small_moe_gemv_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)

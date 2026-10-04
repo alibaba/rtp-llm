@@ -80,6 +80,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             and torch.cuda.get_device_capability(self.w1.device) == (12, 0)
         )
 
+        self._qwen4_small_moe_gemv = (
+            os.environ.get("RTP_LLM_QWEN4_SMALL_MOE_GEMV", "0") == "1"
+            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
+            and self.ep_size == 1
+        )
+
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int32
@@ -99,6 +105,24 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         assert topk_ids is not None
         assert topk_weights is not None
+
+        if (
+            self._qwen4_small_moe_gemv
+            and activation in ("silu", "SiGLU")
+            and expert_map is None
+            and a2_scale is None
+            and not apply_router_weight_on_input
+            and not extra_expert_args
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv import (
+                small_moe_gemv,
+            )
+
+            output = small_moe_gemv(
+                hidden_states, self.w1, self.w2, topk_ids, topk_weights
+            )
+            if output is not None:
+                return CombineForwardPayload(fused_expert_output=output)
 
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
