@@ -80,3 +80,10 @@ py_library(
     ],
     visibility = ["//visibility:public"]
 )
+
+py_library(
+    name = "peer_all_reduce",
+    srcs = ["peer_all_reduce.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)

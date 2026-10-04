@@ -37,6 +37,7 @@ _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
+_canonical_p2p = None
 
 
 def _get_rocm_rccl():
@@ -76,6 +77,7 @@ def _init_flashinfer_allreduce(
     parallelism_config: ParallelismConfig,
     disable_custom_all_reduce: Optional[bool] = None,
 ) -> None:
+    global _canonical_p2p
     if parallelism_config.tp_size <= 1:
         return
     _get_flashinfer_allreduce().init_flashinfer_allreduce(
@@ -84,6 +86,19 @@ def _init_flashinfer_allreduce(
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
         disable_custom_all_reduce=disable_custom_all_reduce,
     )
+
+    if (
+        parallelism_config.tp_size == 8
+        and parallelism_config.world_size == 8
+        and parallelism_config.local_world_size == 8
+    ):
+        from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
+
+        _canonical_p2p = init_canonical_p2p(
+            _get_group(Group.TP),
+            torch.device("cuda", parallelism_config.local_rank),
+            disable_custom_all_reduce=disable_custom_all_reduce,
+        )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -484,9 +499,19 @@ def _register_process_groups_to_cpp():
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        torch.distributed.all_reduce(
-            gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
-        )
+        if (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and not was_cpu
+            and _canonical_p2p is not None
+            and pg is _canonical_p2p.group
+            and _canonical_p2p.should_use(gpu_t)
+        ):
+            _canonical_p2p.all_reduce(gpu_t)
+        else:
+            torch.distributed.all_reduce(
+                gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            )
         if was_cpu:
             target.copy_(gpu_t)
         return target
@@ -623,6 +648,7 @@ def destroy_distributed_environment():
     to reinitialize the distributed environment.
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _canonical_p2p
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -654,6 +680,7 @@ def destroy_distributed_environment():
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
+    _canonical_p2p = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
@@ -784,6 +811,9 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
+            return _canonical_p2p.all_reduce(tensor, inplace=inplace)
+
         flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
         if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
             result = flashinfer_ar.all_reduce(tensor)
