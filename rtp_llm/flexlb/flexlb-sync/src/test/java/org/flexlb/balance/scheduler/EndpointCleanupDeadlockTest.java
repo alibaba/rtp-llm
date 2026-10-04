@@ -154,7 +154,7 @@ class EndpointCleanupDeadlockTest {
             long id = 991L;
             var context = RequestLifecycleTestSupport.context(config, id);
             var future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(id);
+            RequestSlot slot = registry.requestSlot(Long.toString(id));
             CountDownLatch slotHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -172,7 +172,7 @@ class EndpointCleanupDeadlockTest {
                 DecodeEndpoint.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);
-                    reservation = endpoint.reserveUnqueued(pin, id, 1L, 1L, 50);
+                    reservation = endpoint.reserveUnqueued(pin, Long.toString(id), 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 var item = new ScheduledRequest(context, future,

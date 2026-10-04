@@ -13,7 +13,4 @@ public record VictimTerminal(String requestId) {
         requestId = Objects.requireNonNull(requestId);
     }
 
-    public VictimTerminal(long requestId) {
-        this(Long.toString(requestId));
-    }
 }

@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
 
 /** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
 class RequestResourceAccountingTest {
-    private static final long ID = 101L;
+    private static final String ID = "101";
     private static final long HARD_KV = 160L;
     private static final long EXPECTED_KV = 320L;
     private static final long TOTAL_KV = 10_000L;
@@ -346,7 +346,7 @@ class RequestResourceAccountingTest {
 
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50);
+                var next = decode.reserve(pin, "999", HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
@@ -382,7 +382,7 @@ class RequestResourceAccountingTest {
         }
     }
 
-    private static TaskInfo task(long id) {
+    private static TaskInfo task(String id) {
         var task = new TaskInfo();
         task.setRequestId(id);
         task.setInputLength(HARD_KV);

@@ -275,7 +275,7 @@ class FlexlbServiceCancelTest {
             RequestState.Phase state,
             long batchId) {
         return new RequestState(
-                requestId, state,
+                Long.toString(requestId), state,
                 batchId > 0 ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.NONE,
                 batchId, 1L, 2L, state.name());
     }

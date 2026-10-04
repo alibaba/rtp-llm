@@ -1012,7 +1012,7 @@ class FlexlbServiceImplTest {
     void formerMasterDoesNotClaimAnOwnedRequestWasNeverAccepted() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(routeService.getRequestState("88", 0L)).thenReturn(new RequestState(88L,
+        when(routeService.getRequestState("88", 0L)).thenReturn(new RequestState("88",
                 RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.BATCH_ENQUEUE,
                 1001L, 10L, 20L, "already dispatched"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -1031,7 +1031,7 @@ class FlexlbServiceImplTest {
     void followerQueriesAndCancelsItsLocalOwnerBeforeConsultingTheLeader() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        RequestState owned = new RequestState(86L, RequestState.Phase.ACKNOWLEDGED,
+        RequestState owned = new RequestState("86", RequestState.Phase.ACKNOWLEDGED,
                 DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "owned here");
         when(routeService.getRequestState("86", 1001L)).thenReturn(owned);
         when(routeService.cancelRequest("86", 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
@@ -1619,7 +1619,7 @@ class FlexlbServiceImplTest {
         response.setCode(200);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         when(routeService.getRequestState("700", 0)).thenReturn(
-                new RequestState(700L, RequestState.Phase.ACKNOWLEDGED,
+                new RequestState("700", RequestState.Phase.ACKNOWLEDGED,
                         DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L,
                         "engine acknowledged batch"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);

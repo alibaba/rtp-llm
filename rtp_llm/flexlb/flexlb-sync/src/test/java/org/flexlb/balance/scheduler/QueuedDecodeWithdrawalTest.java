@@ -84,7 +84,7 @@ class QueuedDecodeWithdrawalTest {
         when(prefill.removeQueued(any(), anyString())).thenReturn(true);
         var item = new ScheduledRequest(context, future, new Response(), new ServerStatus(), new ServerStatus(),
                 prefill, decode, reservation, System.currentTimeMillis());
-        try (var admission = registry.claimAdmissionHandle(id, future)) {
+        try (var admission = registry.claimAdmissionHandle(Long.toString(id), future)) {
             assertNotNull(admission);
             assertTrue(registry.commitItemForPublication(item, () -> true));
         }
@@ -99,7 +99,7 @@ class QueuedDecodeWithdrawalTest {
         decode = new DecodeEndpoint(status, new EndpointEventProjector(registry));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
-        var slot = registry.requestSlot(42);
+        var slot = registry.requestSlot("42");
         var delivery = slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 7L, () -> true);
         assertNotNull(delivery);
         delivery.complete(DeliveryResult.delivered());
@@ -153,22 +153,22 @@ class QueuedDecodeWithdrawalTest {
     void replacementKeepsRequestAliveAndTransfersCapacityBeforeRequeue() {
         var item = queued(1);
         doAnswer(call -> {
-            assertNull(decode.reservationHandle(1));
-            assertNotNull(decode.reservationHandle(100));
-            assertNull(registry.requestSlot(1).activeItem());
+            assertNull(decode.reservationHandle("1"));
+            assertNotNull(decode.reservationHandle("100"));
+            assertNull(registry.requestSlot("1").activeItem());
             assertFalse(item.future().isDone());
             return true;
         }).when(queue).requeue(item);
         assertTrue(replace(item));
         assertEquals(1, decode.routingView().totalLoad());
-        assertEquals(RequestState.Phase.QUEUED, registry.getRequestState(1, 0).state());
+        assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("1", 0).state());
         verify(queue).requeue(item);
         assertFalse(item.future().isDone());
         try (var pin = decode.tryPinGeneration()) {
             assertNull(decode.reserve(pin, "1", 16, 16, 30, capacity),
                     "victim cannot reclaim capacity already assigned to the incoming request");
         }
-        decode.release(decode.reservationHandle(100), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        decode.release(decode.reservationHandle("100"), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         DecodeEndpoint.ReservationHandle second;
         try (var pin = decode.tryPinGeneration()) { second = decode.reserve(pin, "1", 16, 16, 30, capacity); }
         var next = new ScheduledRequest(item.ctx(), item.future(), new Response(), item.prefill(), item.decode(),
@@ -176,12 +176,12 @@ class QueuedDecodeWithdrawalTest {
         assertEquals(item.enqueuedAtMs(), next.enqueuedAtMs());
         assertEquals(item.enqueueSeq(), next.enqueueSeq());
         assertEquals(item.expiresAtMs(), next.expiresAtMs());
-        try (var admission = registry.claimAdmissionHandle(1, item.future())) {
+        try (var admission = registry.claimAdmissionHandle("1", item.future())) {
             assertNotNull(admission);
             assertTrue(registry.commitItemForPublication(next, () -> true));
         }
         registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
-        assertSame(next, registry.requestSlot(1).activeItem());
+        assertSame(next, registry.requestSlot("1").activeItem());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }
 
@@ -191,7 +191,7 @@ class QueuedDecodeWithdrawalTest {
         var permit = decode.acquireDispatchPermit(item.decodeReservation(), capacity).permit();
         assertNotNull(permit);
         assertFalse(replace(item));
-        assertSame(item, registry.requestSlot(2).activeItem());
+        assertSame(item, registry.requestSlot("2").activeItem());
         assertFalse(item.future().isDone());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(queue, never()).requeue(any());
@@ -203,8 +203,8 @@ class QueuedDecodeWithdrawalTest {
         var item = queued(3);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
                 "100", 16, 16, 30, capacity));
-        assertSame(item, registry.requestSlot(3).activeItem());
-        assertNotNull(decode.reservationHandle(3));
+        assertSame(item, registry.requestSlot("3").activeItem());
+        assertNotNull(decode.reservationHandle("3"));
         verify(queue, never()).requeue(any());
     }
 
@@ -215,13 +215,13 @@ class QueuedDecodeWithdrawalTest {
         doAnswer(call -> {
             assertFalse(RequestLifecycleTestSupport.prepareMember(registry, item),
                     "withdrawal must fence batch preparation before releasing the old route");
-            registry.cancelRequest(4, 0, reason);
+            registry.cancelRequest("4", 0, reason);
             return true;
         }).when(item.prefillEp()).removeQueued(eq(item), anyString());
         assertTrue(replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertNull(decode.reservationHandle(4));
-        assertNotNull(decode.reservationHandle(100));
+        assertNull(decode.reservationHandle("4"));
+        assertNotNull(decode.reservationHandle("100"));
         verify(queue, never()).requeue(item);
     }
 
@@ -229,9 +229,9 @@ class QueuedDecodeWithdrawalTest {
     void failedReplacementDoesNotRemoveOrRequeueVictim() {
         var item = queued(5);
         var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
-                5, item.decodeReservation().reservationToken() + 1);
+                "5", item.decodeReservation().reservationToken() + 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), "100", 16, 16, 80, capacity));
-        assertSame(item, registry.requestSlot(5).activeItem());
+        assertSame(item, registry.requestSlot("5").activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
     }
@@ -243,18 +243,18 @@ class QueuedDecodeWithdrawalTest {
         assertTrue(replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertEquals(0, registry.trackedRequestCount());
-        assertNull(decode.reservationHandle(6));
+        assertNull(decode.reservationHandle("6"));
     }
     @Test
     void laterVictimConflictReleasesEarlierWithdrawalClaim() {
         var item = queued(7);
         var missing = new DecodeEndpoint.ReservationHandle(
-                item.decodeReservation().endpointGenerationId(), 999, 1);
+                item.decodeReservation().endpointGenerationId(), "999", 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode,
                 List.of(item.decodeReservation(), missing), "100", 16, 16, 80, capacity));
-        assertSame(item, registry.requestSlot(7).activeItem());
-        assertNotNull(decode.reservationHandle(7));
-        assertNull(decode.reservationHandle(100));
+        assertSame(item, registry.requestSlot("7").activeItem());
+        assertNotNull(decode.reservationHandle("7"));
+        assertNull(decode.reservationHandle("100"));
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item),
                 "an aborted multi-victim plan must not leave earlier victims fenced");
         verify(queue, never()).requeue(any());
@@ -285,7 +285,7 @@ class QueuedDecodeWithdrawalTest {
             try {
                 assertTrue(removing.await(5, TimeUnit.SECONDS));
                 assertFalse(RequestLifecycleTestSupport.prepareMember(registry, item));
-                registry.cancelRequest(9, 0, CancelReason.CLIENT_CANCELLED);
+                registry.cancelRequest("9", 0, CancelReason.CLIENT_CANCELLED);
                 assertFalse(item.future().isDone(), "cancellation waits for withdrawal ownership to close");
             } finally {
                 resume.countDown();
@@ -294,8 +294,8 @@ class QueuedDecodeWithdrawalTest {
         }
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         verify(queue, never()).requeue(item);
-        assertNull(decode.reservationHandle(9));
-        assertNotNull(decode.reservationHandle(100));
+        assertNull(decode.reservationHandle("9"));
+        assertNotNull(decode.reservationHandle("100"));
     }
 
 }

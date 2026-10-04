@@ -158,8 +158,8 @@ class DecodeSelectionAdmissionContractTest {
             long kvBudget = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(queued.reserve(pin, 1L, 0L, kvBudget, 50));
-                assertNotNull(queued.reserve(pin, 2L, 0L, kvBudget, 50));
+                assertNotNull(queued.reserve(pin, "1", 0L, kvBudget, 50));
+                assertNotNull(queued.reserve(pin, "2", 0L, kvBudget, 50));
             }
         }
 
@@ -171,7 +171,7 @@ class DecodeSelectionAdmissionContractTest {
 
         private DecodeBinding request(long requestId) {
             Request request = new Request();
-            request.setRequestId(requestId);
+            request.setRequestId(Long.toString(requestId));
             request.setSeqLen(100L);
             request.setMaxNewTokens(200);
             request.setPriority(70);
@@ -191,8 +191,8 @@ class DecodeSelectionAdmissionContractTest {
                 DecodeEndpoint.CapacityUsage queuedUsage, DecodeEndpoint.CapacityUsage freeUsage) {
             assertEquals(queuedUsage, queued.routingView().placementUsage());
             assertEquals(freeUsage, free.routingView().placementUsage());
-            assertFalse(queued.resourceSnapshot().isQueued(requestId));
-            assertFalse(free.resourceSnapshot().isQueued(requestId));
+            assertFalse(queued.resourceSnapshot().isQueued(Long.toString(requestId)));
+            assertFalse(free.resourceSnapshot().isQueued(Long.toString(requestId)));
         }
 
         @Override

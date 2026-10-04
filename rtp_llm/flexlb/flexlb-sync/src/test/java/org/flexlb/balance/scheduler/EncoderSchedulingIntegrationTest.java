@@ -339,7 +339,7 @@ class EncoderSchedulingIntegrationTest {
 
     private BalanceContext context(long requestId, long seqLen, Long hitLen) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
         request.setEncoderCacheHitLen(hitLen);
         request.setMaxNewTokens(16);

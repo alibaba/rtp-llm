@@ -135,7 +135,7 @@ public class OptimizerClient {
             }
 
             OptimizerTraceQueryRequest traceQueryRequest = new OptimizerTraceQueryRequest();
-            traceQueryRequest.setTraceId(String.valueOf(request.getRequestId()));
+            traceQueryRequest.setTraceId(request.getRequestId());
             traceQueryRequest.setInstanceId(instanceId);
             traceQueryRequest.setBlockKeys(request.getBlockCacheKeys());
             traceQueryRequest.setTokenIds(List.of());

@@ -383,7 +383,7 @@ class PrefillStateSnapshotTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase, long errorCode, long executionMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(10L);
         task.setPhase(phase);
         task.setErrorCode(errorCode);

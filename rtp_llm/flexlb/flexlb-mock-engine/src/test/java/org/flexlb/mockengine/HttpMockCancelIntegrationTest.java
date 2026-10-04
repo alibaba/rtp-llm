@@ -120,7 +120,7 @@ class HttpMockCancelIntegrationTest {
         assertTrue(scheduleOwnedDecode("2"));
 
         CancelAck outcome = channel
-                .cancel(target(prefillService.getGrpcPort()), 2L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "2", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "queued request cancel over HTTP must register the intent (ACCEPTED)");
@@ -169,12 +169,12 @@ class HttpMockCancelIntegrationTest {
 
         assertTrue(scheduleOwnedDecode(21L));
         CancelAck first = channel
-                .cancel(target(prefillService.getGrpcPort()), 21L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "21", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first);
 
         CancelAck second = channel
-                .cancel(target(prefillService.getGrpcPort()), 21L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "21", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second);
         long terminalCount = workerStatus(prefillService, -1).getFinishedTaskListList().stream()
@@ -194,7 +194,7 @@ class HttpMockCancelIntegrationTest {
         EngineCancelChannel channel = channel();
 
         CancelAck outcome = channel
-                .cancel(target(prefillService.getGrpcPort()), 424242L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "424242", 5_000)
                 .get(5, TimeUnit.SECONDS);
         // Never-seen rid over the HTTP control plane: REQUEST_FENCED with the
         // ABSENT_FENCE record installed engine-side (block-2 fix — the
@@ -243,7 +243,7 @@ class HttpMockCancelIntegrationTest {
                         new JavaMockEngineCluster.ClusterStats());
         services.put(wrongPort, wrongPrefill);
 
-        CancelAck outcome = channel().cancel(target(wrongPort), 23L, 5_000)
+        CancelAck outcome = channel().cancel(target(wrongPort), "23", 5_000)
                 .get(5, TimeUnit.SECONDS);
 
         // The wrong Prefill never saw rid 23: the never-seen branch answers
@@ -290,7 +290,7 @@ class HttpMockCancelIntegrationTest {
                 "a configured control URL supports every endpoint");
 
         CancelAck outcome = channel
-                .cancel(target(59999), 1L, 5_000)
+                .cancel(target(59999), "1", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome,
                 "unknown engine port (HTTP 404) → UNSUPPORTED");
@@ -382,7 +382,7 @@ class HttpMockCancelIntegrationTest {
         inject("cancel_no_respond", true);
 
         long inflightBefore = decodeService.getInflightCount();
-        var future = channel.cancel(target(prefillService.getGrpcPort()), 51L, 5_000);
+        var future = channel.cancel(target(prefillService.getGrpcPort()), "51", 5_000);
         ExecutionException failure = assertThrows(ExecutionException.class,
                 () -> future.get(5, TimeUnit.SECONDS),
                 "cancel_no_respond must fail the channel future");
@@ -394,7 +394,7 @@ class HttpMockCancelIntegrationTest {
 
         inject("cancel_no_respond", false);
         CancelAck outcome = channel
-                .cancel(target(prefillService.getGrpcPort()), 51L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "51", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "clearing the injection must restore the normal cancel path");
@@ -407,7 +407,7 @@ class HttpMockCancelIntegrationTest {
         EngineCancelChannel channel = channel();
         inject("cancel_error", true);
 
-        var future = channel.cancel(target(prefillService.getGrpcPort()), 52L, 5_000);
+        var future = channel.cancel(target(prefillService.getGrpcPort()), "52", 5_000);
         ExecutionException failure = assertThrows(ExecutionException.class,
                 () -> future.get(5, TimeUnit.SECONDS),
                 "cancel_error (HTTP 500) must surface as a failed future");
@@ -418,7 +418,7 @@ class HttpMockCancelIntegrationTest {
 
         inject("cancel_error", false);
         CancelAck outcome = channel
-                .cancel(target(prefillService.getGrpcPort()), 52L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "52", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "clearing the injection must restore the normal cancel path");
@@ -431,7 +431,7 @@ class HttpMockCancelIntegrationTest {
         EngineCancelChannel channel = channel();
         inject("cancel_unexpected_status", true);
 
-        var future = channel.cancel(target(prefillService.getGrpcPort()), 53L, 5_000);
+        var future = channel.cancel(target(prefillService.getGrpcPort()), "53", 5_000);
         ExecutionException failure = assertThrows(ExecutionException.class,
                 () -> future.get(5, TimeUnit.SECONDS),
                 "an out-of-contract ack status must fail the response mapping");
@@ -444,7 +444,7 @@ class HttpMockCancelIntegrationTest {
 
         inject("cancel_unexpected_status", false);
         CancelAck outcome = channel
-                .cancel(target(prefillService.getGrpcPort()), 53L, 5_000)
+                .cancel(target(prefillService.getGrpcPort()), "53", 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "clearing the injection must restore the normal cancel path");

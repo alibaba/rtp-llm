@@ -218,7 +218,7 @@ public class EngineStatusConverter {
                         taskInfoPB.getLastCompletedPrefillStepId());
             }
 
-            taskInfoMap.put(String.valueOf(requestId), taskInfo);
+            taskInfoMap.put(requestId, taskInfo);
         }
 
         return taskInfoMap;

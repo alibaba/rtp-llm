@@ -96,7 +96,7 @@ class EvictionManagerTryAdmitTest {
         var endpoint = mock(DecodeEndpoint.class);
         var routing = mock(DecodeEndpoint.DecodeRoutingView.class);
         var view = mock(DecodeEndpoint.LayeredAdmissionView.class);
-        var victim = new DecodeEndpoint.DecodeRequestView(901L, 30, 128L, 128L,
+        var victim = new DecodeEndpoint.DecodeRequestView("901", 30, 128L, 128L,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         when(endpoint.resourceSnapshot()).thenReturn(view);

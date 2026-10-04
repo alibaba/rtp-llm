@@ -173,7 +173,7 @@ class LeakCanaryLongRunE2ETest {
             if (!"completed".equals(state)) { return; }
             long observedAt = completedAt.computeIfAbsent(requestId, ignored -> now);
             if (now - observedAt >= COMPLETION_SETTLEMENT_MS) {
-                assertTrue(h.decodeEndpoint(0).reservationHandle(requestId) == null,
+                assertTrue(h.decodeEndpoint(0).reservationHandle(Long.toString(requestId)) == null,
                         "completed request " + requestId + " must settle via WorkerStatus, before inactivity expiry");
             }
         });

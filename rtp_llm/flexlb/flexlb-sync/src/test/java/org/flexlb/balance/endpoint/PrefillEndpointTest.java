@@ -1526,7 +1526,7 @@ class PrefillEndpointTest {
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(500);
         request.setPriority(priority);
 
@@ -1636,7 +1636,7 @@ class PrefillEndpointTest {
             DecodeEndpoint decode,
             DecodeEndpoint.ReservationHandle decodeReservation) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext(requestConfig);
@@ -1682,7 +1682,7 @@ class PrefillEndpointTest {
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(batchId);
         task.setErrorCode(8429);
         task.setErrorMessage("priority preempted");
@@ -1696,7 +1696,7 @@ class PrefillEndpointTest {
                                      int errorCode,
                                      long executionTimeMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(batchId);
         task.setPhase(phase);
         task.setErrorCode(errorCode);

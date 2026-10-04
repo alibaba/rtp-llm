@@ -74,6 +74,30 @@ class RequestRegistryTest {
     }
 
     @Test
+    void distinctStringIdsKeepTheirOriginalLifecycleIdentity() throws Exception {
+        Map<String, CompletableFuture<Response>> responses = new java.util.HashMap<>();
+        for (String requestId : List.of("00123", "123", "req-abc", "9223372036854775808")) {
+            BalanceContext context = RequestLifecycleTestSupport.context(config, requestId);
+            CompletableFuture<Response> future = lifecycle.register(context);
+            responses.put(requestId, future);
+            assertEquals(requestId, lifecycle.getRequestState(requestId, 0L).requestId());
+            assertFalse(future.isDone());
+        }
+        assertEquals(4, lifecycle.trackedRequestCount());
+
+        for (var response : responses.entrySet()) {
+            String requestId = response.getKey();
+            RequestState cancelled = lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(requestId, cancelled.requestId());
+            assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                    response.getValue().get(5, TimeUnit.SECONDS).getCode());
+            assertEquals(RequestState.Phase.CANCELLED,
+                    lifecycle.getRequestState(requestId, 0L).state());
+        }
+        assertEquals(0, lifecycle.trackedRequestCount());
+    }
+
+    @Test
     void duplicateRegistrationCannotReplaceTheCanonicalExactGeneration() {
         BalanceContext context = context(101L);
         CompletableFuture<Response> canonical = lifecycle.register(context);
@@ -84,7 +108,7 @@ class RequestRegistryTest {
         assertTrue(duplicate.isDone());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 duplicate.join().getCode());
-        assertSame(canonical, lifecycle.requestSlot(101L).future());
+        assertSame(canonical, lifecycle.requestSlot("101").future());
         assertEquals(1, lifecycle.trackedRequestCount());
     }
 
@@ -443,7 +467,7 @@ class RequestRegistryTest {
     @Test
     void terminalRecordPreservesIdentityWithoutRetainingRequestContext() throws Exception {
         WeakReference<BalanceContext> contextReference = cancelAndReferenceContext(103L);
-        RequestSlot terminal = lifecycle.requestSlot(103L);
+        RequestSlot terminal = lifecycle.requestSlot("103");
         assertEquals(RequestState.Phase.CANCELLED, terminal.snapshot().state());
 
         for (int attempt = 0; attempt < 20 && !contextReference.refersTo(null); attempt++) {
@@ -452,7 +476,7 @@ class RequestRegistryTest {
         }
 
         assertTrue(contextReference.refersTo(null), "terminal identity must not retain the request payload");
-        assertSame(terminal, lifecycle.requestSlot(103L));
+        assertSame(terminal, lifecycle.requestSlot("103"));
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 lifecycle.register(context(103L)).join().getCode());
     }
@@ -472,7 +496,7 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 lifecycle.register(context(1L)).join().getCode());
         for (long id = 1; id <= 1001; id++) {
-            lifecycle.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
+            lifecycle.cancelRequest(Long.toString(id), 0L, CancelReason.CLIENT_CANCELLED);
         }
         assertEquals(0, lifecycle.trackedRequestCount());
     }
@@ -480,7 +504,7 @@ class RequestRegistryTest {
     @Test
     void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
         lifecycle.register(context(102L));
-        RequestSlot slot = lifecycle.requestSlot(102L);
+        RequestSlot slot = lifecycle.requestSlot("102");
         assertNull(slot.activeItem());
         assertTrue(slot.isOpen());
         assertTrue(slot.isLiveGeneration());
@@ -507,11 +531,11 @@ class RequestRegistryTest {
     void admissionHandleDefersCancellationUntilItsExactCapabilityCloses() {
         CompletableFuture<Response> future = lifecycle.register(context(301L));
         AdmissionHandle scope =
-                lifecycle.claimAdmissionHandle(301L, future);
+                lifecycle.claimAdmissionHandle("301", future);
         assertNotNull(scope);
 
         RequestState requested = lifecycle.cancelRequest(
-                301L, 0L, CancelReason.CLIENT_CANCELLED);
+                "301", 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
         assertFalse(future.isDone(),
@@ -522,17 +546,17 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(301L, 0L).state());
+                lifecycle.getRequestState("301", 0L).state());
     }
 
     @Test
     void repeatedCancellationDuringAdmissionKeepsTheFirstCause() throws Exception {
         CompletableFuture<Response> future = lifecycle.register(context(303L));
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(303L, future);
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("303", future);
         assertNotNull(admission);
 
-        lifecycle.cancelRequest(303L, 0L, CancelReason.CLIENT_CANCELLED);
-        lifecycle.cancelRequest(303L, 0L, CancelReason.DEADLINE_EXCEEDED);
+        lifecycle.cancelRequest("303", 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("303", 0L, CancelReason.DEADLINE_EXCEEDED);
         assertFalse(future.isDone());
 
         admission.close();
@@ -540,24 +564,24 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(303L, 0L).state());
+                lifecycle.getRequestState("303", 0L).state());
         assertEquals(0, lifecycle.trackedRequestCount());
     }
 
     @Test
     void admissionFailurePreservesAnEarlierCancellation() throws Exception {
         CompletableFuture<Response> future = lifecycle.register(context(304L));
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(304L, future);
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("304", future);
         assertNotNull(admission);
 
-        lifecycle.cancelRequest(304L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("304", 0L, CancelReason.CLIENT_CANCELLED);
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         admission.close();
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(304L, 0L).state());
+                lifecycle.getRequestState("304", 0L).state());
         assertEquals(0, lifecycle.trackedRequestCount());
     }
 
@@ -586,7 +610,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> heldFuture =
                 lifecycle.register(context(401L));
         AdmissionHandle held =
-                lifecycle.claimAdmissionHandle(401L, heldFuture);
+                lifecycle.claimAdmissionHandle("401", heldFuture);
         assertNotNull(held);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -618,13 +642,13 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context(501L));
 
         assertNull(lifecycle.cancelRequest(
-                999L, 0L, CancelReason.CLIENT_CANCELLED));
+                "999", 0L, CancelReason.CLIENT_CANCELLED));
         assertNull(lifecycle.cancelRequest(
-                501L, 91L, CancelReason.CLIENT_CANCELLED));
+                "501", 91L, CancelReason.CLIENT_CANCELLED));
         assertFalse(future.isDone());
 
         RequestState exact = lifecycle.cancelRequest(
-                501L, 0L, CancelReason.CLIENT_CANCELLED);
+                "501", 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(exact);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
@@ -635,14 +659,14 @@ class RequestRegistryTest {
         Registered registered = registerItem(602L);
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, registered));
-        RequestSlot slot = lifecycle.requestSlot(602L);
+        RequestSlot slot = lifecycle.requestSlot("602");
         synchronized (slot) {
             org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
                     org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
         }
-        lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
+        lifecycle.cancelRequest("602", 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT,
-                lifecycle.getRequestState(602L, 0L).state());
+                lifecycle.getRequestState("602", 0L).state());
         verify(registered.item().decodeEp()).release(
                 registered.item().decodeReservation(),
                 DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
@@ -679,7 +703,7 @@ class RequestRegistryTest {
     void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() {
         Registered registered = registerItem(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        RequestSlot old = lifecycle.requestSlot(703L);
+        RequestSlot old = lifecycle.requestSlot("703");
         DeliveryClaim delivery = RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
         PreemptionRegistration preemption = lifecycle.tryClaim("703", 1L, 19L, "victim").orElseThrow();
@@ -695,7 +719,7 @@ class RequestRegistryTest {
         assertFalse(preemption.release());
         assertNull(old.cancelRequest(0L, CancelReason.CLIENT_CANCELLED));
         assertFalse(replacement.isDone());
-        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState(703L, 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("703", 0L).state());
     }
 
     @Test
@@ -709,7 +733,7 @@ class RequestRegistryTest {
                 () -> lifecycle.claimBatchDelivery(registered.item(), transaction));
 
         org.mockito.Mockito.verify(transaction, org.mockito.Mockito.never()).transferToEndpoint(registered.item());
-        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState(704L, 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("704", 0L).state());
         assertFalse(registered.future().isDone());
     }
 
@@ -721,13 +745,13 @@ class RequestRegistryTest {
         assertNotNull(claim);
 
         assertThrows(NullPointerException.class, () -> claim.complete(null));
-        assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState(705L, 23L).state());
+        assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState("705", 23L).state());
         claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertThrows(IllegalStateException.class, () -> claim.complete(
                 org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("duplicate failure"))));
 
-        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(705L, 23L).state());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState("705", 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
                 .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
     }
@@ -735,7 +759,7 @@ class RequestRegistryTest {
     private WeakReference<BalanceContext> cancelAndReferenceContext(long requestId) {
         BalanceContext context = context(requestId);
         CompletableFuture<Response> future = lifecycle.register(context);
-        lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest(Long.toString(requestId), 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
         return new WeakReference<>(context);
     }
@@ -749,7 +773,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+                new DecodeEndpoint.ReservationHandle(1L, Long.toString(requestId), 1L);
         return new Registered(
                 new ScheduledRequest(
                         context,

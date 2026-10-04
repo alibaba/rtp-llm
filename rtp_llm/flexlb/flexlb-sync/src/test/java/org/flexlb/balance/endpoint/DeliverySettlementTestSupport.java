@@ -93,7 +93,7 @@ public final class DeliverySettlementTestSupport {
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         var tasks = Map.of(Long.toString(requestId), task);

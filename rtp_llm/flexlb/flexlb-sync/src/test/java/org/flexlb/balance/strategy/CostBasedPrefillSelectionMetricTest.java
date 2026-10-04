@@ -268,7 +268,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         Set<String> selectedIps = new HashSet<>();
         for (int index = 0; index < 3; index++) {
-            context.getRequest().setRequestId(30_000L + index);
+            context.getRequest().setRequestId(Long.toString(30_000L + index));
             try (SelectedRole selected = select()) {
                 selectedIps.add(selected.serverStatus().getServerIp());
             }
