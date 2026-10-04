@@ -2,6 +2,8 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
 #include <limits>
+#include <cstdlib>
+#include <cstring>
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -288,6 +290,11 @@ void processLogits(const GreedyParams&  params,
 
 }  // anonymous namespace
 
+static bool topPOneRenormEnabled() {
+    const char* value = std::getenv("RTP_LLM_TOP_P_ONE_RENORM");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
@@ -356,7 +363,16 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                   0,
                                   (int64_t)cur_stream);
         if (need_renorm_probs) {
-            top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            const bool exact_top_p_one =
+                std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return t == 1.0f; });
+            if (exact_top_p_one && topPOneRenormEnabled()) {
+                // Softmax probabilities are nonnegative and have positive row
+                // sums. Renormalize explicitly; returning the original softmax
+                // would change the distribution consumed by rejection sampling.
+                torch::div_out(sampling_probs_t, probs_t, probs_t.sum(-1, /*keepdim=*/true));
+            } else {
+                top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            }
         }
     } else {
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
