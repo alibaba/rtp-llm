@@ -56,6 +56,15 @@ def launch_config(args):
     if reserve_runtime_mem_mb <= 0:
         raise ValueError("Runtime memory reserve must be positive")
     kv_cache_mem_mb = getattr(args, "kv_cache_mem_mb", None)
+    if kv_cache_mem_mb is None and getattr(args, "orthogonal_smoke", False):
+        if args.role == "PREFILL":
+            # A bounded Device pool permits Host demotion while retaining room
+            # for the long-KV seed and two 64K requests.
+            kv_cache_mem_mb = 256 if getattr(args, "debug_four_layer", False) else 4096
+        else:
+            # At 30000 MiB, the reserve watermark postponed one of 64 PD
+            # arrivals until another Decode stream finished.
+            kv_cache_mem_mb = 34000
     if kv_cache_mem_mb is not None and kv_cache_mem_mb <= 0:
         raise ValueError("Explicit KV cache capacity must be positive")
     socket.inet_aton(args.peer_ip)
@@ -335,7 +344,7 @@ def main():
     parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
     parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
     parser.add_argument("--orthogonal-smoke", action="store_true",
-                        help="Enable the optional 64K PageRR, Host cache, DCP and Graph boundary profile")
+                        help="Enable the complete 64K PageRR, Host cache, DCP and Graph smoke profile")
     parser.add_argument("--memory-cache-size-mb", type=int, default=32768,
                         help="Per-rank Prefill Host cache capacity in the orthogonal profile")
     parser.add_argument("--kv-cache-mem-mb", type=int,
