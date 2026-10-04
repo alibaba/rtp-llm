@@ -2,12 +2,14 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "canonical_p2p.py",
         "flashinfer_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:peer_all_reduce",
     ],
     visibility = ["//visibility:public"],
 )
