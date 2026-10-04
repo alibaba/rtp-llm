@@ -749,7 +749,7 @@ class DefaultRouterTest {
         when(selection.prefillWorkMs()).thenReturn(1L);
         when(selection.takeGenerationPin()).thenReturn(pin);
         when(pin.endpoint()).thenReturn(endpoint);
-        when(endpoint.ipPort()).thenReturn(ip + ":" + httpPort);
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         return new SelectionFixture(selection, pin, endpoint, status);
     }
 

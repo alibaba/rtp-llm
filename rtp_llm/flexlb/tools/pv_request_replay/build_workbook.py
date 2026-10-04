@@ -64,7 +64,7 @@ class PvSource:
     instance: str
 
 
-def _instance_from_path(path: Path, collection_root: Path | None = None) -> str:
+def _instance_from_path(path: Path) -> str:
     """Infer a stable instance label when no collector manifest is present."""
 
     name = path.name
@@ -75,8 +75,6 @@ def _instance_from_path(path: Path, collection_root: Path | None = None) -> str:
     generic_names = {"pv", "pv.log", "snapshot", "content", "export", "pvlog", "raw"}
     if name.lower() not in generic_names:
         return name
-    if collection_root is not None and path.parent != collection_root:
-        return path.parent.name
     return path.parent.name or name
 
 
@@ -105,7 +103,7 @@ def _manifest_sources(manifest_path: Path) -> list[PvSource]:
         if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         instance = (item.get("instance") or item.get("pod")
-                    or item.get("instance_id") or _instance_from_path(path, manifest_path.parent))
+                    or item.get("instance_id") or _instance_from_path(path))
         result.append(PvSource(path.resolve(), str(instance)))
     return result
 
@@ -133,7 +131,7 @@ def discover_sources(input_path: str | Path) -> list[PvSource]:
     manifested = (_manifest_sources(root / "collect_manifest.json")
                   or _manifest_sources(root / "manifest.json"))
     discovered = manifested or [
-        PvSource(path.resolve(), _instance_from_path(path, root))
+        PvSource(path.resolve(), _instance_from_path(path))
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES
     ]

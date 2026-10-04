@@ -53,18 +53,20 @@ class LocalStandbyCacheIndex {
         this.ttlReductionStartRatio = ttlReductionStartRatio;
         this.maximumEntries = maximumEntries;
         this.automaticCleanupEnabled = enabled;
+        if (!enabled) {
+            this.cleanupExecutor = null;
+            return;
+        }
         this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "local-standby-cache-cleaner");
             thread.setDaemon(true);
             return thread;
         });
-        if (enabled) {
-            cleanupExecutor.scheduleWithFixedDelay(
-                    this::runCleanupCheck,
-                    CLEANUP_CHECK_INTERVAL_MS,
-                    CLEANUP_CHECK_INTERVAL_MS,
-                    TimeUnit.MILLISECONDS);
-        }
+        cleanupExecutor.scheduleWithFixedDelay(
+                this::runCleanupCheck,
+                CLEANUP_CHECK_INTERVAL_MS,
+                CLEANUP_CHECK_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -147,7 +149,9 @@ class LocalStandbyCacheIndex {
     }
 
     void shutdown() {
-        cleanupExecutor.shutdown();
+        if (cleanupExecutor != null) {
+            cleanupExecutor.shutdown();
+        }
     }
 
     void runCleanupCheck() {

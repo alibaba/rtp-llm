@@ -13,12 +13,15 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 Worker Status 的共享 PB 协议定义为 `string TaskInfoPB.request_id = 1`，
 Java、C++ 和 Python 使用同一字段定义生成代码。
-`RequestId.parse` 优先保留原始字符串；字符串缺失时，从同字段编号的 unknown fields 中读取旧 int64 编码并转换成字符串；两者都缺失时会报错。
+对 Worker Status 和客户端请求中的字符串 ID，`RequestId.parse` 优先保留原始字符串；
+字符串缺失时，从同字段编号的 unknown fields 中读取旧 int64 编码并转换成字符串；两者都缺失时会报错。
 Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调度请求使用同一 ID 关联。
 Master 的请求模型、调度、取消、状态查询、资源预留和 tracing 接口均只接收字符串 ID。
 客户端的 Schedule、Cancel、GetRequestState gRPC 请求使用相同的边界兼容读取；HTTP JSON 的数字 ID 在反序列化请求模型时转换成字符串。
 Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64 字段；
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
+`GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
+对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
 
 ### 调度拓扑
 
