@@ -404,6 +404,15 @@ message GenerateRequestPB {
     // Physical Prefill KV shard count. Query CP may remain disabled.
     // Zero from older senders means one unsharded source.
     int32 prefill_cp_size = 13;
+    int32 prefill_seq_size_per_block = 14;
+    int32 prefill_kernel_seq_size_per_block = 15;
+    int32 prefill_attention_tp_size = 16;
+    int32 prefill_cache_dtype = 17;
+    int32 prefill_ssm_state_dtype = 18;
+    int32 prefill_conv_state_dtype = 19;
+    int32 prefill_mla_fp8_format = 20;
+    float prefill_mla_fp8_q_scale = 21;
+    float prefill_mla_fp8_kv_scale = 22;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

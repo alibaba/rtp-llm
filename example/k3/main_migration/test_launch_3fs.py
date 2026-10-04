@@ -16,6 +16,38 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_asymmetric_pd_topologies_and_sixteen_card_planning(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            draft = root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
+            for role, tp, dp, source_tp, capture in (
+                ("PREFILL", 4, 1, 4, None),
+                ("DECODE", 8, 1, 4, "1,2,4,8,16,32,64"),
+                ("PREFILL", 8, 1, 8, None),
+                ("DECODE", 4, 2, 8, "1,2,4,8,16,32"),
+                ("DECODE", 8, 2, 8, "1,2,4,8,16,32"),
+            ):
+                args = SimpleNamespace(
+                    checkpoint=str(target), draft_checkpoint=str(draft),
+                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                    role=role, server="/bin/true", orthogonal_smoke=True,
+                    tp_size=tp, dp_size=dp, ep_size=tp * dp,
+                    prefill_source_tp_size=source_tp,
+                )
+                env, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                self.assertEqual(options["--world_size"], str(tp * dp))
+                self.assertEqual(options["--ep_size"], str(tp * dp))
+                self.assertEqual(env["LOCAL_WORLD_SIZE"], str(tp * dp))
+                self.assertEqual(len(env["CUDA_VISIBLE_DEVICES"].split(",")), tp * dp)
+                if role == "DECODE":
+                    self.assertEqual(options["--prefill_cp_size"], str(source_tp))
+                    self.assertEqual(options["--decode_capture_config"], capture)
+
     def test_gpu_process_placeholder_is_not_an_occupier(self):
         gpu_rows = "".join(f"{index}, GPU-{index}, 274114\n" for index in range(8))
         with tempfile.TemporaryDirectory() as tmp:

@@ -197,11 +197,8 @@ class KimiK3Model(GptModelBase):
             py_hw_kernel_config,
             device_resource_config,
         )
-        if (
-            parallelism_config.dp_size != 1
-            or parallelism_config.tp_size != parallelism_config.ep_size
-        ):
-            raise ValueError("K3 supports TP=EP with DP=1")
+        if parallelism_config.ep_size != parallelism_config.tp_size * parallelism_config.dp_size:
+            raise ValueError("K3 requires EP=TP×DP for the native expert placement")
         if (
             parallelism_config.pp_size != 1
             or parallelism_config.get_attn_tp_size() != parallelism_config.tp_size
