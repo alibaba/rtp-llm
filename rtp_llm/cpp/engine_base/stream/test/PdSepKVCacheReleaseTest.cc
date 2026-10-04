@@ -5,6 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -1415,6 +1416,132 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     auto block_it = blocks.find(key);
     ASSERT_NE(block_it, blocks.end());
     EXPECT_FALSE(block_it->second->gpu_mem);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStorePreservesCpSwaOpaqueByteSlices) {
+    struct TestCase {
+        int    cp_size;
+        int    gen_num_per_cycle;
+        size_t entries;
+        size_t slice_bytes;
+    };
+    const TestCase cases[] = {
+        {8, 3, 136, 9936},
+        {8, 5, 136, 9936},
+        {8, 7, 136, 9936},
+        {16, 3, 144, 5256},
+        {16, 5, 144, 5256},
+        {16, 7, 144, 5256},
+        {8, 9, 144, 10512},
+    };
+    ModelConfig model_config;
+    model_config.attn_config.size_per_head         = 512;
+    model_config.attn_config.indexer_head_dim      = 128;
+    model_config.attn_config.kv_cache_dtype        = KvCacheDataType::FP8;
+    model_config.attn_config.layer_compress_ratios = {0};
+    KVCacheConfig kv_config;
+    kv_config.seq_size_per_block        = 128;
+    kv_config.kernel_seq_size_per_block = 128;
+    constexpr size_t swa_gid            = 6;
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(::testing::Message() << "cp=" << test_case.cp_size << " gen=" << test_case.gen_num_per_cycle);
+        ParallelismConfig parallelism;
+        parallelism.role_type                          = RoleType::PREFILL;
+        parallelism.tp_size                            = test_case.cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        CacheConfig prefill_config;
+        DSV4CacheConfigHelper::applyConfig(
+            prefill_config, model_config, parallelism, kv_config, test_case.gen_num_per_cycle);
+        parallelism.role_type                         = RoleType::DECODE;
+        parallelism.tp_size                           = 1;
+        parallelism.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+        parallelism.prefill_cp_config.prefill_cp_size = test_case.cp_size;
+        CacheConfig decode_config;
+        DSV4CacheConfigHelper::applyConfig(
+            decode_config, model_config, parallelism, kv_config, test_case.gen_num_per_cycle);
+        ASSERT_EQ(prefill_config.group_region_names.at(swa_gid), KVCacheRegionName::SWA_KV);
+        const size_t slice_bytes = prefill_config.cache_specs.at(swa_gid)->block_size_bytes();
+        const size_t full_bytes  = decode_config.cache_specs.at(swa_gid)->block_size_bytes();
+        ASSERT_EQ(slice_bytes, test_case.slice_bytes);
+        ASSERT_EQ(full_bytes, slice_bytes * test_case.cp_size);
+
+        // Python writes a full striped block, then stores each rank's contiguous
+        // byte slice. A slice is not a miniature block with its own scale tail.
+        const size_t data_end  = test_case.entries * 576;
+        const size_t scale_end = test_case.entries * 584;
+        ASSERT_LE(scale_end, full_bytes);
+        for (size_t model_id : {0u, 1u}) {  // Main model and MTP key namespaces.
+            SCOPED_TRACE(::testing::Message() << "model_id=" << model_id);
+            std::vector<uint8_t> expected(full_bytes);
+            for (size_t byte = 0; byte < full_bytes; ++byte) {
+                if (byte < data_end) {
+                    expected[byte] = static_cast<uint8_t>((byte + model_id * 31) % 127);
+                } else if (byte < scale_end) {
+                    expected[byte] = static_cast<uint8_t>(128 + byte % 64);
+                } else {
+                    expected[byte] = 0xe7;
+                }
+            }
+            auto reconstructed = std::make_shared<std::vector<uint8_t>>(full_bytes, 0xff);
+            for (int cp_rank = 0; cp_rank < test_case.cp_size; ++cp_rank) {
+                SCOPED_TRACE(::testing::Message() << "cp_rank=" << cp_rank);
+                const size_t offset    = static_cast<size_t>(cp_rank) * slice_bytes;
+                auto         kv_buffer = torch::zeros({2, static_cast<int64_t>(slice_bytes)}, torch::kUInt8);
+                std::memcpy(kv_buffer.data_ptr<uint8_t>() + slice_bytes, expected.data() + offset, slice_bytes);
+                auto inputs     = makeSingleBlockWriteInputs("unused",
+                                                         4245,
+                                                         prefill_config.group_seq_size_per_block.at(swa_gid),
+                                                         slice_bytes,
+                                                         0,
+                                                         prefill_config.use_opaque_kv_cache_store,
+                                                         KVCacheRegionName::SWA_KV);
+                inputs.model_id = model_id;
+                inputs.cp_size  = test_case.cp_size;
+                inputs.cp_rank  = cp_rank;
+                inputs.kv_cache_group_types_host =
+                    torch::tensor({static_cast<int32_t>(CacheGroupType::SWA)}, torch::kInt32);
+                inputs.cache_keys.clear();
+                for (int key_index = 0; key_index < test_case.cp_size; ++key_index) {
+                    inputs.cache_keys.push_back(std::to_string(10000 + key_index));
+                }
+                KvCacheInfo kv_cache_info;
+                kv_cache_info.kv_cache_buffer = kv_buffer;
+                auto cache_store              = std::make_shared<MemoryBackedCacheStore>();
+                runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+
+                const auto cache_key = makeCacheKey(model_id, inputs.cache_keys.back(), 0, KVCacheRegionName::SWA_KV);
+                const auto key       = "kv_" + cache_key;
+                ASSERT_EQ(cache_store->store_buffer_requests_.size(), 1u);
+                auto published = cache_store->store_buffer_requests_.front();
+                ASSERT_EQ(published->getBlocksCount(), 1u);
+                ASSERT_NE(published->getBlock(key), nullptr);
+                EXPECT_EQ(published->getBlock("kv_scale_" + cache_key), nullptr);
+                ASSERT_EQ(published->getBlock(key)->len, slice_bytes);
+                EXPECT_FALSE(published->getBlock(key)->gpu_mem);
+
+                // Decode requests the complete opaque slice at its peer offset.
+                auto                  request = std::make_shared<RequestBlockBuffer>("4245");
+                std::shared_ptr<void> destination(reconstructed, reconstructed->data() + offset);
+                request->addBlock(key, destination, slice_bytes, false, true);
+                bool loaded = false;
+                cache_store->load(
+                    request,
+                    [&](bool ok, CacheStoreErrorCode error) {
+                        loaded = ok;
+                        EXPECT_EQ(error, CacheStoreErrorCode::None);
+                    },
+                    "127.0.0.1",
+                    0,
+                    0,
+                    1000,
+                    /*partition_count=*/1,
+                    /*partition_id=*/0);
+                ASSERT_TRUE(loaded);
+            }
+            EXPECT_EQ(*reconstructed, expected);  // Includes global scales and CP8's 64 padding bytes.
+        }
+    }
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKvBuffer) {

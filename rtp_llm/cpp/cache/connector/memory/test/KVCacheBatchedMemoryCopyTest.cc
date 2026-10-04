@@ -35,99 +35,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
-namespace rtp_llm {
-
-bool KVCacheAllocator::init() {
-    return doInit();
-}
-
-MallocResult KVCacheAllocator::malloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-MallocResult KVCacheAllocator::initMalloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo&, size_t, InitCapacityMode) const {
-    return MallocStatus::NONE;
-}
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName, int block_id) const {
-    return convertIndexToAddr(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName, int block_id) const {
-    return convertIndexToBuffer(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, KVCacheRegionName, int block_id, int partition_count, int partition_id) const {
-    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
-}
-
-void KVCacheAllocator::blockCopy(int, int) {}
-void KVCacheAllocator::blockBatchCopy(const std::vector<BlockIdPair>&) {}
-void KVCacheAllocator::blockBatchCopy(const BlockIdPair*, const BlockIdPair*) {}
-void KVCacheAllocator::blockBatchCopy(const torch::Tensor&) {}
-void KVCacheAllocator::regUserMr(size_t, std::shared_ptr<CacheStore>) {}
-
-int64_t KVCacheAllocator::getMrCostTimeMs() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::freeBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableBlocksNum() const {
-    return 0;
-}
-
-BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t) {
-    return nullptr;
-}
-
-void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr&) {}
-
-size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return 0;
-}
-
-uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t, int local_layer_id) const {
-    return static_cast<uint32_t>(local_layer_id);
-}
-
-}  // namespace rtp_llm
-
 namespace rtp_llm::test {
 namespace {
 
@@ -761,6 +668,152 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
     runDsv4TypedStagedCopyRoundTrip(
         {KVCacheRegionName::INDEXER_STATE, KVCacheRegionName::CSA_STATE, KVCacheRegionName::HCA_STATE});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4Cp16ShardedSwaRoundtripPreservesOpaqueBytes) {
+    if (!CrcBlockCopy::supported()) {
+        GTEST_SKIP() << "CRC backend unavailable";
+    }
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+
+    constexpr int cp_size                   = 16;
+    auto          model                     = makeDsv4FlashModelConfig();
+    model.num_layers                        = 3;
+    model.attn_config.layer_compress_ratios = {0, 4, 128};
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.tp_size                            = cp_size;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig kv;
+    kv.seq_size_per_block           = 128;
+    kv.kernel_seq_size_per_block    = 128;
+    kv.dsv4_fixed_pool_blocks       = 3;
+    kv.enable_memory_cache          = true;
+    kv.memory_cache_size_mb         = 16;
+    kv.memory_cache_sync_timeout_ms = 1000;
+    auto config      = HybridPoolConfigCreator::createConfig(model, parallelism, kv, false, /*gen_num_per_cycle=*/5);
+    config.block_num = 3;
+    config.group_block_nums.assign(config.groupNums(), config.block_num);
+    constexpr size_t swa_gid     = 6;
+    const size_t     slice_bytes = config.group_kv_block_stride_bytes.at(swa_gid);
+    ASSERT_EQ(config.group_region_names.at(swa_gid), KVCacheRegionName::SWA_KV);
+    ASSERT_EQ(slice_bytes, 5256u);
+    ASSERT_EQ(config.group_kv_scale_stride_bytes.at(swa_gid), 0u);
+
+    // The full FP8 block has one data region followed by all scales. CP ranks
+    // own contiguous byte slices; rank 15 contains the entire scale tail.
+    std::vector<uint8_t> expected(cp_size * slice_bytes);
+    ASSERT_EQ(expected.size(), 144u * 584u);
+    for (size_t byte = 0; byte < expected.size(); ++byte) {
+        expected[byte] = byte < 144u * 576u ? static_cast<uint8_t>((byte * 17 + byte / 251) % 127) :
+                                              static_cast<uint8_t>(128 + byte % 64);
+    }
+
+    for (bool prefix : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "prefix=" << prefix);
+        kv.enable_prefix_tree_memory_cache = prefix;
+        auto allocator                     = std::make_shared<FakeTypedKVCacheAllocator>(
+            config,
+            /*payload_gap_bytes=*/0,
+            std::set<KVCacheRegionName>{
+                KVCacheRegionName::INDEXER_STATE, KVCacheRegionName::CSA_STATE, KVCacheRegionName::HCA_STATE});
+        auto connector =
+            std::make_shared<KVCacheMemoryConnector>(config, kv, allocator, std::vector<std::string>{"127.0.0.1:1"});
+        ASSERT_TRUE(connector->crc_enabled_);
+        ASSERT_TRUE(connector->init());
+        ASSERT_EQ(connector->usePrefixTreeMemoryCache(), prefix);
+        const auto slots = connector->layerRegionSlots();
+        const auto kind  = prefix ? CacheBlockKind::STATE_SWA_KV : CacheBlockKind::COMPLETE;
+        auto       pool  = connector->memoryPoolFor(kind);
+        ASSERT_NE(pool, nullptr);
+        const auto memory_blocks = pool->malloc(1);
+        ASSERT_EQ(memory_blocks.size(), 1u);
+        auto                 included = [&](size_t i) { return !prefix || connector->kindForSlot(slots[i]) == kind; };
+        std::vector<uint8_t> reconstructed(expected.size(), 0xff);
+
+        for (int rank = 0; rank < cp_size; ++rank) {
+            SCOPED_TRACE(::testing::Message() << "rank=" << rank);
+            MemoryOperationRequestPB request;
+            request.set_copy_direction(MemoryOperationRequestPB::D2H);
+            auto* item = request.add_copy_items();
+            item->set_is_complete(true);
+            item->set_mem_block(memory_blocks[0]);
+            if (prefix) {
+                item->set_cache_block_kind(MemoryOperationRequestPB::STATE_SWA_KV);
+            }
+            std::vector<std::vector<uint8_t>> payloads(slots.size());
+            for (size_t i = 0; i < slots.size(); ++i) {
+                item->add_gpu_blocks(included(i) ? 1 : NULL_BLOCK_IDX);
+                if (!included(i)) {
+                    continue;
+                }
+                const auto& slot    = slots[i];
+                const auto  buffers = allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, 1);
+                ASSERT_EQ(buffers.size(), 1u);
+                const auto& buffer = buffers[0];
+                ASSERT_EQ(buffer.size_bytes, slot.stride_bytes);
+                auto& payload = payloads[i];
+                payload.resize(buffer.size_bytes);
+                for (size_t byte = 0; byte < payload.size(); ++byte) {
+                    payload[byte] = static_cast<uint8_t>((byte * 17 + byte / 251 + i * 29 + rank * 43) % 251);
+                }
+                if (slot.layer_id == 0 && slot.region_name == KVCacheRegionName::SWA_KV) {
+                    ASSERT_EQ(buffer.size_bytes, slice_bytes);
+                    std::copy_n(expected.data() + rank * slice_bytes, slice_bytes, payload.data());
+                }
+                if (buffer.is_cuda) {
+                    ASSERT_EQ(cudaMemcpy(buffer.addr, payload.data(), payload.size(), cudaMemcpyHostToDevice),
+                              cudaSuccess);
+                } else {
+                    std::memcpy(buffer.addr, payload.data(), payload.size());
+                }
+            }
+            MemoryOperationResponsePB response;
+            ASSERT_TRUE(connector->copyCache(request, response));
+            ASSERT_TRUE(response.success());
+
+            // Restore to another block and poison both buffers so the original
+            // device allocation cannot accidentally satisfy the comparison.
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (!included(i)) {
+                    continue;
+                }
+                const auto& slot = slots[i];
+                for (int block : {1, 2}) {
+                    setBlockInfosContent(allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, block),
+                                         '\xff');
+                }
+                item->set_gpu_blocks(i, 2);
+            }
+            request.set_copy_direction(MemoryOperationRequestPB::H2D);
+            response.Clear();
+            ASSERT_TRUE(connector->copyCache(request, response));
+            ASSERT_TRUE(response.success());
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (!included(i)) {
+                    continue;
+                }
+                SCOPED_TRACE(::testing::Message() << "slot=" << i);
+                const auto& slot    = slots[i];
+                const auto  buffers = allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, 2);
+                ASSERT_EQ(buffers.size(), 1u);
+                const auto&          buffer = buffers[0];
+                std::vector<uint8_t> actual(buffer.size_bytes);
+                if (buffer.is_cuda) {
+                    ASSERT_EQ(cudaMemcpy(actual.data(), buffer.addr, actual.size(), cudaMemcpyDeviceToHost),
+                              cudaSuccess);
+                } else {
+                    std::memcpy(actual.data(), buffer.addr, actual.size());
+                }
+                ASSERT_EQ(actual, payloads[i]);
+                if (slot.layer_id == 0 && slot.region_name == KVCacheRegionName::SWA_KV) {
+                    std::copy(actual.begin(), actual.end(), reconstructed.begin() + rank * slice_bytes);
+                }
+            }
+        }
+        EXPECT_EQ(reconstructed, expected);
+        pool->requestFree(memory_blocks);
+    }
 }
 
 class FailWriteDiskIO final: public IDiskBlockIO {
