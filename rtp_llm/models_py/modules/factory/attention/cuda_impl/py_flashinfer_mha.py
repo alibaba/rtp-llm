@@ -648,6 +648,7 @@ class PyFlashinferDecodeAttnOp(object):
             "HND",
             use_tensor_cores=self.use_tensor_core,
         )
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
 
     def __del__(self):
@@ -674,9 +675,9 @@ class PyFlashinferDecodeAttnOp(object):
         )
         # Get torch.dtype from attention configs
         self.decode_wrapper.plan(
-            flashinfer_decode_params.decode_page_indptr_d,
-            flashinfer_decode_params.page_indice_d,
-            flashinfer_decode_params.paged_kv_last_page_len_d,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,

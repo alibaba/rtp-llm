@@ -65,6 +65,14 @@ def _run(logits, lengths, k, max_seq_len) -> torch.Tensor:
     return out
 
 
+def _run_op(op, logits, lengths, k, max_seq_len) -> torch.Tensor:
+    N, _ = logits.shape
+    out = torch.full((N, k), -1, dtype=torch.int32, device=logits.device)
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+    op(logits, lengths, out, ws, k, max_seq_len)
+    return out
+
+
 def _assert_equiv(
     out: torch.Tensor, logits: torch.Tensor, lengths: torch.Tensor, k: int, *, tag: str
 ):
@@ -234,6 +242,42 @@ def test_lengths_2d_accepted():
     _assert_equiv(out, logits, lengths_1d, k=512, tag="lengths 2D ok via view")
 
 
+def test_non_current_cuda_device():
+    """Both bindings must launch on the input tensor's device and stream."""
+    if torch.cuda.device_count() < 2:
+        print("  [non-current CUDA device] SKIP: requires two GPUs")
+        return
+
+    torch.cuda.set_device(0)
+    with torch.cuda.device(1):
+        logits, lengths = _make(4, 2048, seed=10, lengths_mode="varied")
+
+    for op_name in ("persistent_topk", "dsv4_persistent_topk"):
+        op = getattr(rtp_llm_ops, op_name)
+        out = _run_op(op, logits, lengths, k=512, max_seq_len=2048)
+        torch.cuda.synchronize(logits.device)
+        assert torch.cuda.current_device() == 0, f"{op_name} leaked its CUDA device guard"
+        _assert_equiv(out, logits, lengths, k=512, tag=f"{op_name} non-current device")
+
+
+def test_rejects_mixed_cuda_devices():
+    if torch.cuda.device_count() < 2:
+        print("  [mixed CUDA devices] SKIP: requires two GPUs")
+        return
+
+    logits = torch.randn(1, 2048, dtype=torch.float32, device="cuda:1")
+    lengths = torch.full((1,), 2048, dtype=torch.int32, device="cuda:0")
+    out = torch.empty((1, 512), dtype=torch.int32, device="cuda:1")
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda:1")
+    for op_name in ("persistent_topk", "dsv4_persistent_topk"):
+        try:
+            getattr(rtp_llm_ops, op_name)(logits, lengths, out, ws, 512, 2048)
+        except RuntimeError as error:
+            assert "same CUDA device" in str(error), str(error)
+        else:
+            raise AssertionError(f"{op_name} accepted tensors on mixed CUDA devices")
+
+
 # ---------------------------------------------------------------------------
 # Bench — compare against torch.topk (current production path).
 # ---------------------------------------------------------------------------
@@ -312,6 +356,8 @@ if __name__ == "__main__":
     test_long_seq_radix_path()
     test_zero_length_row()
     test_lengths_2d_accepted()
+    test_non_current_cuda_device()
+    test_rejects_mixed_cuda_devices()
     print("\n== Benchmark ==")
     bench_decode_sweep()
     print("\nOK")

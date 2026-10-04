@@ -51,10 +51,7 @@ bool prefillTheoryHitLogEnabled() {
         if (value == nullptr || value[0] == 0) {
             value = std::getenv("PREFILL_THEORY_HIT_LOG_ENABLE");
         }
-        if (value == nullptr || value[0] == 0) {
-            return true;
-        }
-        return !envValueIsFalse(value);
+        return envValueIsTrue(value);
     }();
     return enabled;
 }
@@ -62,7 +59,7 @@ bool prefillTheoryHitLogEnabled() {
 const char* prefillTheoryHitLogPath() {
     const char* value = std::getenv("PREFILL_THEORY_HIT_LOG_PATH");
     if (value == nullptr || value[0] == 0) {
-        return "/home/admin/logs/prefill_theory_hit.log";
+        return "/tmp/rtp_llm_prefill_theory_hit.log";
     }
     return value;
 }
@@ -311,7 +308,7 @@ void PrefillCacheHitMetricsReporter::record(const BatchKVCacheResource&         
     const int64_t hit_token_count   = theoryHitTokens(
         snapshot.request_hit_occurrences, input_token_count, theoryBlockTokens(seq_size_per_block, cp_mapper));
     auto theory_snapshot = theory_stats_->record(hit_token_count, input_token_count);
-    if (theory_snapshot.request_total_count > 0) {
+    if (theory_snapshot.request_total_count > 0 && prefillTheoryHitLogEnabled()) {
         appendPrefillTheoryHitLogLine(
             formatPrefillTheoryHitLogLine(request_id, token_num, seq_size_per_block, theory_snapshot));
     }

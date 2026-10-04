@@ -216,6 +216,7 @@ class MoE(nn.Module):
             local_expert_start=self.local_expert_start,
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
+            is_decode_role=self._is_decode_role,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)

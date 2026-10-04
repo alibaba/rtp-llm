@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
     write_compressed_k_decode,
     write_swa_k_decode,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.kv_write_decode_op import (
+    write_compressed_k_decode as write_compressed_k_decode_fp8,
+)
 
 
 def _tagged(
@@ -350,11 +353,61 @@ class TestWriteCompressedKDecode(unittest.TestCase):
     def test_all_slots_negative_noop(self):
         """All slots -1 → buffer must remain unchanged."""
         device = torch.device("cpu")
-        cmp_buf = torch.zeros(2, 4, 4, dtype=torch.bfloat16, device=device)
+        cmp_buf = torch.full(
+            (2, 4, 4), 17.0, dtype=torch.bfloat16, device=device
+        )
+        original = cmp_buf.clone()
         k_state = _tagged(3, 4, base=900.0, device=device)
         slot = torch.tensor([-1, -1, -1], dtype=torch.int32, device=device)
         write_compressed_k_decode(k_state, slot, cmp_buf)
-        self.assertTrue(torch.all(cmp_buf == 0))
+        self.assertTrue(torch.equal(cmp_buf, original))
+
+    def test_bf16_write_is_bit_exact_from_nonzero_existing_value(self):
+        """The old ``existing + (target - existing)`` path lost this value."""
+        k_state = torch.ones((1, 1), dtype=torch.bfloat16)
+        existing = torch.full((1,), 1000.0, dtype=torch.bfloat16)
+        old_delta_result = existing + (k_state[0] - existing)
+        self.assertFalse(torch.equal(old_delta_result, k_state[0]))
+
+        for write_impl in (
+            write_compressed_k_decode,
+            write_compressed_k_decode_fp8,
+        ):
+            with self.subTest(module=write_impl.__module__):
+                cmp_buf = torch.full((1, 1, 1), 1000.0, dtype=torch.bfloat16)
+                write_impl(k_state, torch.tensor([0], dtype=torch.int32), cmp_buf)
+                self.assertTrue(torch.equal(cmp_buf.view(-1), k_state.view(-1)))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cuda_graph_redirect_is_exact_with_slot_zero_collision(self):
+        for write_impl in (
+            write_compressed_k_decode,
+            write_compressed_k_decode_fp8,
+        ):
+            with self.subTest(module=write_impl.__module__):
+                cmp_buf = torch.full(
+                    (1, 2, 1), 1000.0, dtype=torch.bfloat16, device="cuda"
+                )
+                k_state = torch.tensor(
+                    [[9.0], [1.0]], dtype=torch.bfloat16, device="cuda"
+                )
+                slot = torch.tensor([-1, 0], dtype=torch.int32, device="cuda")
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    write_impl(k_state, slot, cmp_buf)
+
+                graph.replay()
+                torch.cuda.synchronize()
+                expected = torch.tensor(
+                    [1.0, 1000.0], dtype=torch.bfloat16, device="cuda"
+                )
+                self.assertTrue(torch.equal(cmp_buf.view(-1), expected))
+
+                cmp_buf.fill_(17.0)
+                slot.fill_(-1)
+                graph.replay()
+                torch.cuda.synchronize()
+                self.assertTrue(torch.equal(cmp_buf, torch.full_like(cmp_buf, 17.0)))
 
 
 if __name__ == "__main__":

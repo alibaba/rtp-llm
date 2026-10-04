@@ -41,10 +41,10 @@ class _StubAttnInputs:
     sequence_lengths: torch.Tensor
 
 
-def _make_impl(bs: int = 4) -> DSv4DecodeFmhaImpl:
+def _make_impl(bs: int = 4, q_len: int = 1) -> DSv4DecodeFmhaImpl:
     cfg = DSv4DecodeFmhaImplConfig(
         max_batch_size=bs,
-        q_len=1,
+        q_len=q_len,
         window_size=8,
         head_dim=32,
         max_seq_len=64,
@@ -156,6 +156,20 @@ class TestDSv4DecodeFmhaImpl(unittest.TestCase):
         )
         max_s = impl.config.max_seq_len  # 64
         self.assertTrue(bool((impl.metadata.start_pos < max_s).all()))
+
+    def test_warmup_clamp_reserves_full_target_verify_window(self):
+        impl = _make_impl(bs=2, q_len=4)
+        impl.prepare_cuda_graph(
+            _StubAttnInputs(
+                sequence_lengths=torch.tensor([63, 5000], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                impl.metadata.start_pos,
+                torch.tensor([60, 60], dtype=torch.int32),
+            )
+        )
 
 
 if __name__ == "__main__":

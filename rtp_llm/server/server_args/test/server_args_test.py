@@ -397,6 +397,38 @@ class ServerArgsSetTest(TestCase):
                     self.assertTrue(restored.enable_sleep_mode)
                     self.assertEqual(restored.sleep_mode_level, level)
 
+    def test_kv_cache_config_accepts_legacy_44_and_49_field_pickles(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.reuse_cache = True
+        config.linear_step = 7
+        config.seq_size_per_block = 128
+        config.ssm_state_dtype = "fp32"
+        config.dsv4_fixed_pool_blocks = 37
+        config.dsv4_fixed_pool_use_memory = True
+        state = config.__getstate__()
+
+        # Pre-disk-cache releases used 44 fields. The first eight fields are
+        # unchanged; current fields 8..12 are the later disk-cache extension.
+        legacy44 = state[:8] + state[13:49]
+        # The first disk-cache-aware format had 49 fields and stopped at
+        # ssm_state_dtype, before either DSV4 fixed-pool field was added.
+        legacy49 = state[:49]
+        self.assertEqual(len(legacy44), 44)
+        self.assertEqual(len(legacy49), 49)
+
+        for saved in (legacy44, legacy49):
+            with self.subTest(field_count=len(saved)):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(saved)
+                self.assertTrue(restored.reuse_cache)
+                self.assertEqual(restored.linear_step, 7)
+                self.assertEqual(restored.seq_size_per_block, 128)
+                self.assertEqual(restored.ssm_state_dtype, "fp32")
+                self.assertEqual(restored.dsv4_fixed_pool_blocks, 0)
+                self.assertFalse(restored.dsv4_fixed_pool_use_memory)
+
     def test_runtime_config_legacy_pickle_sleep_defaults_and_field_alignment(self):
         from rtp_llm.ops import RuntimeConfig
 

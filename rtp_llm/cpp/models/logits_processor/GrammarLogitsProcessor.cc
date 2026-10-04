@@ -245,6 +245,7 @@ bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
 }
 
 int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
+    std::unique_lock<std::mutex> lock(state_mutex_);
     if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
         return request.propose_step;
     }

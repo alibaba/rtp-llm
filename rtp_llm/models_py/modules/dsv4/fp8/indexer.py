@@ -22,6 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch

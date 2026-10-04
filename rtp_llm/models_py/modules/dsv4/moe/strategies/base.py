@@ -12,7 +12,8 @@ Strategies (priority high→low for ``forced=None``):
 
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
-    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
+    >1       SM90 + grouped FP8 available GroupedFP8Strategy
+    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; SM100 default)
     >1       DSV4_USE_MEGA_MOE_SE=0        MegaMoEStrategy
     >1       mega unavailable/disabled     RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
@@ -56,6 +57,7 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    is_decode_role: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -244,6 +246,13 @@ def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
     return strategy_arg, strategy_arg is not None  # ctor kwarg → strict
 
 
+# Strategies allowed to serve ep_size > 1. The Mega family is the SM100 answer;
+# grouped_fp8 is the SM90 one and carries its own NCCL all-gather/reduce-scatter
+# combine (see its module docstring). deepep/local_loop stay excluded — local_loop
+# hardcodes FP4 storage, and deepep delegates its local compute to it.
+_EP_CAPABLE = ("mega", "mega_fused", "mega_se", "grouped_fp8")
+
+
 def select_strategy(
     cfg: MoeCfg,
     forced: Optional[str] = None,
@@ -268,6 +277,13 @@ def select_strategy(
         from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import mega_moe_se_requested
 
         se_requested = mega_moe_se_requested()
+        # The default Mega-SE implementation requires SM100. Preserve the
+        # Hopper auto-pick while keeping an explicit SE request strict.
+        if se_requested and os.environ.get("DSV4_USE_MEGA_MOE_SE") is None:
+            se_requested = not any(
+                cls.name == "grouped_fp8" and cls.can_handle(cfg)
+                for cls in _STRATEGY_PRIORITY
+            )
         fused_requested = mega_moe_fused_requested()
         if se_requested and fused_requested:
             raise RuntimeError(
@@ -300,14 +316,10 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in (
-                        "mega",
-                        "mega_fused",
-                        "mega_se",
-                    ):
+                    if cfg.ep_size > 1 and cls.name not in _EP_CAPABLE:
                         raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
-                            f"Requested strategy {forced!r} would bypass Mega "
+                            f"DSV4 EP MoE requires one of {_EP_CAPABLE}. "
+                            f"Requested strategy {forced!r} has no EP combine "
                             f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
                         )
                     return cls
@@ -331,15 +343,31 @@ def select_strategy(
             )
         if mega_cls.can_handle(cfg):
             return mega_cls
+        # Mega is gated on SM100. On SM90 grouped_fp8 is the only remaining EP
+        # path, so prefer it over raising; the DeepEP/LocalLoop ban stands.
+        for cls in _STRATEGY_PRIORITY:
+            if cls.name in _EP_CAPABLE and cls.can_handle(cfg):
+                return cls
         from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
             _mega_moe_disabled_or_unavailable_reason,
         )
 
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            ep_group_unavailable_reason,
+        )
+
+        grouped_fp8_reason = (
+            ep_group_unavailable_reason()
+            or "SM90 FP8 grouped kernel probe returned False "
+            "(needs DSV4_USE_GROUPED_FP8!=0, CUDA, a Hopper device and a "
+            "DeepGEMM exporting m_grouped_fp8_gemm_nt_contiguous)"
+        )
         raise RuntimeError(
-            "DSV4 EP MoE requires MegaMoEStrategy by default; fallback to "
+            f"DSV4 EP MoE requires one of {_EP_CAPABLE}; fallback to "
             "DeepEP/LocalLoop is disabled. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
-            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
+            f"Mega reason: {_mega_moe_disabled_or_unavailable_reason()}. "
+            f"grouped_fp8 reason: {grouped_fp8_reason}."
         )
 
     for cls in _STRATEGY_PRIORITY:
