@@ -77,10 +77,15 @@ Encoder 使用常规 `GetWorkerStatus`，角色字符串为 `ENCODER`，`RoleTyp
 `running_task_info` 和 `finished_task_list` 投影到 Encoder 阶段的请求记录；运行中的
 任务使本地待观察并发与引擎并发对账，完成任务中的错误码决定完成或失败。当前
 PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
-响应字段（`WorkerStatusResponse`）：`alive`、`available_concurrency`、running/waiting/finished
-任务表（Map<requestId, TaskInfo>）、`status_version`、`step_latency_ms`、`iterate_count`、
-dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_match_rollback_blocks`、
-`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
+`WorkerStatusPB` 由 `EngineStatusConverter.convertToStatusObservation` 转成不可变的
+`WorkerStatus.StatusObservation`。其中 `runningTasks` 对应引擎的 `running_task_info`，
+保存所有尚未完成的任务，包括 `PENDING`、`RECEIVED`、`KV_ALLOCATED` 和 `RUNNING` 阶段；
+`finishedTasks` 单独保存完成上报。任务按字符串 request ID 索引，并保留各自的 `phase`。
+纯运行任务需按 `phase == RUNNING` 筛选，不能用 `runningTasks.size()` 代替；
+`runningQueryLen` 与 `waitingQueryLen` 则直接保留引擎上报的数量。
+其余字段包括 `alive`、`available_concurrency`、`status_version`、`step_latency_ms`、
+`iterate_count`、dp/tp size、KV cache 容量、`block_size`、`block_hash_lookahead_tokens`、
+`cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
