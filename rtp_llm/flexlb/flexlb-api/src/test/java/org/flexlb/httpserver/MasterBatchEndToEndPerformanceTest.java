@@ -360,7 +360,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         RouteService routeService = new RouteService(
                 scheduler,
-                new TheoryCacheHitReporter());
+                mock(TheoryCacheHitReporter.class, withSettings().stubOnly()));
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();

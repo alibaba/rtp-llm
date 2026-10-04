@@ -168,6 +168,20 @@ class DefaultRouterTest {
     }
 
     @Test
+    void unavailableEncoderRetainsItsFailureReasonAndPolicyGroup() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
+        BalanceContext context = context(704L);
+        context.setRequestedRoles(Set.of(RoleType.ENCODER));
+        PlacementResult<SelectedRole, PlacementKey> result = router().selectEncoder(context);
+
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(), result.failure().getCode());
+        assertEquals(new PlacementKey(RoleType.ENCODER, null), result.blocker());
+        verify(encoderSelector).select(context, null);
+        verifyNoInteractions(configService);
+    }
+
+    @Test
     void directRouteCommitsRolesAndReleasesGenerationPins() {
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.PREFILL, RoleType.DECODE));

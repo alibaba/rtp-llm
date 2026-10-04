@@ -264,11 +264,15 @@ class LocalStandbyCacheIndex {
     }
 
     private boolean incrementMappingCountIfBelowLimit() {
-        if (mappingCount.get() >= maximumEntries) {
-            return false;
+        while (true) {
+            long currentCount = mappingCount.get();
+            if (currentCount >= maximumEntries) {
+                return false;
+            }
+            if (mappingCount.compareAndSet(currentCount, currentCount + 1)) {
+                return true;
+            }
         }
-        mappingCount.incrementAndGet();
-        return true;
     }
 
     private void requestHighWatermarkCleanupIfNeeded() {

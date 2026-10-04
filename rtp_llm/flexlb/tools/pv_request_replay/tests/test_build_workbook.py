@@ -105,6 +105,66 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
 
 
 class CurrentRoutingDecisionTest(unittest.TestCase):
+    def test_log_timestamps_accept_comma_and_microsecond_precision(self):
+        for timestamp in ("2026-08-11 01:45:00.123", "2026-08-11 01:45:00,123",
+                          "2026-08-11 01:45:00.123456", "2026-08-11 01:45:00,123456"):
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(workbook_module.log_time_from_content(timestamp + " INFO pvLogger"),
+                                 timestamp.replace(",", "."))
+                self.assertIsNotNone(html_module.timestamp_ms(
+                    workbook_module.log_time_from_content(timestamp + " INFO pvLogger")))
+
+    def test_null_or_malformed_response_keeps_top_level_outcome(self):
+        for response in (None, [], "invalid"):
+            with self.subTest(response=response):
+                route = route_record("malformed-response", epoch_ms(1, 45), "10.0.0.8")
+                route.update(response=response, code=200)
+                self.assertTrue(workbook_module.route_success(route))
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / "pv.log"
+                    source.write_text(pv_line("2026-08-11 01:45:00.010", route))
+                    destination = Path(directory) / "analysis.xlsx"
+                    summary = workbook_module.build_workbook([source], destination)
+                    self.assertEqual(summary["request_count"], 1)
+                    workbook = load_workbook(destination)
+                    try:
+                        sheet = workbook["Requests"]
+                        headers = [cell.value for cell in sheet[1]]
+                        values = next(record for record in (dict(zip(headers, values))
+                            for values in sheet.iter_rows(min_row=2, values_only=True))
+                            if record.get("request_id") == "malformed-response")
+                        self.assertEqual(values["route_response_code"], 200)
+                    finally:
+                        workbook.close()
+                route.pop("code")
+                self.assertFalse(workbook_module.route_success(route))
+
+    def test_malformed_candidates_are_skipped_when_building_workbook(self):
+        route = route_record("malformed-candidate", epoch_ms(1, 45), "10.0.0.8")
+        route["routingDecisions"] = [{"role": "PREFILL", "candidates": [None, "invalid",
+            {"endpoint": "10.0.0.8:8001@1", "selected": True, "routingMatchTokens": 512}]}]
+        self.assertEqual(workbook_module.get_route_cache_selection(route),
+                         {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"})
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "pv.log"
+            source.write_text(pv_line("2026-08-11 01:45:00.010", route))
+            destination = Path(directory) / "analysis.xlsx"
+            workbook_module.build_workbook([source], destination)
+            workbook = load_workbook(destination)
+            try:
+                records = list(workbook["Routing Decisions"].iter_rows(min_row=2, values_only=True))
+                self.assertEqual(len(records), 1)
+                self.assertIn("10.0.0.8:8001@1", records[0])
+            finally:
+                workbook.close()
+
+        legacy_route = {"shortestTtftDecisions": [{"role": "PREFILL", "workers": [None, "invalid",
+            {"ip": "10.0.0.8", "selected": True, "routingMatchTokens": 512}]}]}
+        self.assertEqual(workbook_module.get_route_cache_selection(legacy_route),
+                         {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"})
+        legacy_route["shortestTtftDecisions"][0]["workers"] = None
+        self.assertEqual(workbook_module.get_route_cache_selection(legacy_route), {})
+
     def test_selected_ipv6_candidate_uses_the_normalized_host(self):
         for endpoint, host in (("10.0.0.8:8001@1", "10.0.0.8"),
                                ("[2001:db8::1]:8001@1", "2001:db8::1")):

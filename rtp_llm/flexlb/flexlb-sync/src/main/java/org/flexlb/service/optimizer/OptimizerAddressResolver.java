@@ -79,6 +79,7 @@ public class OptimizerAddressResolver {
                         pollIntervalMs,
                         TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException e) {
+                started.set(false);
                 log.warn("Service discovery refresh scheduling failed, address={}, msg={}",
                         address, e.getMessage());
                 return;

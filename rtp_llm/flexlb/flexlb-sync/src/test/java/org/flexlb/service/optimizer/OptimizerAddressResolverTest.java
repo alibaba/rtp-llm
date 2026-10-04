@@ -6,8 +6,13 @@ import org.flexlb.dao.route.Endpoint;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -15,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -197,6 +203,31 @@ class OptimizerAddressResolverTest {
         resolver.shutdown();
         resolver.start();
         verify(serviceDiscovery, never()).shutdown();
+    }
+
+    @Test
+    void retriesStartAfterRefreshSchedulingIsRejected() {
+        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
+        OptimizerAddressResolver resolver = new OptimizerAddressResolver(
+                serviceDiscovery, endpoint(ServiceDiscoveryType.VIPSERVER), PORT, POLL_INTERVAL_MS);
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ReflectionTestUtils.setField(resolver, "refreshScheduler", scheduler);
+        when(scheduler.scheduleWithFixedDelay(
+                any(Runnable.class), eq(0L), eq(POLL_INTERVAL_MS), eq(TimeUnit.MILLISECONDS)))
+                .thenThrow(new RejectedExecutionException("refresh rejected"))
+                .thenReturn(mock(ScheduledFuture.class));
+
+        try {
+            resolver.start();
+            resolver.start();
+            resolver.start();
+
+            verify(scheduler, times(2)).scheduleWithFixedDelay(
+                    any(Runnable.class), eq(0L), eq(POLL_INTERVAL_MS), eq(TimeUnit.MILLISECONDS));
+            verifyNoInteractions(serviceDiscovery);
+        } finally {
+            resolver.shutdown();
+        }
     }
 
     @Test

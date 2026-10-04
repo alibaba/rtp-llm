@@ -210,7 +210,7 @@ class LocalStandbyCacheIndexTest {
                     return owners == null ? 0 : owners.size();
                 })
                 .sum();
-        assertTrue(cacheIndex.mappingCount() >= 100);
+        assertEquals(100, cacheIndex.mappingCount());
         assertEquals(1_000, cacheIndex.mappingCount() + rejectedMappings.get());
         assertEquals(cacheIndex.mappingCount(), indexedMappings);
         cacheIndex.shutdown();

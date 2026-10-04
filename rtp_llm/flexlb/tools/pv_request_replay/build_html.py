@@ -291,7 +291,7 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
             "hostCount": len(hosts),
             "candidateCount": sum(len(values) for values in candidates.values()),
             "start": requests[0]["route"],
-            "end": max(terminal_times),
+            "end": max(requests[0]["route"] + 1, max(terminal_times)),
             "timezone": "Asia/Shanghai",
             "notice": (
                 "决策候选为 PV 中的实际快照；CostBased 预测使用毫秒，历史工作量使用 Token；请求生命周期和 "

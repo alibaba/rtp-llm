@@ -23,6 +23,26 @@ build_html = BUILD_HTML_MODULE.build_html
 
 
 class BuildHtmlTest(unittest.TestCase):
+    def test_single_request_without_first_token_has_nonzero_replay_window(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "input.xlsx"
+            workbook = Workbook()
+            requests = workbook.active
+            requests.title = "Requests"
+            requests.append(["request_id", "route_log_time (decision)", "prefill_host"])
+            requests.append(["single", "2026-08-11 02:00:00.000", "10.0.0.1"])
+            candidates = workbook.create_sheet("Decision Snapshot Top5")
+            for _ in range(3):
+                candidates.append([])
+            candidates.append(["request_id"])
+            workbook.save(path)
+
+            replay = BUILD_HTML_MODULE._build_replay(path)
+
+            self.assertEqual(replay["meta"]["requestCount"], 1)
+            self.assertEqual(replay["meta"]["end"], replay["meta"]["start"] + 1)
+            self.assertIsNone(replay["requests"][0]["firstToken"])
+
     def test_request_and_host_text_is_escaped_in_all_replay_panels(self) -> None:
         node = shutil.which("node")
         if not node:
