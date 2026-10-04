@@ -577,7 +577,7 @@ public class EngineHealthReporter {
             int code = ctx.getResponse().getCode();
 
             for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
-                if (serverStatus.getRole() != null) {
+                if (serverStatus != null && serverStatus.getRole() != null) {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
                             "reason", selectionReason(ctx, serverStatus.getRole()),

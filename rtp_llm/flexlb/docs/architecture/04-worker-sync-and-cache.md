@@ -191,7 +191,11 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
   `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
   `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
-  达到上限拒绝新映射；daemon 清理线程每 10s 增量扫描。
+  达到上限拒绝新映射。启动时要求 `0 < minimumTtlMs <= ttlMs`，压力比例为 `[0, 1]`
+  内的有限值；比例为 1 时，仅在达到容量上限后使用最小 TTL。
+  daemon 清理线程每 10s 检查用量并分批清理，用量达到 90% 时改为全量扫描；请求写入
+  也可异步触发高水位扫描，但两次全量扫描至少间隔 10s。关闭索引时中断清理线程，
+  扫描循环检测关闭和中断状态。
 - 匹配时对每个 worker 的命中块数**减去其 `cacheMatchRollbackBlocks`**（下限 0）。
 - 主路由和故障降级直接查内存索引；KVCM 影子对照使用异步查询，不让主路由等待影子任务的队列。
 - `LocalStandbyComparisonService`：KVCM 为主时持续影子预测，与引擎实际命中

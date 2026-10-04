@@ -36,6 +36,7 @@ import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProc
 import org.springframework.scheduling.support.ScheduledMethodRunnable;
 import reactor.netty.resources.LoopResources;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -233,6 +234,31 @@ class EngineHealthReporterTest {
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricTags.of(
                 "role", "PREFILL",
                 "reason", "LEAST_RECENTLY_USED_IN_POOL",
+                "engineIp", "10.0.0.1:8080",
+                "success", "true",
+                "code", "200"), 1.0);
+    }
+
+    @Test
+    void shouldSkipMissingWorkersAndReportValidSelection() {
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        selectedWorker.setServerIp("10.0.0.1");
+        selectedWorker.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(Arrays.asList(null, new ServerStatus(), selectedWorker));
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.setResponse(response);
+
+        reporter.reportBalancingService(context);
+
+        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS,
+                FlexMetricTags.of("code", "200"), 1.0);
+        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricTags.of(
+                "role", "PREFILL",
+                "reason", "UNKNOWN",
                 "engineIp", "10.0.0.1:8080",
                 "success", "true",
                 "code", "200"), 1.0);
