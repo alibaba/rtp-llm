@@ -41,7 +41,15 @@ def _worker():
             result = init_canonical_p2p(group, device)
         if result is not None:
             raise RuntimeError("peer availability vote split the group")
-        communicator = init_canonical_p2p(group, device)
+        with patch.dict(
+            os.environ, {"RTP_LLM_CANONICAL_P2P_LARGE": "1" if rank != 7 else "0"}
+        ):
+            smaller = init_canonical_p2p(group, device)
+        if smaller is None or smaller.max_elements != 20480:
+            raise RuntimeError("large flag mismatch must retain the40KiB backend")
+        del smaller
+        with patch.dict(os.environ, {"RTP_LLM_CANONICAL_P2P_LARGE": "1"}):
+            communicator = init_canonical_p2p(group, device)
     if communicator is None:
         raise RuntimeError("requested supported communicator unavailable")
     from types import SimpleNamespace
@@ -109,7 +117,7 @@ def _worker():
         raise RuntimeError("full-tile peer reads were not vectorized")
     rows = []
     generator = torch.Generator(device=device).manual_seed(12433 + rank)
-    for count in (1, 257, 2560, 10240, 20480):
+    for count in (1, 257, 2560, 10240, 20480, 40960):
         for inplace in (True, False):
             x = torch.randn(
                 count, dtype=torch.bfloat16, device=device, generator=generator
@@ -163,7 +171,7 @@ def _worker():
     fallback_contracts = []
     for x in (
         torch.full((257,), rank + 1.0, device=device),
-        torch.full((20481,), rank + 1.0, dtype=torch.bfloat16, device=device),
+        torch.full((40961,), rank + 1.0, dtype=torch.bfloat16, device=device),
         torch.full((2, 257), rank + 1.0, dtype=torch.bfloat16, device=device).t(),
     ):
         if communicator.should_use(x):
@@ -208,8 +216,10 @@ def _worker():
                     ranks=8,
                     full_tile_vector_load_bits=32,
                     rows=all_rows,
-                    changing_graph_replays=320,
+                    changing_graph_replays=384,
                     initialization_fallback_cases=4,
+                    large_mismatch_cases=1,
+                    max_elements=communicator.max_elements,
                     unsupported_cases=3,
                     cpp_sum_cases=2,
                     cpp_other_op_mode_cases=2,
