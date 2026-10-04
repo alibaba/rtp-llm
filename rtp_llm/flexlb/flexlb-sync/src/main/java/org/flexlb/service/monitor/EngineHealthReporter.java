@@ -98,7 +98,6 @@ import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_BLOCK_SIZE;
-import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_MESSAGE_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_SEQ_LEN;
@@ -250,8 +249,6 @@ public class EngineHealthReporter {
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(REQUEST_MESSAGE_BYTES,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        this.monitor.register(REQUEST_BODY_BYTES,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
@@ -323,11 +320,7 @@ public class EngineHealthReporter {
     }
 
     public void reportStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "code", String.valueOf(errorEnum.getCode()),
-                "role", role == null ? "" : role.getCode()
-        );
-        monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
+        reportStatusCheckerFail(errorEnum, "", role);
     }
 
     public void reportStatusCheckerFail(
@@ -383,9 +376,6 @@ public class EngineHealthReporter {
         }
         if (context.getRequestMessageBytes() != null) {
             monitor.report(REQUEST_MESSAGE_BYTES, tags, context.getRequestMessageBytes());
-        }
-        if (context.getRequestBodyBytes() != null) {
-            monitor.report(REQUEST_BODY_BYTES, tags, context.getRequestBodyBytes());
         }
     }
 
@@ -452,9 +442,9 @@ public class EngineHealthReporter {
     private static FlexMetricTags lifecycleTags(
             String engineIp, String role, String group) {
         return FlexMetricTags.of(
-                "engineIp", engineIp,
-                "role", role,
-                "group", group);
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role == null ? "" : role,
+                "group", group == null ? "" : group);
     }
 
     private long reportDuration(
@@ -514,13 +504,14 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
         if (status.role() == RoleType.ENCODER) {
-            int pendingRequests = ep == null ? 0 : ((EncoderEndpoint) ep).pendingEncoderRequestCount();
+            EncoderEndpoint encoderEndpoint = ep instanceof EncoderEndpoint encoder ? encoder : null;
+            int pendingRequests = encoderEndpoint == null ? 0 : encoderEndpoint.pendingEncoderRequestCount();
             monitor.report(ENCODER_PENDING_REQUEST_COUNT, metricTags, pendingRequests);
             monitor.report(ENCODER_SELECTION_LOAD, metricTags,
                     Math.max(0, status.runningQueryLen())
                             + Math.max(0, status.waitingQueryLen()) + pendingRequests);
             monitor.report(ENCODER_UNCACHED_TOKEN_LOAD, metricTags,
-                    ep == null ? 0 : ((EncoderEndpoint) ep).inflightUncachedTokenEstimate());
+                    encoderEndpoint == null ? 0 : encoderEndpoint.inflightUncachedTokenEstimate());
         }
         reportKvCacheCapacity(metricTags, status);
     }
@@ -699,18 +690,14 @@ public class EngineHealthReporter {
      * @param localMatchTokens  tokens matched in the worker's local cache
      * @param globalMatchTokens tokens matched across local and remote caches
      * @param inputTokens       request input tokens
-     * @param available         whether KVCM supplied a match result
      */
     public void reportKvcmSelectedMatch(RoleType roleType,
                                          String engineIp,
                                          long localMatchTokens,
                                          long globalMatchTokens,
-                                         long inputTokens,
-                                         boolean available) {
-        if (available) {
-            cacheMetricsReporter.reportKvcmSelectedMatch(
-                    roleType, engineIp, localMatchTokens, globalMatchTokens, inputTokens);
-        }
+                                         long inputTokens) {
+        cacheMetricsReporter.reportKvcmSelectedMatch(
+                roleType, engineIp, localMatchTokens, globalMatchTokens, inputTokens);
     }
 
     public void reportCacheHitComparisonMetrics(CacheHitComparisonResult comparison) {

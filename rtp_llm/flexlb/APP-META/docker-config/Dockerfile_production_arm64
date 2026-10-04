@@ -8,6 +8,9 @@ ENV NGINX_SKIP=1
 RUN echo whale_wave_prod > /etc/ilogtail/user_defined_id && \
     echo whale_wave_prod > /etc/uniagent/user_defined_id
 
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin/
+COPY environment/common/bin/whale_start.sh /home/admin/whale_start.sh
+RUN chmod +x /home/admin/${APP_NAME}/bin/*.sh
 COPY environment/common/bin/RASP.sh /home/admin/RASP.sh
 COPY ${APP_NAME}.tgz /home/admin/${APP_NAME}/target/${APP_NAME}.tgz
 

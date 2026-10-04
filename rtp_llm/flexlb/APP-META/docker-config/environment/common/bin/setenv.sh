@@ -23,6 +23,68 @@ java_version() {
     echo "$local_java_version"
 }
 
+available_memory_mb() {
+    local meminfo_file=${1:-/proc/meminfo}
+    local cgroup_v2_file=${2:-/sys/fs/cgroup/memory.max}
+    local cgroup_v1_file=${3:-/sys/fs/cgroup/memory/memory.limit_in_bytes}
+    local total_mb limit_file limit_bytes limit_mb
+    total_mb=$(awk '/^MemTotal:/ {printf "%d", $2 / 1024}' "$meminfo_file" 2>/dev/null)
+    if [[ ! "$total_mb" =~ ^[1-9][0-9]*$ ]]; then
+        echo "WARN: cannot read available memory; using a conservative 1024MB JVM budget" >&2
+        total_mb=1024
+    fi
+    for limit_file in "$cgroup_v2_file" "$cgroup_v1_file"; do
+        if [[ ! -r "$limit_file" ]]; then
+            continue
+        fi
+        limit_bytes=$(cat "$limit_file")
+        # 'max' and huge v1 unlimited values do not restrict physical memory.
+        if [[ "$limit_bytes" == "max" || "$limit_bytes" =~ ^[0-9]{19,}$ ]]; then
+            continue
+        fi
+        if [[ "$limit_bytes" =~ ^[0-9]{1,18}$ ]]; then
+            limit_mb=$((limit_bytes / 1048576))
+            if [[ "$limit_mb" -gt 0 && "$limit_mb" -lt "$total_mb" ]]; then
+                total_mb=$limit_mb
+            fi
+        else
+            echo "WARN: invalid cgroup memory limit; using at most a 1024MB JVM budget" >&2
+            if [[ "$total_mb" -gt 1024 ]]; then
+                total_mb=1024
+            fi
+        fi
+    done
+    echo "$total_mb"
+}
+
+configure_default_jvm_memory() {
+    local total_mb=$1
+    maxMetaspace=512m
+    reservedCodeCache=512m
+    if [ "$total_mb" -le 2048 ]; then
+        DEFAULT_JVM_XMS="$((total_mb / 2))m"
+        maxDirectMemory="$((total_mb / 8))m"
+        maxMetaspace="$((total_mb / 8))m"
+        reservedCodeCache="$((total_mb / 16))m"
+    elif [ "$total_mb" -le 16384 ]; then
+        DEFAULT_JVM_XMS="$((total_mb * 5 / 8))m"
+        maxDirectMemory="$((total_mb / 16))m"
+        maxMetaspace="$((total_mb / 32))m"
+        reservedCodeCache="$((total_mb / 32))m"
+    elif [ "$total_mb" -le 24576 ]; then
+        # The 12c24g ASI pool exposes about 19GiB to the container.
+        DEFAULT_JVM_XMS=12g
+        maxDirectMemory=1g
+    elif [ "$total_mb" -le 32768 ]; then
+        DEFAULT_JVM_XMS=18g
+        maxDirectMemory=1g
+    else
+        DEFAULT_JVM_XMS=32g
+        maxDirectMemory=2g
+    fi
+    DEFAULT_JVM_XMX=$DEFAULT_JVM_XMS
+}
+
 # SETENV_SETTED promise run this only once.
 if [ -z $SETENV_SETTED ]; then
     SETENV_SETTED="true"
@@ -86,7 +148,6 @@ if [ -z $SETENV_SETTED ]; then
         fi
 
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
-        export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
         export MIDDLEWARE_LOGS="${HOME}/logs"
         export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
         mkdir -p "$APP_HOME"/.default "$APP_HOME"/logs \
@@ -99,32 +160,11 @@ if [ -z $SETENV_SETTED ]; then
 
         SERVICE_OPTS="${SERVICE_OPTS} -server"
 
-        let memTotal=`cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }'`
-        echo "INFO: OS total memory: "$memTotal"M"
+        memTotal=$(available_memory_mb)
+        echo "INFO: available container memory: ${memTotal}M"
         # Keep enough native-memory headroom for direct buffers, metaspace,
         # code cache, thread stacks, and the container runtime.
-        if [ $memTotal -le 2048 ]; then
-          DEFAULT_JVM_XMS="1536m"
-          DEFAULT_JVM_XMX="1536m"
-          maxDirectMemory=2g
-        elif [ $memTotal -le 16384 ]; then
-          DEFAULT_JVM_XMS="10g"
-          DEFAULT_JVM_XMX="10g"
-          maxDirectMemory=1g
-        elif [ $memTotal -le 24576 ]; then
-          # The 12c24g ASI pool exposes about 19GiB to the container.
-          DEFAULT_JVM_XMS="12g"
-          DEFAULT_JVM_XMX="12g"
-          maxDirectMemory=1g
-        elif [ $memTotal -le 32768 ]; then
-          DEFAULT_JVM_XMS="18g"
-          DEFAULT_JVM_XMX="18g"
-          maxDirectMemory=1g
-        else
-          DEFAULT_JVM_XMS="32g"
-          DEFAULT_JVM_XMX="32g"
-          maxDirectMemory=2g
-        fi
+        configure_default_jvm_memory "$memTotal"
 
         FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
         SERVICE_JVM_XMS=${FLEXLB_JVM_XMS:-${MASTER_JVM_XMS:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMS}}}}
@@ -132,8 +172,8 @@ if [ -z $SETENV_SETTED ]; then
         echo "INFO: JVM heap config: -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
         SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=${maxDirectMemory}"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=${maxMetaspace} -XX:MaxMetaspaceSize=${maxMetaspace}"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=${reservedCodeCache} -XX:MaxDirectMemorySize=${maxDirectMemory}"
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"

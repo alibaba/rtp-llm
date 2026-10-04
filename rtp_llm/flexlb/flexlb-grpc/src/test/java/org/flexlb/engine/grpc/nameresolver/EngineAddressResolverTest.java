@@ -115,6 +115,42 @@ class EngineAddressResolverTest {
                 hosts -> hosts.size() == 2 && hosts.containsAll(List.of(b, c))));
     }
 
+    @Test
+    void deduplicatesSharedAddressAcrossGroupsAndPreservesDifferentControlPorts() {
+        Endpoint first = new Endpoint();
+        first.setAddress("shared-service");
+        first.setProtocol("grpc");
+        first.setGroup("group-a");
+        first.setWorkerStatusPort(18002);
+        Endpoint sameAddressInAnotherGroup = new Endpoint();
+        sameAddressInAnotherGroup.setAddress("shared-service");
+        sameAddressInAnotherGroup.setProtocol("grpc");
+        sameAddressInAnotherGroup.setGroup("group-b");
+        sameAddressInAnotherGroup.setWorkerStatusPort(18002);
+        Endpoint differentControlPort = new Endpoint();
+        differentControlPort.setAddress("shared-service");
+        differentControlPort.setProtocol("grpc");
+        differentControlPort.setWorkerStatusPort(19002);
+        ServiceRoute route = mock(ServiceRoute.class);
+        when(route.getAllEndpoints()).thenReturn(List.of(first, sameAddressInAnotherGroup, differentControlPort));
+        ModelMetaConfig config = mock(ModelMetaConfig.class);
+        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        when(discovery.getHosts(first)).thenReturn(List.of(workerHost("10.0.0.1", 8080)));
+        when(discovery.getHosts(differentControlPort)).thenReturn(List.of(workerHost("10.0.0.2", 8080)));
+
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, config);
+
+        verify(discovery).getHosts(first);
+        verify(discovery).getHosts(differentControlPort);
+        verify(discovery, org.mockito.Mockito.never()).getHosts(sameAddressInAnotherGroup);
+        verify(discovery, org.mockito.Mockito.never()).listen(eq(sameAddressInAnotherGroup),
+                org.mockito.ArgumentMatchers.any());
+        EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(listener);
+        verify(listener).onAddressUpdate(argThat(hosts -> hosts.size() == 2));
+    }
+
     private void assertWorkerHost(WorkerHost host, String ip, int grpcPort, int workerStatusPort) {
         assertInstanceOf(WorkerHost.class, host);
         assertEquals(ip, host.getIp());

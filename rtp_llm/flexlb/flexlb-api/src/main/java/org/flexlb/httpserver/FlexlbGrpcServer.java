@@ -103,6 +103,7 @@ public class FlexlbGrpcServer {
 
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
+        reportExecutorMetrics();
 
         server = NettyServerBuilder.forPort(port)
                 .channelType(NioServerSocketChannel.class)

@@ -591,7 +591,7 @@ class MasterSpec:
       FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
       distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
 
-    * Tier-2/3 ZK-activated — FLEXLB_SYNC_CONSISTENCY_CONFIG set by the
+    * Tier-2/3 ZK-activated — FLEXLB_CONFIG.consistency set by the
       harness (EnvSpec.zk_consistency).  The layout MUST switch to
       same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
       FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
@@ -630,7 +630,7 @@ class MasterSpec:
     # Spring --server.address; Tier-1 stays 127.0.0.1 (distinct ports),
     # Tier-2/3 uses 127.0.0.1 vs 127.0.0.2 (same ports, distinct IPs).
     bind_ip: str = "127.0.0.1"
-    # FLEXLB_ADVERTISED_IP (Tier-2/3): overrides the ZK-advertised localIp.
+    # FLEXLB_ADVERTISED_IP (Tier-2/3): env-injection contract reference.
     # Has NO consumer in the flexlb Java code and none will land (see the
     # RULING in the docstring above) — kept as the env-injection contract
     # reference for the phase-2 dual-container Tier-3.
@@ -855,8 +855,9 @@ class EnvSpec:
     # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
     # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
     # <connectString>" on stdout) BEFORE the masters and injects
-    # FLEXLB_SYNC_CONSISTENCY_CONFIG (needConsistency=true, zkHost=<helper
-    # connectString>, zkTimeoutMs from this dict) into every master env.
+    # FLEXLB_CONFIG.consistency (type=ZOOKEEPER, connectString=<helper
+    # connectString>, session/connection timeout from this dict's zkTimeoutMs)
+    # into every master's configuration document.
     # Tier-1 dual-standalone specs leave this None: no ZK, no election, no
     # forwarding (needConsistency=false → LOCAL_STANDALONE, the mock line's
     # existing state).
@@ -1471,21 +1472,15 @@ class EnvManager:
                         "zk_consistency spec requires a live ZK helper "
                         "(connectString missing) — fail-closed"
                     )
-                menv["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = json.dumps(
-                    {
-                        "needConsistency": True,
-                        "zookeeperConfig": {
-                            "zkHost": env.zk_connect_string,
-                            # Default 10s: session expiry inside the ≤60s
-                            # convergence window; widen via the
-                            # zk_consistency dict for slow-CI layouts.
-                            "zkTimeoutMs": int(
-                                spec.zk_consistency.get("zkTimeoutMs", 10000)
-                            ),
-                        },
-                    },
-                    separators=(",", ":"),
-                )
+                master_config = json.loads(menv["FLEXLB_CONFIG"])
+                zk_timeout_ms = int(spec.zk_consistency.get("zkTimeoutMs", 10000))
+                master_config["consistency"] = {
+                    "type": "ZOOKEEPER",
+                    "connectString": env.zk_connect_string,
+                    "sessionTimeoutMs": zk_timeout_ms,
+                    "connectionTimeoutMs": zk_timeout_ms,
+                }
+                menv["FLEXLB_CONFIG"] = json.dumps(master_config, separators=(",", ":"))
             menv.update(mspec.extra_env)  # per-instance overrides come last
         return menv
 
@@ -1739,7 +1734,7 @@ class EnvManager:
         instance's own bind ip/port, plus the per-instance argv/env keys:
         --server.address, --management.server.address, --flexlb.log.path
         (per-instance log dir), FLEXLB_ADVERTISED_IP and
-        FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
+        FLEXLB_CONFIG.consistency via _master_env(env, mspec).
         """
         spec = env.spec
         if not API_JAR.is_file():

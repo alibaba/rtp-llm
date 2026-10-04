@@ -200,6 +200,8 @@ class CacheHitFeedbackFlowTest {
     @Test
     void fallbackReportsStandbyWithoutPretendingItIsKvcm() throws Exception {
         when(failover.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        when(standby.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
+                .thenReturn(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)));
         select("1003");
         poll(worker, task("1003", true, 0), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();

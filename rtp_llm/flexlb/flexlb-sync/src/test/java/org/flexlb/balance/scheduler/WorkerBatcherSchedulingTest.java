@@ -34,7 +34,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -440,10 +439,12 @@ class WorkerBatcherSchedulingTest {
         updated.decisionPolicy().setMaxPredictedExecutionMs(null);
         updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
         current.set(updated);
+        assertEquals(increaseWindow ? 60_000L : 0L,
+                runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
         assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
         if (increaseWindow) {
-            assertFalse(delivery.firstAttempt.await(100L, TimeUnit.MILLISECONDS));
             current.set(initial);
+            assertEquals(0L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
             runtime.signalSchedulingInputsChanged();
         }
         await(delivery.firstAttempt);

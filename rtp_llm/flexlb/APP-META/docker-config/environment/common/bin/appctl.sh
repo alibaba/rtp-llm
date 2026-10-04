@@ -67,7 +67,7 @@ die() {
 
 printLogPathInfo() {
   echo "Please check deploy log: ${APP_HOME}/logs/${APP_NAME}_deploy.log"
-  echo "Please check application stdout: ${SERVICE_OUT}"
+  echo "Please check application output in container stdout"
 }
 
 exit1() {

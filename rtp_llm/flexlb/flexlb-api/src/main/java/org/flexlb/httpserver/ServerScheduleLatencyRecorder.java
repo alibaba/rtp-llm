@@ -33,6 +33,9 @@ public class ServerScheduleLatencyRecorder {
     }
 
     public void recordCompletion(BalanceContext context, long responseCompletedNanos) {
+        if (context == null) {
+            return;
+        }
         Window current = window;
         current.completions.record(responseCompletedNanos);
 

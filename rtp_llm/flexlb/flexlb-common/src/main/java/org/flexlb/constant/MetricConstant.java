@@ -601,9 +601,6 @@ public class MetricConstant {
     /** Protobuf message size excluding gRPC framing and compression. */
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
 
-    /** Request payload size from Content-Length when available. */
-    public static final String REQUEST_BODY_BYTES = "app.request.body.bytes";
-
     /**
      * Graceful online/offline lifecycle events
      */

@@ -34,13 +34,16 @@ Spring 按标准规则读取环境变量，例如 `SERVER_PORT` 对应 `server.p
 `EnvironmentConfigSource` 仍负责读取独立的 `MODEL_SERVICE_CONFIG` 启动拓扑。
 来源选择和连接参数在启动时确定，修改它们需要重启进程。
 
-三种来源都返回原始字符串，复用 `ConfigDocumentParserResolver` 和原有 v0/v1 解析器：
+三种来源都返回原始字符串，复用 `ConfigDocumentParserResolver` 和 v0/v3 解析器：
 优先使用文档内的 `schemaVersion`，否则使用 `FLEXLB_CONFIG_SCHEMA_VERSION`（默认 `0`）。
 UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装层。
 
 格式归一化后，由现有 `FlexlbConfigMerger` 执行递归部分更新：
 对象字段递归覆盖，未出现或从外部配置删除的字段保留当前内存值，数组和标量整体替换；
-tagged union 的 `type` 变化会替换整个分支。v1 文档 `{"schemaVersion":1}` 是 no-op；
+`cacheMatching`、`consistency`、`scheduler.ordering` 和 `scheduler.decision` 的 `type`
+变化会替换整个分支，避免保留新模式不支持的抢占或凑批参数。`scheduler`、`dispatcher`
+自身的 `type` 字段变化仍按递归覆盖处理，
+保留未出现的兄弟字段。v3 文档 `{"schemaVersion":3}` 是 no-op；
 没有显式版本的 `{}` 则按版本选择规则解析，默认走 v0 兼容转换。
 每次合并后都使用与 `FLEXLB_CONFIG` 相同的严格解析和跨字段校验：
 
@@ -52,8 +55,10 @@ tagged union 的 `type` 变化会替换整个分支。v1 文档 `{"schemaVersion
 运行时读取失败或非法更新不会替换当前 last-known-good 快照，后续更新恢复正常后
 继续应用；合法更新原子替换 `FlexlbConfig`，随后通知监听器。
 
-配置来源层不区分“热生效”与“重启生效”：它只发布最新有效快照。业务组件每次读取快照，
-就可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
+`scheduler.type`、`dispatcher.type` 和 `scheduler.decision.type` 在启动时确定，运行时保持
+当前模式。部分更新中已知但不同的模式值会被忽略，同一对象中的数值参数仍继续合并；未知模式值
+仍会校验失败并保留当前快照。切换模式需要重启 Master，并在启动文档中配置完整的目标分支。
+其余业务组件每次读取快照的参数可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
 
 旧的字段级行为变量 `BLOCK_HASH_STRATEGY`、`FLEXLB_LOG_LEVEL`、
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
@@ -147,11 +152,11 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 读取异常均导致启动失败。配置缺失或空白的错误包含 DataId、group 和 namespace；读取异常保留原始原因。
 启动过程不回退其他 DataId、环境变量配置或默认配置。
 
-UniConfig / Nacos 的 v1 部分更新示例：
+UniConfig / Nacos 的 v3 部分更新示例：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "router": {
     "availabilityHysteresisPercent": 12
   },
@@ -166,7 +171,7 @@ UniConfig / Nacos 的 v1 部分更新示例：
 
 ## FLEXLB_CONFIG 结构
 
-公共 schema 当前为 version 1，按责任分区：
+公共 schema 当前为 version 3，按责任分区：
 
 - `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、capacity 和 lifecycle。
 - `dispatcher`：`BATCH` / `NON_BATCH`。QUEUE 模式可用
@@ -307,7 +312,20 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
-gRPC 服务端执行器与批次发送执行器通过 `FlexMonitor` 每 2 秒上报忙碌线程数、总线程数和
+WorkerStatus 的容量与健康指标使用 `engineIp` 区分 worker：单 Engine 为 `ip:port`，
+多 Engine 为 `ip:port@engineIndex`；同一物理 IP 上的实例分别上报，按角色汇总时应聚合该维度。
+缓存预测对照事件使用完整的逻辑身份，单 Engine 也保留 `@0`。选点详情指标另外包含有限枚举的
+`reason`，按角色统计总 QPS 时应汇总 `reason` 和 `engineIp`。
+`app.cache.hit.count` 和 `app.cache.input.tokens` 是按所选 worker 累计的 Token Counter，
+全局命中率使用同一窗口内的命中 Token 增量除以输入 Token 增量，不能求单请求命中率的平均值。
+`app.engine.zk.master.event` 是按事件类型记录最近发生时刻的 epoch-ms Gauge，用于展示主选举
+事件时间，不作为事件次数或 QPS 使用。
+`app.engine.worker.status.scheduler.to.running.ms` 中的 scheduler 是 Engine 调度器；该值
+与 `app.engine.worker.status.engine.waiting.to.running.ms` 相同，均取 Engine 的
+`running_entered_time_ms - waiting_entered_time_ms`。前者保留已有展示口径，后者显式标明观测来源；
+不能将二者相加或作为 Master 与 Engine 的两端耗时比较。
+
+gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
@@ -315,7 +333,6 @@ provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 Master 重启后累计拒绝数重新开始。已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，
 总线程数仍包含空闲线程。拒绝数包含队列或线程饱和、线程池关闭后提交触发的拒绝，
 沿用 `grpc.server.executor.caller.runs` 上报名，面板显示“任务拒绝累计数”。
-本地 Block Hash 计算池按需创建，首次使用前不产生线程池状态样本。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
 通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
@@ -342,6 +359,8 @@ WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `role=PREFILL/DECODE` 分开展示，只统计已提交给引擎且尚未在 WorkerStatus 中确认的请求。
 排队请求和已确认请求不计入节点在途数。大盘分为正在跟踪的请求数、Prefill 在途请求数、
 Decode 在途请求数三个独立面板。
+`/rtp_llm/inflight_status` 的 `scheduler_tracked` 返回两个阶段正在跟踪的请求总数，包含排队请求；
+`scheduler_inflight` 保留为该值的兼容别名，供现有清账和测试工具使用。它不表示节点侧的未确认在途数。
 Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 `inputAndMaxOutputKvTokens = inputKvTokens + max(0, maxNewTokens)`（溢出时饱和）。
 两者分别表示输入预留和输入加最大输出预留，不是输出长度预测，后者包含前者。

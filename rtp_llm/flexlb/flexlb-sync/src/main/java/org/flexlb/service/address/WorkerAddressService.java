@@ -43,7 +43,7 @@ public class WorkerAddressService {
     private final ServiceDiscovery serviceDiscovery;
     // Cache the last non-empty worker list per endpoint; its key fields stay unchanged after initialization.
     private final ConcurrentMap<Endpoint, List<WorkerHost>> lastNonEmptyHostsByEndpoint = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, WorkerAvailabilityLogState> workerAvailabilityByAddress = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Endpoint, WorkerAvailabilityLogState> workerAvailabilityByEndpoint = new ConcurrentHashMap<>();
 
     /**
      * Service discovery request thread pool
@@ -145,8 +145,8 @@ public class WorkerAddressService {
     }
 
     private void reportWorkerAvailability(String modelName, Endpoint endpoint, List<WorkerHost> hosts) {
-        WorkerAvailabilityLogState state = workerAvailabilityByAddress.computeIfAbsent(
-                endpoint.getAddress(), ignored -> new WorkerAvailabilityLogState());
+        WorkerAvailabilityLogState state = workerAvailabilityByEndpoint.computeIfAbsent(
+                endpoint, ignored -> new WorkerAvailabilityLogState());
         if (hosts.isEmpty()) {
             if (state.shouldWarnForEmptyWorkers()) {
                 logger.warn("No workers discovered, model={}, address={}, group={}; "

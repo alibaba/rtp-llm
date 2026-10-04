@@ -7,6 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -80,6 +81,31 @@ class GrpcWorkerStatusRunnerTest {
         } else {
             verifyNoInteractions(cache);
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"DEADLINE_EXCEEDED,WORKER_STATUS_GRPC_TIMEOUT", "UNAVAILABLE,WORKER_SERVICE_UNAVAILABLE"})
+    void reportsFailedRpcLatencyWithSameWorkerTags(String grpcCode, BalanceStatusEnum expectedError) {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerDirectory directory = directory(mock(EndpointRegistry.class), status);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        io.grpc.Status failure = "DEADLINE_EXCEEDED".equals(grpcCode)
+                ? io.grpc.Status.DEADLINE_EXCEEDED : io.grpc.Status.UNAVAILABLE;
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.failedFuture(failure.asRuntimeException()));
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+
+        new GrpcWorkerStatusRunner("test-model", status.getLogicalIpPort(), "test-site", RoleType.PREFILL,
+                null, status, status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L,
+                mock(CacheAwareService.class), Runnable::run).run();
+
+        ArgumentCaptor<Long> latency = ArgumentCaptor.forClass(Long.class);
+        verify(reporter).reportStatusCheckerFail(expectedError, status.getMetricIpPort(), RoleType.PREFILL);
+        verify(reporter).reportStatusCheckFailureLatency(org.mockito.ArgumentMatchers.eq(expectedError),
+                org.mockito.ArgumentMatchers.eq(status.getMetricIpPort()),
+                org.mockito.ArgumentMatchers.eq(RoleType.PREFILL), latency.capture());
+        assertTrue(latency.getValue() >= 0L);
     }
 
     @Test
@@ -228,7 +254,7 @@ class GrpcWorkerStatusRunnerTest {
                 ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
         verify(endpoint).observeStatusHeartbeat(
                 org.mockito.Mockito.eq(status), observation.capture());
-        assertTrue(observation.getValue().runningTasks().values().stream()
+        assertTrue(observation.getValue().activeTasks().values().stream()
                 .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();

@@ -1284,7 +1284,7 @@ public final class PrefillState {
     public HeartbeatReconciliation reconcileHeartbeat(
             WorkerStatus.StatusObservation observation) {
         List<WorkerStatusFact> facts = new ArrayList<>(
-                observation.runningTasks().size());
+                observation.activeTasks().size());
         boolean capacityReleased = false;
         boolean schedulingInputsChanged = false;
         lock.lock();

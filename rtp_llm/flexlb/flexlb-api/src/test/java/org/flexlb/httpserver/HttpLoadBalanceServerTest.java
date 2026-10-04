@@ -48,6 +48,7 @@ class HttpLoadBalanceServerTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.scheduler_inflight").isEqualTo(9)
+                .jsonPath("$.scheduler_tracked").isEqualTo(9)
                 .jsonPath("$.scheduler_blocked").isEqualTo(2);
 
         verify(scheduler).getBlockedRequestCount();

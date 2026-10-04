@@ -125,6 +125,11 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
             int workerStatusBasePort = endpoint.getWorkerStatusPort() == null
                     ? grpcPort
                     : endpoint.getWorkerStatusPort();
+            requireValidPort(httpPort, "httpPort");
+            requireValidPort(grpcPort, "grpcPort");
+            requireValidPort(httpPort + 5, "httpServerPort");
+            requireValidPort(workerStatusBasePort, "workerStatusPort");
+            requireValidPort((long) workerStatusBasePort + multiEngineNum - 1, "lastWorkerStatusPort");
             for (int engineIndex = 0; engineIndex < multiEngineNum; engineIndex++) {
                 normalizedHosts.add(new WorkerHost(
                         host.getIp(),
@@ -140,5 +145,11 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
             }
         }
         return normalizedHosts;
+    }
+
+    private static void requireValidPort(long port, String name) {
+        if (port <= 0 || port > 65535) {
+            throw new IllegalArgumentException(name + " must be in [1, 65535], received " + port);
+        }
     }
 }

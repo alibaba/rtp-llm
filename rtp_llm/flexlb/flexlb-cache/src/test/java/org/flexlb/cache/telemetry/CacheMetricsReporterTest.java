@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class CacheMetricsReporterTest {
@@ -67,6 +68,13 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+    }
+
+    @Test
+    void selectedKvcmMatchWithoutRoleDoesNotReport() {
+        reporter.reportKvcmSelectedMatch(null, "10.0.0.1:8080", 20L, 30L, 100L);
+
+        verifyNoInteractions(monitor);
     }
 
     @Test

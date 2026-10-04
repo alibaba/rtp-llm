@@ -397,6 +397,36 @@ class KvcmGrpcClientTest {
         assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
     }
 
+    @Test
+    void reportsFailedGrpcCallMetricsAndLeavesSharedClientLifecycleToSpring() {
+        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        runtimeConfig.setMaxQueryRetryCount(0);
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
+        KvcmMetaServiceClient metaServiceClient = mock(KvcmMetaServiceClient.class);
+        KvcmLeaderResolver leaderResolver = mock(KvcmLeaderResolver.class);
+        when(leaderResolver.resolve()).thenReturn(new GrpcTarget("127.0.0.1", 7001));
+        KvcmWorkerMetadataResolver metadataResolver = mock(KvcmWorkerMetadataResolver.class);
+        when(metadataResolver.resolveNamespace(RoleType.PREFILL, "default", 2192L))
+                .thenReturn("deployment_2192");
+        when(metadataResolver.resolveQueryType(RoleType.PREFILL, "default"))
+                .thenReturn(QueryType.QT_PREFIX_MATCH);
+        when(metaServiceClient.getHostCacheState(any(), any(), anyLong()))
+                .thenThrow(io.grpc.Status.UNAVAILABLE.asRuntimeException());
+        GrpcReporter reporter = mock(GrpcReporter.class);
+        client = createClient(configuration, metaServiceClient, leaderResolver, metadataResolver, reporter);
+
+        assertThrows(KvcmQueryException.class, () -> client.findMatchingEngines(
+                "failed-query", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+
+        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), eq(0), eq(false));
+        client.shutdown();
+        verify(metaServiceClient, org.mockito.Mockito.never()).shutdown();
+    }
+
     private static KvcmGrpcClient createClient(CacheMatchConfiguration configuration,
                                                KvcmMetaServiceClient metaServiceClient,
                                                KvcmLeaderResolver leaderResolver,

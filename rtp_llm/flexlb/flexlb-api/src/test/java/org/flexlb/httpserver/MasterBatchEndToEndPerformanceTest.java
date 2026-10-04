@@ -1289,8 +1289,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private long assertLatencyCoverage(
             TrafficResult result, long firstRequestId, Map<String, Object> snapshot) {
         int requestCount = result.responses().size();
-        Map<Long, ResponseTiming> timings = Map.copyOf(latencyRecorder.responseTimings);
-        assertEquals(expectedRequestIds(firstRequestId, requestCount), timings.keySet(),
+        Map<String, ResponseTiming> timings = Map.copyOf(latencyRecorder.responseTimings);
+        assertEquals(expectedRequestIds(firstRequestId, requestCount).stream()
+                        .map(Object::toString).collect(java.util.stream.Collectors.toSet()), timings.keySet(),
                 "latency observations must cover each measured request exactly once");
         assertEquals(0L, latencyRecorder.duplicateResponses.get(),
                 "a repeated response must not replace a missing latency sample");
@@ -1303,7 +1304,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         long acknowledgedRequests = 0L;
         for (int index = 0; index < requestCount; index++) {
-            long requestId = firstRequestId + index;
+            String requestId = Long.toString(firstRequestId + index);
             ResponseTiming timing = timings.get(requestId);
             if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
                 assertEquals(0L, timing.ackAtNanos(),
@@ -1710,7 +1711,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     /** Retains request identities to audit stage denominators without changing production telemetry. */
     private static final class CompletionCoverageRecorder extends ServerScheduleLatencyRecorder {
-        private final Map<Long, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
+        private final Map<String, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
         private final AtomicLong duplicateResponses = new AtomicLong();
 
         @Override
@@ -1719,7 +1720,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     context.getBatchDispatchedNanos(), context.getAckAtNanos(), responseCompletedNanos);
             super.recordCompletion(context, responseCompletedNanos);
             if (responseTimings.putIfAbsent(
-                    Long.parseLong(context.getRequestId()), timing) != null) {
+                    context.getRequestId(), timing) != null) {
                 duplicateResponses.incrementAndGet();
             }
         }

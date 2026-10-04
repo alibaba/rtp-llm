@@ -80,10 +80,16 @@ class WhalePod:
 def default_runner(command: Sequence[str]) -> str:
     """Run a CLI command and return stdout, retrying transient failures."""
     for attempt in range(3):
-        result = subprocess.run(command, text=True, capture_output=True)
+        result = subprocess.run(command, capture_output=True)
         if result.returncode == 0:
-            return result.stdout
-        detail = result.stderr.strip() or result.stdout.strip()
+            try:
+                return result.stdout.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise WhaleSourceError(
+                    "command output is not UTF-8; inspect the remote log encoding "
+                    "and provide a UTF-8 snapshot"
+                ) from error
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
         if attempt < 2 and "请等待" not in detail:
             time.sleep(attempt + 1)
             continue
@@ -363,7 +369,7 @@ def _download_chunk(
     output = _exec(
         runner, pod, container, f'{selector} | sed -n "{first_line},{last_line}p"'
     )
-    encoded = output.encode("utf-8", errors="replace")
+    encoded = output.encode("utf-8")
     if len(encoded) >= EXEC_STDOUT_LIMIT:
         raise WhaleSourceError(
             f"chunk {first_line}-{last_line} of {path} on {pod.pod_name} reached the "
@@ -397,6 +403,9 @@ def fetch_pod_window(
         raise ValueError("window start must not be later than window end")
     if window_end > _as_log_time(datetime.now().astimezone()):
         raise ValueError("window end must not be in the future")
+    # The awk selector includes the entire start and end seconds.
+    window_start = window_start.replace(microsecond=0)
+    window_end = window_end.replace(microsecond=0)
     names = _list_log_files(runner, pod, container, log_dir, log_name)
     files: list[dict[str, Any]] = []
     lines: list[str] = []
@@ -411,7 +420,8 @@ def fetch_pod_window(
         if first is None:
             files.append({**entry, "status": "empty", "selected_line_count": 0})
             continue
-        if (last or first) < window_start or first > window_end:
+        if ((last or first).replace(microsecond=0) < window_start
+                or first.replace(microsecond=0) > window_end):
             files.append(
                 {**entry, "status": "outside_window", "selected_line_count": 0}
             )

@@ -68,7 +68,7 @@ public class CacheMatchQueryOrchestrator {
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
             trackComparisonBestEffort(query, () -> comparisonService.trackLocalStandbyPrediction(query));
-            return emptyResult(CacheMatchSource.KVCM, startTimeNs);
+            return emptyResult(CacheMatchSource.KVCM, startTimeNs, query.blockSize());
         }
 
         try {
@@ -129,7 +129,7 @@ public class CacheMatchQueryOrchestrator {
 
     private CacheMatchResult queryLocalSync(CacheMatchQuery query, long startTimeNs) {
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs);
+            return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs, query.blockSize());
         }
         Map<String, HostCacheMatch> matches = localSyncProvider.findMatchingEngines(
                 query.requestId(), query.blockCacheKeys(), query.blockSize(),
@@ -140,7 +140,17 @@ public class CacheMatchQueryOrchestrator {
 
     private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
         try {
-            return localStandbyProvider.asyncLocalStandbyMatch(query).join();
+            if (query.blockSize() <= 0) {
+                return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
+            }
+            if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
+                return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs, query.blockSize());
+            }
+            Map<String, HostCacheMatch> matches = localStandbyProvider.findMatchingEngines(
+                    query.requestId(), query.blockCacheKeys(), query.blockSize(),
+                    query.roleType(), query.group());
+            return new CacheMatchResult(
+                    matches, CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException error) {
             log.warn("Local Standby cache query failed; requestId={}", query.requestId(), error);
             return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
@@ -165,9 +175,9 @@ public class CacheMatchQueryOrchestrator {
         }
     }
 
-    private CacheMatchResult emptyResult(CacheMatchSource source, long startTimeNs) {
+    private CacheMatchResult emptyResult(CacheMatchSource source, long startTimeNs, long blockSize) {
         return new CacheMatchResult(
-                Collections.emptyMap(), source, elapsedUs(startTimeNs), 0);
+                Collections.emptyMap(), source, elapsedUs(startTimeNs), blockSize);
     }
 
     private long elapsedUs(long startTimeNs) {

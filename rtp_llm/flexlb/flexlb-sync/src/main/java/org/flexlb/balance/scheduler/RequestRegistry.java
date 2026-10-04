@@ -418,6 +418,9 @@ public class RequestRegistry {
                 ? PlacementResult.Status.CLOSED : slot.commitRoute(item, publication);
     }
 
+    /**
+     * Checks the Generation admission gate. Encoder routes use claimEncoderRoute.
+     */
     public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
@@ -431,6 +434,9 @@ public class RequestRegistry {
         }
     }
 
+    /**
+     * Claims a Generation admission handle. Encoder routes use claimEncoderRoute.
+     */
     public AdmissionHandle claimAdmissionHandle(
             String requestId, CompletableFuture<?> future) {
         if (!enterAdmissionHandleGate()) {

@@ -120,7 +120,7 @@ class FlexlbGrpcForwarderTest {
         channels(forwarder).put("10.0.0.2:7003", channel);
 
         ch.qos.logback.classic.Logger logger =
-                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.flexlb.util.Logger.LOGGER_NAME);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);

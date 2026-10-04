@@ -165,8 +165,7 @@ public class CostBasedPrefillStrategy {
                             selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
                     selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
                             selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
-                    seqLen,
-                    true);
+                    seqLen);
         }
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,

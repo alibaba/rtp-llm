@@ -141,7 +141,7 @@ public class KvcmGrpcClient {
         // One snapshot per query keeps the wire parameters of every attempt consistent.
         KvcmCacheMatchingConfig config = configuration.getKvcmRuntimeConfig();
         int maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
-        for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
+        for (int attemptIndex = 0; ; attemptIndex++) {
             try {
                 Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
                         config, requestId, blockCacheKeys, namespace, queryType,
@@ -160,7 +160,6 @@ public class KvcmGrpcClient {
                         requestId, attemptIndex + 1, maxQueryRetryCount, failure);
             }
         }
-        throw new IllegalStateException("KVCM query retry loop completed without a result");
     }
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryOnce(
@@ -188,29 +187,33 @@ public class KvcmGrpcClient {
                 .setEnableP2P(config.isEnableP2p())
                 .build();
 
+        long startTimeNanos = System.nanoTime();
+        int responseBytes = 0;
+        GetHostCacheStateResponse response;
         try {
-            long startTimeNanos = System.nanoTime();
-            GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
+            response = metaServiceClient.getHostCacheState(
                     currentLeader, request, config.getRequestTimeoutMs());
-            grpcReporter.reportCallMetrics(
-                    "KVCM_GET_HOST_CACHE_STATE",
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
-                    response.getSerializedSize(),
-                    retry);
-            ErrorCode code = response.getHeader().getStatus().getCode();
-            if (code != ErrorCode.OK) {
-                requestImmediateRefresh();
-                throw new KvcmQueryException(
-                        "KVCM GetHostCacheState failed, code=" + code
-                                + ", message="
-                                + response.getHeader().getStatus().getMessage());
-            }
-            return toMatchesByHost(response.getHostsList());
+            responseBytes = response.getSerializedSize();
         } catch (StatusRuntimeException error) {
             requestImmediateRefresh();
             throw new KvcmQueryException(
                     "KVCM GetHostCacheState gRPC request failed", error);
+        } finally {
+            grpcReporter.reportCallMetrics(
+                    "KVCM_GET_HOST_CACHE_STATE",
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
+                    responseBytes,
+                    retry);
         }
+        ErrorCode code = response.getHeader().getStatus().getCode();
+        if (code != ErrorCode.OK) {
+            requestImmediateRefresh();
+            throw new KvcmQueryException(
+                    "KVCM GetHostCacheState failed, code=" + code
+                            + ", message="
+                            + response.getHeader().getStatus().getMessage());
+        }
+        return toMatchesByHost(response.getHostsList());
     }
 
     void refreshKvcmServiceStateSafely() {
@@ -329,11 +332,15 @@ public class KvcmGrpcClient {
             if (StringUtils.isBlank(match.getHostIpPort())) {
                 continue;
             }
-            result.put(
+            org.flexlb.dao.cache.HostCacheMatch previous = result.put(
                     match.getHostIpPort(),
                     new org.flexlb.dao.cache.HostCacheMatch(
                             match.getLocal(),
                             match.getGlobal()));
+            if (previous != null) {
+                log.warn("KVCM returned duplicate cache matches for host {}; keeping the last record",
+                        match.getHostIpPort());
+            }
         }
         return result;
     }
@@ -362,6 +369,5 @@ public class KvcmGrpcClient {
         if (refreshExecutor != null) {
             refreshExecutor.shutdown();
         }
-        metaServiceClient.shutdown();
     }
 }
