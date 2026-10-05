@@ -15,6 +15,9 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_TIMEOUT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
+import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
@@ -84,6 +87,25 @@ class RequestSchedulerReporterTest {
 
         verify(monitor).report(AUTO_TPM_CANCEL_TIMEOUT_COUNT,
                 FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "70"), 1.0);
+    }
+
+    @Test
+    void reportsLifecycleFailuresAsPreciseCounterIncrements() {
+        reporter.init();
+        reporter.reportLifecycleFailure("terminal_cleanup");
+
+        verify(monitor).register(REQUEST_LIFECYCLE_FAILURES_TOTAL,
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).report(REQUEST_LIFECYCLE_FAILURES_TOTAL,
+                FlexMetricTags.of("stage", "terminal_cleanup"), 1.0);
+    }
+
+    @Test
+    void failingMetricsDoNotInterruptRequestCleanup() {
+        doThrow(new IllegalStateException("monitor unavailable")).when(monitor)
+                .report(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricTags.of("stage", "registration"), 1.0);
+
+        assertDoesNotThrow(() -> reporter.reportLifecycleFailure("registration"));
     }
 
     @Test

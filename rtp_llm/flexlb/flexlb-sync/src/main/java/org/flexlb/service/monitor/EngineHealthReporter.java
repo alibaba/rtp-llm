@@ -69,6 +69,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
+import static org.flexlb.constant.MetricConstant.ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL;
@@ -158,6 +159,7 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_ENCODER_WORKER_NUMBER, FlexMetricType.GAUGE);
+        this.monitor.register(ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT, FlexMetricType.GAUGE);
         this.monitor.register(ENCODER_PENDING_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENCODER_SELECTION_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENCODER_UNCACHED_TOKEN_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -285,8 +287,9 @@ public class EngineHealthReporter {
 
     @Scheduled(fixedRate = 2000)
     private void reportWorkerBlockSizes() {
-        reportWorkerBlockSize(RoleType.PREFILL);
-        reportWorkerBlockSize(RoleType.DECODE);
+        for (RoleType role : RoleType.values()) {
+            reportWorkerBlockSize(role);
+        }
     }
 
     private void reportWorkerBlockSize(RoleType role) {
@@ -297,6 +300,11 @@ public class EngineHealthReporter {
                 return;
             }
         }
+    }
+
+    public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
+        monitor.report(ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
+                FlexMetricTags.of("model", model, "role", role.name()), count);
     }
 
     public void reportStatusCheckRemoteInfo(WorkerStatus worker, long startTime) {

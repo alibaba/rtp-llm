@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
+import io.grpc.Deadline;
 import io.grpc.StatusRuntimeException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -142,15 +143,19 @@ public class KvcmGrpcClient {
         // One snapshot per query keeps the wire parameters of every attempt consistent.
         KvcmCacheMatchingConfig config = configuration.getKvcmRuntimeConfig();
         int maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
+        Deadline queryDeadline = Deadline.after(config.getRequestTimeoutMs(), TimeUnit.MILLISECONDS);
         for (int attemptIndex = 0; ; attemptIndex++) {
             try {
+                if (queryDeadline.isExpired()) {
+                    throw new KvcmQueryException("KVCM cache query timed out");
+                }
                 Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
-                        config, requestId, blockCacheKeys, namespace, queryType,
+                        config, queryDeadline, requestId, blockCacheKeys, namespace, queryType,
                         roleType, group, attemptIndex > 0);
                 recordQuerySuccess();
                 return result;
             } catch (RuntimeException failure) {
-                if (attemptIndex == maxQueryRetryCount) {
+                if (attemptIndex == maxQueryRetryCount || queryDeadline.isExpired()) {
                     recordQueryFailure();
                     metricsReporter.reportQueryFailure();
                     throw failure;
@@ -165,6 +170,7 @@ public class KvcmGrpcClient {
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryOnce(
             KvcmCacheMatchingConfig config,
+            Deadline queryDeadline,
             String requestId,
             List<Long> blockCacheKeys,
             String namespace,
@@ -193,7 +199,7 @@ public class KvcmGrpcClient {
         GetHostCacheStateResponse response;
         try {
             response = metaServiceClient.getHostCacheState(
-                    currentLeader, request, config.getRequestTimeoutMs());
+                    currentLeader, request, queryDeadline);
             responseBytes = response.getSerializedSize();
         } catch (StatusRuntimeException error) {
             requestImmediateRefresh();

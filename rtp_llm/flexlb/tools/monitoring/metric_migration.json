@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "metricPrefix": "whale-lb.",
+  "datasource": {
+    "type": "prometheus",
+    "uid": "bfs1jewo09x4wb"
+  },
+  "dashboardUid": "d87d0473-850a-457e-a734-f81b59dcb42b",
+  "baseCommit": "5fc1b9b206917c7bfc7b43cbd47d10a237436885",
+  "rules": [
+    {
+      "oldName": "app.cache.total.kv.cache.tokens",
+      "newName": "app.cache.total.kv.cache.tokens",
+      "type": "GAUGE",
+      "note": "Worker 上报的 KV 总容量，保留裸 IP 的 engineIp 标签。同 IP 多实例共用标签，Gauge 为逐样本值，不能当作该 IP 下所有实例的容量合计。多个 Master 的同一标签观察需去重。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.cache.hit.count",
+      "newName": "app.cache.hit.count",
+      "type": "COUNTER",
+      "note": "命中 Tokens 是累计 Counter；按窗口 increase/rate 统计，不能把累计值当作单请求 Gauge。"
+    },
+    {
+      "oldName": "app.cache.theory.hit.count",
+      "newName": "app.cache.theory.hit.count",
+      "type": "COUNTER",
+      "note": "理论命中 Tokens 是 Counter，与理论输入 Tokens 的同窗口增量计算加权命中率。",
+      "aliases": [
+        "app.cache.recent.key.hit.count"
+      ]
+    },
+    {
+      "oldName": "app.cache.theory.total.count",
+      "newName": "app.cache.theory.total.count",
+      "type": "COUNTER",
+      "note": "理论输入 Tokens 是 Counter，不能沿用旧瞬时值的 avg 查询。",
+      "aliases": [
+        "app.cache.recent.key.total.count"
+      ]
+    },
+    {
+      "oldName": "app.engine.balancing.master.select.detail",
+      "newName": "app.engine.balancing.master.select.detail",
+      "type": "QPS",
+      "note": "保留既有 role、success、code 标签；包含精确 engineIp 和 reason 的选点明细使用独立的 app.engine.balancing.master.worker.select.detail。"
+    },
+    {
+      "oldName": "app.engine.worker.info.step.latency.var",
+      "newName": "app.engine.worker.info.step.latency.var",
+      "type": "GAUGE",
+      "note": "同一 role 的逻辑 Worker step latency 方差，单位为 ms²；用 BIZ_NAME 定位部署，不再按旧 model 标签筛选。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.engine.worker.info.running.query.len.var",
+      "newName": "app.engine.worker.info.running.query.len.var",
+      "type": "GAUGE",
+      "note": "同一 role 的逻辑 endpoint 负载方差；Prefill 单位为 work-ms²，Decode/状态角色为 count²，不跨角色混算。保留原名，通过面板说明实际口径。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.engine.health.check.engine.prefill.worker.number",
+      "newName": "app.engine.health.check.engine.prefill.worker.number",
+      "type": "GAUGE",
+      "note": "已发现的逻辑 Prefill Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.engine.health.check.engine.decode.worker.number",
+      "newName": "app.engine.health.check.engine.decode.worker.number",
+      "type": "GAUGE",
+      "note": "已发现的逻辑 Decode Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.engine.health.check.engine.encoder.worker.number",
+      "newName": "app.engine.health.check.engine.encoder.worker.number",
+      "type": "GAUGE",
+      "note": "已发现的逻辑 Encoder Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
+      "removeLabels": [
+        "model"
+      ]
+    },
+    {
+      "oldName": "app.flexlb.decode.inflight.kv.reserved.tokens",
+      "newName": "app.flexlb.decode.inflight.kv.reserved.tokens",
+      "type": "GAUGE",
+      "note": "本地 Decode 预留的输入加最大输出 Tokens，含排队；是容量上限，包含输入预留，不与输入指标相加。"
+    },
+    {
+      "oldName": "app.flexlb.decode.inflight.hard.kv.reserved.tokens",
+      "newName": "app.flexlb.decode.inflight.hard.kv.reserved.tokens",
+      "type": "GAUGE",
+      "note": "本地 Decode 输入 Tokens 预留，含排队；输入预留不会因尚未派发而消失。"
+    },
+    {
+      "oldName": "app.flexlb.ack.to.response.time.ms",
+      "newName": "app.flexlb.ack.to.response.time.ms",
+      "type": "GAUGE",
+      "note": "Engine ACK 到 Master 返回响应的毫秒数；role 是真实 Prefill/PDFusion，engineIp 使用逻辑实例地址。",
+      "workerAddress": true,
+      "includePdfusion": true
+    },
+    {
+      "oldName": "grpc.server.executor.caller.runs",
+      "newName": "grpc.server.executor.caller.runs",
+      "type": "COUNTER",
+      "note": "沿用既有上报名，实际表示 AbortPolicy 拒绝任务 Counter。每次拒绝上报 1，由 provider 累加；周期零上报保持序列可见。图中为最近 1 分钟 increase。"
+    },
+    {
+      "oldName": "app.cache.block.size",
+      "newName": "app.cache.block.size",
+      "type": "GAUGE",
+      "removeLabels": [
+        "model"
+      ],
+      "note": "同一角色 Block Size 一致，取首个有效 Worker；按 BIZ_NAME、role 展示，覆盖 Prefill、Decode、PDFusion、Encoder，不增加 engineIp。"
+    },
+    {
+      "oldName": "app.engine.health.check.engine.worker.number.service.discovery.result",
+      "newName": "app.engine.health.check.engine.worker.number.service.discovery.result",
+      "type": "GAUGE",
+      "note": "服务发现成功返回的原始 Host 数，空返回为 0，不是缓存回退或展开后的逻辑 Worker 数。"
+    }
+  ],
+  "unchangedMetrics": [
+    "app.cache.block.size",
+    "grpc.server.executor.active.threads",
+    "grpc.server.executor.queue.size",
+    "grpc.server.executor.pool.size",
+    "grpc.server.executor.max.pool.size",
+    "dispatch.executor.active.threads",
+    "dispatch.executor.queue.size",
+    "dispatch.executor.pool.size"
+  ],
+  "samplingNote": "执行器瞬时 Gauge 每 2 秒采样，scrape 读取最近快照；保留原名，不能捕获短于采样间隔的峰值。",
+  "retiredMetrics": [
+    {
+      "name": "auto_tpm.inflight_settle_miss.count",
+      "replacement": "auto_tpm.request.lifecycle.failures.total",
+      "equivalent": false,
+      "reason": "独立 inflight 清理台账已移除；旧 kind 告警退役。新指标观测当前 RequestSlot 的注册/清理异常，不能映射成 preemption.target_invalid。"
+    }
+  ],
+  "newPanels": [
+    {
+      "title": "服务发现原始 Host 数",
+      "description": "各 model、role 的全部 endpoint 成功返回的原始数量，成功空返回为 0；失败轮次不更新总数。",
+      "expr": "max by (model,role) (last_over_time({__name__=\"whale-lb.app.engine.health.check.engine.worker.number.service.discovery.result\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\"}[1m]))",
+      "legend": "{{model}} · {{role}}"
+    },
+    {
+      "title": "请求生命周期异常（最近 5 分钟）",
+      "description": "注册或资源清理/最终状态提交异常。与抢占目标失效是不同信号；没有异常时为 0。",
+      "expr": "sum by (host,stage) (increase({__name__=\"whale-lb.auto_tpm.request.lifecycle.failures.total\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\"}[5m]))",
+      "legend": "{{host}} · {{stage}}"
+    },
+    {
+      "title": "PDFUSION Block Size",
+      "description": "同一角色统一的块大小，尚无有效 WorkerStatus 时保留 No data。",
+      "expr": "max by (role) (last_over_time({__name__=\"whale-lb.app.cache.block.size\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\",role=\"PDFUSION\"}[1m]))",
+      "legend": "{{role}}"
+    },
+    {
+      "title": "ENCODER Block Size",
+      "description": "同一角色统一的块大小，尚无有效 WorkerStatus 时保留 No data。",
+      "expr": "max by (role) (last_over_time({__name__=\"whale-lb.app.cache.block.size\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\",role=\"ENCODER\"}[1m]))",
+      "legend": "{{role}}"
+    }
+  ],
+  "alerts": [
+    {
+      "name": "FlexlbRequestLifecycleFailure",
+      "metric": "auto_tpm.request.lifecycle.failures.total",
+      "summary": "FlexLB 请求注册或结束清理发生异常，请按 host、stage 查 request_id 日志。"
+    },
+    {
+      "name": "FlexlbGrpcExecutorRejections",
+      "metric": "grpc.server.executor.caller.runs",
+      "summary": "FlexLB gRPC 执行器出现任务拒绝，检查饱和或关闭状态。"
+    }
+  ],
+  "metricNamePolicy": "保留现有指标名称；仅将已停用 recent.key 别名映射到当前已有 theory 指标。"
+}

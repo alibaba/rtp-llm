@@ -8,6 +8,8 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -108,7 +110,7 @@ class ScheduleForwardMatrixTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
 
         cacheAwareService = mock(CacheAwareService.class);
 
@@ -478,7 +480,7 @@ class ScheduleForwardMatrixTest {
         when(consistencyView.getMasterHostIpPort()).thenReturn(masterHostIpPort);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);
@@ -487,6 +489,12 @@ class ScheduleForwardMatrixTest {
                 consistencyView, configService, healthReporter,
                 channelEventLoop, channelExecutor);
         return new RealForwarderFixture(healthReporter, forwarder);
+    }
+
+    private static FlexlbConfig routingConfig() {
+        FlexlbConfig config = org.flexlb.mock.TestFlexlbConfigs.create();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        return config;
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {

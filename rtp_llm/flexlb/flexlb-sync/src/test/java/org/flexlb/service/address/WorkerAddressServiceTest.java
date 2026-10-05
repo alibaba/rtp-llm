@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -99,6 +100,22 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         verify(engineHealthReporter).reportStatusCheckerFail(
                 BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter, never()).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+    }
+
+    @Test
+    void reportsRawEmptyDiscoveryEvenWhenCachedHostsRemainAvailable() {
+        Endpoint endpoint = endpoint("vip");
+        configure(endpoint);
+        List<WorkerHost> hosts = List.of(WorkerHost.of("10.0.0.1", 8080));
+        when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts, List.of());
+
+        assertEquals(hosts, refresh());
+        assertEquals(hosts, refresh());
+
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
     }
 
     @Test
@@ -206,6 +223,8 @@ class WorkerAddressServiceTest {
 
         assertEquals(List.of(a, b), refresh());
         assertEquals(List.of(a, c), refresh());
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
     }
 
     @Test

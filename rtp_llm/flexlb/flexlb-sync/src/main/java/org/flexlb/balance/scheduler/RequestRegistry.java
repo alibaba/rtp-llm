@@ -85,7 +85,7 @@ public class RequestRegistry {
                 Objects.requireNonNull(configService, "configService"));
         this.completionPublisher = new RequestCompletionPublisher(
                 completionPublisherWorkers(configService), reporter);
-        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
+        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
     }
 
     synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
@@ -373,6 +373,7 @@ public class RequestRegistry {
             attachRequestExpiration(context, future);
             return future;
         } catch (Throwable failure) {
+            requestReporter.reportLifecycleFailure("registration");
             Logger.error(
                     "Request registration failed for request id: {}",
                     context.getRequestId(),

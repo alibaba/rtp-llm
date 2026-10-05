@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.springframework.stereotype.Component;
 
@@ -61,7 +62,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         try {
             EngineRpcService.CancelRequestPB requestPB =
                     EngineRpcService.CancelRequestPB.newBuilder()
-                            .setRequestId(Long.parseLong(requestId))
+                            .setRequestId(RequestId.toEngineRequestId(requestId))
                             .build();
 
             // Fire-and-forget contract: fork the gRPC Context so that when the

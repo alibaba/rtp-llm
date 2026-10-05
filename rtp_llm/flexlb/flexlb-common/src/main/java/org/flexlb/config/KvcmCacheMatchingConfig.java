@@ -17,6 +17,9 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
     public static final int DEFAULT_RECOVERY_SUCCESS_THRESHOLD = 3;
     public static final int DEFAULT_GLOBAL_KVS_HOST_COUNT = 3;
 
+    /**
+     * Total cache-query budget, including retries; also bounds each cluster-info RPC.
+     */
     private long requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
     /**
      * Fixed when the KVCM client starts; a runtime update requires a restart.

@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * {@link MockEngineCancelChannel} contract tests against the in-process mock
@@ -76,6 +78,19 @@ class MockEngineCancelChannelTest {
     }
 
     // ---- accepted: mid-flight cancel drives the mock ----
+
+    @Test
+    void invalidRequestIdDoesNotReachTheEngineOrConsumeCancelFaults() {
+        JavaMockEngineCluster.FastRpcService service = mock(JavaMockEngineCluster.FastRpcService.class);
+        EngineCancelChannel channel = new MockEngineCancelChannel(Map.of(BASE_PORT, service));
+
+        for (String requestId : List.of("007", "+7", "request-a", "9223372036854775808")) {
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> channel.cancel(target(BASE_PORT), requestId, 2_000).join());
+            assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        }
+        verifyNoInteractions(service);
+    }
 
     @Test
     void cancelMidFlightAcceptedAndCancelledSurfacesInWorkerStatus() throws Exception {

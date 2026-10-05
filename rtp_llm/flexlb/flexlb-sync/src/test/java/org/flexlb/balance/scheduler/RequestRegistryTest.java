@@ -52,6 +52,7 @@ class RequestRegistryTest {
 
     private FlexlbConfig config;
     private RequestRegistry lifecycle;
+    private RequestSchedulerReporter requestReporter;
 
     @BeforeEach
     void setUp() {
@@ -59,10 +60,11 @@ class RequestRegistryTest {
         SchedulingTestConfig.usePriorityQueue(config);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
+        requestReporter = mock(RequestSchedulerReporter.class);
         lifecycle = new RequestRegistry(
                 configService,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+                requestReporter);
     }
 
     @AfterEach
@@ -96,6 +98,19 @@ class RequestRegistryTest {
                     lifecycle.getRequestState(requestId, 0L).state());
         }
         assertEquals(0, lifecycle.trackedRequestCount());
+    }
+
+    @Test
+    void reportsUnexpectedRegistrationFailureWithoutRegisteringTheRequest() {
+        BalanceContext context = context(101L);
+        config.getRequestLifecycle().setRequest(null);
+
+        Response response = lifecycle.register(context).join();
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(0, lifecycle.trackedRequestCount());
+        verify(requestReporter).reportLifecycleFailure("registration");
     }
 
     @Test

@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
+import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.core.GrpcChannelPool;
@@ -39,9 +40,9 @@ public class KvcmMetaServiceClient {
     public GetHostCacheStateResponse getHostCacheState(
             GrpcTarget target,
             GetHostCacheStateRequest request,
-            long requestTimeoutMs) {
+            Deadline queryDeadline) {
         return MetaServiceGrpc.newBlockingStub(channelFor(target))
-                .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS)
+                .withDeadline(queryDeadline)
                 .getHostCacheState(request);
     }
 

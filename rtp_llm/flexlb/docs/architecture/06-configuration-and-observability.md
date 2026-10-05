@@ -321,6 +321,18 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
+`app.engine.health.check.engine.worker.number.service.discovery.result{model,role}` 统计所有已配置 endpoint
+成功返回的原始 Host 数量；空返回上报 0，即使健康检查继续沿用缓存。某 endpoint 查询失败时
+不以缓存或 0 伪装完整的发现结果，本轮跳过总数上报，失败由 discovery error/timeout 指标记录。
+`app.engine.health.check.engine.{prefill,decode,encoder}.worker.number` 则统计 WorkerDirectory
+中已展开的逻辑 Worker 数，使用公共 BIZ_NAME 与 Master 标签定位部署，不含 model 标签。
+两种数量含义不同，不能互相替代。
+
+Block Size 保留 `app.cache.block.size{role}`：同一角色的 Worker 共享相同配置，
+每 2 秒读取该角色首个大于 0 的 WorkerStatus 值，覆盖 PREFILL、DECODE、PDFUSION、ENCODER。
+首次状态到达前 EngineObservation 已初始化，blockSize=0，不上报未就绪值。
+该指标不增加 engineIp 标签；大盘按 BIZ_NAME 与 role 展示，删除旧 model 筛选。
+
 既有 WorkerStatus/cache 的轮询成功周期、RPC 耗时、运行队列时间、任务列表大小、cache key 数
 和 KV 容量指标保留裸 IP 的 `engineIp` 标签。同 IP 多实例使用相同标签上报，Gauge 是逐样本值，
 不表示 IP 合计。缓存预测对照使用实际 WorkerStatus 的实例数选择精确身份：单 Engine 为
@@ -330,6 +342,10 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 
 `app.engine.balancing.master.select.detail` 保留原有 `role/success/code` 标签；独立的
 `app.engine.balancing.master.worker.select.detail` 增加有限枚举 `reason` 和精确 `engineIp`。
+`app.engine.worker.info.step.latency.var` 与 `app.engine.worker.info.running.query.len.var`
+按 role 上报逻辑 endpoint 方差，不含 model。后者 Prefill 使用 work-ms，Decode 和状态角色使用
+活动任务数，方差单位分别为 work-ms² 与 count²，不能跨角色混合比较数值。
+Step 延迟方差单位为 ms²。上述指标保留原有名称，通过标签聚合和面板说明表达实际口径。
 `app.cache.hit.count` 和 `app.cache.input.tokens` 是按所选 worker 累计的 Token Counter，
 全局命中率使用同一窗口内的命中 Token 增量除以输入 Token 增量，不能求单请求命中率的平均值。
 `app.engine.zk.master.event` 保留按事件类型上报 `1.0` 的既有 Gauge 口径；
@@ -349,10 +365,14 @@ gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMon
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
-这些值全部使用 GAUGE，包括从拒绝处理器读取的累计拒绝数；周期上报不会再次累加，
-Master 重启后累计拒绝数重新开始。已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，
-总线程数仍包含空闲线程。拒绝数包含队列或线程饱和、线程池关闭后提交触发的拒绝，
-沿用 `grpc.server.executor.caller.runs` 上报名，面板显示“任务拒绝累计数”。
+忙碌线程、排队数、总线程数、最大线程数使用 GAUGE，scrape 读取最近一次上报的快照，
+最多滞后 2 秒；不能用这些快照捕获短于采样间隔的峰值。瞬时指标保留原名。
+拒绝任务数使用 `grpc.server.executor.caller.runs` COUNTER。每次拒绝发生时直接上报 1，
+由监控 provider 累加，不维护本地累计值或上次上报位置。初始化及每 2 秒上报 0，
+使没有拒绝事件时指标仍可查询；零上报不增加计数。Master 重启后计数重新开始。拒绝数包含队列或线程饱和、
+线程池关闭后提交触发的拒绝。保留 `grpc.server.executor.caller.runs` 上报名，
+面板显示“任务拒绝数”，使用 `increase(...[1m])` 查看窗口拒绝数。
+已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，总线程数仍包含空闲线程。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
 通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
@@ -385,7 +405,8 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 `inputAndMaxOutputKvTokens = inputKvTokens + max(0, maxNewTokens)`（溢出时饱和）。
 两者分别表示输入预留和输入加最大输出预留，不是输出长度预测，后者包含前者。
 引擎确认后的容量使用引擎上报的实际 KV 数，不再使用请求上限。
-监控上报名保留现有协议，中文图例使用上述计算口径。
+监控分别使用 `app.flexlb.decode.inflight.hard.kv.reserved.tokens` 与
+`app.flexlb.decode.inflight.kv.reserved.tokens`，包含排队预留；中文图例使用上述计算口径。
 周期统计复用 Prefill 快照，调度器一次遍历计算数量和最大年龄；Decode admission
 上报仅收集数值，不构造请求明细。
 
@@ -396,6 +417,13 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 `cancel_target_unavailable`（RPC 取消地址无法取得）、`request_claim_rejected`（RPC 无法锁定该请求进行抢占）。
 这类失败会结束本次高优先级请求的调度；容量不足、取消 RPC 返回 NOT_FOUND、超时不计入此指标。
 未发生事件时可能没有时间序列，不能据此断言上报链路正常。
+`auto_tpm.request.lifecycle.failures.total{stage}` 是 PRECISE COUNTER，
+`stage=registration` 记录注册异常，`stage=terminal_cleanup` 记录资源清理失败或请求最终状态提交异常。
+初始化及周期采样对这两个 stage 报告 0，尚未发生异常时也能显示已初始化的计数。
+这些异常保留 request_id 日志供定位，指标标签不包含请求 ID 或错误文本。
+旧 `auto_tpm.inflight_settle_miss.count{kind}` 随独立 inflight 台账的清理路径一起停用：
+当前注册、资源跟踪和结束记录由同一个 RequestSlot 保持，迟到或重复回调无需找回旧台账。
+它不映射为抢占目标校验失败。旧竞态告警应退役，另启用新的生命周期异常增量告警。
 
 上报器分布在 common、grpc、cache、sync 模块。新增指标应复用现有 reporter ownership，
 不要恢复已删除的旧监控层。
@@ -454,3 +482,9 @@ GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上�
 曲线均值分别是有非末块样本请求的最小值均值、最大值均值，不是所有 Chunk 的均值或窗口极值。
 业务调用只更新本地统计，不逐请求发送网络数据，也不额外抽样。指标名以单位 `tokens` 结尾，
 请求内最小、最大值由 `min` / `max` 中间段区分。
+
+监控迁移配置在 `tools/monitoring/metric_migration.json`；
+`python3 tools/monitoring/migrate_metrics.py --input dashboard.json --output dashboard-migrated.json`
+读取 Grafana 导出的 JSON，保留现有指标名称与已正确的查询，仅修正失效标签筛选、
+累计 Counter 查询与展示口径，并补充缺失面板和独立告警规则；不会写入线上 Grafana。
+在对应版本代码发布时使用生成的配置；保留导出原件以便整体回退。

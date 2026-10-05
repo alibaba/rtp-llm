@@ -9,6 +9,7 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -502,7 +503,9 @@ class FollowerAsyncForwardingNettyTest {
             when(consistency.getLocalHostIp()).thenReturn("127.0.0.2");
 
             ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+            var routingConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+            routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+            when(configService.loadBalanceConfig()).thenReturn(routingConfig);
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
             channelEventLoop = new NioEventLoopGroup(1);
             // Match the production forwarder callback executor width so this

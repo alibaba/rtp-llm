@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -49,7 +51,7 @@ class FlexlbGrpcExecutorMetricsTest {
             MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS);
 
     @Test
-    void skipsReportingBeforeExecutorCreationAndRegistersGauges() {
+    void skipsReportingBeforeExecutorCreationAndRegistersExpectedMetricTypes() {
         FlexMonitor monitor = mock(FlexMonitor.class);
         FlexlbGrpcServer server = newServer(monitor);
 
@@ -58,7 +60,9 @@ class FlexlbGrpcExecutorMetricsTest {
 
         ReflectionTestUtils.invokeMethod(server, "registerMetrics");
         for (String metric : METRICS) {
-            verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            verify(monitor).register(metric, metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                            ? FlexMetricType.COUNTER : FlexMetricType.GAUGE,
+                    FlexPriorityType.PRECISE);
         }
         verifyNoMoreInteractions(monitor);
     }
@@ -129,6 +133,7 @@ class FlexlbGrpcExecutorMetricsTest {
                 throw new AssertionError("Rejected tasks must not execute on the caller");
             };
             assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
             fixture.report();
@@ -136,12 +141,32 @@ class FlexlbGrpcExecutorMetricsTest {
 
             fixture.executor.shutdown();
             assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
             fixture.finishTasks();
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
         }
+    }
+
+    @Test
+    void monitorFailureStillAbortsTheRejectedTask() {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        doThrow(new IllegalStateException("monitor unavailable")).when(monitor)
+                .report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
+        FlexlbGrpcServer server = newServer(monitor);
+        RejectedExecutionHandler handler =
+                (RejectedExecutionHandler) ReflectionTestUtils.getField(server, "rejectionHandler");
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES,
+                new LinkedBlockingQueue<>(1), handler);
+        executor.shutdown();
+        Runnable task = mock(Runnable.class);
+
+        assertThrows(RejectedExecutionException.class, () -> executor.execute(task));
+
+        verify(monitor).report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
+        verifyNoInteractions(task);
     }
 
     private static FlexlbGrpcServer newServer(FlexMonitor monitor) {
@@ -161,8 +186,8 @@ class FlexlbGrpcExecutorMetricsTest {
         private final ThreadPoolExecutor executor;
 
         Fixture() {
-            FlexlbGrpcServer.CountingAbortHandler rejectionHandler =
-                    (FlexlbGrpcServer.CountingAbortHandler) ReflectionTestUtils.getField(server, "countingAbortHandler");
+            RejectedExecutionHandler rejectionHandler =
+                    (RejectedExecutionHandler) ReflectionTestUtils.getField(server, "rejectionHandler");
             executor = new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES,
                     new LinkedBlockingQueue<>(1), rejectionHandler);
             ReflectionTestUtils.setField(server, "grpcExecutor", executor);
@@ -193,7 +218,10 @@ class FlexlbGrpcExecutorMetricsTest {
         }
 
         void assertValue(String metric, double expected) {
-            assertEquals(expected, registry.get("flexlb." + metric).gauge().value(), metric);
+            double value = metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                    ? registry.get("flexlb." + metric).counter().count()
+                    : registry.get("flexlb." + metric).gauge().value();
+            assertEquals(expected, value, metric);
         }
 
         @Override

@@ -512,19 +512,27 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldReportOneWorkerBlockSizePerRole() {
+    void shouldReportOneSharedBlockSizePerRoleAcrossAllRoles() {
         WorkerStatus prefill = workerStatusWithCacheStatus();
         WorkerStatus decode = workerStatus("10.0.0.2", RoleType.DECODE, 800L, 1000L,
                 CacheStatus.builder().blockSize(128).build());
+        WorkerStatus fusion = workerStatus("10.0.0.3", RoleType.PDFUSION, 800L, 1000L,
+                CacheStatus.builder().blockSize(256).build());
+        WorkerStatus encoder = workerStatus("10.0.0.4", RoleType.ENCODER, 800L, 1000L,
+                CacheStatus.builder().blockSize(32).build());
         when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
                 .thenReturn(List.of(WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, null, "10.0.0.3", 8080, 8081, "test-site"), prefill, prefill));
+                        RoleType.PREFILL, null, "10.0.0.5", 8080, 8081, "test-site"), prefill, prefill));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null)).thenReturn(List.of(decode));
+        when(workerDirectory.getWorkerStatuses(RoleType.PDFUSION, null)).thenReturn(List.of(fusion));
+        when(workerDirectory.getWorkerStatuses(RoleType.ENCODER, null)).thenReturn(List.of(encoder));
 
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
 
         verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "PREFILL"), 64.0);
         verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "DECODE"), 128.0);
+        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "PDFUSION"), 256.0);
+        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "ENCODER"), 32.0);
     }
 
     @Test

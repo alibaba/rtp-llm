@@ -22,6 +22,12 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
+BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
+并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
+越界或不一致的 ID 返回 INVALID_REQUEST。整数兼容读取仍保留，大于 JS 精确整数范围的 ID
+通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
+NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
+对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。
 
 ### 调度拓扑
 
@@ -175,7 +181,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   映射到 PB 的 `enable_p2p = 8`（bool）。PB 与已部署 KVCM 的
   `alibaba/tair-kvcache@f9196aaff4f0dad3520b9523ae55721eb4955b2f` 保持一致。
   PB 不再声明 `p2p_host_count`、`p2p_1_fetch`、`p2p_1_total_match`；返回结果只消费 `local/global`。
-  查询失败重试至 `maxQueryRetryCount`。
+  查询失败重试至 `maxQueryRetryCount`。一次主查询及其所有重试共享同一个绝对 gRPC Deadline，
+  总等待预算为 `requestTimeoutMs`（默认 500ms），重试不重新增加完整超时；预算耗尽后直接进入
+  查询失败/本地兜底路径。主查询仍同步等待应答，异步改造不包含在这一预算限制中。
   `KvcmGrpcClient` 与 `KvcmMetaServiceClient` 各自关闭自己的后台任务和通道，前者不负责关闭注入的后者。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /

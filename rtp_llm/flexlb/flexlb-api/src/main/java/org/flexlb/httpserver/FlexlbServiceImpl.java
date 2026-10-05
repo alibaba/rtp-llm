@@ -934,6 +934,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ctx.setRequestPhase(RequestPhase.ENCODER);
         }
 
+        if (config.isBatchDispatch() && ctx.getRequestPhase() != RequestPhase.ENCODER) {
+            try {
+                RequestId.requireMatchingGenerateInput(requestId, pb.getGenerateInput());
+            } catch (IllegalArgumentException error) {
+                throw new InvalidScheduleRequestException(error.getMessage(), error);
+            }
+        }
+
         Request request = new Request();
         request.setRequestId(requestId);
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());

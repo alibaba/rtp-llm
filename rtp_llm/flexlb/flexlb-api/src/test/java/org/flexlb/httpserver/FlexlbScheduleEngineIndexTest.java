@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -41,7 +42,9 @@ class FlexlbScheduleEngineIndexTest {
         when(consistencyService.isNeedConsistency()).thenReturn(false);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        FlexlbConfig routingConfig = new FlexlbConfig();
+        routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+        when(configService.loadBalanceConfig()).thenReturn(routingConfig);
 
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
 

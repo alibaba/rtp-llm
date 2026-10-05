@@ -30,7 +30,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcServer {
@@ -55,7 +54,7 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
-    private final CountingAbortHandler countingAbortHandler = new CountingAbortHandler();
+    private final RejectedExecutionHandler rejectionHandler;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
@@ -71,6 +70,7 @@ public class FlexlbGrpcServer {
                 configService.loadBalanceConfig().getGrpcServer().getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.monitor = Objects.requireNonNull(monitor, "monitor");
+        this.rejectionHandler = new ReportingAbortHandler(this.monitor);
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
         this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }
@@ -98,7 +98,7 @@ public class FlexlbGrpcServer {
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
                 new DefaultThreadFactory("flexlb-grpc-executor"),
-                countingAbortHandler
+                rejectionHandler
         );
 
         // Register monitoring metrics for the gRPC server executor
@@ -130,9 +130,8 @@ public class FlexlbGrpcServer {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        // Report the rejection handler's cumulative count as a snapshot, without adding it again.
         monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -145,8 +144,7 @@ public class FlexlbGrpcServer {
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
-                countingAbortHandler.getRejectionCount());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
     }
 
     /**
@@ -212,22 +210,25 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Counts tasks rejected because the pool is saturated or shutting down.
+     * Reports each task rejected because the pool is saturated or shutting down.
      * AbortPolicy throws instead of running tasks on the calling Netty event loop.
      */
-    static class CountingAbortHandler implements RejectedExecutionHandler {
-        private final AtomicLong rejectionCount = new AtomicLong(0);
+    private static class ReportingAbortHandler implements RejectedExecutionHandler {
+        private final FlexMonitor monitor;
         private final ThreadPoolExecutor.AbortPolicy delegate =
                 new ThreadPoolExecutor.AbortPolicy();
 
-        @Override
-        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-            rejectionCount.incrementAndGet();
-            delegate.rejectedExecution(r, executor);
+        ReportingAbortHandler(FlexMonitor monitor) {
+            this.monitor = monitor;
         }
 
-        public long getRejectionCount() {
-            return rejectionCount.get();
+        @Override
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+            try {
+                monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
+            } finally {
+                delegate.rejectedExecution(r, executor);
+            }
         }
     }
 }
