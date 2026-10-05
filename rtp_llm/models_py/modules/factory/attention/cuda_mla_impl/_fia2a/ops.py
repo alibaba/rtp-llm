@@ -4,21 +4,11 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _a2a_pull(Peers, Received, Words: tl.constexpr, Rank: tl.constexpr,
-              World: tl.constexpr, BLOCK: tl.constexpr):
-    program = tl.program_id(0).to(tl.int64)
-    # Interleave peers in the CTA order; keep all chunks on grid.x so large
-    # payloads do not encounter grid.y's 65535 limit.
-    source = (program + Rank) % World
-    offset = (program // World) * BLOCK + tl.arange(0, BLOCK)
-    words = tl.full((), Words, tl.int64)
-    # Attach alignment after int_to_ptr: an integer hint is lost by Triton 3.6.
-    peer = tl.multiple_of(tl.load(Peers + source).to(tl.pointer_type(tl.int32)), 16)
-    value = tl.load(peer + tl.full((), Rank, tl.int64) * words + offset,
-                    offset < words, other=0, cache_modifier=".cg")
-    # Integer copying preserves the FP32 LSE bits in the two final BF16 slots.
-    tl.store(Received + source * words + offset, value, offset < words)
+# Peer control layout, one int64 array per rank in symmetric memory. Epochs
+# are monotonic per arena (no reset); a receiver's ready[src] is written only
+# by rank src. Each group starts on its own 128-byte line.
+EPOCH, COUNT, READY = 0, 1, 16
+CONTROL_SIZE = READY + 32
 
 
 @triton.jit

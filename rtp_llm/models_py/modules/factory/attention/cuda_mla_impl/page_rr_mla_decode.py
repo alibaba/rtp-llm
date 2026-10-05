@@ -83,8 +83,11 @@ class PageRRMlaDecodeOp:
         if backend == DecodeCPMLABackend.FIA2A:
             from .page_rr_fia2a_backend import PageRRFIA2AMLABackend
 
+            # Replicated Q needs no gather, so FIA2A takes the token-major
+            # kernel layout directly. Gathered Q stays head-major for NCCL.
             self.fia2a_backend = PageRRFIA2AMLABackend(
-                attn_configs, communicator, kernel_dtype, fusion_mode, a2a_backend
+                attn_configs, communicator, kernel_dtype, fusion_mode, a2a_backend,
+                token_major=q_replicated,
             )
         elif backend == DecodeCPMLABackend.TOKENSPEED:
             if not tokenspeed_mla_kernel_supported(
@@ -124,17 +127,21 @@ class PageRRMlaDecodeOp:
                 f"q_nope={q_nope.shape[1]}, q_pe={q_pe.shape[1]}, "
                 f"expected={expected_heads}"
             )
+        # BMM writes FIA2A's token-major layout through a transposed view
+        # instead of a separate reorder kernel.
+        token_major = self.q_replicated and self.fia2a_backend is not None
         local_query = torch.empty(
-            (self.query_heads, tokens, dim),
+            (tokens, self.query_heads, dim) if token_major else (self.query_heads, tokens, dim),
             dtype=q_nope.dtype,
             device=q_nope.device,
         )
+        head_major = local_query.transpose(0, 1) if token_major else local_query
         torch.bmm(
             q_nope.transpose(0, 1),
             self.weights[layer_id][W.mla_kc],
-            out=local_query[..., : self.kv_lora_rank],
+            out=head_major[..., : self.kv_lora_rank],
         )
-        local_query[..., self.kv_lora_rank :].copy_(q_pe.transpose(0, 1))
+        head_major[..., self.kv_lora_rank :].copy_(q_pe.transpose(0, 1))
         if self.fp8_compute:
             local_query = quantize_fp8(
                 local_query, self.q_scale, name="page_rr_absorbed_q"

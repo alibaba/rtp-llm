@@ -10,8 +10,8 @@ import time
 _REPLAY = re.compile(
     r"cuda_graph\.forward\((replayDecode|replayPrefill),B=(\d+),capture=(\d+),Q=(\d+),T=(\d+),fake=([01])\)"
 )
-_FILE = re.compile(r"mla_(small|large)_owner(\d+)_wr(\d+)_.*\.json$")
-_PLAN = re.compile(r"\[FIA2A_PLAN\] world_rank=(\d+) TP=(\d+) B=(\d+) Q=(\d+) H=(\d+) S=(\d+) mode=(\w+) dtype=([\w.]+)")
+_FILE = re.compile(r"mla_(small|mid|large)_owner(\d+)_wr(\d+)_.*\.json$")
+_PLAN = re.compile(r"\[FIA2A_PLAN\] world_rank=(\d+) TP=(\d+) B=(\d+) Q=(\d+) H=(\d+) S=(\d+) mode=(\w+) dtype=([\w.]+).* q_layout=(\w+)")
 
 
 def collect_plans(root: Path) -> dict:
@@ -23,7 +23,7 @@ def collect_plans(root: Path) -> dict:
                 if match:
                     rank, tp, batch, queries, heads, splits = map(int, match.groups()[:6])
                     key = (rank, batch, queries, match[8])
-                    value = dict(TP=tp, H=heads, S=splits, mode=match[7], dtype=match[8])
+                    value = dict(TP=tp, H=heads, S=splits, mode=match[7], dtype=match[8], q_layout=match[9])
                     if key in plans and plans[key] != value:
                         raise ValueError(f"Conflicting FIA2A plan {key}")
                     plans[key] = value
@@ -66,16 +66,51 @@ def graph_replays(path: Path) -> list[dict]:
     return replays
 
 
-def _unfused_transport(names: list[str]) -> str | None:
-    combines = sum("_combine_a2a" in name for name in names)
-    if not combines or not any("merge_local_splits" in name for name in names):
-        return None
-    pulls = sum("_a2a_pull" in name for name in names)
-    if pulls >= combines and sum("PeerBarrier" in name for name in names) >= 2 * pulls:
-        return "CUSTOM"
-    if not pulls and any("ncclDev" in name and "SendRecv" in name for name in names):
-        return "NCCL"
-    return None
+def _fia2a_replay(row: dict, rank: int, tp: int, plans: dict, dtype: str,
+                   a2a_backend: str, q_replicated: bool) -> bool:
+    """Verify each MLA call, not a union of unrelated work across the model."""
+    names = [event["name"] for event in row["kernels"]]
+    producer = "PageRRFusedMLAFP8" if dtype == "torch.float8_e4m3fn" else "PageRRFusedMLABF16"
+    indices = [i for i, name in enumerate(names) if producer in name and "split_kv_kernel" in name]
+    if not indices:
+        return False
+    plan = plans.get((rank, row["B_capture"], row["Q"], dtype))
+    if not plan or plan["TP"] != tp or plan["H"] != 96:
+        raise ValueError("Missing/mismatched FIA2A preparation mapping")
+    if (plan["S"] == 1) != (plan["mode"] == "fused"):
+        raise ValueError("FIA2A AUTO split plan disagrees with fusion mode")
+    layout = "token_major" if q_replicated else "head_major"
+    if plan.get("q_layout") != layout:
+        raise ValueError(f"FIA2A Q layout disagrees with qrep={int(q_replicated)}")
+    row.update(plan)
+    for index in indices:
+        # Query AllGather and _pack are adjacent to their own producer. Other
+        # K3 projections may AllGather even with replicated Q enabled.
+        packed_q = index > 0 and names[index - 1] == "_pack"
+        if packed_q == q_replicated:
+            raise ValueError("FIA2A Q reorder disagrees with Q layout")
+        if not q_replicated and not (index >= 2 and "AllGather" in names[index - 2]):
+            raise ValueError("FIA2A head-major Q has no preceding query AllGather")
+        tail = names[index + 1:]
+        if plan["mode"] == "fused":
+            if not tail or tail[0] != "_merge_splits_serial":
+                raise ValueError("FIA2A fused producer has no destination merge")
+        else:
+            if plan["S"] > 1:
+                if not tail or tail[0] != "merge_local_splits":
+                    raise ValueError("FIA2A split producer has no local merge")
+                tail = tail[1:]
+            if tail and "PeerPullMerge" in tail[0]:
+                transport = "CUSTOM"
+            elif (len(tail) >= 3 and tail[0] == "_pack_a2a"
+                  and "ncclDev" in tail[1] and "SendRecv" in tail[1]
+                  and tail[2] == "_combine_a2a"):
+                transport = "NCCL"
+            else:
+                raise ValueError("FIA2A producer has no complete GPU A2A transport")
+            _check_transport(transport, a2a_backend, plan, row)
+    row["mla_calls"] = len(indices)
+    return True
 
 
 def _check_transport(actual: str, requested: str, plan: dict, row: dict) -> None:
@@ -92,8 +127,9 @@ def _check_transport(actual: str, requested: str, plan: dict, row: dict) -> None
 
 
 def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: dict | None = None,
-                      *, require_draft: bool = False, a2a_backend: str = "AUTO") -> dict:
-    """Require independent small/large request-window evidence on every rank.
+                      *, require_draft: bool = False, a2a_backend: str = "AUTO",
+                      q_replicated: bool = False) -> dict:
+    """Require independent request-window evidence on every rank.
 
     Kernel assertions are kept separate from profile arming and capture logs.
     The caller waits for complete JSON files before running this verifier.
@@ -110,7 +146,8 @@ def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: di
             if key in files:
                 raise ValueError(f"Duplicate request profile window: {key}")
             files[key] = path
-    expected = {(stage, rank) for stage in ("small", "large") for rank in range(tp * dp)}
+    stages = ("small", "mid", "large") if backend == "FIA2A" else ("small", "large")
+    expected = {(stage, rank) for stage in stages for rank in range(tp * dp)}
     if set(files) != expected:
         raise ValueError(f"Request traces missing={sorted(expected-set(files))}, extra={sorted(set(files)-expected)}")
     observations = []
@@ -129,32 +166,20 @@ def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: di
         witnessed = []
         for row in target:
             names = [event["name"] for event in row["kernels"]]
-            fused = (any("_merge_splits_serial" in name for name in names)
-                     and sum("PeerBarrier" in name for name in names) >= 2)
-            transport = _unfused_transport(names)
-            unfused = transport is not None
             if backend == "FIA2A":
-                if not any("PageRRFusedMLAFP8" in name and "split_kv_kernel" in name for name in names):
+                if not _fia2a_replay(row, rank, tp, plans or {}, "torch.float8_e4m3fn",
+                                      a2a_backend, q_replicated):
                     continue
-                if plans is not None:
-                    plan = plans.get((rank, row["B_capture"], row["Q"], "torch.float8_e4m3fn"))
-                    if not plan or plan["TP"] != tp or plan["H"] != 96:
-                        raise ValueError(f"{path.name}: missing/mismatched FIA2A preparation mapping")
-                    if (fused and (plan["S"] != 1 or plan["mode"] != "fused")) or (
-                        unfused and (plan["S"] <= 1 or plan["mode"] != "unfused")
-                    ):
-                        raise ValueError(f"{path.name}: GPU branch disagrees with prepared split plan")
-                    row.update(plan)
-                    if unfused:
-                        _check_transport(transport, a2a_backend, plan, row)
-                if stage == "large" and fused:
+                if stage == "large" and row["mode"] == "fused":
                     if row["B_capture"] < 16:
                         raise ValueError(f"{path.name}: fused Graph is outside the declared B16 acceptance bucket")
                     witnessed.append(row)
-                if stage == "small" and unfused:
+                if stage == "small" and row["mode"] == "unfused":
+                    witnessed.append(row)
+                if stage == "mid" and row["mode"] == "unfused" and row["B_capture"] in (2, 4, 8):
                     witnessed.append(row)
             elif backend == "TOKENSPEED":
-                if fused or unfused:
+                if any("PageRRFusedMLA" in name or "PeerPullMerge" in name for name in names):
                     raise ValueError(f"{path.name}: FIA2A merge in a TokenSpeed round")
                 if any("split_kv" in name and "PageRRFusedMLA" not in name for name in names) and (
                     stage == "small" or row["B_capture"] >= 16
@@ -169,7 +194,7 @@ def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: di
                                  trace=str(path), replay_count=len(replays),
                                  **{key: value for key, value in row.items() if key != "kernels"},
                                  kernel_names=[event["name"] for event in row["kernels"]]))
-        if require_draft:
+        if require_draft and stage != "mid":
             for phase, kind, queries in (("proposal", "replayDecode", 1),
                                          ("update", "replayPrefill", 4)):
                 candidates = []
@@ -178,21 +203,18 @@ def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: di
                         continue
                     names = [event["name"] for event in draft["kernels"]]
                     if backend == "FIA2A":
-                        if not any("PageRRFusedMLABF16" in name and "split_kv_kernel" in name for name in names):
+                        if not _fia2a_replay(draft, rank, tp, plans or {}, "torch.bfloat16",
+                                              a2a_backend, q_replicated):
                             continue
-                        plan = plans.get((rank, draft["B_capture"], queries, "torch.bfloat16")) if plans else None
-                        if not plan or plan["TP"] != tp or plan["H"] != 96:
-                            raise ValueError(f"{path.name}: missing BF16 {phase} preparation mapping")
-                        fused = (any("_merge_splits_serial" in name for name in names)
-                                 and sum("PeerBarrier" in name for name in names) >= 2)
-                        transport = _unfused_transport(names)
-                        unfused = transport is not None
-                        if not ((plan["S"] == 1 and plan["mode"] == "fused" and fused)
-                                or (plan["S"] > 1 and plan["mode"] == "unfused" and unfused)):
-                            raise ValueError(f"{path.name}: BF16 {phase} GPU branch disagrees with plan")
-                        draft.update(plan)
-                        if unfused:
-                            _check_transport(transport, a2a_backend, plan, draft)
+                        # Match the planned MTP branches, even when a profile
+                        # window also contains legal replays from smaller batches.
+                        if phase == "proposal" and (
+                            draft["mode"] != "unfused"
+                            or (stage == "large" and draft["B_capture"] < 16)
+                        ):
+                            continue
+                        if phase == "update" and draft["mode"] != "fused":
+                            continue
                     elif not any("split_kv" in name and "PageRRFusedMLA" not in name for name in names):
                         continue
                     candidates.append(draft)
@@ -203,20 +225,22 @@ def verify_mla_traces(directory: Path, tp: int, dp: int, backend: str, plans: di
                                          trace=str(path),
                                          **{key: value for key, value in draft.items() if key != "kernels"},
                                          kernel_names=[event["name"] for event in draft["kernels"]]))
-    return dict(passed=True, backend=backend, a2a_backend=a2a_backend, tp=tp, dp=dp,
+    return dict(passed=True, backend=backend, a2a_backend=a2a_backend,
+                q_replicated=q_replicated, tp=tp, dp=dp,
                 source="actual request Graph scopes and CUDA launch-correlated GPU kernels",
                 observations=observations, incomplete_replays=incomplete_replays)
 
 
 def wait_and_verify_mla_traces(root: Path, tp: int, dp: int, backend: str, timeout_s=120,
-                             *, a2a_backend: str = "AUTO") -> dict:
+                             *, a2a_backend: str = "AUTO", q_replicated: bool = False) -> dict:
     directory = root / "mla-profile"
     deadline = time.monotonic() + timeout_s
     # Kineto saves asynchronously. Wait only for files/JSON completion; a
     # completed trace with the wrong branch fails immediately.
+    expected_files = (3 if backend == "FIA2A" else 2) * tp * dp
     while True:
         paths = list(directory.glob("mla_*_owner*_wr*.json"))
-        complete = len(paths) >= 2 * tp * dp
+        complete = len(paths) >= expected_files
         if complete:
             try:
                 for path in paths:
@@ -226,10 +250,10 @@ def wait_and_verify_mla_traces(root: Path, tp: int, dp: int, backend: str, timeo
         if complete:
             break
         if time.monotonic() >= deadline:
-            raise ValueError(f"Timed out waiting for {2 * tp * dp} complete request traces in {directory}")
+            raise ValueError(f"Timed out waiting for {expected_files} complete request traces in {directory}")
         time.sleep(2)
     result = verify_mla_traces(directory, tp, dp, backend,
                                collect_plans(root) if backend == "FIA2A" else None,
-                               require_draft=True, a2a_backend=a2a_backend)
+                               require_draft=True, a2a_backend=a2a_backend, q_replicated=q_replicated)
     (root / "mla-request-evidence.json").write_text(json.dumps(result, indent=2) + "\n")
     return result

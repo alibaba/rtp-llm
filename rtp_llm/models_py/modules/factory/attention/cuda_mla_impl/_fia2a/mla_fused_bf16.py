@@ -28,7 +28,7 @@
 
 
 import math
-from .mla_helpers import make_output_routes
+from .mla_helpers import make_output_routes, publish_peer_outputs
 from typing import Type, Tuple, Optional
 from types import SimpleNamespace
 
@@ -289,6 +289,7 @@ class PageRRFusedMLABF16:
         peer_table: cute.Tensor,
         source_rank: cutlass.Int32,
         peer_output_ptrs: tuple,
+        control_peers: cute.Tensor,
         stream: cuda.CUstream,
     ):
         """Launch packed Q[B,Q,H,D] against a PageRR KV page table.
@@ -712,6 +713,7 @@ class PageRRFusedMLABF16:
             lse_scale,
             peer_table,
             source_rank,
+            control_peers,
             q_latent_smem_layout_staged,
             q_rope_smem_layout_staged,
             kc_smem_layout_staged,
@@ -795,6 +797,7 @@ class PageRRFusedMLABF16:
         lse_scale: cutlass.Float32,
         peer_table: cute.Tensor,
         source_rank: cutlass.Int32,
+        control_peers: cute.Tensor,
         q_latent_smem_layout_staged: cute.ComposedLayout,
         q_rope_smem_layout_staged: cute.ComposedLayout,
         kc_smem_layout_staged: cute.ComposedLayout,
@@ -1316,6 +1319,12 @@ class PageRRFusedMLABF16:
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
 
+        if cutlass.const_expr(self.peer_world > 1):
+            # Every warp has finished its peer O/LSE stores (W11 has waited its
+            # TMA stores). The CTA barrier orders them all before the release
+            # count; the last CTA of the persistent grid publishes to peers.
+            cute.arch.barrier()
+            publish_peer_outputs(control_peers, source_rank, self.peer_world, tidx)
         return
 
     @cute.jit

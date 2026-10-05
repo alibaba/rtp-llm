@@ -121,25 +121,24 @@ class MlaDcpCommunicator:
             or not (partial_o.device == partial_lse.device == local_seq_lens.device == self.device)
         ):
             raise ValueError("MLA DCP combine requires BF16 O[T,H,L], FP32 LSE[T,H] and int32 lengths[T]")
-        shape = (self.size, tokens, self.local_heads, dim + 2)
-        packed = (torch.empty(shape, dtype=torch.bfloat16, device=self.device)
-                  if a2a_buffers is None else a2a_buffers.packed(tokens))
-        _pack_a2a[(tokens, heads)](
-            partial_o, partial_lse, local_seq_lens, packed, packed.view(torch.float32),
-            tokens, heads=heads, local_heads=self.local_heads, dim=dim,
-            block=triton.next_power_of_2(dim),
-        )
         if a2a_buffers is None:
+            shape = (self.size, tokens, self.local_heads, dim + 2)
+            packed = torch.empty(shape, dtype=torch.bfloat16, device=self.device)
+            _pack_a2a[(tokens, heads)](
+                partial_o, partial_lse, local_seq_lens, packed, packed.view(torch.float32),
+                tokens, heads=heads, local_heads=self.local_heads, dim=dim,
+                block=triton.next_power_of_2(dim),
+            )
             received = all_to_all_single(packed, Group.TP)
+            output = partial_o.new_empty(self.local_heads, tokens, dim)
+            _combine_a2a[(tokens, self.local_heads)](
+                received, received.view(torch.float32), output, tokens,
+                local_heads=self.local_heads, dim=dim, cp_size=self.size,
+                block=triton.next_power_of_2(dim),
+            )
+            return output
         else:
-            received = a2a_buffers.exchange(tokens)
-        output = partial_o.new_empty(self.local_heads, tokens, dim)
-        _combine_a2a[(tokens, self.local_heads)](
-            received, received.view(torch.float32), output, tokens,
-            local_heads=self.local_heads, dim=dim, cp_size=self.size,
-            block=triton.next_power_of_2(dim),
-        )
-        return output
+            return a2a_buffers.combine(tokens)
 
 
 _communicators = {}

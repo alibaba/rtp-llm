@@ -133,6 +133,7 @@ def parse_args() -> argparse.Namespace:
         "--mla-profile-steps", type=int, default=0,
         help="opt-in Decode GPU trace windows for the small and all-owner batches; 0 disables",
     )
+    parser.add_argument("--mla-backend", choices=("TOKENSPEED", "FIA2A"), default="TOKENSPEED")
     parser.add_argument("--block-size", type=int, default=4096)
     parser.add_argument(
         "--reuse-unit-tokens",
@@ -798,11 +799,14 @@ class Runner:
                 # enter B16. Requiring all sixteen misses a valid window when
                 # earlier requests finish before the final arrivals. The GPU
                 # trace independently checks the actual bucket and kernels.
-                required = (
-                    min(len(expected), 9)
-                    if profile_stage == "large"
-                    else len(expected)
-                )
+                if profile_stage == "large":
+                    required = min(len(expected), 9)
+                elif profile_stage == "mid":
+                    # Two live requests suffice for the target CUSTOM branch;
+                    # the trace must independently witness capture B2/B4/B8.
+                    required = min(len(expected), 2)
+                else:
+                    required = len(expected)
                 ready = owner not in armed and len(expected & active) >= required
                 if ready:
                     armed.add(owner)
@@ -1629,6 +1633,8 @@ class Runner:
             ],
         )
 
+        mid_profile = (getattr(self.args, "mla_profile_steps", 0) > 0
+                       and getattr(self.args, "mla_backend", "TOKENSPEED") == "FIA2A")
         self.run_stage(
             "cuda_graph_bucket_8",
             [
@@ -1642,11 +1648,12 @@ class Runner:
                     ),
                     numbered_answer_pattern((110 + idx) ** 2),
                     "miss",
-                    decode_owner_rank=0,
+                    decode_owner_rank=idx // 8,
                 )
-                for idx in range(8)
+                for idx in range(8 * (len(self.decode_role_addrs) if mid_profile else 1))
             ],
             concurrent=True,
+            profile_stage="mid" if mid_profile else None,
         )
 
         owner_concurrency = getattr(self.args, "decode_owner_concurrency", 0)

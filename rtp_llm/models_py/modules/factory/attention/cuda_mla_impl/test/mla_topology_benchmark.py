@@ -31,7 +31,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_dcp_comm
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.page_rr_mla_decode_test import (
-    _clone_query_inputs, _fixture,
+    _clone_query_inputs, _fixture, _layer_collective,
 )
 from rtp_llm.ops import FMHAConfig, NcclCommConfig, ParallelismConfig, RoleType
 from rtp_llm.test.utils.port_util import PortManager
@@ -223,12 +223,24 @@ def _worker(rank, world, port, topology, cases, directory, failed):
                 )
                 expected_class = "PageRRMlaDecodeImpl" if is_dcp else "TokenSpeedMlaDecodeImpl"
                 assert type(impl).__name__ == expected_class, type(impl).__name__
+                backend = getattr(impl.fmha_impl, "fia2a_backend", None)
+
+                def wait_peer_consumption():
+                    # Stands in for the model's following TP collective, which
+                    # orders the next peer write after this rank's reads. It is
+                    # issued after the measured core and excluded by the parser.
+                    # Keep the same inter-call ordering for all FIA2A transports.
+                    if backend is not None:
+                        _layer_collective()
+
                 def forward():
                     # RoPE mutates its Q/K inputs; copy from immutable fixture
                     # tensors outside the measured core on every graph replay.
                     q, k_pe = _clone_query_inputs(fixture)
-                    return impl.forward(q, fixture.ckv, k_pe,
-                                        fixture.cache, fixture.layer_id)
+                    output = impl.forward(q, fixture.ckv, k_pe,
+                                          fixture.cache, fixture.layer_id)
+                    wait_peer_consumption()
+                    return output
                 result = forward()
                 torch.testing.assert_close(result, fixture.expected, atol=2e-3, rtol=0.015)
                 manifest.update(impl=type(impl).__module__+"."+type(impl).__name__,
@@ -238,11 +250,13 @@ def _worker(rank, world, port, topology, cases, directory, failed):
                                 unique_kv_bytes=len(requests)*(global_kv//world if is_dcp else global_kv)*576)
                 candidate = getattr(impl.fmha_impl, "fia2a_backend", None)
                 if candidate is not None:
+                    manifest.update(test_consumption_wait="AllReduce")
                     manifest.update(mode=candidate.mode.name.lower(), splits=candidate.splits, persistent=True,
                                     requested_mode=candidate.requested_mode.name,
                                     a2a_transport=("producer" if candidate.fused else
                                                    "pull" if candidate.a2a_buffers is not None else "nccl"),
-                                    wire_dtype=str(candidate.buffers.output.dtype),
+                                    wire_dtype=str(candidate.buffers.output.dtype if candidate.fused
+                                                   else candidate.output.dtype),
                                     qk_tiler=[128, 128], planner_sm_count=candidate.sm_count)
                 else:
                     manifest.update(_tokenspeed_plan(impl.fmha_impl, fixture.q.device))
@@ -311,6 +325,7 @@ def _worker(rank, world, port, topology, cases, directory, failed):
                     for _ in range(inner):
                         evict()
                         output = original(*args, **kwargs)
+                        wait_peer_consumption()
                     return output
                 impl.fmha_impl._forward_mla = burst
                 graph = torch.cuda.CUDAGraph()

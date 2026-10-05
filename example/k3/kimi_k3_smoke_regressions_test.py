@@ -793,26 +793,28 @@ class RuntimeEvidenceTest(unittest.TestCase):
         self.assertEqual(physical_graph_buckets(4, 3, (1, 2, 4, 8, 16)), (1, 2, 4, 8, 16))
 
     def test_mla_request_evidence_requires_correlated_work_in_both_groups(self):
-        for selector in ("AUTO", "NCCL", "CUSTOM"):
-            with self.subTest(a2a_backend=selector), tempfile.TemporaryDirectory() as tmp:
+        for selector, qrep in ((s, q) for s in ("AUTO", "NCCL", "CUSTOM") for q in (False, True)):
+            with self.subTest(a2a_backend=selector, qrep=qrep), tempfile.TemporaryDirectory() as tmp:
                 directory = pathlib.Path(tmp)
                 plans = {}
                 def branch_names(batch, queries, splits):
                     if splits == 1:
-                        return ["PeerBarrier", "_merge_splits_serial", "PeerBarrier"]
-                    # Fixture H96/TP4: small T4/T1 retains NCCL; draft T16
+                        return ["_merge_splits_serial"]
+                    # Fixture H96/TP4: small target/draft T4 retains NCCL; draft T16
                     # reaches AUTO's custom range. Explicit modes override it.
                     custom = selector == "CUSTOM" or (selector == "AUTO" and batch * queries >= 8)
-                    exchange = (["PeerBarrier", "_a2a_pull", "PeerBarrier"] if custom
-                                else ["ncclDevKernel_SendRecv"])
-                    return ["merge_local_splits", *exchange, "_combine_a2a"]
-                for stage in ("small", "large"):
-                    batch = 1 if stage == "small" else 16
+                    exchange = (["kernel_PeerPullMerge"] if custom
+                                else ["_pack_a2a", "ncclDevKernel_SendRecv", "_combine_a2a"])
+                    return ["merge_local_splits", *exchange]
+                for stage, batch, target_splits in (("small", 1, 24), ("mid", 4, 6), ("large", 16, 1)):
                     for rank in range(8):
-                        plans[rank, batch, 4, "torch.float8_e4m3fn"] = dict(TP=4, H=96, S=24 if batch == 1 else 1,
-                                                   mode="unfused" if batch == 1 else "fused")
-                        names = ["kernel_cutlass_split_kv_kernel_PageRRFusedMLAFP8"]
-                        names += branch_names(batch, 4, 24 if batch == 1 else 1)
+                        plans[rank, batch, 4, "torch.float8_e4m3fn"] = dict(TP=4, H=96, S=target_splits, mode="fused" if target_splits == 1 else "unfused",
+                                                   q_layout="token_major" if qrep else "head_major")
+                        prefix = [] if qrep else ["ncclDevKernel_AllGather", "_pack"]
+                        names = prefix + ["kernel_cutlass_split_kv_kernel_PageRRFusedMLAFP8"]
+                        names += branch_names(batch, 4, target_splits)
+                        # Two attention layers, plus unrelated TP AllGather.
+                        names = ["ncclDevKernel_AllGather"] + names * 2
                         events = [dict(ph="X", cat="cpu_op", pid=1, tid=1, ts=10, dur=10,
                                        name=f"cuda_graph.forward(replayDecode,B={batch},capture={batch},Q=4,T={batch*4},fake=0)"),
                                   dict(ph="X", cat="cuda_runtime", pid=1, tid=1, ts=12, dur=1,
@@ -820,14 +822,15 @@ class RuntimeEvidenceTest(unittest.TestCase):
                         # GPU activity is deliberately later than the CPU scope.
                         events += [dict(ph="X", cat="kernel", pid=0, tid=8, ts=100+i, dur=1,
                                         name=name, args={"correlation": 7}) for i, name in enumerate(names)]
-                        for kind, queries, capture, correlation, splits in (
-                            ("replayDecode", 1, batch, 17, 32 if batch == 1 else 4),
+                        for kind, queries, capture, correlation, splits in (() if stage == "mid" else (
+                            ("replayDecode", 1, max(4, batch), 17, 18 if batch == 1 else 4),
                             ("replayPrefill", 4, 16, 27, 1),
-                        ):
+                        )):
                             plans[rank, capture, queries, "torch.bfloat16"] = dict(
                                 TP=4, H=96, S=splits, mode="fused" if splits == 1 else "unfused",
+                                q_layout="token_major" if qrep else "head_major",
                             )
-                            draft_names = ["kernel_cutlass_split_kv_kernel_PageRRFusedMLABF16"]
+                            draft_names = prefix + ["kernel_cutlass_split_kv_kernel_PageRRFusedMLABF16"]
                             draft_names += branch_names(capture, queries, splits)
                             events += [dict(ph="X", cat="cpu_op", pid=1, tid=1, ts=correlation*10, dur=10,
                                             name=f"cuda_graph.forward({kind},B={batch},capture={capture},Q={queries},T={batch*queries},fake=0)"),
@@ -837,26 +840,78 @@ class RuntimeEvidenceTest(unittest.TestCase):
                                             name=name, args={"correlation": correlation}) for i, name in enumerate(draft_names)]
                         (directory / f"mla_{stage}_owner{rank//4}_wr{rank}_0.json").write_text(
                             json.dumps({"traceEvents": events}))
-                self.assertTrue(verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)["passed"])
+                self.assertTrue(verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector, q_replicated=qrep)["passed"])
                 missing = directory / "mla_large_owner1_wr7_0.json"
                 original = missing.read_text()
-                full = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
-                self.assertEqual(len(full["observations"]), 48)
+                full = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector, q_replicated=qrep)
+                self.assertEqual(len(full["observations"]), 56)
                 wrong_selector = "NCCL" if selector == "CUSTOM" else "CUSTOM"
                 with self.assertRaisesRegex(ValueError, "GPU A2A transport"):
                     verify_mla_traces(directory, 4, 2, "FIA2A", plans,
-                                      require_draft=True, a2a_backend=wrong_selector)
+                                      require_draft=True, a2a_backend=wrong_selector, q_replicated=qrep)
                 small = directory / "mla_small_owner1_wr7_0.json"
                 small_original = small.read_text()
-                # A bare copy without its completion protocol is insufficient;
-                # unrelated NCCL AllGather work cannot witness an A2A either.
-                bad = small_original.replace("PeerBarrier", "missing_barrier") if selector == "CUSTOM" else (
+                # A valid small proposal in the large window cannot substitute
+                # for the native B16 proposal branch required by that stage.
+                def proposal_event(event):
+                    return event.get("args", {}).get("correlation") == 17 or (
+                        event.get("name", "").startswith("cuda_graph.forward(replayDecode,")
+                        and ",Q=1," in event["name"]
+                    )
+                wrong_bucket = json.loads(original)
+                wrong_bucket["traceEvents"] = [e for e in wrong_bucket["traceEvents"] if not proposal_event(e)]
+                wrong_bucket["traceEvents"] += [e for e in json.loads(small_original)["traceEvents"] if proposal_event(e)]
+                missing.write_text(json.dumps(wrong_bucket))
+                with self.assertRaisesRegex(ValueError, "native MTP proposal"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                      require_draft=True, a2a_backend=selector, q_replicated=qrep)
+                missing.write_text(original)
+                # A complete unfused Q4 replay is still insufficient to prove
+                # the MTP update's required fused path.
+                wrong_update = json.loads(original)
+                wrong_update["traceEvents"] = [e for e in wrong_update["traceEvents"]
+                    if e.get("args", {}).get("correlation") != 27
+                    and not e.get("name", "").startswith("cuda_graph.forward(replayPrefill,")]
+                for event in json.loads(small_original)["traceEvents"]:
+                    if event.get("args", {}).get("correlation") == 7 or (
+                        event.get("name", "").startswith("cuda_graph.forward(replayDecode,")
+                        and ",Q=4," in event["name"]
+                    ):
+                        event["ts"] += 4000
+                        event["name"] = event["name"].replace("replayDecode", "replayPrefill").replace(
+                            "PageRRFusedMLAFP8", "PageRRFusedMLABF16")
+                        if "args" in event:
+                            event["args"]["correlation"] = 27
+                        wrong_update["traceEvents"].append(event)
+                plans[7, 1, 4, "torch.bfloat16"] = plans[7, 1, 4, "torch.float8_e4m3fn"]
+                missing.write_text(json.dumps(wrong_update))
+                with self.assertRaisesRegex(ValueError, "native MTP update"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                      require_draft=True, a2a_backend=selector, q_replicated=qrep)
+                del plans[7, 1, 4, "torch.bfloat16"]
+                missing.write_text(original)
+                # A missing PullMerge or unrelated AllGather cannot witness A2A.
+                bad = small_original.replace("PeerPullMerge", "missing_pull_merge") if selector == "CUSTOM" else (
                     small_original.replace("ncclDevKernel_SendRecv", "ncclDevKernel_AllGather")
                 )
                 small.write_text(bad)
-                with self.assertRaisesRegex(ValueError, "requested small"):
-                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                with self.assertRaisesRegex(ValueError, "complete GPU A2A transport"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector, q_replicated=qrep)
                 small.write_text(small_original)
+                small.write_text(small_original.replace("merge_local_splits", "missing_merge", 1))
+                with self.assertRaisesRegex(ValueError, "no local merge"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                      a2a_backend=selector, q_replicated=qrep)
+                small.write_text(small_original)
+                with self.assertRaisesRegex(ValueError, "Q layout"):
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                      a2a_backend=selector, q_replicated=not qrep)
+                if not qrep:
+                    small.write_text(small_original.replace('"_pack"', '"missing_q_pack"', 1))
+                    with self.assertRaisesRegex(ValueError, "Q reorder"):
+                        verify_mla_traces(directory, 4, 2, "FIA2A", plans,
+                                          a2a_backend=selector, q_replicated=qrep)
+                    small.write_text(small_original)
                 # A CPU launch without recorded GPU work cannot be a witness, but
                 # must not discard the complete target/proposal/update witnesses.
                 partial = json.loads(original)
@@ -867,23 +922,23 @@ class RuntimeEvidenceTest(unittest.TestCase):
                          name="cudaGraphLaunch", args={"correlation": 37}),
                 ]
                 missing.write_text(json.dumps(partial))
-                retained = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
-                self.assertEqual(len(retained["observations"]), 48)
+                retained = verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector, q_replicated=qrep)
+                self.assertEqual(len(retained["observations"]), 56)
                 self.assertEqual([row["correlation"] for row in retained["incomplete_replays"]], [37])
                 missing.write_text(original.replace("PageRRFusedMLABF16", "missing_draft_kernel"))
                 with self.assertRaisesRegex(ValueError, "native MTP proposal"):
-                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector)
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, require_draft=True, a2a_backend=selector, q_replicated=qrep)
                 missing.write_text(original.replace("fake=0", "fake=1"))
                 with self.assertRaisesRegex(ValueError, "no Q4 target"):
-                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector, q_replicated=qrep)
                 data = json.loads(original)
                 data["traceEvents"] = [event for event in data["traceEvents"] if event["cat"] != "kernel"]
                 missing.write_text(json.dumps(data))
                 with self.assertRaisesRegex(ValueError, "no GPU kernels"):
-                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector, q_replicated=qrep)
                 missing.unlink()
                 with self.assertRaisesRegex(ValueError, "missing="):
-                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector)
+                    verify_mla_traces(directory, 4, 2, "FIA2A", plans, a2a_backend=selector, q_replicated=qrep)
 
     def test_dcp_decode_evidence_needs_every_rank_and_bucket(self):
         with tempfile.TemporaryDirectory() as tmp:

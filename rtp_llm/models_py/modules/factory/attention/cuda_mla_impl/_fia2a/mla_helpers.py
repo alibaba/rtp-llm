@@ -32,6 +32,11 @@ from math import gcd
 
 import cutlass
 import cutlass.cute as cute
+from cutlass import Int64
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import dsl_user_op, T
+
+from .ops import CONTROL_SIZE, COUNT, EPOCH, READY
 
 
 class MLAStaticTileSchedulerParams:
@@ -386,3 +391,71 @@ def make_output_routes(heads: int, queries: int, world: int) -> OutputRoutes:
     return OutputRoutes(heads, queries, world, phases, period * 128 // heads,
                         query_tiles > period, tuple(routes), tuple(groups),
                         tuple(boxes), eligible)
+
+
+@dsl_user_op
+def read_globaltimer(*, loc=None, ip=None):
+    # CuTe 4.4.2 has no arch.globaltimer wrapper. This register counts ns.
+    return Int64(llvm.inline_asm(T.i64(), [], 'mov.u64 $0, %globaltimer;', '=l',
+                                has_side_effects=True, asm_dialect=0, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def timeout_trap(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], 'trap;', '', has_side_effects=True,
+                    asm_dialect=0, loc=loc, ip=ip)
+
+
+# Peer publication uses the FIA2A control layout (one int64 array per rank in
+# symmetric memory): completed epoch, finished-CTA count and ready[src], where
+# a receiver's ready[src] is written only by rank src with that call's epoch.
+
+
+@cute.jit
+def wait_ready(slot: cute.Pointer, epoch: Int64):
+    """Acquire a local ready slot once it reaches epoch; trap after 5 s."""
+    # Read the clock only after a failed poll: on sm_103a a timer read
+    # scheduled between the address and its first load faulted.
+    if cute.arch.load(slot.llvm_ptr, Int64, sem="acquire", scope="sys") < epoch:
+        start = read_globaltimer()
+        while cute.arch.load(slot.llvm_ptr, Int64, sem="acquire", scope="sys") < epoch:
+            if read_globaltimer() - start > Int64(5000000000):
+                timeout_trap()
+
+
+@cute.jit
+def publish_peer_outputs(control_peers: cute.Tensor, source_rank: cutlass.Int32,
+                         world: cutlass.Constexpr, tidx: cutlass.Int32):
+    """Exchange completion with every peer once all CTAs finished their stores.
+
+    Call from all threads of every CTA after its peer O/LSE stores completed
+    (TMA stores waited by their issuer) and a CTA barrier ordered every
+    thread's remote stores before this point. The last arriving CTA of the
+    persistent grid publishes this rank's completion, then waits until every
+    peer has published: when the kernel exits, all records this rank will
+    read have arrived, so the stream-ordered consumer needs no synchronization.
+    Each rank publishes before it waits, so the exchange cannot deadlock.
+    """
+    if tidx == 0:
+        control = cute.make_tensor(
+            cute.make_ptr(cutlass.Int64, control_peers[source_rank], cute.AddressSpace.gmem, assumed_align=8),
+            cute.make_layout((CONTROL_SIZE,)))
+        # Releases this CTA's barrier-ordered stores; the last arrival also
+        # acquires every earlier CTA's release through the RMW sequence.
+        finished = cute.arch.atomic_add((control.iterator + COUNT).llvm_ptr, cutlass.Int64(1),
+                                        sem="acq_rel", scope="gpu")
+        grid = cute.arch.grid_dim()
+        if finished == cutlass.Int64(grid[0] * grid[1] * grid[2] - 1):
+            epoch = control[EPOCH] + 1
+            # Fence + strong writes form one system release for all peers.
+            cute.arch.fence_acq_rel_sys()
+            for destination in cutlass.range_constexpr(world):
+                ready = cute.make_ptr(cutlass.Int64, control_peers[destination],
+                                      cute.AddressSpace.gmem, assumed_align=8)
+                cute.arch.store((ready + READY + source_rank).llvm_ptr, epoch,
+                                sem="relaxed", scope="sys")
+            for source in cutlass.range_constexpr(world):
+                wait_ready(control.iterator + READY + source, epoch)
+            # Nothing reads these again until this kernel has exited.
+            control[COUNT] = cutlass.Int64(0)
+            control[EPOCH] = epoch

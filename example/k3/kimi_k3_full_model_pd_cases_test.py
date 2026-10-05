@@ -499,6 +499,8 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         args = make_args()
         args.decode_role_addrs = args.decode_role_addrs[:2]
         args.decode_owner_concurrency = 16
+        args.mla_profile_steps = 32
+        args.mla_backend = "FIA2A"
         runner = Runner(args)
         with (
             mock.patch.object(runner, "fit_prompt", side_effect=lambda head, tail, target: (head+tail, [0]*target)),
@@ -510,6 +512,10 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             mock.patch.object(runner, "run_stage") as stage,
         ):
             runner.run_all()
+        mid = next(call for call in stage.call_args_list if call.args[0] == "cuda_graph_bucket_8")
+        self.assertEqual(mid.kwargs, dict(concurrent=True, profile_stage="mid"))
+        self.assertEqual([case.decode_owner_rank for case in mid.args[1]], [0] * 8 + [1] * 8)
+        self.assertEqual(len({case.name for case in mid.args[1]}), 16)
         calls = [call for call in stage.call_args_list if call.args[0] == "cuda_graph_all_owners"]
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].kwargs["concurrent"])

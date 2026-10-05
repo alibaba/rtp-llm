@@ -373,6 +373,7 @@ def main():
     parser.add_argument("--mla-profile-steps", type=int, default=0)
     parser.add_argument("--mla-backend", choices=("TOKENSPEED", "FIA2A"), default="TOKENSPEED")
     parser.add_argument("--mla-a2a-backend", choices=("AUTO", "NCCL", "CUSTOM"), default="AUTO")
+    parser.add_argument("--decode-q-replicated", choices=("0", "1"), default="0")
     parser.add_argument("--tp-size", type=int)
     parser.add_argument("--dp-size", type=int, default=1)
     parser.add_argument("--block-size", type=int)
@@ -404,6 +405,7 @@ def main():
             trace_report = wait_and_verify_mla_traces(
                 args.root, args.tp_size, args.dp_size, args.mla_backend,
                 a2a_backend=args.mla_a2a_backend,
+                q_replicated=args.decode_q_replicated == "1",
             )
             report["checks"]["actual_mla_request_gpu_traces"] = trace_report["passed"]
             report["passed"] = report["passed"] and trace_report["passed"]

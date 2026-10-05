@@ -55,6 +55,7 @@ def _compile_producer(heads, queries, world, capacity, page_size, fp32_wire, dty
         cutlass.Float32(1.), cutlass.Float32(1.),
         cute.runtime.make_fake_compact_tensor(cutlass.Int64, (world,2), stride_order=(1,0), assumed_align=16),
         cutlass.Int32(0), tuple(cutlass.Int64(0) for _ in range(world)),
+        cute.runtime.make_fake_compact_tensor(cutlass.Int64, (world,), assumed_align=16),
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
     ]
     return cute.compile(kernel, *args, options="--enable-tvm-ffi --opt-level 2")
@@ -62,8 +63,11 @@ def _compile_producer(heads, queries, world, capacity, page_size, fp32_wire, dty
 
 class PageRRFIA2AMLABackend:
     def __init__(self, attn_configs, communicator, dtype, fusion_mode=DecodeCPMLAFusionMode.AUTO,
-                 a2a_backend=DecodeCPMLAA2ABackend.AUTO):
+                 a2a_backend=DecodeCPMLAA2ABackend.AUTO, token_major=False):
         self.requested_mode = fusion_mode
+        # Token-major callers pass Q as [T,H,576]; otherwise forward reorders
+        # gathered head-major Q.
+        self.token_major = token_major
         self.a2a_backend = a2a_backend
         self.communicator = communicator
         self.heads = communicator.heads
@@ -84,6 +88,8 @@ class PageRRFIA2AMLABackend:
             raise ValueError("FIA2A peer publication requires 2..32 TP ranks")
         self.sm_count = torch.cuda.get_device_properties(communicator.device).multi_processor_count
         self.workspace = get_workspace(communicator)
+        # Unused placeholder for the local producer's publication argument.
+        self.local_control = torch.zeros(1, dtype=torch.int64, device=communicator.device)
         self._shape = None
 
     def prepare(self, metadata, softmax_scale, output_scale):
@@ -115,7 +121,6 @@ class PageRRFIA2AMLABackend:
             raise ValueError("FIA2A fusion mode must be AUTO, FUSED or UNFUSED")
         self.mode = DecodeCPMLAFusionMode.FUSED if self.fused else DecodeCPMLAFusionMode.UNFUSED
         self.rows = batch * queries
-        self.buffers = self.workspace.acquire(self.rows, self.splits, self.fused)
         self.a2a_buffers = None
         if self.a2a_backend == DecodeCPMLAA2ABackend.AUTO:
             # AUTO limits retained arenas to the measured logical wire range.
@@ -127,8 +132,16 @@ class PageRRFIA2AMLABackend:
             use_custom_a2a = self.a2a_backend == DecodeCPMLAA2ABackend.CUSTOM
         if not self.fused and use_custom_a2a:
             self.a2a_buffers = self.workspace.acquire_all_to_all(self.rows)
-        self.query = torch.empty((batch, queries, self.heads, 576),
-                                 device=self.communicator.device, dtype=self.dtype)
+        if self.a2a_buffers is not None and self.splits == 1:
+            self.buffers = self.a2a_buffers
+        else:
+            self.buffers = self.workspace.acquire(self.rows, self.splits, self.fused)
+        self.query_shape = (batch, queries, self.heads, 576)
+        if not self.token_major:
+            self.query = torch.empty(self.query_shape, device=self.communicator.device, dtype=self.dtype)
+            self.query_words = self.query.view(torch.int64)
+            self.pack_words = 576 * self.query.element_size() // 8
+            self.pack_grid = (triton.cdiv(self.rows * self.heads * self.pack_words, 1024),)
         # A single local destination specializes the same output epilogue into
         # local stores. Page-RR masks still use the original per-query bounds.
         self.output_world = self.communicator.size if self.fused else 1
@@ -148,10 +161,14 @@ class PageRRFIA2AMLABackend:
                 self.output.stride(1), self.output.stride(0), 512,
             )
         elif self.splits > 1:
-            self.output = torch.empty((self.rows, self.heads, 512),
-                                      device=self.communicator.device, dtype=torch.bfloat16)
-            self.output_lse = torch.empty((self.rows, self.heads),
-                                          device=self.communicator.device, dtype=torch.float32)
+            if self.a2a_buffers is not None:
+                self.output = self.a2a_buffers.output[0, :self.rows]
+                self.output_lse = self.a2a_buffers.lse[0, :self.rows]
+            else:
+                self.output = torch.empty((self.rows, self.heads, 512),
+                                          device=self.communicator.device, dtype=torch.bfloat16)
+                self.output_lse = torch.empty((self.rows, self.heads),
+                                              device=self.communicator.device, dtype=torch.float32)
             self.merge_kernel = merge_local_splits
             merge_rows = 8 if self.splits <= 4 else 1
             self.merge_grid = ((self.rows, self.heads, 4) if merge_rows == 1
@@ -172,24 +189,20 @@ class PageRRFIA2AMLABackend:
             self.page_size, self.splits > 1,
             "fp8" if self.dtype == torch.float8_e4m3fn else "bf16",
         )
-        self.query_words = self.query.view(torch.int64)
-        self.pack_words = 576 * self.query.element_size() // 8
-        self.pack_grid = (triton.cdiv(self.rows * self.heads * self.pack_words, 1024),)
 
         signature = (*shape, self.page_size, self.splits, self.buffers.capacity, self.dtype, self.mode,
-                     self.a2a_buffers is not None)
+                     self.a2a_buffers is not None, self.token_major)
         if signature not in self.workspace.prepared:
             # warmup only compiles: the prepared query is a dtype/alignment
             # prototype for the future layer's Q and KV pointers. KV strides
             # are runtime arguments, so strided layer pools share this JIT.
-            _pack.warmup(
-                self.query_words, self.query_words, self.rows, self.heads,
-                self.pack_words, BLOCK=1024, num_warps=4, grid=self.pack_grid,
-            )
+            if not self.token_major:
+                _pack.warmup(
+                    self.query_words, self.query_words, self.rows, self.heads,
+                    self.pack_words, BLOCK=1024, num_warps=4, grid=self.pack_grid,
+                )
             if self.merge_kernel is not None:
                 self.merge_kernel.warmup(*self.merge_args, num_warps=4, grid=self.merge_grid)
-            if self.a2a_buffers is not None:
-                self.a2a_buffers.warmup(self.rows)
             if self.fused or self.a2a_buffers is not None:
                 # Finish all ranks' first-use compilation before any producer
                 # can enter a peer wait. This is preparation, not a layer step.
@@ -199,20 +212,24 @@ class PageRRFIA2AMLABackend:
             if os.environ.get("KIMI_K3_SMOKE_EVIDENCE", "0") == "1":
                 logging.info(
                     "[FIA2A_PLAN] world_rank=%d TP=%d B=%d Q=%d H=%d S=%d mode=%s dtype=%s "
-                    "requested_mode=%s wire_dtype=%s a2a_backend=%s a2a_transport=%s",
+                    "requested_mode=%s wire_dtype=%s a2a_backend=%s a2a_transport=%s q_layout=%s",
                     dist.get_rank(), self.communicator.size, batch, queries,
                     self.heads, self.splits, self.mode.name.lower(), self.dtype,
                     self.requested_mode.name, self.buffers.output.dtype, self.a2a_backend.name,
                     "producer" if self.fused else "custom" if self.a2a_buffers is not None else "nccl",
+                    "token_major" if self.token_major else "head_major",
                 )
         self._shape = shape
 
     def forward(self, gathered, kv):
-        query = self.query
-        _pack[self.pack_grid](
-            gathered.view(torch.int64), self.query_words, self.rows, self.heads,
-            self.pack_words, BLOCK=1024, num_warps=4,
-        )
+        if self.token_major:
+            query = gathered.view(self.query_shape)
+        else:
+            query = self.query
+            _pack[self.pack_grid](
+                gathered.view(torch.int64), self.query_words, self.rows, self.heads,
+                self.pack_words, BLOCK=1024, num_warps=4,
+            )
         with tvm_ffi.use_torch_stream():
             self.kernel(
                 query[..., :512], query[..., 512:], kv[..., :512], kv[..., 512:],
@@ -220,13 +237,16 @@ class PageRRFIA2AMLABackend:
                 self.bounds[:, -1], self.bounds.view(-1),
                 cutlass.Float32(self.softmax_scale), cutlass.Float32(self.output_scale),
                 self.buffers.pointers, cutlass.Int32(self.output_rank), self.buffers.output_ptrs,
+                self.buffers.control_peers if self.fused else self.local_control,
             )
         if self.fused:
-            # Stream ordering completes all producer stores before publication.
-            self.buffers.synchronize_peers()
+            # The producer exits only after every peer published its records
+            # to this rank; the stream-ordered merge reads them directly.
             self.merge_kernel[self.merge_grid](*self.merge_args, num_warps=4)
-            # Every receiver has finished before any layer/step reuses storage.
-            self.buffers.synchronize_peers()
+            # No consumption barrier: the layer's following TP collective
+            # cannot complete on any rank before every rank has finished this
+            # merge, so no peer can overwrite these slots earlier. Callers
+            # without that collective must issue one between calls.
             return self.output
         else:
             if self.splits > 1:

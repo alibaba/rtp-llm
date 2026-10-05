@@ -684,6 +684,7 @@ verify_smoke_runtime_coverage() {
         --decode-capture-config "${smoke_decode_capture_config}" \
         --mla-profile-steps "${smoke_mla_profile_steps}" --mla-backend "${smoke_decode_mla_backend}" \
         --mla-a2a-backend "${smoke_decode_mla_a2a_backend}" \
+        --decode-q-replicated "${smoke_decode_q_replicated}" \
         --tp-size "${smoke_tp_size}" --dp-size "${smoke_dp_size}" --block-size "${smoke_block_size}" --source-tp-size "${smoke_prefill_tp_size}" \
         --prefill-page-rr "${smoke_prefill_page_rr_multi_launch}"
 }
@@ -850,6 +851,7 @@ else:
         "DECODE_CP_KV_CACHE_SHARDED": "1",
         "DECODE_CP_Q_REPLICATED": decode_q_replicated,
         "DECODE_CP_MLA_BACKEND": decode_mla_backend,
+        "DECODE_CP_MLA_FUSION_MODE": "AUTO",
         "DECODE_CP_MLA_A2A_BACKEND": os.environ.get("DECODE_CP_MLA_A2A_BACKEND", "AUTO"),
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -975,6 +977,7 @@ apply_validated_prefill_profile() {
     export CONCURRENCY_LIMIT=32
     unset DECODE_CP_KV_CACHE_SHARDED DECODE_CP_Q_REPLICATED
     unset DECODE_CP_MLA_A2A_BACKEND
+    unset DECODE_CP_MLA_FUSION_MODE
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
     export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
@@ -1021,6 +1024,7 @@ apply_validated_decode_profile() {
     export DECODE_CP_KV_CACHE_SHARDED=1
     export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
     export DECODE_CP_MLA_BACKEND="${smoke_decode_mla_backend}"
+    export DECODE_CP_MLA_FUSION_MODE=AUTO
     export DECODE_CP_MLA_A2A_BACKEND="${smoke_decode_mla_a2a_backend}"
     if ((smoke_mla_profile_steps > 0)); then
         export TORCH_CUDA_PROFILER_DIR="${role_dir}/mla-profile"
@@ -1191,6 +1195,7 @@ python3 -u "${case_runner}" \
     --decode-dp-size "${smoke_decode_dp_size}" \
     --decode-owner-concurrency "${SMOKE_DECODE_OWNER_CONCURRENCY:-0}" \
     --mla-profile-steps "${smoke_mla_profile_steps}" \
+    --mla-backend "${smoke_decode_mla_backend}" \
     --output "${accuracy_file}" \
     --suite "${smoke_suite}" \
     --namespace "${SMOKE_RUN_ID}" \

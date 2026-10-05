@@ -19,7 +19,9 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
     destroy_distributed_environment,
+    get_process_group,
     init_distributed_environment,
 )
 from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
@@ -721,6 +723,23 @@ def _assert_result(fixture, impl, output, rank, size, expected=None):
         assert torch.all(guarded == -7), "KV writes modified storage outside the page spans"
 
 
+_layer_collective_token = {}
+
+
+def _layer_collective():
+    """The model's TP collective after attention, between direct calls.
+
+    FIA2A waits for no peer consumption: each layer's output-projection
+    collective orders the next source write after every peer's reads.
+    Back-to-back test calls issue a TP all-reduce in its place: one NCCL
+    kernel, which benchmark traces name as the excluded trailing wait.
+    """
+    device = torch.cuda.current_device()
+    if device not in _layer_collective_token:
+        _layer_collective_token[device] = torch.zeros(64, dtype=torch.bfloat16, device="cuda")
+    torch.distributed.all_reduce(_layer_collective_token[device], group=get_process_group(Group.TP))
+
+
 def _worker(rank, size, port, failed):
     torch.cuda.set_device(rank)
     dp_size = int(os.environ.get("DCP_TEST_DP_SIZE", "1"))
@@ -875,10 +894,10 @@ def _worker(rank, size, port, failed):
                             side_effect=AssertionError("FIA2A pack must be compiled in prepare"),
                         )
                     elif case.get("forbid_copy_compile", False):
-                        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl._fia2a.ops import _a2a_pull
+                        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl._fia2a import pull_merge
                         compilation_guard = patch.object(
-                            _a2a_pull, "compile",
-                            side_effect=AssertionError("FIA2A A2A copy must be compiled in prepare"),
+                            pull_merge.cute, "compile",
+                            side_effect=AssertionError("FIA2A A2A pull-merge must be compiled in prepare"),
                         )
                     route_dir = os.environ.get("DCP_TEST_ROUTE_TRACE_DIR")
                     capture_route = bool(route_dir and q_replicated and "fusion_mode" in case)
@@ -887,6 +906,8 @@ def _worker(rank, size, port, failed):
                                                            torch.profiler.ProfilerActivity.CUDA])
                         if capture_route else nullcontext()
                     )
+                    # The previous case may still be reading this arena on a peer.
+                    _layer_collective()
                     with compilation_guard, route_profiler as profile:
                         output = impl.forward(
                             q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id,
@@ -901,13 +922,15 @@ def _worker(rank, size, port, failed):
                         kernels = [event["name"] for event in json.loads(path.read_text())["traceEvents"]
                                    if event.get("cat") == "kernel"]
                         backend = impl.fmha_impl.fia2a_backend
-                        barriers = sum("PeerBarrier" in name for name in kernels)
                         nccl = any("nccl" in name.lower() for name in kernels)
                         local_merge = any("merge_local_splits" in name for name in kernels)
                         pull = backend.a2a_buffers is not None
-                        assert barriers == (2 if backend.fused or pull else 0), (path, kernels)
+                        # Replicated Q reaches FIA2A token-major: no reorder kernel.
+                        assert not any(name == "_pack" or name.startswith("_pack__") for name in kernels), (path, kernels)
                         assert nccl == (not backend.fused and not pull), (path, kernels)
-                        assert any("_a2a_pull" in name for name in kernels) == pull, (path, kernels)
+                        assert any("PeerPullMerge" in name for name in kernels) == pull, (path, kernels)
+                        if pull:
+                            assert not any("_pack_a2a" in name or "_combine_a2a" in name for name in kernels), (path, kernels)
                         assert local_merge == (not backend.fused and backend.splits > 1), (path, kernels)
                         print(f"DCP GPU ROUTE PASS rank={rank} requested={backend.requested_mode.name} "
                               f"mode={backend.mode.name} S={backend.splits} trace={path}", flush=True)
@@ -940,6 +963,7 @@ def _worker(rank, size, port, failed):
                     stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(stream):
                         for _ in range(2):
+                            _layer_collective()
                             impl.forward(
                                 q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id
                             )
@@ -948,6 +972,7 @@ def _worker(rank, size, port, failed):
                     with torch.cuda.graph(graph):
                         if case.get("collect_during_capture", False):
                             gc.collect()
+                        _layer_collective()
                         output = impl.forward(
                             q, fixture.ckv, k_pe, fixture.cache, fixture.layer_id
                         )
@@ -1193,6 +1218,7 @@ class PageRREmptyPartialTest(unittest.TestCase):
         op = object.__new__(PageRRMlaDecodeOp)
         op.num_heads = op.all_heads = op.query_heads = 2
         op.q_replicated = True
+        op.fia2a_backend = None
         op.kv_lora_rank, op.qk_rope_head_dim = 4, 2
         op.fp8_compute, op.bmm1_scale = False, 0.5
         op.communicator = SimpleNamespace(combine=combine)
