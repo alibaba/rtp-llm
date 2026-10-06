@@ -78,7 +78,9 @@ public:
     }
 
 public:
-    int64_t                         request_id = 0;
+    int64_t request_id = 0;
+    // Internal PD handshake result, not a client-configurable request option.
+    uint32_t                        pd_draft_cache_window_tokens = 0;
     RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;

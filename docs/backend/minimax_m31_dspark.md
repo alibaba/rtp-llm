@@ -10,14 +10,13 @@ from the target's packed NVFP4 main KV and indexer K.
 This MiniMax-M3.1 integration requires CUDA. Other model families retain their
 existing HIP sampler routing; strict sampled rejection is not claimed for HIP.
 
-Checkpoint metadata alone does not specify all training forward semantics.
-`M31_DSPARK_CANDIDATE_MATH=gemma_causal_v1` is an explicit **provisional** opt-in,
-not certification of training/reference alignment. It uses weight-plus-one RMS
-normalization, projection followed by hidden normalization, causal query blocks,
-and a 4095-token left window. Target feature capture uses the existing residual
-boundaries for layers 3, 17, 31, 45, and 59. The loaded confidence head is not used
-by fixed-width verification. Do not remove this opt-in based on benchmark
-accuracy or acceptance length alone.
+The released checkpoint contract uses weight-plus-one Gemma RMS normalization,
+projection followed by hidden normalization, non-causal query blocks and a
+checkpoint-defined sliding window. Target feature capture uses the configured
+layers3,17,31,45,59. The old `M31_DSPARK_CANDIDATE_MATH` provisional selector
+is no longer read. The confidence head is used only by adaptive verification;
+static verification does not use it. See the [switch audit](minimax_m31_env_switch_audit.md)
+for exact current mode/budget semantics and compatibility settings.
 
 ## Configuration
 
@@ -36,17 +35,19 @@ SP_CHECKPOINT_PATH=<preview2-checkpoint>/dspark
 SP_ACT_TYPE=BF16
 SP_FP8_KV_CACHE=0
 GEN_NUM_PER_CIRCLE=7
-M31_DSPARK_CANDIDATE_MATH=gemma_causal_v1
+SP_DSPARK_VERIFY_MODE=adaptive
+SP_DSPARK_VERIFY_TOKENS=4
 SEQ_SIZE_PER_BLOCK=128
 KERNEL_SEQ_SIZE_PER_BLOCK=128
 ```
 
-`SP_DSPARK_VERIFY_TOKENS=0` verifies all seven candidates. An explicit value
-1 through 7 verifies that prefix without changing the five-layer checkpoint or
-seven-row draft backbone. Target verification and the subsequent commit use
-`verify_tokens + 1` rows. Proposal width is not MTP depth or request batch size.
-Keep this setting equal across PD roles. Report the verification budget alongside
-MAL: existing fixed-acceptance metrics retain the generated width denominator.
+Explicit `SP_DSPARK_VERIFY_MODE=static` verifies all seven candidates plus anchor
+and requires VERIFY_TOKENS0 or7. Adaptive mode uses confidence to distribute a
+batch-wide extra-row budget: VERIFY_TOKENS4 initially budgets4 extra rows per
+request on average, not exactly4 candidates for each request. Zero selects the
+full gamma budget. The seven-row draft backbone does not change. Keep mode and
+budget consistent across PD roles and report both alongside MAL. An empty mode
+retains legacy bool/fixed-prefix behavior; new deployments should set a mode.
 
 Prefill uses eager CP4 with `PREFILL_CP_KV_CACHE_SHARDED=1`; Decode may use DP4
 and target CUDA Graph. `RTP_LLM_DSPARK_CUDA_GRAPH=1` additionally opts into the
@@ -78,7 +79,7 @@ PD topology, graph buckets, sampling fields and dataset IDs. Require normal
 rejection PD smoke, GSM8K and long-context evaluation, complete response/route
 accounting, and healthy idle ranks. Historical results and forced-accept timing
 do not certify a newly changed revision. TCP PD validation does not establish
-RDMA readiness; provisional training math remains a separate open gate.
+RDMA readiness; source alignment and runtime dataset quality remain distinct gates.
 
 ### Local validation snapshot (2026-09-28)
 
@@ -101,4 +102,5 @@ Both dataset runs had zero request/integrity errors. GSM8K reached 16 active
 client requests per Decode rank; LongBench used two. The numeric GSM8K audit is
 a separately identified scoring contract, not a replacement of raw evidence.
 These checks are not a full no-DSpark equivalence test or a prolonged production
-soak, and do not remove the provisional math gate above.
+soak. This historical snapshot predates the reference-alignment release and is
+not validation of the current revision or a different verification mode.

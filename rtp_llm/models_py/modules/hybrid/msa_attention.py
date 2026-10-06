@@ -74,10 +74,10 @@ from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     clear_packed_working_tail_scales,
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
-    quantize_main_index_rows as nvfp4_quantize_main_index_rows,
+    quantize_cp_main_index_rows_to_planes as nvfp4_quantize_cp_main_index_rows_to_planes,
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
-    quantize_main_index_rows_to_planes as nvfp4_quantize_main_index_rows_to_planes,
+    quantize_main_index_rows as nvfp4_quantize_main_index_rows,
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     quantize_query_rows_mma as nvfp4_quantize_query_rows_mma,
@@ -2555,7 +2555,16 @@ class MSAAttention(nn.Module):
         self.idx_head_rank = self.tp_rank // self.idx_replica_size
         return self.total_idx_heads // self.idx_head_tp_size
 
-    def _fuse_m31_projected_norm_rope(self, qkv, idx_q, idx_k, positions):
+    def _fuse_m31_projected_norm_rope(
+        self,
+        qkv,
+        idx_q,
+        idx_k,
+        positions,
+        *,
+        contiguous_outputs=None,
+        query_fp8_outputs=None,
+    ):
         """M3.1 raw-weight producer; callers must skip legacy norm and RoPE."""
         raw_weights = getattr(self, "_m31_raw_attention_norms", None)
         if raw_weights is None:
@@ -2578,6 +2587,8 @@ class MSAAttention(nn.Module):
             num_kv_heads=self.kv_head_num,
             num_index_heads=self.num_idx_heads,
             eps=self.layernorm_eps,
+            contiguous_outputs=contiguous_outputs,
+            query_fp8_outputs=query_fp8_outputs,
         )
         return True
 
@@ -2855,8 +2866,6 @@ class MSAAttention(nn.Module):
         unpad_indices: torch.Tensor,
         write_slots: torch.Tensor,
         slot_mapping: torch.Tensor,
-        persistent_suffix_rows: Optional[torch.Tensor],
-        persistent_suffix_slots: Optional[torch.Tensor],
         nk: int,
         ni: int,
         token_count: int,
@@ -2880,31 +2889,21 @@ class MSAAttention(nn.Module):
             self.physical_page_size,
             self.head_dim,
         )
-        selected = packed.index_select(
-            0, unpad_indices[:token_count].to(torch.long)
-        ).contiguous()
-        k = selected[:, :nk].view(token_count, self.kv_head_num, self.head_dim)
-        v = selected[:, nk : 2 * nk].view(token_count, self.kv_head_num, self.head_dim)
-        idx = selected[:, 2 * nk : 2 * nk + ni].view(token_count, 1, ni)
+        if (
+            nk != 512
+            or ni != 128
+            or self.kv_head_num != 4
+            or self.head_dim != 128
+            or self.page_size != 128
+        ):
+            raise ValueError(
+                "M3.1 CP mapped writer requires head4/dim128/index128/page128"
+            )
+        unpad_rows = unpad_indices[:token_count]
 
         # The persistent scale bytes use the same 128x4 swizzle consumed by
         # both fmha_sm100 prefill readers and the native decode readers.
-        if persistent_suffix_rows is not None:
-            persistent_k = k.index_select(0, persistent_suffix_rows)
-            persistent_v = v.index_select(0, persistent_suffix_rows)
-            persistent_idx = idx.index_select(0, persistent_suffix_rows)
-            persistent_slots = persistent_suffix_slots
-        else:
-            persistent_k, persistent_v, persistent_idx = k, v, idx
-            persistent_slots = slot_mapping[:token_count].contiguous()
-        nvfp4_quantize_main_index_rows(
-            persistent_k,
-            persistent_v,
-            persistent_idx,
-            persistent_slots,
-            persistent_layout,
-            mma_scale_layout=True,
-        )
+        views = persistent_layout.logical_views(ni)
 
         scratch_slots = int(self._scratch_slots)
         if scratch_slots % int(self.page_size) != 0:
@@ -2968,11 +2967,12 @@ class MSAAttention(nn.Module):
                 ),
             )
 
-        # write_slots address the shared request-local working page namespace.
-        nvfp4_quantize_main_index_rows_to_planes(
-            k,
-            v,
-            idx,
+        # Quantize once into both independent destinations. The full persistent
+        # map contains -1 for non-owned rows; never substitute the compressed
+        # owned-row map. Prefix restoration above cannot overlap suffix pages.
+        nvfp4_quantize_cp_main_index_rows_to_planes(
+            packed,
+            unpad_rows,
             write_slots[:token_count].contiguous(),
             main[0],
             main_scales[0],
@@ -2980,7 +2980,15 @@ class MSAAttention(nn.Module):
             main_scales[1],
             idx_packed,
             idx_scales,
-            page_size=self.page_size,
+            persistent_slots=slot_mapping[:token_count],
+            persistent_planes=(
+                views.main_k_fp4,
+                views.main_k_scale,
+                views.main_v_fp4,
+                views.main_v_scale,
+                views.idx_k_fp4,
+                views.idx_k_scale,
+            ),
         )
         clear_packed_working_tail_scales(
             main_scales[0],
@@ -3835,18 +3843,39 @@ class MSAAttention(nn.Module):
         index_plan = {"_fp4_host_metadata": host}
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-        m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+        query_fp8_outputs = None
+        if self._m31_raw_attention_norms is not None:
+            query_fp8_outputs = tuple(
+                torch.empty(
+                    (total_tokens, heads, self.head_dim),
+                    dtype=torch.float8_e4m3fn,
+                    device=device,
+                )
+                for heads in (self.head_num, self.num_idx_heads)
+            )
+        m31_fused = self._fuse_m31_projected_norm_rope(
+            qkv, idx_q, idx_k, positions, query_fp8_outputs=query_fp8_outputs
+        )
         if self.qk_fuse_norm is not None and not m31_fused:
             qkv = self.qk_fuse_norm(qkv)
         q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
+        q = (
+            query_fp8_outputs[0]
+            if query_fp8_outputs is not None
+            else q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
+        )
         k = k.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
         v = v.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
-        idx_q = self._legacy_index_norm(
-            idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim),
-            self.idx_q_norm_w,
-            self.layernorm_eps,
-        ).contiguous()
+        idx_q = (
+            query_fp8_outputs[1]
+            if query_fp8_outputs is not None
+            else self._legacy_index_norm(
+                idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim),
+                self.idx_q_norm_w,
+                self.layernorm_eps,
+            ).contiguous()
+        )
+        del query_fp8_outputs
         idx_k = self._legacy_index_norm(
             idx_k.reshape(total_tokens, 1, self.idx_head_dim),
             self.idx_k_norm_w,
@@ -3873,8 +3902,6 @@ class MSAAttention(nn.Module):
                 identity_rows,
                 working_slots,
                 physical_slots,
-                None,
-                None,
                 nk,
                 ni,
                 total_tokens,
@@ -4000,27 +4027,41 @@ class MSAAttention(nn.Module):
             sparse_attn_plan = cache["sparse_attn_plan"]
             need_build_new_meta = False
         else:
-            chunk_dev = cp_info.prefill_cp_chunk_lengths.detach().to(
-                device=device, dtype=torch.int64
+            from rtp_llm.models_py.modules.hybrid.cp_host_metadata import (
+                cp_planning_host_mirrors,
+            )
+
+            host_mirrors = cp_planning_host_mirrors(cp_info)
+            chunk_source = (
+                (
+                    cp_info.prefill_cp_chunk_lengths
+                    if host_mirrors is None
+                    else host_mirrors[0]
+                )
+                .detach()
+                .to(dtype=torch.int64)
             )
             prefix_dev = attn_inputs.prefix_lengths.detach().to(
                 device=device, dtype=torch.int64
             )
-            n_chunks = chunk_dev.numel()
+            n_chunks = chunk_source.numel()
             packed_pinned = torch.empty(
                 n_chunks + prefix_dev.numel(), dtype=torch.int64, pin_memory=True
             )
-            packed_pinned[:n_chunks].copy_(chunk_dev, non_blocking=True)
+            packed_pinned[:n_chunks].copy_(chunk_source, non_blocking=True)
             packed_pinned[n_chunks:].copy_(prefix_dev, non_blocking=True)
-            shuffle_pinned = torch.empty(
-                cp_info.prefill_shuffle_indices.numel(),
-                dtype=torch.int64,
-                pin_memory=True,
-            )
-            shuffle_pinned.copy_(
-                cp_info.prefill_shuffle_indices.detach().to(torch.int64),
-                non_blocking=True,
-            )
+            if host_mirrors is not None:
+                shuffle_pinned = host_mirrors[1].to(torch.int64)
+            else:
+                shuffle_pinned = torch.empty(
+                    cp_info.prefill_shuffle_indices.numel(),
+                    dtype=torch.int64,
+                    pin_memory=True,
+                )
+                shuffle_pinned.copy_(
+                    cp_info.prefill_shuffle_indices.detach().to(torch.int64),
+                    non_blocking=True,
+                )
             need_build_new_meta = True
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
@@ -4221,8 +4262,6 @@ class MSAAttention(nn.Module):
             req_to_token_segments = addr_cache["req_to_token_segments"]
             slot_ids = addr_cache["slot_ids"]
             slot_mapping = addr_cache["slot_mapping"]
-            persistent_suffix_rows = addr_cache["persistent_suffix_rows"]
-            persistent_suffix_slots = addr_cache["persistent_suffix_slots"]
             kv_page_indices = addr_cache["kv_page_indices"]
             prefix_dst_pages = addr_cache["prefix_dst_pages"]
             prefix_gather_plans = addr_cache["prefix_gather_plans"]
@@ -4243,16 +4282,6 @@ class MSAAttention(nn.Module):
             ).contiguous()
             slot_ids = torch.arange(n_seg, device=device, dtype=torch.int64)
             slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
-            if self._kv_sharded:
-                persistent_suffix_rows = torch.nonzero(
-                    slot_mapping >= 0, as_tuple=False
-                ).flatten()
-                persistent_suffix_slots = slot_mapping.index_select(
-                    0, persistent_suffix_rows
-                ).contiguous()
-            else:
-                persistent_suffix_rows = None
-                persistent_suffix_slots = None
             # fmha physical page table: built once here (per forward), shared by the
             # index-score and step3 fmha kernels across all sparse layers.
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
@@ -4292,8 +4321,6 @@ class MSAAttention(nn.Module):
                     "req_to_token_segments": req_to_token_segments,
                     "slot_ids": slot_ids,
                     "slot_mapping": slot_mapping,
-                    "persistent_suffix_rows": persistent_suffix_rows,
-                    "persistent_suffix_slots": persistent_suffix_slots,
                     "kv_page_indices": kv_page_indices,
                     "prefix_dst_pages": prefix_dst_pages,
                     "prefix_gather_plans": prefix_gather_plans,
@@ -4359,8 +4386,18 @@ class MSAAttention(nn.Module):
                 use_fp8_kvcache=self.idx_k_fp8_mode == 2,
             )
 
+        query_fp8_outputs = None
+        if self.nvfp4_kv_cache and self._m31_raw_attention_norms is not None:
+            query_fp8_outputs = tuple(
+                torch.empty(
+                    (local_tokens, heads, self.head_dim),
+                    dtype=torch.float8_e4m3fn,
+                    device=device,
+                )
+                for heads in (self.head_num, self.num_idx_heads)
+            )
         m31_fused = self._fuse_m31_projected_norm_rope(
-            qkv, idx_q, idx_k, local_positions
+            qkv, idx_q, idx_k, local_positions, query_fp8_outputs=query_fp8_outputs
         )
         idx_k = idx_k.contiguous()
         if not m31_fused:
@@ -4423,8 +4460,12 @@ class MSAAttention(nn.Module):
 
         all_packed, packed_kv_event = self._cp_all_gather_packed_kv(packed_kv)
 
-        q = _rows_to_contig(q)
-        idx_q = idx_q.contiguous()
+        if query_fp8_outputs is not None:
+            q, idx_q = query_fp8_outputs
+            del query_fp8_outputs
+        else:
+            q = _rows_to_contig(q)
+            idx_q = idx_q.contiguous()
         if m31_fused:
             pass  # Q and index Q were rotated together before the KV pack.
         elif self.head_dim == self.idx_head_dim:
@@ -4569,8 +4610,6 @@ class MSAAttention(nn.Module):
                     unpad_indices,
                     write_slots,
                     slot_mapping,
-                    persistent_suffix_rows,
-                    persistent_suffix_slots,
                     nk,
                     ni,
                     token_count_py,
@@ -4912,6 +4951,26 @@ class MSAAttention(nn.Module):
         is_ragged = bool(getattr(attn_inputs, "is_ragged_target_verify", False))
         write_seq_lens = seq_lens
         score_block_table = phys_block_table if is_ragged else request_block_table
+        norm_rope_outputs = None
+        if (
+            self.nvfp4_kv_cache
+            and getattr(self, "_m31_raw_attention_norms", None) is not None
+            and hidden_states.dtype == torch.bfloat16
+            and (self.head_num, self.kv_head_num, self.num_idx_heads) == (64, 4, 4)
+            and self.head_dim == self.idx_head_dim == 128
+            and 1 < total_tokens <= 128
+        ):
+            # Replace the four existing contiguous copies, without introducing
+            # history workspace or per-layer persistent storage. M1 previously
+            # aliases its projection and must keep the allocation-free path.
+            norm_rope_outputs = tuple(
+                torch.empty(
+                    (total_tokens, heads, self.head_dim),
+                    dtype=hidden_states.dtype,
+                    device=device,
+                )
+                for heads in (self.head_num, self.kv_head_num, self.num_idx_heads, 1)
+            )
 
         if (
             self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale)
@@ -4939,7 +4998,9 @@ class MSAAttention(nn.Module):
             )
         else:
             qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
-            m31_fused = self._fuse_m31_projected_norm_rope(qkv, idx_q, idx_k, positions)
+            m31_fused = self._fuse_m31_projected_norm_rope(
+                qkv, idx_q, idx_k, positions, contiguous_outputs=norm_rope_outputs
+            )
             if self.qk_fuse_norm is not None and not m31_fused:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
@@ -4958,7 +5019,9 @@ class MSAAttention(nn.Module):
                 idx_k, self.idx_k_norm_w, self.layernorm_eps
             )
 
-            if m31_fused:
+            if norm_rope_outputs is not None:
+                q, k, idx_q, idx_k = norm_rope_outputs
+            elif m31_fused:
                 q = q.contiguous()
                 k = k.contiguous()
             elif self.nvfp4_kv_cache:

@@ -360,12 +360,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const auto        cuda_i32    = runtimeCudaI32Options();
 
     GptModelInputs model_input;
-    model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
-    model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
-    model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
-    model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.combo_tokens                 = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+    model_input.input_lengths                = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths             = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths               = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
+    model_input.request_id                   = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
+    model_input.request_pd_separation        = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.pd_draft_cache_window_tokens = torch::zeros({(int64_t)total_context_batch_size}, pinned_i64);
 
     if (max_blocks_num) {
         model_input.kv_cache_kernel_block_id =
@@ -585,6 +586,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
                 stream->queryPdSep();
+            model_input.pd_draft_cache_window_tokens.data_ptr<int64_t>()[prefill_batch_idx] =
+                stream->generateInput()->pd_draft_cache_window_tokens;
 
             ctx.batch_idx += 1;
             ctx.token_idx += input_tokens.size();

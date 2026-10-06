@@ -25,6 +25,9 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            # Torch 2.11 CUDA links this extension from libtorch_python and
+            # libtorch_cuda. Optional glob keeps older Torch wheels compatible.
+            "torch/lib/libtorch_nvshmem.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",

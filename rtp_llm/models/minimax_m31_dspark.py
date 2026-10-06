@@ -116,6 +116,9 @@ class MiniMaxM31DSpark(MiniMaxM3):
         config.dspark_target_layer_ids = report["target_layer_ids"]
         config.dspark_markov_rank = text["dspark_markov_rank"]
         config.dspark_checkpoint_metadata = report
+        # Query math owns this capability; preserve full resident draft history
+        # for arbitrary shorter-prefix reuse, but allow negotiated tail transfer.
+        config.pd_draft_cache_window_tokens = int(report["sliding_window"])
         config.prepacked_nvfp4_moe = False
         config.expert_num = 0
         config.moe_k = 0

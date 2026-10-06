@@ -1874,6 +1874,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
         .def_readwrite("model_type", &ModelConfig::model_type)
+        .def_readwrite("pd_draft_cache_window_tokens", &ModelConfig::pd_draft_cache_window_tokens)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)

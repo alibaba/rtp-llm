@@ -845,6 +845,90 @@ TEST(DSparkSamplerTest, KeepsSoftmaxDistributionForSamplingRequests) {
     EXPECT_TRUE(torch::allclose(output.all_probs, expected));
 }
 
+#if USING_CUDA
+TEST(DSparkSamplerTest, AdaptiveVerifyPlanMatchesStableSortAtBoundaries) {
+    struct Candidate {
+        float value;
+        int   position;
+        int   request;
+    };
+    // Match the CUDA target's FTZ boundary; keep the oracle a full stable
+    // sort, independent of the kernel's parallel rank-count implementation.
+    const auto flush = [](float value) {
+        return std::abs(value) < std::numeric_limits<float>::min() ? std::copysign(0.f, value) : value;
+    };
+    const auto cpu = torch::TensorOptions().dtype(torch::kFloat32);
+    for (const auto& shape :
+         std::vector<std::pair<int, int>>{{0, 7}, {1, 1}, {1, 1024}, {3, 4}, {16, 7}, {28, 7}, {256, 4}}) {
+        const int batch = shape.first, gamma = shape.second;
+        for (int pattern = 0; pattern < 5; ++pattern) {
+            auto                   confidence = torch::empty({batch, gamma}, cpu);
+            auto*                  values     = confidence.data_ptr<float>();
+            std::vector<Candidate> candidates;
+            for (int request = 0; request < batch; ++request) {
+                float survival = 1.f;
+                for (int position = 0; position < gamma; ++position) {
+                    float value = 0.f;
+                    if (pattern == 1) {
+                        value = 1.f;
+                    } else if (pattern == 2) {
+                        value = static_cast<float>((request * 17 + position * 13) % 37 - 4) / 29.f;
+                    } else if (pattern == 3) {
+                        const float edges[] = {std::numeric_limits<float>::quiet_NaN(),
+                                               std::numeric_limits<float>::infinity(),
+                                               -std::numeric_limits<float>::infinity(),
+                                               -.2f,
+                                               1.2f,
+                                               -0.f,
+                                               .5f};
+                        value               = edges[(request + position) % 7];
+                    } else if (pattern == 4) {
+                        const float edges[] = {std::numeric_limits<float>::denorm_min(),
+                                               std::numeric_limits<float>::min(),
+                                               .5f,
+                                               -0.f,
+                                               0.f,
+                                               0x1p-70f};
+                        value               = edges[(request + position) % 6];
+                    }
+                    values[request * gamma + position] = value;
+                    value                              = flush(value);
+                    const float conditional = std::isfinite(value) ? std::min(std::max(value, 0.f), 1.f) : 0.f;
+                    survival                = flush(survival * conditional);
+                    candidates.push_back({survival, position, request});
+                }
+            }
+            std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+                if (a.value != b.value)
+                    return a.value > b.value;
+                if (a.position != b.position)
+                    return a.position < b.position;
+                return a.request < b.request;
+            });
+            const auto input = confidence.to(torch::kCUDA);
+            for (int budget : {0, std::min(1, batch * gamma), std::min(4 * batch, batch * gamma), batch * gamma}) {
+                SCOPED_TRACE(::testing::Message() << "batch=" << batch << " gamma=" << gamma << " pattern=" << pattern
+                                                  << " budget=" << budget);
+                std::vector<int> expected(batch, 1);
+                for (int picked = 0; picked < budget; ++picked)
+                    ++expected[candidates[picked].request];
+                auto plan    = execDSparkVerifyPlan(input, budget);
+                auto lengths = plan.first.cpu(), mapping = plan.second.cpu();
+                ASSERT_EQ(mapping.numel(), batch + budget);
+                int compact = 0;
+                for (int request = 0; request < batch; ++request) {
+                    ASSERT_EQ(lengths[request].item<int>(), expected[request]);
+                    for (int row = 0; row < expected[request]; ++row) {
+                        EXPECT_EQ(mapping[compact++].item<int>(), request * (gamma + 1) + row);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#endif
+
 TEST(DSparkSamplerTest, SevenTokenProposalPreservesConditionalProbabilities) {
     if (!torch::cuda::is_available()) {
         GTEST_SKIP() << "CUDA is required";

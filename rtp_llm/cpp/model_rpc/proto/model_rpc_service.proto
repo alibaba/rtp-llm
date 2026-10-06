@@ -299,6 +299,9 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    // ALLOCATE reply only: agreed native FULL/page-RR draft tail window.
+    // Zero (including older peers) means full-history draft transfer.
+    uint32 draft_cache_window_tokens = 10;
 }
 
 // return to python client
@@ -366,6 +369,9 @@ message GenerateRequestPB {
     // cp_size physical blocks per virtual block. Default 0 keeps backward
     // compatibility (treated as 1 by decode side).
     int32 prefill_cp_size = 13;
+    // ALLOCATE offer: native FULL/page-RR tail pages with absolute page keys.
+    // This never changes target cache transfer or P-side resident draft writes.
+    uint32 draft_cache_window_tokens = 14;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -383,6 +389,8 @@ message BroadcastLoadRequestPB {
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
     int32 prefill_cp_size = 13;
+    uint32 draft_cache_window_tokens = 14;
+    uint64 draft_cache_context_tokens = 15;
 }
 
 message BroadcastLoadResponsePB {

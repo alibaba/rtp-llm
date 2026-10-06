@@ -91,6 +91,11 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
     torch_ext::PyContextParallelParams cp_params;
     processor.handleInputs(model_input, cp_params);
 
+    TORCH_CHECK(cp_params.prefill_cp_chunk_lengths_cpu.device().is_cpu());
+    TORCH_CHECK(cp_params.prefill_shuffle_indices_cpu.device().is_cpu());
+    TORCH_CHECK(torch::equal(cp_params.prefill_cp_chunk_lengths_cpu, cp_params.prefill_cp_chunk_lengths.cpu()));
+    TORCH_CHECK(torch::equal(cp_params.prefill_shuffle_indices_cpu, cp_params.prefill_shuffle_indices.cpu()));
+
     return std::make_tuple(model_input.combo_tokens.cpu().clone(),
                            model_input.input_lengths.cpu().clone(),
                            model_input.last_hidden_states.cpu().clone(),
@@ -120,6 +125,11 @@ zigzagHandleInputsWithHiddenLayout(const torch::Tensor& total_input_tokens,
     torch_ext::PyContextParallelParams cp_params;
     ScopedDisableCoreDumpOnException   disable_core_dump;
     processor.handleInputs(model_input, cp_params);
+
+    TORCH_CHECK(cp_params.prefill_cp_chunk_lengths_cpu.device().is_cpu());
+    TORCH_CHECK(cp_params.prefill_shuffle_indices_cpu.device().is_cpu());
+    TORCH_CHECK(torch::equal(cp_params.prefill_cp_chunk_lengths_cpu, cp_params.prefill_cp_chunk_lengths.cpu()));
+    TORCH_CHECK(torch::equal(cp_params.prefill_shuffle_indices_cpu, cp_params.prefill_shuffle_indices.cpu()));
 
     return std::make_tuple(model_input.combo_tokens.cpu().clone(),
                            model_input.input_lengths.cpu().clone(),

@@ -311,6 +311,7 @@ std::string ModelConfig::to_string() const {
         << "\n"
         //<< "act_type: " << act_type << "\n"
         << "model_type: " << model_type << "\n"
+        << "pd_draft_cache_window_tokens: " << pd_draft_cache_window_tokens << "\n"
         << "ptuning_path: " << ptuning_path;
 
     return oss.str();

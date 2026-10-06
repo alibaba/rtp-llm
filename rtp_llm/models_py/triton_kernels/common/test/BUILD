@@ -32,6 +32,24 @@ py_test(
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
 
+# CPU-only wrapper/gate contracts by default; parent may explicitly pass --gpu
+# and --frozen-probe for the separate SM100 exact-output CUDA validation.
+py_test(
+    name = "test_m31_norm_rope_outputs",
+    srcs = ["test_m31_norm_rope_outputs.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_mxfp8_tma_scale",
+    srcs = ["test_mxfp8_tma_scale.py", "test_mxfp8_tma_scale_gpu.py", "mxfp8_invalid_scale_child.py"],
+    main = "test_mxfp8_tma_scale.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)
+
 py_test(
     name = "test_fused_rmsnorm_gated_fp8_quant",
     srcs = ["test_fused_rmsnorm_gated_fp8_quant.py"],

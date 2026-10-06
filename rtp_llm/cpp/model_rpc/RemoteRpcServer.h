@@ -24,6 +24,8 @@ private:
     void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
 
 protected:
+    uint32_t draftCacheTransferWindowTokens() const;
+
     std::string                 process_id_;
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};

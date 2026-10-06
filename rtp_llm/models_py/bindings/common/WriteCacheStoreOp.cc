@@ -114,6 +114,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.cp_size,
                                 std::move(event),
                                 captured_cache_store.cache_store_async_writer};
+        inputs.pd_draft_cache_window_tokens = captured_cache_store.pd_draft_cache_window_tokens;
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

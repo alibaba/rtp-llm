@@ -148,6 +148,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (inputs.skip_run) {
         return;
     }
+    if (parallelism_config.tp_rank == 0 && !inputs.pd_draft_cache_window_tokens.defined()) {
+        // Legacy constructors/tests omit this tensor. Match the non-root
+        // request-length allocation so CPU broadcast packing stays in lockstep.
+        inputs.pd_draft_cache_window_tokens =
+            torch::zeros({shape_hints_ptr[GptModelInputIndex::gptModelRequestLength]},
+                         torch::TensorOptions(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+    }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({(int64_t)mm_features_num}, torch::kInt32).pin_memory();
@@ -271,10 +278,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (group_types_len) {
             inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
         }
-        inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
-        inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
-        inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                                {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
+        inputs.request_id                   = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
+        inputs.request_pd_separation        = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
+        inputs.pd_draft_cache_window_tokens = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
+        inputs.lm_output_indexes            = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                       {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
@@ -347,6 +355,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.pd_draft_cache_window_tokens);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

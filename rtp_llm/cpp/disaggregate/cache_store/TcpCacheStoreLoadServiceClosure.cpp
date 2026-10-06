@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
+#include <stdexcept>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -43,26 +44,43 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
-    for (int i = 0; i < response_->blocks_size(); i++) {
-        const auto& block        = response_->blocks(i);
-        auto        unload_block = request_block_buffer_->getBlock(block.key());
-
-        if (unload_block == nullptr || block.len() != unload_block->len) {
-            RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
-                                block.key().c_str(),
-                                request_block_buffer_->getRequestId().c_str());
-            end(false, CacheStoreErrorCode::LoadBufferTimeout);
-            return;
+    try {
+        // Validate the complete packet before DMA. Count equality alone cannot
+        // detect a duplicate key replacing an omitted block or a truncated payload.
+        auto                                      requested_blocks = request_block_buffer_->getBlocks();
+        std::vector<std::shared_ptr<BlockBuffer>> destinations;
+        destinations.reserve(response_->blocks_size());
+        for (int i = 0; i < response_->blocks_size(); i++) {
+            const auto& block = response_->blocks(i);
+            auto        entry = requested_blocks.find(block.key());
+            if (entry == requested_blocks.end() || entry->second == nullptr || block.len() != entry->second->len
+                || block.content().size() != block.len() || (block.len() > 0 && entry->second->addr == nullptr)) {
+                // Keep callbacks outside try: a throwing callback must never
+                // be caught as a copy error and invoked a second time.
+                throw std::invalid_argument("invalid or duplicate cache response block: " + block.key());
+            }
+            destinations.push_back(entry->second);
+            requested_blocks.erase(entry);
         }
-
-        auto dst_tensor = torch::from_blob(
-            unload_block->addr.get(),
-            {(int64_t)unload_block->len},
-            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
-        auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
-                                           {(int64_t)block.len()},
-                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        execNoBlockCopy({dst_tensor, src_tensor});
+        for (size_t i = 0; i < destinations.size(); ++i) {
+            const auto& block              = response_->blocks(static_cast<int>(i));
+            const auto& destination        = destinations[i];
+            auto        destination_tensor = torch::from_blob(
+                destination->addr.get(),
+                {(int64_t)destination->len},
+                torch::TensorOptions().dtype(torch::kUInt8).device(destination->gpu_mem ? torch::kCUDA : torch::kCPU));
+            auto source_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
+                                                  {(int64_t)block.len()},
+                                                  torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+            execNoBlockCopy({destination_tensor, source_tensor});
+        }
+        // Preserve the original per-block copy completion before callback.
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("cache load response copy failed, request %s: %s",
+                            request_block_buffer_->getRequestId().c_str(),
+                            error.what());
+        end(false, CacheStoreErrorCode::LoadBufferTimeout);
+        return;
     }
     end(true, CacheStoreErrorCode::None);
 }

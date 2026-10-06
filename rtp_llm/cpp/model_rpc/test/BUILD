@@ -5,6 +5,29 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "draft_cache_transfer_window_test",
+    srcs = ["DraftCacheTransferWindowTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc:draft_cache_transfer_window",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "pd_allocate_scheduling_test",
+    srcs = ["PdAllocateSchedulingTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc:pd_allocate_scheduling",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

@@ -129,9 +129,12 @@ __global__ void dsparkVerifyPlanKernel(const float* confidence,
                                        int64_t      gamma,
                                        int64_t      extra_budget) {
     __shared__ float   survival[kMaxDSparkPlanCandidates];
-    __shared__ uint8_t selected[kMaxDSparkPlanCandidates];
+    __shared__ int32_t rows[kMaxDSparkPlanBatch];
 
     const int64_t candidate_count = batch * gamma;
+    for (int64_t request = threadIdx.x; request < batch; request += blockDim.x) {
+        rows[request] = 1;  // Every request verifies its anchor.
+    }
     for (int64_t candidate = threadIdx.x; candidate < candidate_count; candidate += blockDim.x) {
         const int64_t request  = candidate / gamma;
         const int64_t position = candidate - request * gamma;
@@ -142,53 +145,41 @@ __global__ void dsparkVerifyPlanKernel(const float* confidence,
             value *= isfinite(conditional) ? fminf(fmaxf(conditional, 0.0f), 1.0f) : 0.0f;
         }
         survival[candidate] = value;
-        selected[candidate] = 0;
     }
     __syncthreads();
 
-    // Current production batches are small (B<=28, gamma=7).  Keeping the
-    // global selection in one CTA avoids a host sync and makes ties stable.
-    if (threadIdx.x == 0) {
-        for (int64_t request = 0; request < batch; ++request) {
-            verify_lengths[request] = 1;
+    // Compute each candidate's rank in the same total order as repeated
+    // maximum selection: survival descending, position ascending, request
+    // ascending. Survival products and their FP32 rounding are unchanged.
+    // Integer counts are deterministic regardless of atomic update order.
+    for (int64_t candidate = threadIdx.x; candidate < candidate_count; candidate += blockDim.x) {
+        const float   value    = survival[candidate];
+        const int64_t request  = candidate / gamma;
+        const int64_t position = candidate - request * gamma;
+        int64_t       rank     = 0;
+        for (int64_t other = 0; other < candidate_count; ++other) {
+            const float   other_value    = survival[other];
+            const int64_t other_request  = other / gamma;
+            const int64_t other_position = other - other_request * gamma;
+            rank += other_value > value
+                    || (other_value == value
+                        && (other_position < position || (other_position == position && other_request < request)));
         }
-        for (int64_t picked = 0; picked < extra_budget; ++picked) {
-            int64_t best       = -1;
-            float   best_value = -1.0f;
-            for (int64_t candidate = 0; candidate < candidate_count; ++candidate) {
-                if (selected[candidate]) {
-                    continue;
-                }
-                const float   value         = survival[candidate];
-                const int64_t request       = candidate / gamma;
-                const int64_t position      = candidate - request * gamma;
-                const int64_t best_request  = best < 0 ? batch : best / gamma;
-                const int64_t best_position = best < 0 ? gamma : best - best_request * gamma;
-                // Match the reference scheduler's stable ordering: survival
-                // first, then the earlier prefix position, then request id.
-                // Request-major tie breaking can spend the whole budget on
-                // one request when confidence saturates at exactly one.
-                if (value > best_value
-                    || (value == best_value
-                        && (position < best_position || (position == best_position && request < best_request)))) {
-                    best       = candidate;
-                    best_value = value;
-                }
-            }
-            if (best < 0) {
-                break;
-            }
-            selected[best] = 1;
-            ++verify_lengths[best / gamma];
+        if (rank < extra_budget) {
+            atomicAdd(&rows[request], 1);
         }
+    }
+    __syncthreads();
 
-        int64_t compact_row = 0;
-        for (int64_t request = 0; request < batch; ++request) {
-            const int64_t rows       = verify_lengths[request];
-            const int64_t dense_base = request * (gamma + 1);
-            for (int64_t row = 0; row < rows; ++row) {
-                compact_to_dense[compact_row++] = static_cast<int32_t>(dense_base + row);
-            }
+    for (int64_t request = threadIdx.x; request < batch; request += blockDim.x) {
+        verify_lengths[request] = rows[request];
+        int64_t compact_row     = 0;
+        for (int64_t previous = 0; previous < request; ++previous) {
+            compact_row += rows[previous];
+        }
+        const int64_t dense_base = request * (gamma + 1);
+        for (int64_t row = 0; row < rows[request]; ++row) {
+            compact_to_dense[compact_row + row] = static_cast<int32_t>(dense_base + row);
         }
     }
 }

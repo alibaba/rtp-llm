@@ -7,6 +7,10 @@
 #include <cuda_runtime.h>
 #include <unordered_set>
 #include <future>
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -19,7 +23,14 @@ namespace rtp_llm {
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();
-    void verifyDSparkMixedCacheTransport(bool asynchronous);
+    enum class DraftTransferBatch {
+        SINGLE,
+        MIXED,
+        LEGACY_UNDEFINED
+    };
+    void verifyDSparkMixedCacheTransport(bool               asynchronous,
+                                         int64_t            draft_window = 0,
+                                         DraftTransferBatch batch        = DraftTransferBatch::SINGLE);
 
     void verifyBlock(
         const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
@@ -85,7 +96,9 @@ void NormalCacheStoreTest::verifyBlock(
 
 // Exercise the production publisher and TCP transport, not model arithmetic.
 // Both model formats and addresses come from the mixed production cache allocator.
-void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
+void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool               asynchronous,
+                                                           int64_t            draft_window,
+                                                           DraftTransferBatch batch) {
     ASSERT_TRUE(initCacheStores());
     ModelConfig target;
     target.num_layers                         = 60;
@@ -126,6 +139,7 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
     ASSERT_TRUE(pool->init());
     const auto            cpu_byte = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
     CacheStoreAsyncWriter writer(0);
+    const int             batch_size = batch == DraftTransferBatch::MIXED ? 3 : 1;
     for (int rank = 0; rank < 4; ++rank) {
         std::vector<std::function<void()>> checks;
         if (asynchronous) {
@@ -142,7 +156,7 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
             const auto    next         = pool->convertIndexToAddr(global_layer, 1);
             ASSERT_EQ(static_cast<char*>(next.kv_addr) - static_cast<char*>(base.kv_addr), stride);
             CacheStoreInputs inputs{};
-            inputs.context_batch_size        = 1;
+            inputs.context_batch_size        = batch_size;
             inputs.tokens_per_block          = 128;
             inputs.pd_separation             = true;
             inputs.warmup                    = false;
@@ -153,14 +167,26 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
             inputs.kv_block_stride_bytes     = stride;
             inputs.kv_scale_stride_bytes     = scale_stride;
             inputs.use_opaque_kv_cache_store = opaque;
-            inputs.prefix_lengths_host       = torch::tensor({128}, torch::kInt32);
-            inputs.input_lengths_host        = torch::tensor({897}, torch::kInt32);
-            inputs.host_kv_cache_offset      = torch::tensor({3, 1, 2}, torch::kInt32).reshape({1, 3});
-            const int64_t request_id         = 31000 + rank;
-            inputs.request_id                = torch::tensor({request_id}, torch::kInt64);
-            inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
-            for (int page = 0; page < 9; ++page) {
-                inputs.cache_keys.push_back("page_" + std::to_string(page));
+            inputs.prefix_lengths_host       = torch::full({batch_size}, 128, torch::kInt32);
+            inputs.input_lengths_host        = torch::full({batch_size}, 897, torch::kInt32);
+            inputs.host_kv_cache_offset =
+                torch::tensor({3, 1, 2}, torch::kInt32).reshape({1, 3}).repeat({batch_size, 1});
+            inputs.request_id = torch::arange(31000 + rank * 10, 31000 + rank * 10 + batch_size, torch::kInt64);
+            inputs.request_pd_separation = torch::ones({batch_size}, torch::kBool);
+            // Also set the target's metadata to prove model_id0 is never cropped.
+            if (batch != DraftTransferBatch::LEGACY_UNDEFINED) {
+                inputs.pd_draft_cache_window_tokens = torch::full({batch_size}, draft_window, torch::kInt64);
+            }
+            if (batch == DraftTransferBatch::MIXED) {
+                inputs.pd_draft_cache_window_tokens.data_ptr<int64_t>()[1] = 0;
+                inputs.input_lengths_host.data_ptr<int32_t>()[2]           = 1;
+                inputs.host_kv_cache_offset[1].copy_(torch::tensor({1, 2, 3}, torch::kInt32));
+                inputs.host_kv_cache_offset[2].copy_(torch::tensor({2, 3, 1}, torch::kInt32));
+            }
+            for (int request = 0; request < batch_size; ++request) {
+                for (int page = 0; page < 9; ++page) {
+                    inputs.cache_keys.push_back("request_" + std::to_string(request) + "_page_" + std::to_string(page));
+                }
             }
             auto host   = torch::empty({4, stride}, cpu_byte);
             auto scales = torch::empty({4, scale_stride}, cpu_byte);
@@ -192,54 +218,71 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
             } else {
                 execWriteCacheStore(inputs, cache, false, cache_store2_);
             }
-            auto request = std::make_shared<RequestBlockBuffer>(std::to_string(request_id));
-            std::vector<std::pair<std::shared_ptr<BlockBuffer>, torch::Tensor>> expected;
-            for (int page = 0; page < 9; ++page) {
-                const auto key = makeCacheKey(inputs.model_id, inputs.cache_keys[page], inputs.layer_id);
-                if (page % 4 != rank) {
-                    checks.emplace_back([this, request_id, opaque, key]() {
-                        EXPECT_EQ(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(
-                                      std::to_string(request_id), (opaque ? "kv_" : "k_") + key),
-                                  nullptr);
-                    });
-                    continue;
+            for (int request_index = 0; request_index < batch_size; ++request_index) {
+                const auto   request_id     = inputs.request_id.data_ptr<int64_t>()[request_index];
+                const size_t context_tokens = 128 + inputs.input_lengths_host.data_ptr<int32_t>()[request_index];
+                const size_t request_window =
+                    inputs.pd_draft_cache_window_tokens.defined() ?
+                        inputs.pd_draft_cache_window_tokens.data_ptr<int64_t>()[request_index] :
+                        0;
+                auto request = std::make_shared<RequestBlockBuffer>(std::to_string(request_id));
+                std::vector<std::pair<std::shared_ptr<BlockBuffer>, torch::Tensor>> expected;
+                for (int page = 0; page < 9; ++page) {
+                    const auto key =
+                        makeCacheKey(inputs.model_id, inputs.cache_keys[request_index * 9 + page], inputs.layer_id);
+                    const size_t first_page = !opaque && context_tokens > request_window && request_window > 0 ?
+                                                  (context_tokens - request_window) / 128 :
+                                                  0;
+                    if (page % 4 != rank || static_cast<size_t>(page) < first_page
+                        || static_cast<size_t>(page) >= (context_tokens + 127) / 128) {
+                        checks.emplace_back([this, request_id, opaque, key]() {
+                            EXPECT_EQ(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(
+                                          std::to_string(request_id), (opaque ? "kv_" : "k_") + key),
+                                      nullptr);
+                        });
+                        continue;
+                    }
+                    const int physical = inputs.host_kv_cache_offset.data_ptr<int32_t>()[request_index * 3 + page / 4];
+                    auto      add      = [&](const std::string& name, const torch::Tensor& reference) {
+                        auto block = block_buffer_util_->makeBlockBuffer(name + key, reference.numel(), 0, true);
+                        request->addBlock(block);
+                        expected.emplace_back(block, reference);
+                    };
+                    if (opaque) {
+                        add("kv_", host[physical]);
+                        add("kv_scale_", scales[physical]);
+                    } else {
+                        add("k_", host[physical].narrow(0, 0, stride / 2));
+                        add("v_", host[physical].narrow(0, stride / 2, stride / 2));
+                    }
                 }
-                const int physical = inputs.host_kv_cache_offset.data_ptr<int32_t>()[page / 4];
-                auto      add      = [&](const std::string& name, const torch::Tensor& reference) {
-                    auto block = block_buffer_util_->makeBlockBuffer(name + key, reference.numel(), 0, true);
-                    request->addBlock(block);
-                    expected.emplace_back(block, reference);
-                };
-                if (opaque) {
-                    add("kv_", host[physical]);
-                    add("kv_scale_", scales[physical]);
-                } else {
-                    add("k_", host[physical].narrow(0, 0, stride / 2));
-                    add("v_", host[physical].narrow(0, stride / 2, stride / 2));
-                }
+                checks.emplace_back([this, request, expected, cpu_byte]() {
+                    if (expected.empty()) {
+                        return;
+                    }
+                    auto result = std::make_shared<std::promise<std::pair<bool, CacheStoreErrorCode>>>();
+                    auto future = result->get_future();
+                    cache_store1_->load(
+                        request,
+                        [result](bool ok, CacheStoreErrorCode ec) { result->set_value({ok, ec}); },
+                        autil::NetUtil::getBindIp(),
+                        port2_,
+                        0,
+                        5000);
+                    ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+                    const auto status = future.get();
+                    ASSERT_TRUE(status.first);
+                    ASSERT_EQ(status.second, CacheStoreErrorCode::None);
+                    for (const auto& item : expected) {
+                        auto actual = torch::empty({item.first->len}, cpu_byte);
+                        ASSERT_EQ(
+                            cudaMemcpy(
+                                actual.data_ptr(), item.first->addr.get(), item.first->len, cudaMemcpyDeviceToHost),
+                            cudaSuccess);
+                        EXPECT_TRUE(torch::equal(actual, item.second)) << item.first->key;
+                    }
+                });
             }
-            checks.emplace_back([this, request, expected, cpu_byte]() {
-                auto result = std::make_shared<std::promise<std::pair<bool, CacheStoreErrorCode>>>();
-                auto future = result->get_future();
-                cache_store1_->load(
-                    request,
-                    [result](bool ok, CacheStoreErrorCode ec) { result->set_value({ok, ec}); },
-                    autil::NetUtil::getBindIp(),
-                    port2_,
-                    0,
-                    5000);
-                ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
-                const auto status = future.get();
-                ASSERT_TRUE(status.first);
-                ASSERT_EQ(status.second, CacheStoreErrorCode::None);
-                for (const auto& item : expected) {
-                    auto actual = torch::empty({item.first->len}, cpu_byte);
-                    ASSERT_EQ(
-                        cudaMemcpy(actual.data_ptr(), item.first->addr.get(), item.first->len, cudaMemcpyDeviceToHost),
-                        cudaSuccess);
-                    EXPECT_TRUE(torch::equal(actual, item.second)) << item.first->key;
-                }
-            });
         }
         if (asynchronous) {
             ASSERT_NO_THROW(writer.waitAllDone());
@@ -256,6 +299,26 @@ TEST_F(NormalCacheStoreTest, DSparkMixedCacheCP4PublicationAndTcpLoad) {
 
 TEST_F(NormalCacheStoreTest, DSparkMixedCacheCP4AsyncPublicationAndTcpLoad) {
     verifyDSparkMixedCacheTransport(true);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkWindowCP4PublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(false, 256);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkWindowCP4AsyncPublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(true, 256);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkMixedWindowBatchCP4PublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(false, 256, DraftTransferBatch::MIXED);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkMixedWindowBatchCP4AsyncPublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(true, 256, DraftTransferBatch::MIXED);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkUndefinedWindowCP4PublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(false, 0, DraftTransferBatch::LEGACY_UNDEFINED);
 }
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {

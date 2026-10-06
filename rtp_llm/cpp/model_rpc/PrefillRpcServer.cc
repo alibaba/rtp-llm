@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PdAllocateScheduling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -312,8 +313,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
+    alloc_request.set_draft_cache_window_tokens(draftCacheTransferWindowTokens());
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    normalizePdAllocateScheduling(*new_request);
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -334,6 +337,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    // An older D returns zero. A positive agreement must echo our exact offer.
+    const auto agreed_window = allocate_response.draft_cache_window_tokens();
+    prefill_context.generate_input->pd_draft_cache_window_tokens =
+        agreed_window == alloc_request.draft_cache_window_tokens() ? agreed_window : 0;
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "

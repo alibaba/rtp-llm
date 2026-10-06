@@ -618,6 +618,38 @@ TEST_F(MtpExecutorTest, AdaptiveVerifyCapRefreshesBookkeepingMirror) {
     EXPECT_TRUE(torch::equal(output.accept_len_cpu, torch::ones({4}, torch::kInt32)));
 }
 
+TEST_F(MtpExecutorTest, PrepareDSparkSkipsUnusedMtpProposalMirror) {
+    for (bool dspark : {false, true}) {
+        auto  components    = createMtpExecutorComponents(MtpExecutorTestConfig{});
+        auto& executor      = *components.executor;
+        executor.is_dspark_ = dspark;
+        auto stream         = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {2, 3});
+        stream->setIsContextStream(false);
+        auto buffer              = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens           = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
+        buffer->target_token_gpu = torch::tensor({3}, torch::kInt32).to(torch::kCUDA);
+        auto* anchor             = buffer->target_token_gpu.data_ptr<int>();
+        stream->setSPOutputBuffer(buffer);
+        std::list<GenerateStreamPtr> prefill, decode;
+        for (int round = 0; round < 2; ++round) {
+            prefill.clear();
+            decode.clear();
+            executor.prepareStreams({stream}, prefill, decode);
+            EXPECT_TRUE(prefill.empty());
+            ASSERT_EQ(decode.size(), 1);
+            EXPECT_EQ(buffer->target_token_gpu.data_ptr<int>(), anchor);
+            EXPECT_EQ(buffer->target_token_gpu.item<int>(), 3);
+            if (dspark) {
+                EXPECT_FALSE(buffer->propose_tokens_gpu.defined());
+            } else {
+                ASSERT_TRUE(buffer->propose_tokens_gpu.is_cuda());
+                EXPECT_EQ(buffer->propose_tokens_gpu.item<int>(), -1);
+            }
+        }
+    }
+}
+
 TEST_F(MtpExecutorTest, DSparkKvLeaseFiltersRetiredRowsAndPreservesEpPhase) {
     auto  components                     = createMtpExecutorComponents(MtpExecutorTestConfig{});
     auto& executor                       = *components.executor;

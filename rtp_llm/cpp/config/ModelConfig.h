@@ -123,6 +123,10 @@ public:
 
     bool use_opaque_kv_cache_store = false;
 
+    // Model-owned native FULL/page-RR draft transport capability. Zero keeps
+    // full-history PD transfer. It does not change cache allocation or writes.
+    uint32_t pd_draft_cache_window_tokens = 0;
+
     int64_t pre_seq_len       = 0;
     bool    prefix_projection = false;
 

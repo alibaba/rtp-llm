@@ -34,6 +34,25 @@ def bare_mlp():
 
 
 class PrefillRouterOwnershipTest(unittest.TestCase):
+    def test_bf16_gate_skips_expansion_and_uses_linear(self):
+        for expanded_first in (False, True):
+            with self.subTest(expanded_first=expanded_first):
+                mlp = bare_mlp()
+                if expanded_first:
+                    mlp.prepare_prefill_router()
+                mlp.gate = CudaF16Linear(
+                    torch.randn(6144, 128, dtype=torch.bfloat16) * 0.01
+                )
+                mlp.prepare_prefill_router()
+                self.assertFalse(any("_prefill_gate" in name for name in mlp._buffers))
+                x = torch.randn(17, 6144, dtype=torch.bfloat16)
+                for prefill, invariant in ((True, False), (False, True)):
+                    mlp._prefill_router_active = prefill
+                    mlp._batch_invariant_router = invariant
+                    torch.testing.assert_close(
+                        mlp._compute_router_logits(x), mlp.gate(x), rtol=0, atol=0
+                    )
+
     def test_exact_expansion_and_layout(self):
         for weight in (
             torch.randn(128, 6144) * 0.01,

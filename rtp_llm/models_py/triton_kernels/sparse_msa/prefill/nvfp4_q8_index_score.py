@@ -6,8 +6,19 @@ import triton.language as tl
 
 from ..decode.nvfp4_q8_index_score import _load_index_page_fp8
 
+# These values change with live request shapes, not the kernel's tile geometry.
+# Runtime scalars avoid compiling a new IndexScore binary for every P step.
+_DYNAMIC_GEOMETRY_PARAMETERS = (
+    "TOTAL_Q",
+    "MAX_PAGES",
+    "PHYSICAL_PAGES",
+    "TABLE_SIZE",
+    "OSTRIDE_H",
+    "OSTRIDE_Q",
+)
 
-@triton.jit
+
+@triton.jit(do_not_specialize=_DYNAMIC_GEOMETRY_PARAMETERS)
 def _prefill_score_kernel(
     Q,
     K,
@@ -18,17 +29,17 @@ def _prefill_score_kernel(
     CUPAGES,
     PAGES,
     OUT,
-    TOTAL_Q: tl.constexpr,
+    TOTAL_Q,
     HEADS: tl.constexpr,
-    MAX_PAGES: tl.constexpr,
-    PHYSICAL_PAGES: tl.constexpr,
-    TABLE_SIZE: tl.constexpr,
+    MAX_PAGES,
+    PHYSICAL_PAGES,
+    TABLE_SIZE,
     QSTRIDE: tl.constexpr,
     HSTRIDE: tl.constexpr,
     KSTRIDE: tl.constexpr,
     SSTRIDE: tl.constexpr,
-    OSTRIDE_H: tl.constexpr,
-    OSTRIDE_Q: tl.constexpr,
+    OSTRIDE_H,
+    OSTRIDE_Q,
     TILE_Q: tl.constexpr,
 ):
     tile = tl.program_id(0)
@@ -57,7 +68,10 @@ def _prefill_score_kernel(
     page_ok = logical_ok & (physical >= 0) & (physical < PHYSICAL_PAGES)
     d = tl.arange(0, 128)
     query = tl.load(
-        Q + row[:, None] * QSTRIDE + head * HSTRIDE + d[None, :],
+        Q
+        + row[:, None].to(tl.int64) * QSTRIDE
+        + head.to(tl.int64) * HSTRIDE
+        + d[None, :],
         mask=row_ok[:, None],
         other=0.0,
     )
@@ -74,13 +88,13 @@ def _prefill_score_kernel(
     )
     score = tl.max(tl.where(visible, dot, float("-inf")), axis=1)
     tl.store(
-        OUT + head * OSTRIDE_H + row * OSTRIDE_Q + block,
+        OUT + head.to(tl.int64) * OSTRIDE_H + row.to(tl.int64) * OSTRIDE_Q + block,
         score,
         mask=row_ok,
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=_DYNAMIC_GEOMETRY_PARAMETERS)
 def _prefill_two_page_score_kernel(
     Q,
     K,
@@ -91,17 +105,17 @@ def _prefill_two_page_score_kernel(
     CUPAGES,
     PAGES,
     OUT,
-    TOTAL_Q: tl.constexpr,
+    TOTAL_Q,
     HEADS: tl.constexpr,
-    MAX_PAGES: tl.constexpr,
-    PHYSICAL_PAGES: tl.constexpr,
-    TABLE_SIZE: tl.constexpr,
+    MAX_PAGES,
+    PHYSICAL_PAGES,
+    TABLE_SIZE,
     QSTRIDE: tl.constexpr,
     HSTRIDE: tl.constexpr,
     KSTRIDE: tl.constexpr,
     SSTRIDE: tl.constexpr,
-    OSTRIDE_H: tl.constexpr,
-    OSTRIDE_Q: tl.constexpr,
+    OSTRIDE_H,
+    OSTRIDE_Q,
     TILE_Q: tl.constexpr,
 ):
     # Reuse one Q tile across two independent 128-token page reductions.
@@ -124,7 +138,10 @@ def _prefill_two_page_score_kernel(
     page_end = tl.load(CUPAGES + segment + 1)
     d = tl.arange(0, 128)
     query = tl.load(
-        Q + row[:, None] * QSTRIDE + head * HSTRIDE + d[None, :],
+        Q
+        + row[:, None].to(tl.int64) * QSTRIDE
+        + head.to(tl.int64) * HSTRIDE
+        + d[None, :],
         mask=row_ok[:, None],
         other=0.0,
     )
@@ -159,7 +176,7 @@ def _prefill_two_page_score_kernel(
         )
         score = tl.max(tl.where(visible, dot, float("-inf")), axis=1)
         tl.store(
-            OUT + head * OSTRIDE_H + row * OSTRIDE_Q + block,
+            OUT + head.to(tl.int64) * OSTRIDE_H + row.to(tl.int64) * OSTRIDE_Q + block,
             score,
             mask=row_ok & (block < MAX_PAGES),
         )

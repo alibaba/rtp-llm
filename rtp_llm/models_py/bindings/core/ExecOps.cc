@@ -435,13 +435,44 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         // pairs for both legacy and sharded cases.
         // Clamp by cache_keys_per_batch (global stride) — NOT max_blocks_per_batch,
         // which under CP shard is the local-compact stride for FULL groups.
-        const auto block_plan = buildCacheStoreBlockPlan(
-            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
-            use_group_cache_transfer_policy,
-            group_type,
-            param.cp_rank,
-            param.cp_size);
+        size_t draft_window = 0;
+        if (param.model_id != 0 && param.pd_draft_cache_window_tokens.defined()) {
+            const auto& windows = param.pd_draft_cache_window_tokens;
+            RTP_LLM_CHECK_WITH_INFO(windows.device().is_cpu() && windows.scalar_type() == torch::kInt64
+                                        && windows.is_contiguous()
+                                        && static_cast<size_t>(windows.numel()) == param.context_batch_size,
+                                    "invalid negotiated draft transport-window metadata");
+            const auto window = windows.data_ptr<int64_t>()[batch_id];
+            RTP_LLM_CHECK_WITH_INFO(window >= 0, "negative draft transport window");
+            if (window != 0) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    group_type == CacheGroupType::FULL && param.region_name == KVCacheRegionName::DEFAULT
+                        && !is_cp_compact_fixed_region && !mla_kvcache && prefix_len >= 0 && input_len >= 0,
+                    "negotiated draft window requires native FULL page-RR layout");
+                const size_t context_tokens = static_cast<size_t>(prefix_len) + static_cast<size_t>(input_len);
+                const auto   range =
+                    cacheTransferPageRange(context_tokens, static_cast<size_t>(window), seq_size_per_block);
+                RTP_LLM_CHECK_WITH_INFO(range.end <= cache_keys_per_batch,
+                                        "draft transport window exceeds cache key coverage");
+                draft_window = static_cast<size_t>(window);
+            }
+        }
+        // Do not materialize a whole-history plan just to discard it for a
+        // negotiated tail. Only the owned tail pages are enumerated here.
+        const auto block_plan =
+            draft_window != 0 ?
+                buildFullCacheStoreBlockPlanForWindow(static_cast<size_t>(prefix_len) + static_cast<size_t>(input_len),
+                                                      draft_window,
+                                                      seq_size_per_block,
+                                                      param.cp_rank,
+                                                      param.cp_size) :
+                buildCacheStoreBlockPlan(
+                    static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
+                    /*reuse_block_size=*/0,
+                    use_group_cache_transfer_policy,
+                    group_type,
+                    param.cp_rank,
+                    param.cp_size);
         // REBASE CONFLICT CONTEXT(6511f0467): source branch logged
         // `block_positions` from `blockPositionsForCacheTransfer`; new base
         // uses `buildCacheStoreBlockPlan` to map cache-key indices to compact

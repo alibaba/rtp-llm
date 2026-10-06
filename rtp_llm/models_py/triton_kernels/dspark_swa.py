@@ -167,7 +167,10 @@ def commit_paged_gqa_kv(k, v, cache, slot_ids, valid_mask):
         )
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["BLOCKS"],
+    do_not_specialize_on_alignment=["BLOCKS"],
+)
 def _paged_swa(
     Q,
     K,
@@ -182,7 +185,7 @@ def _paged_swa(
     HK: tl.constexpr,
     D: tl.constexpr,
     PAGE: tl.constexpr,
-    BLOCKS: tl.constexpr,
+    BLOCKS,
     PHYSICAL: tl.constexpr,
     CACHE_STRIDE: tl.constexpr,
     LEFT: tl.constexpr,

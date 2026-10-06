@@ -44,6 +44,10 @@ public:
 
     std::tuple<bool, ValueType> get(const KeyType& key);
 
+    // Read without changing recency or snapshot version. The caller owns synchronization;
+    // the returned pointer must not outlive removal/replacement of the entry.
+    const ValueType* peek(const KeyType& key) const;
+
     std::tuple<bool, ValueType> pop();
 
     std::tuple<bool, ValueType> popWithCond(const std::function<bool(const KeyType&, const ValueType&)>& cond);
@@ -120,6 +124,12 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType, Hash, Equal>::get(const
     }
     items_list_.splice(items_list_.begin(), items_list_, it->second);
     return {true, it->second->second};
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+const ValueType* LRUCache<KeyType, ValueType, Hash, Equal>::peek(const KeyType& key) const {
+    auto it = cache_items_map_.find(key);
+    return it == cache_items_map_.end() ? nullptr : &it->second->second;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

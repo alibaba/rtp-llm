@@ -19,6 +19,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+
     try:
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
             CudaMxfp8Linear,
@@ -28,9 +29,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
-    from rtp_llm.models_py.triton_kernels.common.swiglu_oai import (
-        swiglu_oai_torch,
-    )
+    from rtp_llm.models_py.triton_kernels.common.swiglu_oai import swiglu_oai_torch
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     CudaMxfp8Linear = None  # type: ignore
@@ -48,15 +47,14 @@ class _FusedFp8QuantParams(NamedTuple):
     group_size: int
     scale_ue8m0: bool
     round_to_pow2: bool
+    tma_packed_scales: bool = False
 
 
 def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
     if CudaFp8GEMMLinear is not None and isinstance(linear, CudaFp8GEMMLinear):
         return _FusedFp8QuantParams(
             group_size=getattr(linear, "input_quant_group_size", 128),
-            scale_ue8m0=getattr(
-                linear, "input_quant_scale_ue8m0", linear.scale_ue8m0
-            ),
+            scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", linear.scale_ue8m0),
             round_to_pow2=getattr(linear, "input_quant_round_to_pow2", False),
         )
     if CudaMxfp8Linear is not None and isinstance(linear, CudaMxfp8Linear):
@@ -64,6 +62,7 @@ def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
             group_size=getattr(linear, "input_quant_group_size", 32),
             scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", False),
             round_to_pow2=getattr(linear, "input_quant_round_to_pow2", True),
+            tma_packed_scales=linear.input_quant_tma_packed_scales,
         )
     return None
 
@@ -98,11 +97,13 @@ class DenseMLP(nn.Module):
         # ``config.swiglu_alpha`` / ``config.swiglu_limit`` and passes them in.
         self.swiglu_oai_params = swiglu_oai_params
         if self.swiglu_oai_params is not None:
-            assert activation_type == ActivationType.Swiglu, (
-                "swiglu_oai_params requires Swiglu activation_type"
-            )
+            assert (
+                activation_type == ActivationType.Swiglu
+            ), "swiglu_oai_params requires Swiglu activation_type"
             self.act_fn = lambda x: swiglu_oai_torch(
-                x, self.swiglu_oai_params[0], self.swiglu_oai_params[1],
+                x,
+                self.swiglu_oai_params[0],
+                self.swiglu_oai_params[1],
                 gate_first=True,
             )
         else:
@@ -159,22 +160,16 @@ class DenseMLP(nn.Module):
 
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
-        self._down_proj_fp8_quant_params = _get_fused_fp8_quant_params(
-            self.down_proj
-        )
+        self._down_proj_fp8_quant_params = _get_fused_fp8_quant_params(self.down_proj)
         self._fuse_silu_quant = (
             fuse_kernels_enabled(hw_kernel_config)
             and self.is_gated
             and self._down_proj_fp8_quant_params is not None
             and (self.down_proj.K % self._down_proj_fp8_quant_params.group_size == 0)
         )
-        if (
-            self._fuse_silu_quant
-            and self._down_proj_fp8_quant_params.scale_ue8m0
-        ):
+        if self._fuse_silu_quant and self._down_proj_fp8_quant_params.scale_ue8m0:
             self._fuse_silu_quant = (
-                self.down_proj.K
-                % (self._down_proj_fp8_quant_params.group_size * 4)
+                self.down_proj.K % (self._down_proj_fp8_quant_params.group_size * 4)
                 == 0
             )
 
@@ -201,13 +196,16 @@ class DenseMLP(nn.Module):
             _params = self._down_proj_fp8_quant_params
             assert _params is not None
             _alpha, _limit = self.swiglu_oai_params or (0.0, 0.0)
-            fp8_out, scale_out = silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
-                up.contiguous(),
-                quant_group_size=_params.group_size,
-                scale_ue8m0=_params.scale_ue8m0,
-                round_to_pow2=_params.round_to_pow2,
-                gemm1_alpha=_alpha,
-                gemm1_clamp_limit=_limit,
+            fp8_out, scale_out = (
+                silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
+                    up.contiguous(),
+                    quant_group_size=_params.group_size,
+                    scale_ue8m0=_params.scale_ue8m0,
+                    round_to_pow2=_params.round_to_pow2,
+                    gemm1_alpha=_alpha,
+                    gemm1_clamp_limit=_limit,
+                    tma_packed_scales=_params.tma_packed_scales,
+                )
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:

@@ -1,15 +1,27 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include <chrono>
 
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   output_ready = [this]() {
+        return hasError() || getStatus() == StreamState::FINISHED || !generate_outputs_queue_.isEmpty();
+    };
+    while (!output_ready()) {
+        // Timeout reporting takes mutex_; only check while active and empty.
+        lock.unlock();
         checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+        lock.lock();
+        if (output_ready()) {
+            break;
+        }
+        cv_->wait_for(
+            lock, std::chrono::microseconds(autil::SynchronizedQueue<GenerateOutputs>::DEF_WAIT_TIME), output_ready);
     }
     if (hasError()) {
-        return statusInfo();
+        // statusInfo() takes mutex_; copy the protected error without relocking.
+        return generate_status_->error_info;
     }
     if (generate_outputs_queue_.isEmpty()) {
         if (isFinished()) {
@@ -154,6 +166,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
+        cv_->notify_all();
     }
 }
 

@@ -85,6 +85,7 @@ class _FusedFp8QuantParams(NamedTuple):
     group_size: int
     scale_ue8m0: bool
     round_to_pow2: bool
+    tma_packed_scales: bool = False
 
 
 def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
@@ -99,6 +100,7 @@ def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
             group_size=getattr(linear, "input_quant_group_size", 32),
             scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", False),
             round_to_pow2=getattr(linear, "input_quant_round_to_pow2", True),
+            tma_packed_scales=linear.input_quant_tma_packed_scales,
         )
     return None
 
@@ -751,6 +753,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=params.group_size,
                 scale_ue8m0=params.scale_ue8m0,
                 round_to_pow2=params.round_to_pow2,
+                tma_packed_scales=params.tma_packed_scales,
             )
             hidden_states, topk_indices = self._forward_attention(
                 bf16_hs,
@@ -793,6 +796,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=_params.group_size,
                 scale_ue8m0=_params.scale_ue8m0,
                 round_to_pow2=_params.round_to_pow2,
+                tma_packed_scales=_params.tma_packed_scales,
             )
             hidden_states = self.mlp(
                 hidden_states, x_fp8=fp8_hs, x_scale=scale, **moe_kwargs
@@ -808,6 +812,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=_params.group_size,
                 scale_ue8m0=_params.scale_ue8m0,
                 round_to_pow2=_params.round_to_pow2,
+                tma_packed_scales=_params.tma_packed_scales,
             )
             hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale, **moe_kwargs)
         else:

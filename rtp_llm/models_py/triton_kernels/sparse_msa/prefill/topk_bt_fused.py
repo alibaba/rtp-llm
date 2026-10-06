@@ -58,9 +58,15 @@ def _nvfp4_attention_supports_out(attention) -> bool:
 
 
 @lru_cache(maxsize=8)
-def _nvfp4_attention_supports_flat_combine(attention) -> bool:
+def _nvfp4_attention_supports_flat_combine(attention, topk=16) -> bool:
     """Negotiate the optional combine-only geometry ABI per native callable."""
-    return "combine_cu_seqlens_q" in inspect.signature(attention).parameters
+    # The first optional-flat API supported16 only. A matching signature alone
+    # must not enable32 against that package; require explicit capability.
+    supported = getattr(attention, "supported_flat_combine_topks", (16,))
+    return (
+        topk in supported
+        and "combine_cu_seqlens_q" in inspect.signature(attention).parameters
+    )
 
 
 def _flat_combine_shape_supported(num_q_heads, head_dim, topk, partial_dtype):
@@ -68,7 +74,7 @@ def _flat_combine_shape_supported(num_q_heads, head_dim, topk, partial_dtype):
     return (
         num_q_heads == 64
         and head_dim == 128
-        and topk == 16
+        and topk in (16, 32)
         and partial_dtype == torch.bfloat16
     )
 
@@ -844,6 +850,8 @@ def _allocate_topk_outputs(
     topk: int,
     device: torch.device,
     emit_block_table: bool,
+    *,
+    overwrite_topk: bool = False,
 ):
     if emit_block_table:
         block_tables = torch.zeros(
@@ -855,8 +863,11 @@ def _allocate_topk_outputs(
     else:
         block_tables = torch.empty(1, 1, dtype=torch.int32, device=device)
         output_seq_lens = torch.empty(1, dtype=torch.int32, device=device)
-    topk_idx = torch.full(
-        (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=device
+    shape = (num_kv_heads, total_q, topk)
+    topk_idx = (
+        torch.empty(shape, dtype=torch.int32, device=device)
+        if overwrite_topk
+        else torch.full(shape, -1, dtype=torch.int32, device=device)
     )
     return block_tables, output_seq_lens, topk_idx
 
@@ -1295,7 +1306,8 @@ def flash_prefill_topk_to_block_tables_fp4(
 ):
     """Run training-compatible Q8K4 IndexScore and RTP's production TopK.
 
-    Q is cast to scale-one E4M3. The score kernel reads packed NVFP4 index-K
+    BF16 Q is cast to scale-one E4M3; pre-cast E4M3 Q is consumed directly.
+    The score kernel reads packed NVFP4 index-K
     and its MMA-ordered block scales directly from the page table; it does not
     materialize historical keys in BF16 or FP8 working pages.
     """
@@ -1307,8 +1319,10 @@ def flash_prefill_topk_to_block_tables_fp4(
 
     if block_size_k != 128:
         raise ValueError("FP4 prefill index score requires 128-token pages")
-    if idx_q.dtype != torch.bfloat16 or idx_q.dim() != 3:
-        raise ValueError("Q8K4 prefill index Q source must be BF16 [token,head,128]")
+    if idx_q.dtype not in (torch.bfloat16, torch.float8_e4m3fn) or idx_q.dim() != 3:
+        raise ValueError("Q8K4 prefill index Q must be BF16 or E4M3 [token,head,128]")
+    if idx_q.dtype == torch.float8_e4m3fn and not idx_q.is_contiguous():
+        raise ValueError("pre-cast E4M3 index Q must be contiguous")
     if idx_k_fp4.dim() != 4 or idx_k_fp4.dtype != torch.uint8:
         raise ValueError("FP4 prefill index K must be uint8 [page,head,128,64]")
     total_q, num_heads, head_dim = map(int, idx_q.shape)
@@ -1333,15 +1347,29 @@ def flash_prefill_topk_to_block_tables_fp4(
         index_score_plan=index_score_plan,
         host_metadata=host_metadata,
     )
+    # Canonical TopK stores every index, including -1 padding. Only skip
+    # initialization when native score chunks cover the entire query output.
+    covered = 0
+    for chunk in chunks:
+        if chunk.q_start != covered or chunk.q_end <= chunk.q_start:
+            raise ValueError("FP4 prefill score chunks must partition all query rows")
+        covered = chunk.q_end
+    if covered != total_q:
+        raise ValueError("FP4 prefill score chunks do not cover the query output")
     block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
-        total_q, num_heads, topk, idx_q.device, emit_block_table
+        total_q,
+        num_heads,
+        topk,
+        idx_q.device,
+        emit_block_table,
+        overwrite_topk=True,
     )
     if not isinstance(index_score_plan, dict):
         index_score_plan = {}
     max_chunk_q = max(chunk.q_end - chunk.q_start for chunk in chunks)
     max_pages = triton.cdiv(max_seqlen_k, block_size_k)
     q8_buffer = index_score_plan.get("_q8_index_query_buffer")
-    if (
+    if idx_q.dtype == torch.bfloat16 and (
         q8_buffer is None
         or q8_buffer.shape[0] < max_chunk_q
         or q8_buffer.shape[1:] != (num_heads, head_dim)
@@ -1375,8 +1403,11 @@ def flash_prefill_topk_to_block_tables_fp4(
     for chunk, cu_page_offsets in zip(chunks, chunk_page_offsets):
         q_start, q_end = chunk.q_start, chunk.q_end
         chunk_q = q_end - q_start
-        q8_chunk = q8_buffer[:chunk_q]
-        scale1_query_fp8(idx_q[q_start:q_end].contiguous(), q8_chunk)
+        if idx_q.dtype == torch.float8_e4m3fn:
+            q8_chunk = idx_q[q_start:q_end]
+        else:
+            q8_chunk = q8_buffer[:chunk_q]
+            scale1_query_fp8(idx_q[q_start:q_end].contiguous(), q8_chunk)
 
         chunk_max_pages = triton.cdiv(chunk.max_seqlen_k, block_size_k)
         score = score_buffer[:, :chunk_q, :chunk_max_pages]
@@ -1576,7 +1607,7 @@ def _build_chunk_meta(
     ):
         from fmha_sm100.cute.interface import sparse_atten_nvfp4_kv_func
 
-        if _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func):
+        if _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func, topk):
             for chunk in chunks:
                 # Immutable and owned by this forward, reused by every sparse
                 # layer. Producer cu_q/cu_k and CSR geometry stay untouched.
@@ -1678,7 +1709,7 @@ def run_sparse_attn_chunk(
             and _flat_combine_shape_supported(
                 q.shape[1], q.shape[2], topk, partial_dtype
             )
-            and _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func)
+            and _nvfp4_attention_supports_flat_combine(sparse_atten_nvfp4_kv_func, topk)
         ):
             combine_kwargs["combine_cu_seqlens_q"] = c["combine_cu_q"]
         chunk_out = sparse_atten_nvfp4_kv_func(

@@ -19,12 +19,12 @@ BlockDependency childDep(CacheKeyType parent, uint32_t ordinal) {
     return dep;
 }
 
-void putOne(SharedBlockCache& cache,
-            CacheKeyType      key,
-            BlockIdxType      block,
-            const BlockDependency& dep,
+void putOne(SharedBlockCache&             cache,
+            CacheKeyType                  key,
+            BlockIdxType                  block,
+            const BlockDependency&        dep,
             SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace,
-            bool resident = false) {
+            bool                          resident     = false) {
     cache.put(key, std::vector<BlockIdxType>{block}, resident, namespace_id, dep);
 }
 
@@ -227,6 +227,31 @@ TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasU
     EXPECT_EQ(evicted.evicted_namespaces.at(8), SharedBlockCache::kGpuCpCanonicalNamespace);
 }
 
+TEST(SharedBlockCacheTest, GroupFlatEvictionPreservesOrderProtectionAndCanonicalMetadata) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    cache.put(1, {101, NULL_BLOCK_IDX}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep());
+    cache.put(2, {102, 202}, true, SharedBlockCache::kGpuLogicalNamespace, rootDep());
+    cache.put(3, {103, 203}, false, SharedBlockCache::kGpuCpCanonicalNamespace, childDep(1, 3), {true, false});
+    cache.put(3, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep());
+    cache.put(4, {104, 204}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep(4));
+
+    EXPECT_TRUE(cache.selectAndEvictForGroup(-1, 1).evicted_keys.empty());
+    EXPECT_TRUE(cache.selectAndEvictForGroup(2, 1).evicted_keys.empty());
+    EXPECT_TRUE(cache.selectAndEvictForGroup(1, 0).evicted_keys.empty());
+    const auto evicted = cache.selectAndEvictForGroup(1, 1);
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{3}));
+    EXPECT_EQ(evicted.evicted_slots.at(3), (std::vector<BlockIdxType>{103, 203}));
+    EXPECT_EQ(evicted.evicted_namespaces.at(3), SharedBlockCache::kGpuCpCanonicalNamespace);
+    EXPECT_EQ(evicted.evicted_dependencies.at(3).parent_key, 1);
+    EXPECT_EQ(evicted.evicted_dependencies.at(3).ordinal, 3u);
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(4));
+    EXPECT_EQ(cache.selectAndEvictForGroup(1, 99).evicted_keys, (CacheKeysType{4}));
+    EXPECT_TRUE(cache.selectAndEvictForGroup(1, 1).evicted_keys.empty());
+}
+
 TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
     SharedBlockCache cache;
     cache.put(1,
@@ -248,12 +273,21 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
     SharedBlockCache cache;
     cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
 
-    cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(2, std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(1, 1));
-    cache.put(3, std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(2, 2));
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1));
+    cache.put(3,
+              std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(2, 2));
 
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
 
@@ -271,18 +305,36 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
     SharedBlockCache cache;
     cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
 
-    cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(2, std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(1, 1));
-    cache.put(3, std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(2, 2));
-    cache.put(10, std::vector<BlockIdxType>{110, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 310}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(11, std::vector<BlockIdxType>{111, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 311}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(10, 1));
-    cache.put(12, std::vector<BlockIdxType>{112, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 312}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(11, 2));
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1));
+    cache.put(3,
+              std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(2, 2));
+    cache.put(10,
+              std::vector<BlockIdxType>{110, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 310},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(11,
+              std::vector<BlockIdxType>{111, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 311},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(10, 1));
+    cache.put(12,
+              std::vector<BlockIdxType>{112, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 312},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(11, 2));
 
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/2);
 
@@ -297,10 +349,16 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnly
     SharedBlockCache cache;
     cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
 
-    cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(2, std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(1, 1));
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1));
 
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
 
@@ -313,14 +371,26 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupSkipsChainsWithoutTargetSlot) {
     SharedBlockCache cache;
     cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
 
-    cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(2, std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(1, 1));
-    cache.put(10, std::vector<BlockIdxType>{110, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
-              SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
-    cache.put(11, std::vector<BlockIdxType>{111, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 311}, false,
-              SharedBlockCache::kGpuLogicalNamespace, childDep(10, 1));
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1));
+    cache.put(10,
+              std::vector<BlockIdxType>{110, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(11,
+              std::vector<BlockIdxType>{111, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 311},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(10, 1));
 
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
 

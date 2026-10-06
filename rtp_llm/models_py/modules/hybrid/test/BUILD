@@ -146,3 +146,9 @@ py_test(
     tags = ["open_skip", "SM100_X86"],
     exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )
+py_test(
+    name = "test_cp_host_metadata",
+    srcs = ["test_cp_host_metadata.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

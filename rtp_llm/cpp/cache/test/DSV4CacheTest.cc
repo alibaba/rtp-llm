@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -402,6 +404,55 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(decode_config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(decode_config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(decode_config.cache_specs[6]->block_size_bytes(), 74880u);
+}
+
+TEST(KVCacheTransferPlannerTest, TransportWindowRoundsAbsolutePages) {
+    for (size_t context : {0u, 1u, 127u, 128u, 129u, 4095u, 4096u, 4097u, 74011u, 100000u}) {
+        const auto range = cacheTransferPageRange(context, 4096, 128);
+        EXPECT_EQ(range.begin, (context > 4096 ? context - 4096 : 0) / 128);
+        EXPECT_EQ(range.end, context / 128 + (context % 128 != 0));
+        EXPECT_LE(range.end - range.begin, 33u);
+        EXPECT_EQ(cacheTransferPageRange(context, 0, 128).begin, 0u);
+    }
+    const auto maximum = std::numeric_limits<size_t>::max();
+    EXPECT_EQ(cacheTransferPageRange(maximum, 1, 128).end, maximum / 128 + 1);
+    EXPECT_THROW(cacheTransferPageRange(1, 4096, 0), std::invalid_argument);
+    EXPECT_THROW(buildFullCacheStoreBlockPlanForWindow(maximum, 4096, 1, 0, 4), std::overflow_error);
+    EXPECT_THROW(buildFullCacheStoreBlockPlanForWindow(0, 4096, 128, 0, 0), std::invalid_argument);
+    EXPECT_THROW(buildFullCacheStoreBlockPlanForWindow(1, 4096, 128, -1, 4), std::invalid_argument);
+    EXPECT_THROW(buildFullCacheStoreBlockPlanForWindow(1, 4096, 128, 4, 4), std::invalid_argument);
+}
+
+TEST(KVCacheTransferPlannerTest, TransportWindowCpUnionMatchesDecodePages) {
+    for (int cp_size : {1, 2, 4}) {
+        for (size_t context : {0u, 1u, 127u, 128u, 129u, 4095u, 4096u, 4097u, 51000u, 74011u, 100000u}) {
+            const auto       range = cacheTransferPageRange(context, 4096, 128);
+            std::vector<int> coverage(range.end - range.begin, 0);
+            for (int rank = 0; rank < cp_size; ++rank) {
+                const auto plan = buildFullCacheStoreBlockPlanForWindow(context, 4096, 128, rank, cp_size);
+                for (const auto& block : plan) {
+                    ASSERT_GE(block.key_index, static_cast<int>(range.begin));
+                    ASSERT_LT(block.key_index, static_cast<int>(range.end));
+                    EXPECT_EQ(block.key_index % cp_size, rank);
+                    EXPECT_EQ(block.offset_index, block.key_index / cp_size);
+                    ++coverage[block.key_index - range.begin];
+                }
+                // Disabling the transport window preserves the legacy FULL plan.
+                const auto full   = buildFullCacheStoreBlockPlanForWindow(context, 0, 128, rank, cp_size);
+                const auto legacy = buildCacheStoreBlockPlan(range.end, 0, false, CacheGroupType::FULL, rank, cp_size);
+                ASSERT_EQ(full.size(), legacy.size());
+                for (size_t i = 0; i < full.size(); ++i) {
+                    EXPECT_EQ(full[i].key_index, legacy[i].key_index);
+                    EXPECT_EQ(full[i].offset_index, legacy[i].offset_index);
+                }
+            }
+            for (int count : coverage) {
+                EXPECT_EQ(count, 1);
+            }
+        }
+    }
+    // A shorter reused prefix must use its own tail, not the previous request's.
+    EXPECT_LT(cacheTransferPageRange(51000, 4096, 128).end, cacheTransferPageRange(100000, 4096, 128).begin);
 }
 
 TEST(KVCacheTransferPlannerTest, CpCompactSwaUsesCanonicalTailRows) {

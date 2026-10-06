@@ -84,6 +84,156 @@ def cpu_oracle(q, packed, scales, cu, lengths, prefixes, offsets, table, blocks)
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestQ8KV4PrefillIndexScore(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("RTP_TEST_Q8KV4_LARGE_STRIDE") == "1",
+        "additional ~2GiB allocation",
+    )
+    def test_query_address_crosses_int32_element_boundary(self):
+        q = torch.empty_strided(
+            (129, 4, 128),
+            (2**24, 128, 1),
+            device="cuda",
+            dtype=torch.float8_e4m3fn,
+        )
+        q.copy_(torch.ones(129, 4, 128, device="cuda").to(torch.float8_e4m3fn))
+        packed = torch.full((2, 1, 128, 64), 0x22, device="cuda", dtype=torch.uint8)
+        scales = torch.ones((2, 1, 2, 32, 4, 4), device="cuda").to(torch.float8_e4m3fn)
+        cu = torch.tensor([0, 129], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([256], device="cuda", dtype=torch.int32)
+        prefixes = torch.tensor([127], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+        pages = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        out = torch.empty(4, 129, 2, device="cuda")
+        for tile in (32, 128):
+
+            def run():
+                q8kv4_prefill_index_score(
+                    q,
+                    packed,
+                    scales,
+                    cu,
+                    lengths,
+                    prefixes,
+                    offsets,
+                    pages,
+                    out,
+                    max_seqlen_q=129,
+                    tile_q=tile,
+                )
+
+            run()
+            torch.testing.assert_close(
+                out[:, :, 0], torch.full_like(out[:, :, 0], 128), atol=0, rtol=0
+            )
+            self.assertTrue(bool(torch.isneginf(out[:, 0, 1]).all()))
+            torch.testing.assert_close(
+                out[:, 1:, 1], torch.full_like(out[:, 1:, 1], 128), atol=0, rtol=0
+            )
+            expected = out.clone()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run()
+            out.fill_(100)
+            graph.replay()
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+    def test_dynamic_geometry_reuses_compiled_variant(self):
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
+            nvfp4_q8_index_score as score_op,
+        )
+
+        dynamic = {
+            "TOTAL_Q",
+            "MAX_PAGES",
+            "PHYSICAL_PAGES",
+            "TABLE_SIZE",
+            "OSTRIDE_H",
+            "OSTRIDE_Q",
+        }
+        kernel = score_op._prefill_two_page_score_kernel
+        params = {param.name: param for param in kernel.params}
+        self.assertEqual(set(kernel.do_not_specialize), dynamic)
+        for name in dynamic:
+            self.assertFalse(params[name].is_constexpr)
+            self.assertTrue(params[name].do_not_specialize)
+
+        torch.manual_seed(2026100553)
+        previous = None
+        for total, blocks, pages in ((258, 3, 7), (274, 5, 13), (300, 7, 17)):
+            q = torch.randn(total, 4, 128, device="cuda").to(torch.float8_e4m3fn)
+            packed = torch.randint(
+                0, 256, (pages, 1, 128, 64), device="cuda", dtype=torch.uint8
+            )
+            scales = torch.full(
+                (pages, 1, 2, 32, 4, 4),
+                0.5,
+                device="cuda",
+                dtype=torch.float8_e4m3fn,
+            )
+            cu = torch.tensor([0, 129, total], device="cuda", dtype=torch.int32)
+            lengths = torch.full(
+                (2,), blocks * 128 - 1, device="cuda", dtype=torch.int32
+            )
+            prefix = lengths - torch.tensor(
+                [129, total - 129], device="cuda", dtype=torch.int32
+            )
+            offsets = torch.tensor(
+                [0, blocks, blocks * 2], device="cuda", dtype=torch.int32
+            )
+            table = torch.arange(blocks * 2, device="cuda", dtype=torch.int32)
+            table[1] = -1
+            buffers = [
+                torch.full((4, total + 7, blocks + 3), 123.0, device="cuda")
+                for _ in range(2)
+            ]
+            expected, actual = (buffer[:, :total, :blocks] for buffer in buffers)
+            # Independent one-page reduction preserves the original dot shape.
+            _prefill_score_kernel[(triton.cdiv(max(129, total - 129), 128), 8, blocks)](
+                q,
+                packed,
+                scales.view(torch.uint8),
+                cu,
+                lengths,
+                prefix,
+                offsets,
+                table,
+                expected,
+                total,
+                4,
+                blocks,
+                pages,
+                table.numel(),
+                q.stride(0),
+                q.stride(1),
+                packed.stride(0),
+                scales.stride(0),
+                expected.stride(0),
+                expected.stride(1),
+                128,
+                num_warps=4,
+            )
+            q8kv4_prefill_index_score(
+                q,
+                packed,
+                scales,
+                cu,
+                lengths,
+                prefix,
+                offsets,
+                table,
+                actual,
+                max_seqlen_q=max(129, total - 129),
+            )
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for buffer in buffers:
+                self.assertTrue(torch.all(buffer[:, total:, :] == 123.0))
+                self.assertTrue(torch.all(buffer[:, :total, blocks:] == 123.0))
+            variants = len(kernel.device_caches[torch.cuda.current_device()][0])
+            if previous is not None:
+                self.assertEqual(variants, previous)
+            previous = variants
+
     def test_two_page_production_topk_cross_segment_chunks(self):
         torch.manual_seed(2026100127)
         pages, total = 5, 274

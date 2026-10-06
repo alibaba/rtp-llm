@@ -32,6 +32,22 @@ cc_library(
 )
 
 cc_test(
+    name = "tcp_cache_store_load_closure_test",
+    srcs = ["TcpCacheStoreLoadServiceClosureTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        ":cache_store_test_base",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@local_config_cuda//cuda:cuda_driver",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + device_impl_target(),
+    env = {"CACHE_STORE_RDMA_MODE": "0"},
+    copts = ["-fno-access-control"] + copts(),
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "cache_store_gtest",
     srcs = glob(["*.cpp"], exclude = test_base_sources),
     deps = [

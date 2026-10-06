@@ -8,6 +8,19 @@ requirement([
 embedding_arpc_deps()
 
 cc_library(
+    name = "draft_cache_transfer_window",
+    hdrs = ["DraftCacheTransferWindow.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "pd_allocate_scheduling",
+    hdrs = ["PdAllocateScheduling.h"],
+    deps = ["//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "tensor_pb_convert",
     srcs = ["TensorPbConvert.cc"],
     hdrs = ["TensorPbConvert.h"],
@@ -53,12 +66,14 @@ cc_library(
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = ["RPCPool.h", "PdAllocateScheduling.h", "DraftCacheTransferWindow.h"],
     ),
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
+        ":draft_cache_transfer_window",
         ":model_rpc_pool",
+        ":pd_allocate_scheduling",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",

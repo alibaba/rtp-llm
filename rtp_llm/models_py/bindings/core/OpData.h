@@ -94,9 +94,10 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;             // int64, [context_batch_size]
-    torch::Tensor request_pd_separation;  // bool, [context_batch_size]
-    torch::Tensor cache_keys;             // [context_batch_size]
+    torch::Tensor request_id;                    // int64, [context_batch_size]
+    torch::Tensor request_pd_separation;         // bool, [context_batch_size]
+    torch::Tensor pd_draft_cache_window_tokens;  // CPU int64, [context_batch_size]; zero = legacy
+    torch::Tensor cache_keys;                    // [context_batch_size]
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
     size_t        seq_size_per_block;
@@ -291,6 +292,7 @@ struct CacheStoreInputs {
     // writer wait for store callbacks without blocking writer submission
     // threads on every layer.
     CacheStoreAsyncWriter* cache_store_async_writer = nullptr;
+    torch::Tensor          pd_draft_cache_window_tokens;  // optional CPU int64, per context request
 };
 
 struct AttentionCommonInputs {

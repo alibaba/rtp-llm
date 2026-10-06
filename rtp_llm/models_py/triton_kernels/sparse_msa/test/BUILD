@@ -83,3 +83,15 @@ py_test(
     tags = ["SM100_X86"],
     exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_nvfp4_cp_mapped_writer",
+    srcs = [
+        "test_nvfp4_cp_mapped_writer.py",
+        "nvfp4_cp_writer_reference.py",
+    ],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1", "RTP_TEST_NVFP4_CP_MAPPED_GPU": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)

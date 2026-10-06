@@ -134,6 +134,7 @@ class ModelConfig(CppModelConfig):
         "extra_data_path",
         "local_extra_data_path",
         "model_type",
+        "pd_draft_cache_window_tokens",
         "ptuning_path",
         "mm_model_config",
         "deepseek_rope_mscale",

@@ -266,8 +266,9 @@ struct PyCacheStoreInputs {
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
 
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
-    int cp_size = 1;
-    int cp_rank = 0;
+    int           cp_size = 1;
+    int           cp_rank = 0;
+    torch::Tensor pd_draft_cache_window_tokens;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -285,6 +286,9 @@ struct PyContextParallelParams {
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
+    // Forward-owned host originals; kernels keep using the CUDA fields above.
+    torch::Tensor prefill_cp_chunk_lengths_cpu;
+    torch::Tensor prefill_shuffle_indices_cpu;
 };
 
 struct PyAttentionInputs {

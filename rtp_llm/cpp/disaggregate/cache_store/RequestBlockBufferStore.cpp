@@ -170,7 +170,10 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
         }
     }
 
-    auto new_block = std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true);
+    auto new_block     = std::make_shared<BlockBuffer>(*block);
+    new_block->addr    = std::move(addr);
+    new_block->gpu_mem = false;
+    new_block->adopted = true;
 
     if (!copyBlock(new_block, block)) {
         return nullptr;

@@ -614,6 +614,9 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
+        if (model_id_ != 0 && dspark_model_role_ == DSparkModelRole::COMMIT) {
+            cache_store_inputs.pd_draft_cache_window_tokens = inputs.pd_draft_cache_window_tokens;
+        }
         params = cache_store_inputs;
     }
     return params;
@@ -697,6 +700,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             input_list.size());
 
     if (!inputs.warmup && inputs.pd_separation) {
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched(wait_cache_store_publication)");
         cache_store_async_writer_->waitAllDone();
     }
 
@@ -1048,6 +1052,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         if (!inputs.warmup && inputs.pd_separation) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(wait_cache_store_publication)");
             cache_store_async_writer_->waitAllDone();
         }
 
@@ -1506,6 +1511,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.pd_draft_cache_window_tokens =
+                    inputs.pd_draft_cache_window_tokens.defined() ?
+                        inputs.pd_draft_cache_window_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1585,6 +1594,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.pd_draft_cache_window_tokens =
+                    inputs.pd_draft_cache_window_tokens.defined() ?
+                        inputs.pd_draft_cache_window_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1642,6 +1655,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.pd_draft_cache_window_tokens);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

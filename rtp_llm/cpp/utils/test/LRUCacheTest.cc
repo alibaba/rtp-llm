@@ -186,4 +186,29 @@ TEST_F(LRUCacheTest, testGetUpdatesLRUOrder) {
     ASSERT_TRUE(cache.contains(key(1, 1)));
 }
 
+TEST_F(LRUCacheTest, testPeekPreservesRecencyAndSnapshotVersion) {
+    LRUCache<IntPair, std::string, IntPairHash, IntPairEqual> cache(3);
+    cache.put(key(1, 1), "A");
+    cache.put(key(1, 2), "B");
+    cache.put(key(2, 1), "C");
+    const auto  before    = cache.cacheSnapshot(-1);
+    const auto& read_only = cache;
+    ASSERT_NE(read_only.peek(key(1, 1)), nullptr);
+    EXPECT_EQ(*read_only.peek(key(1, 1)), "A");
+    EXPECT_EQ(*read_only.peek(key(1, 2)), "B");
+    EXPECT_EQ(read_only.peek(key(9, 9)), nullptr);
+    const auto after = cache.cacheSnapshot(-1);
+    EXPECT_EQ(after.version, before.version);
+    EXPECT_EQ(after.values, before.values);
+    cache.put(key(3, 1), "D");
+    EXPECT_EQ(read_only.peek(key(1, 1)), nullptr);
+    EXPECT_EQ(std::get<1>(cache.pop()), "B");
+    cache.put(key(2, 1), "updated");
+    EXPECT_EQ(*read_only.peek(key(2, 1)), "updated");
+    cache.remove(key(2, 1));
+    EXPECT_EQ(read_only.peek(key(2, 1)), nullptr);
+    cache.clear();
+    EXPECT_EQ(read_only.peek(key(3, 1)), nullptr);
+}
+
 }  // namespace rtp_llm

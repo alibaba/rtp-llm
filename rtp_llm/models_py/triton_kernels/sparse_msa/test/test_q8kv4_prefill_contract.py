@@ -149,12 +149,22 @@ class Q8KV4PrefillContractTest(unittest.TestCase):
                 self.assertTrue(op._nvfp4_attention_supports_flat_combine(flat))
             self.assertEqual(signature.call_count, 2)
         op._nvfp4_attention_supports_flat_combine.cache_clear()
+        # Old optional ABI must not be mistaken for the new TopK32 contract.
+        self.assertFalse(op._nvfp4_attention_supports_flat_combine(flat, 32))
+
+        def flat32(q, *, out=None, combine_cu_seqlens_q=None):
+            return out
+
+        flat32.supported_flat_combine_topks = (16, 32)
+        self.assertTrue(op._nvfp4_attention_supports_flat_combine(flat32, 32))
+        self.assertTrue(op._nvfp4_attention_supports_flat_combine(flat32, 16))
+        self.assertFalse(op._nvfp4_attention_supports_flat_combine(flat32, 8))
         self.assertTrue(op._flat_combine_shape_supported(64, 128, 16, torch.bfloat16))
+        self.assertTrue(op._flat_combine_shape_supported(64, 128, 32, torch.bfloat16))
         for heads, dim, topk, dtype in (
             (32, 128, 16, torch.bfloat16),
             (64, 64, 16, torch.bfloat16),
             (64, 128, 4, torch.bfloat16),
-            (64, 128, 32, torch.bfloat16),
             (64, 128, 16, torch.float32),
         ):
             self.assertFalse(op._flat_combine_shape_supported(heads, dim, topk, dtype))
@@ -223,6 +233,51 @@ class Q8KV4PrefillContractTest(unittest.TestCase):
         oracle.masked_fill_(~valid[None], float("-inf"))
         oracle = oracle.reshape(heads, rows, pages, 128).amax(-1)
         torch.testing.assert_close(rawscore, oracle, rtol=1e-5, atol=1e-5)
+        # Both producer contracts must reach the same real packed-K4 score and
+        # production TopK; pre-cast Q must not allocate or invoke the cast path.
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+            PrefillScoreHostMetadata,
+        )
+
+        plans = [
+            {
+                "_fp4_host_metadata": PrefillScoreHostMetadata(
+                    (rows,), (tokens,), (tokens - rows,), (0,)
+                )
+            }
+            for _ in range(2)
+        ]
+
+        def index(value, plan):
+            return op.flash_prefill_topk_to_block_tables_fp4(
+                value,
+                ip,
+                idx_scale_mma,
+                cuq,
+                lengths,
+                prefixes,
+                rows,
+                tokens,
+                128,
+                4,
+                pages,
+                index_score_plan=plan,
+                kv_indices=permutation,
+                emit_block_table=True,
+            )
+
+        projected_index = index(iq, plans[0])
+        with patch.object(
+            op, "scale1_query_fp8", side_effect=AssertionError("Q8 must skip cast")
+        ):
+            precast_index = index(iq8, plans[1])
+        for a, b in zip(projected_index, precast_index):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        self.assertIn("_q8_index_query_buffer", plans[0])
+        self.assertNotIn("_q8_index_query_buffer", plans[1])
+        self.report["index_bf16_projection_cast_vs_precast_q8"] = (
+            "exact TopK/block tables/seqlens"
+        )
         topk = rawscore.topk(4, dim=-1).indices.int().contiguous()
         q8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
         op.scale1_query_fp8(q, q8)

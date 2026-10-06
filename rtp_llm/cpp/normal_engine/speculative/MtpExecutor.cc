@@ -515,7 +515,7 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
     return sp_buffer;
 }
 
-static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
+static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer, bool needs_proposal) {
     // PDFUSION and P2P paths publish device mirrors directly. Legacy/test
     // initialization may only carry the two CPU tokens; materialize those once
     // here rather than teaching the generic GenerateStream about MTP state.
@@ -526,7 +526,9 @@ static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputP
     if (!sp_buffer->target_token_gpu.defined() || !sp_buffer->target_token_gpu.is_cuda()) {
         sp_buffer->target_token_gpu = sp_buffer->tokens.reshape({-1}).narrow(0, 0, 1).to(cuda_i32);
     }
-    if (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda()) {
+    // DSpARK publishes no recurrent MTP proposal. Its -1 CPU sentinel must
+    // not trigger a pageable H2D copy and stream sync on every decode round.
+    if (needs_proposal && (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda())) {
         sp_buffer->propose_tokens_gpu = sp_buffer->tokens.reshape({-1}).narrow(0, 1, 1).to(cuda_i32);
     }
 }
@@ -2440,7 +2442,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // set propose_step
         auto sp_output_buffer          = stream->getSPOutputBuffer();
         sp_output_buffer->propose_step = propose_step_;
-        ensureSpOutputTokenGpuMirrors(sp_output_buffer);
+        ensureSpOutputTokenGpuMirrors(sp_output_buffer, !is_dspark_);
     }
 }
 

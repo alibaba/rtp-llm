@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DraftCacheTransferWindow.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -177,8 +178,15 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
+    decode_context.draft_cache_window_tokens = negotiateDraftCacheTransferWindow(
+        decode_context.allocate_request.draft_cache_window_tokens(),
+        draftCacheTransferWindowTokens(),
+        generate_stream->reuseBlockSize() != 0
+            || (generate_stream->streamCacheResource().resourceContext().reuse_cache && generate_stream->reuseCache()));
+    GenerateOutputsPB allocate_response;
+    allocate_response.set_draft_cache_window_tokens(decode_context.draft_cache_window_tokens);
     GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
+                      decode_context.rpc_context.grpc_stream->Write(allocate_response),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 
@@ -442,6 +450,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_count(1);
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_draft_cache_window_tokens(load_context.draft_cache_window_tokens);
+    request.set_draft_cache_context_tokens(load_context.draft_cache_context_tokens);
 
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
@@ -517,6 +527,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_draft_cache_window_tokens(load_context.draft_cache_window_tokens);
+    request.set_draft_cache_context_tokens(load_context.draft_cache_context_tokens);
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
         request.set_partition_count(1);
@@ -636,7 +648,9 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     1,
                                     0,
                                     decode_context.server_context,
-                                    decode_context.prefill_cp_size};
+                                    decode_context.prefill_cp_size,
+                                    decode_context.draft_cache_window_tokens,
+                                    static_cast<size_t>(generate_stream->inputLength())};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -1323,9 +1337,34 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
-                            CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto           block_pos_list = blockPositionsForLoad(
-                                block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
+                            CacheGroupType      group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            std::vector<size_t> block_pos_list;
+                            if (load_context.draft_cache_window_tokens != 0) {
+                                if (group_type != CacheGroupType::FULL || region_name != KVCacheRegionName::DEFAULT
+                                    || load_context.reuse_block_size != 0
+                                    || mtp_engine_init_params->model_config_.pd_draft_cache_window_tokens
+                                           != load_context.draft_cache_window_tokens) {
+                                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                                     "incompatible negotiated draft transport-window layout");
+                                }
+                                const size_t tokens_per_block = gid < mtp_cache_cfg.group_seq_size_per_block.size() ?
+                                                                    mtp_cache_cfg.group_seq_size_per_block[gid] :
+                                                                    mtp_cache_cfg.seq_size_per_block;
+                                const auto   range = cacheTransferPageRange(load_context.draft_cache_context_tokens,
+                                                                          load_context.draft_cache_window_tokens,
+                                                                          tokens_per_block);
+                                if (range.end > block_num || range.end > load_context.cache_keys.size()) {
+                                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                                     "draft transport window exceeds allocated logical pages");
+                                }
+                                block_pos_list.reserve(range.end - range.begin);
+                                for (size_t page = range.begin; page < range.end; ++page) {
+                                    block_pos_list.push_back(page);
+                                }
+                            } else {
+                                block_pos_list = blockPositionsForLoad(
+                                    block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
+                            }
                             // REBASE CONFLICT CONTEXT(6511f0467): source branch
                             // computed MTP load positions with direct
                             // `blockPositionsForCacheTransfer`; new base uses
@@ -1564,7 +1603,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->partition_count(),
                                  request->partition_id(),
                                  server_context,
-                                 std::max(1, request->prefill_cp_size())});
+                                 std::max(1, request->prefill_cp_size()),
+                                 request->draft_cache_window_tokens(),
+                                 static_cast<size_t>(request->draft_cache_context_tokens())});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

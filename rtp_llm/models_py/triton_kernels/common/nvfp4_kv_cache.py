@@ -38,15 +38,18 @@ _TL_SCALE_MAX = tl.constexpr(448.0)
 _TL_E2M1_MAX = tl.constexpr(6.0)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["N", "COLS", "TS0"],
+    do_not_specialize_on_alignment=["N", "COLS", "TS0"],
+)
 def _decode_physical_slots_kernel(
     LENS,
     TABLE,
     OUT,
-    N: tl.constexpr,
-    COLS: tl.constexpr,
+    N,
+    COLS,
     LS: tl.constexpr,
-    TS0: tl.constexpr,
+    TS0,
     TS1: tl.constexpr,
     PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -595,6 +598,8 @@ def _quantize_main_index_rows_d128_kernel(
     v_ptr,
     idx_ptr,
     slots_ptr,
+    unpad_ptr,
+    owned_rows_ptr,
     k_packed_ptr,
     k_scales_ptr,
     v_packed_ptr,
@@ -618,6 +623,21 @@ def _quantize_main_index_rows_d128_kernel(
     NUM_HEADS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     MMA_SCALE_LAYOUT: tl.constexpr,
+    MAP_SOURCE_ROWS: tl.constexpr = False,
+    MAP_OWNED_ROWS: tl.constexpr = False,
+    persist_slots_ptr=None,
+    persist_k_packed_ptr=None,
+    persist_k_scales_ptr=None,
+    persist_v_packed_ptr=None,
+    persist_v_scales_ptr=None,
+    persist_idx_packed_ptr=None,
+    persist_idx_scales_ptr=None,
+    PERSIST_MAIN_PACKED_S0: tl.constexpr = 0,
+    PERSIST_MAIN_SCALE_S0: tl.constexpr = 0,
+    PERSIST_IDX_PACKED_S0: tl.constexpr = 0,
+    PERSIST_IDX_SCALE_S0: tl.constexpr = 0,
+    PERSIST_NUM_BLOCKS: tl.constexpr = 0,
+    WRITE_PERSISTENT: tl.constexpr = False,
 ):
     """One row/plane CTA, eight independent groups by eight nibble pairs.
 
@@ -632,27 +652,48 @@ def _quantize_main_index_rows_d128_kernel(
     head = tl.where(is_k, plane, tl.where(is_v, plane - NUM_HEADS, 0))
 
     valid_row = row < N
+    source_row = row
+    if MAP_SOURCE_ROWS:
+        logical_row = row
+        if MAP_OWNED_ROWS:
+            logical_row = tl.load(owned_rows_ptr + row, mask=valid_row, other=0).to(
+                tl.int64
+            )
+        source_row = tl.load(unpad_ptr + logical_row, mask=valid_row, other=0).to(
+            tl.int64
+        )
     slot = tl.load(slots_ptr + row, mask=valid_row, other=-1).to(tl.int64)
     valid_slot = valid_row & (slot >= 0) & (slot < NUM_BLOCKS * PAGE_SIZE)
+    input_valid = valid_slot
+    if WRITE_PERSISTENT:
+        persist_slot = tl.load(persist_slots_ptr + row, mask=valid_row, other=-1).to(
+            tl.int64
+        )
+        persist_valid = (
+            valid_row
+            & (persist_slot >= 0)
+            & (persist_slot < PERSIST_NUM_BLOCKS * PAGE_SIZE)
+        )
+        input_valid = valid_slot | persist_valid
     block = slot // PAGE_SIZE
     page_offset = slot - block * PAGE_SIZE
     pair = tl.arange(0, 8)[None, :]
     groups = tl.arange(0, 8)
     group = groups[:, None]
     element = group * 16 + 2 * pair
-    main_even_offset = row * K_S0 + head * K_S1 + element * K_S2
+    main_even_offset = source_row * K_S0 + head * K_S1 + element * K_S2
     main_odd_offset = main_even_offset + K_S2
-    v_even_offset = row * V_S0 + head * V_S1 + element * V_S2
+    v_even_offset = source_row * V_S0 + head * V_S1 + element * V_S2
     v_odd_offset = v_even_offset + V_S2
-    idx_even_offset = row * IDX_S0 + element * IDX_S2
+    idx_even_offset = source_row * IDX_S0 + element * IDX_S2
     idx_odd_offset = idx_even_offset + IDX_S2
 
-    k_even = tl.load(k_ptr + main_even_offset, mask=valid_slot & is_k, other=0.0)
-    k_odd = tl.load(k_ptr + main_odd_offset, mask=valid_slot & is_k, other=0.0)
-    v_even = tl.load(v_ptr + v_even_offset, mask=valid_slot & is_v, other=0.0)
-    v_odd = tl.load(v_ptr + v_odd_offset, mask=valid_slot & is_v, other=0.0)
-    idx_even = tl.load(idx_ptr + idx_even_offset, mask=valid_slot & is_idx, other=0.0)
-    idx_odd = tl.load(idx_ptr + idx_odd_offset, mask=valid_slot & is_idx, other=0.0)
+    k_even = tl.load(k_ptr + main_even_offset, mask=input_valid & is_k, other=0.0)
+    k_odd = tl.load(k_ptr + main_odd_offset, mask=input_valid & is_k, other=0.0)
+    v_even = tl.load(v_ptr + v_even_offset, mask=input_valid & is_v, other=0.0)
+    v_odd = tl.load(v_ptr + v_odd_offset, mask=input_valid & is_v, other=0.0)
+    idx_even = tl.load(idx_ptr + idx_even_offset, mask=input_valid & is_idx, other=0.0)
+    idx_odd = tl.load(idx_ptr + idx_odd_offset, mask=input_valid & is_idx, other=0.0)
     even_values = tl.where(is_k, k_even, tl.where(is_v, v_even, idx_even)).to(
         tl.float32
     )
@@ -721,6 +762,61 @@ def _quantize_main_index_rows_d128_kernel(
         stored_scale,
         mask=valid_slot & is_idx,
     )
+
+    if WRITE_PERSISTENT:
+        persist_block = persist_slot // PAGE_SIZE
+        persist_page_offset = persist_slot - persist_block * PAGE_SIZE
+        persist_main_packed_offset = (
+            persist_block * PERSIST_MAIN_PACKED_S0
+            + (head * PAGE_SIZE + persist_page_offset) * 64
+            + group * 8
+            + pair
+        )
+        persist_main_scale_offset = (
+            persist_block * PERSIST_MAIN_SCALE_S0
+            + head * PAGE_SIZE * 8
+            + _scale_128x4_offset(persist_page_offset, groups)
+        )
+        persist_idx_packed_offset = (
+            persist_block * PERSIST_IDX_PACKED_S0
+            + persist_page_offset * 64
+            + group * 8
+            + pair
+        )
+        persist_idx_scale_offset = (
+            persist_block * PERSIST_IDX_SCALE_S0
+            + _scale_128x4_offset(persist_page_offset, groups)
+        )
+        tl.store(
+            persist_k_packed_ptr + persist_main_packed_offset,
+            packed_codes,
+            mask=persist_valid & is_k,
+        )
+        tl.store(
+            persist_k_scales_ptr + persist_main_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_k,
+        )
+        tl.store(
+            persist_v_packed_ptr + persist_main_packed_offset,
+            packed_codes,
+            mask=persist_valid & is_v,
+        )
+        tl.store(
+            persist_v_scales_ptr + persist_main_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_v,
+        )
+        tl.store(
+            persist_idx_packed_ptr + persist_idx_packed_offset,
+            packed_codes,
+            mask=persist_valid & is_idx,
+        )
+        tl.store(
+            persist_idx_scales_ptr + persist_idx_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_idx,
+        )
 
 
 @triton.jit
@@ -1480,6 +1576,8 @@ def quantize_main_index_rows(
             v,
             index_k,
             physical_slots,
+            physical_slots,
+            physical_slots,
             k_packed,
             k_scales,
             v_packed,
@@ -1539,6 +1637,154 @@ def quantize_main_index_rows(
         IDX_DIM=index_dim,
         IDX_GROUPS=index_groups,
         MMA_SCALE_LAYOUT=mma_scale_layout,
+        num_warps=1,
+    )
+
+
+def _validate_cp_writer_planes(planes):
+    if len(planes) != 6 or planes[0].ndim < 2:
+        raise ValueError("M3.1 CP writer requires six paged planes")
+    pages = int(planes[0].shape[0])
+    for tensor, elements, dtype in zip(
+        planes,
+        (32768, 4096, 32768, 4096, 8192, 1024),
+        (torch.uint8, torch.float8_e4m3fn) * 3,
+    ):
+        stride = 1
+        if tensor.ndim < 2 or int(tensor.shape[0]) != pages or tensor.dtype != dtype:
+            raise ValueError("M3.1 CP writer plane geometry or dtype mismatch")
+        for size, actual_stride in zip(
+            reversed(tensor.shape[1:]), reversed(tensor.stride()[1:])
+        ):
+            if int(actual_stride) != stride:
+                raise ValueError("M3.1 CP writer plane rows must be contiguous")
+            stride *= int(size)
+        if stride != elements or int(tensor.stride(0)) < elements:
+            raise ValueError("M3.1 CP writer requires head4/dim128/page128 planes")
+    if planes[0].stride(0) != planes[2].stride(0) or planes[1].stride(0) != planes[
+        3
+    ].stride(0):
+        raise ValueError("M3.1 CP writer K/V plane row strides must match")
+    return pages
+
+
+def quantize_cp_main_index_rows_to_planes(
+    packed: torch.Tensor,
+    unpad_indices: torch.Tensor,
+    slots: torch.Tensor,
+    k_packed: torch.Tensor,
+    k_scales: torch.Tensor,
+    v_packed: torch.Tensor,
+    v_scales: torch.Tensor,
+    idx_packed: torch.Tensor,
+    idx_scales: torch.Tensor,
+    *,
+    owned_rows: Optional[torch.Tensor] = None,
+    persistent_slots: Optional[torch.Tensor] = None,
+    persistent_planes: Optional[tuple[torch.Tensor, ...]] = None,
+) -> None:
+    """M3.1 CP suffix writer reading the padded packed projection directly.
+
+    Working rows read ``unpad_indices[row]``; rank-owned persistent rows read
+    ``unpad_indices[owned_rows[row]]``. The maps must contain valid source
+    indices, as required by the former index_select chain. Their values remain
+    on device. Output planes may be independent working allocations or views
+    of the persistent value/side ABI. No tensor or device metadata is allocated.
+    Optional persistent planes reuse the quantized values with a full logical
+    slot map, never a compressed owned-row map, and independent storage.
+    """
+    if (
+        packed.ndim != 2
+        or int(packed.shape[1]) != 1152
+        or packed.dtype != torch.bfloat16
+        or packed.stride(1) != 1
+    ):
+        raise ValueError("M3.1 CP writer requires BF16 packed[padded_rows,1152]")
+    dual = persistent_planes is not None
+    if dual != (persistent_slots is not None) or (dual and owned_rows is not None):
+        raise ValueError(
+            "dual CP writer requires full persistent slots and no owned-row map"
+        )
+    persistent = tuple(persistent_planes) if dual else ()
+    maps = (unpad_indices, slots) + (() if owned_rows is None else (owned_rows,))
+    if dual:
+        maps += (persistent_slots,)
+    if any(
+        tensor.ndim != 1 or tensor.dtype != torch.int64 or not tensor.is_contiguous()
+        for tensor in maps
+    ):
+        raise ValueError("M3.1 CP writer maps and slots require contiguous int64")
+    rows = int(slots.numel())
+    if dual and persistent_slots.numel() != rows:
+        raise ValueError("dual CP writer persistent slots must cover every logical row")
+    if (owned_rows is None and unpad_indices.numel() != rows) or (
+        owned_rows is not None and owned_rows.numel() != rows
+    ):
+        raise ValueError("M3.1 CP writer row-map/slot count mismatch")
+    outputs = (k_packed, k_scales, v_packed, v_scales, idx_packed, idx_scales)
+    if not packed.is_cuda or any(
+        not tensor.is_cuda or tensor.device != packed.device
+        for tensor in (*maps, *outputs, *persistent)
+    ):
+        raise ValueError("M3.1 CP writer tensors must share one CUDA device")
+    pages = _validate_cp_writer_planes(outputs)
+    if dual:
+        persistent_pages = _validate_cp_writer_planes(persistent)
+        if rows:
+            working_storage = {
+                x.untyped_storage().data_ptr() for x in (*outputs, packed, *maps)
+            }
+            if working_storage.intersection(
+                x.untyped_storage().data_ptr() for x in persistent
+            ):
+                raise ValueError(
+                    "dual CP writer destinations must have independent non-input storage"
+                )
+    if rows == 0:
+        return
+    k = packed[:, :512].view(packed.shape[0], 4, 128)
+    v = packed[:, 512:1024].view(packed.shape[0], 4, 128)
+    index_k = packed[:, 1024:].view(packed.shape[0], 1, 128)
+    _quantize_main_index_rows_d128_kernel[(rows, 9)](
+        k,
+        v,
+        index_k,
+        slots,
+        unpad_indices,
+        unpad_indices if owned_rows is None else owned_rows,
+        *outputs,
+        rows,
+        K_S0=int(k.stride(0)),
+        K_S1=int(k.stride(1)),
+        K_S2=int(k.stride(2)),
+        V_S0=int(v.stride(0)),
+        V_S1=int(v.stride(1)),
+        V_S2=int(v.stride(2)),
+        IDX_S0=int(index_k.stride(0)),
+        IDX_S2=int(index_k.stride(2)),
+        MAIN_PACKED_S0=int(k_packed.stride(0)),
+        MAIN_SCALE_S0=int(k_scales.stride(0)),
+        IDX_PACKED_S0=int(idx_packed.stride(0)),
+        IDX_SCALE_S0=int(idx_scales.stride(0)),
+        NUM_BLOCKS=pages,
+        NUM_HEADS=4,
+        PAGE_SIZE=128,
+        MMA_SCALE_LAYOUT=True,
+        MAP_SOURCE_ROWS=True,
+        MAP_OWNED_ROWS=owned_rows is not None,
+        persist_slots_ptr=persistent_slots,
+        persist_k_packed_ptr=persistent[0] if dual else None,
+        persist_k_scales_ptr=persistent[1] if dual else None,
+        persist_v_packed_ptr=persistent[2] if dual else None,
+        persist_v_scales_ptr=persistent[3] if dual else None,
+        persist_idx_packed_ptr=persistent[4] if dual else None,
+        persist_idx_scales_ptr=persistent[5] if dual else None,
+        PERSIST_MAIN_PACKED_S0=int(persistent[0].stride(0)) if dual else 0,
+        PERSIST_MAIN_SCALE_S0=int(persistent[1].stride(0)) if dual else 0,
+        PERSIST_IDX_PACKED_S0=int(persistent[4].stride(0)) if dual else 0,
+        PERSIST_IDX_SCALE_S0=int(persistent[5].stride(0)) if dual else 0,
+        PERSIST_NUM_BLOCKS=persistent_pages if dual else 0,
+        WRITE_PERSISTENT=dual,
         num_warps=1,
     )
 
@@ -1603,6 +1849,8 @@ def quantize_main_index_rows_to_planes(
             k,
             v,
             index_k,
+            slots,
+            slots,
             slots,
             k_packed,
             k_scales,

@@ -22,6 +22,21 @@ struct CacheStoreBlockPair {
     int offset_index;
 };
 
+// Half-open absolute logical-page range. A zero window retains full history.
+// Page rounding retains the partially covered first and last pages.
+struct CacheTransferPageRange {
+    size_t begin;
+    size_t end;
+};
+
+CacheTransferPageRange cacheTransferPageRange(size_t context_tokens, size_t window_tokens, size_t tokens_per_block);
+
+// Transport-only window for native FULL/page-RR caches, NOT the compact SWA
+// layout below. Keys and offsets stay absolute, even when earlier pages are
+// omitted. Callers must negotiate identical P/D window semantics first.
+std::vector<CacheStoreBlockPair> buildFullCacheStoreBlockPlanForWindow(
+    size_t context_tokens, size_t window_tokens, size_t tokens_per_block, int cp_rank, int cp_size);
+
 // Build the per-prefill-write iteration plan for cache_store registration.
 //
 // Background: ``cache_keys`` is always the FULL logical-block hash sequence

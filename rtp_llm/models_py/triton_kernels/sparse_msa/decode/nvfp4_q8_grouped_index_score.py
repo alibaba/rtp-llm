@@ -80,7 +80,10 @@ def _grouped_index_score_kernel(
         tl.store(OUT + output_row + block, score, mask=valid & (block < nblocks))
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["MB", "TOKENS", "TABLE_STRIDE"],
+    do_not_specialize_on_alignment=["MB", "TOKENS", "TABLE_STRIDE"],
+)
 def _ragged_grouped_index_score_kernel(
     Q,
     K,
@@ -90,15 +93,15 @@ def _ragged_grouped_index_score_kernel(
     CU_SEQLENS,
     OUT,
     NP,
-    MB: tl.constexpr,
+    MB,
     KS: tl.constexpr,
     SS: tl.constexpr,
-    TOKENS: tl.constexpr,
+    TOKENS,
     MAX_W: tl.constexpr,
     CHUNKS: tl.constexpr,
     PAD: tl.constexpr,
     MMA: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
     INIT: tl.constexpr,
     LOCAL: tl.constexpr,
     SM_SCALE: tl.constexpr,

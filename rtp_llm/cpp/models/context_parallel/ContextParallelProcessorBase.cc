@@ -392,6 +392,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
+    cp_params.prefill_cp_chunk_lengths_cpu     = cp_chunk_lengths;
+    cp_params.prefill_shuffle_indices_cpu      = shuffle_indices;
 #endif
 }
 

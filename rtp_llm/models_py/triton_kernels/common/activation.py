@@ -4,6 +4,11 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.common.mxfp8_scale_layout import (
+    allocate_mxfp8_tma_scale,
+    checked_ue8m0_exponent,
+)
+
 
 @triton.jit
 def _ieee_rn_div_f32(x, y):
@@ -810,6 +815,8 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
     ROUND_POW2: tl.constexpr = False,
     GEMM1_ALPHA: tl.constexpr = 0.0,
     GEMM1_CLAMP_LIMIT: tl.constexpr = 0.0,
+    TMA_PACKED_SCALES: tl.constexpr = False,
+    GROUPS_PER_CTA: tl.constexpr = 1,
 ):
     """Fused: SiLU-and-mul + per-token-group FP8 quant.
 
@@ -871,6 +878,43 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             exp_bits = (scale_bits >> 23) & 0xFF
             packed_scale = packed_scale | (exp_bits << (g * 8))
         tl.store(scale_base, packed_scale)
+    elif GROUPS_PER_CTA > 1:
+        # Independently reduce each 32-value group, while amortizing the
+        # one-warp CTA overhead across four groups for larger verify shapes.
+        group_idx = block_id * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
+        offs_in_d = group_idx[:, None] * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+        mask = offs_in_d < size_n
+        gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
+        up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
+        gate_up = (
+            (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1))
+            .to(tl.bfloat16)
+            .to(tl.float32)
+        )
+        absmax = tl.maximum(tl.max(tl.abs(gate_up), axis=1), 1e-4)
+        output_s = _ieee_rn_div_f32(absmax, fp8_max)
+        output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+        output_q = tl.clamp(
+            _ieee_rn_div_f32(
+                gate_up, tl.broadcast_to(output_s[:, None], gate_up.shape)
+            ),
+            fp8_min,
+            fp8_max,
+        ).to(output_ptr.dtype.element_ty)
+        tl.store(out_base + offs_in_d, output_q, mask=mask)
+        scale_offset = (
+            output_scale_ptr
+            + token_id * stride_output_scale_t
+            + (group_idx // 4) * stride_output_scale_g
+            + group_idx % 4
+        )
+        tl.store(
+            scale_offset,
+            checked_ue8m0_exponent(output_s, group_idx * BLOCK_N < size_n),
+            mask=group_idx * BLOCK_N < size_n,
+        )
     else:
         group_idx = block_id
         offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -897,12 +941,24 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             fp8_max,
         ).to(output_ptr.dtype.element_ty)
         tl.store(out_base + offs_in_d, output_q, mask=mask)
-        scale_offset = (
-            output_scale_ptr
-            + token_id * stride_output_scale_t
-            + group_idx * stride_output_scale_g
-        )
-        tl.store(scale_offset, output_s)
+        if TMA_PACKED_SCALES:
+            scale_offset = (
+                output_scale_ptr
+                + token_id * stride_output_scale_t
+                + (group_idx // 4) * stride_output_scale_g
+                + group_idx % 4
+            )
+            tl.store(
+                scale_offset,
+                checked_ue8m0_exponent(output_s, group_idx * BLOCK_N < size_n),
+            )
+        else:
+            scale_offset = (
+                output_scale_ptr
+                + token_id * stride_output_scale_t
+                + group_idx * stride_output_scale_g
+            )
+            tl.store(scale_offset, output_s)
 
 
 _SILU_MUL_FP8_QUANT_M_THRESHOLD = 1024
@@ -915,6 +971,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     round_to_pow2: bool = False,
     gemm1_alpha: float = 0.0,
     gemm1_clamp_limit: float = 0.0,
+    tma_packed_scales: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dense 2-D fused activation + per-token-group FP8 quant.
 
@@ -936,6 +993,9 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
                       tensor matching :func:`mxfp8_quant_act`'s contract.
         gemm1_alpha:  SwiGLU-OAI alpha (>0 enables OAI math, 0 for standard SiLU).
         gemm1_clamp_limit: SwiGLU-OAI clamp limit (used when gemm1_alpha > 0).
+        tma_packed_scales: Internal MXFP8 linear request for final int32 TMA
+                          scales at small T/group32/K%128==0. Defaults and
+                          unsupported/large-T paths retain their old scale ABI.
 
     Returns:
         (fp8_output, output_scale) tuple.
@@ -999,7 +1059,15 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         )
 
     output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
-    if mxfp8_mode:
+    direct_tma = (
+        tma_packed_scales
+        and mxfp8_mode
+        and quant_group_size == 32
+        and size_n % 128 == 0
+    )
+    if direct_tma:
+        output_scale, scale_bytes = allocate_mxfp8_tma_scale(T, size_n, input.device)
+    elif mxfp8_mode:
         output_scale = torch.empty(
             (T, num_groups),
             dtype=torch.float32,
@@ -1028,6 +1096,19 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
 
     BLOCK_N = quant_group_size
     NUM_STAGE = 2
+    groups_per_cta = (
+        4
+        if (
+            direct_tma
+            and input.dtype == torch.bfloat16
+            and 64 <= T <= 128
+            and size_n in (3072, 12288)
+            and gemm1_alpha == 1.702
+            and gemm1_clamp_limit == 7.0
+        )
+        else 1
+    )
+    num_blocks = triton.cdiv(num_blocks, groups_per_cta)
     grid = (num_blocks, T)
 
     finfo = torch.finfo(torch.float8_e4m3fn)
@@ -1039,9 +1120,9 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         input.stride(0),
         output,
         output.stride(0),
-        output_scale,
-        output_scale.stride(0),
-        output_scale.stride(1),
+        scale_bytes if direct_tma else output_scale,
+        4 if direct_tma else output_scale.stride(0),
+        ((T + 3) // 4 * 4) * 4 if direct_tma else output_scale.stride(1),
         size_n,
         fp8_max,
         fp8_min,
@@ -1051,6 +1132,8 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         ROUND_POW2=mxfp8_mode,
         GEMM1_ALPHA=gemm1_alpha,
         GEMM1_CLAMP_LIMIT=gemm1_clamp_limit,
+        TMA_PACKED_SCALES=direct_tma,
+        GROUPS_PER_CTA=groups_per_cta,
         num_warps=1,
     )
     return output, output_scale

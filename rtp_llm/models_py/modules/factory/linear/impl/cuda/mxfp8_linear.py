@@ -27,6 +27,8 @@ class CudaMxfp8Linear(LinearBase):
     input_quant_group_size: int = MX_BLOCK
     input_quant_scale_ue8m0: bool = False
     input_quant_round_to_pow2: bool = True
+    # Internal producer request. Other FP8 linears keep their existing scale ABI.
+    input_quant_tma_packed_scales: bool = True
 
     @classmethod
     def can_handle(
@@ -123,7 +125,10 @@ class CudaMxfp8Linear(LinearBase):
                 out = out + self.bias.to(out.dtype)
         else:
             out = mxfp8_linear(
-                x, self.weight, self._packed_weight_scale(), self.bias,
+                x,
+                self.weight,
+                self._packed_weight_scale(),
+                self.bias,
                 out_dtype=torch.bfloat16,
             )
         return out.reshape(*orig_shape[:-1], out.shape[-1])

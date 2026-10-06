@@ -5,6 +5,15 @@ using namespace std;
 
 namespace rtp_llm {
 
+uint32_t RemoteRpcServer::draftCacheTransferWindowTokens() const {
+    if (!engine_ || !engine_->isDSpark() || !propose_maga_init_params_ || !propose_maga_init_params_->mtp_model_params_
+        || propose_maga_init_params_->mtp_model_params_->size() != 1
+        || !propose_maga_init_params_->mtp_model_params_->at(0)) {
+        return 0;
+    }
+    return propose_maga_init_params_->mtp_model_params_->at(0)->model_config_.pd_draft_cache_window_tokens;
+}
+
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {

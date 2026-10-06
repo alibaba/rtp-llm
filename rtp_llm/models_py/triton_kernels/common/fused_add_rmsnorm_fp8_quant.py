@@ -24,6 +24,10 @@ import triton.language as tl
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+from rtp_llm.models_py.triton_kernels.common.mxfp8_scale_layout import (
+    allocate_mxfp8_tma_scale,
+    checked_ue8m0_exponent,
+)
 
 MAX_INREG_H = 8192
 
@@ -85,6 +89,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     ROUND_POW2: tl.constexpr = False,
+    TMA_PACKED_SCALES: tl.constexpr = False,
 ):
     """Single-pass: load whole row → r_new in registers → reuse for normalize+quant.
 
@@ -182,11 +187,21 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
         g_offs = tl.arange(0, num_groups)
         g_mask = g_offs < actual_num_groups
-        tl.store(
-            scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
-            s,
-            mask=g_mask,
-        )
+        if TMA_PACKED_SCALES:
+            tl.store(
+                scale_out_ptr
+                + token_id * stride_scale_t
+                + (g_offs // 4) * stride_scale_g
+                + g_offs % 4,
+                checked_ue8m0_exponent(s, g_mask),
+                mask=g_mask,
+            )
+        else:
+            tl.store(
+                scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
+                s,
+                mask=g_mask,
+            )
 
 
 @triton.jit
@@ -211,6 +226,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     ROUND_POW2: tl.constexpr = False,
+    TMA_PACKED_SCALES: tl.constexpr = False,
 ):
     """Single-pass dual-output: also stores bf16 normed alongside fp8.
 
@@ -316,11 +332,21 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
         g_offs = tl.arange(0, num_groups)
         g_mask = g_offs < actual_num_groups
-        tl.store(
-            scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
-            s,
-            mask=g_mask,
-        )
+        if TMA_PACKED_SCALES:
+            tl.store(
+                scale_out_ptr
+                + token_id * stride_scale_t
+                + (g_offs // 4) * stride_scale_g
+                + g_offs % 4,
+                checked_ue8m0_exponent(s, g_mask),
+                mask=g_mask,
+            )
+        else:
+            tl.store(
+                scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
+                s,
+                mask=g_mask,
+            )
 
 
 def _select_num_warps(H: int) -> int:
@@ -401,6 +427,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     group_size: int = 128,
     scale_ue8m0: bool = False,
     round_to_pow2: bool = False,
+    tma_packed_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Same as ``fused_add_rmsnorm_fp8_quant`` but also returns bf16 normed.
 
@@ -408,6 +435,8 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     rounded to the nearest power of two (MXFP8 1×32 format). The returned
     scale is a row-major fp32 ``[T, H // group_size]`` tensor matching
     :func:`mxfp8_quant_act`'s contract.
+    Internal ``tma_packed_scales`` requests final int32 TMA scales only for
+    small MXFP8 group32/H<=8192/H%128==0 inputs; other cases keep this ABI.
     """
     assert hidden_states.dim() == 2, "hidden_states must be 2-D"
     assert residual.shape == hidden_states.shape
@@ -420,7 +449,12 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0,
+            hidden_states,
+            residual,
+            weight,
+            eps,
+            group_size,
+            scale_ue8m0,
             round_to_pow2=round_to_pow2,
         )
 
@@ -430,10 +464,21 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    if mxfp8_mode:
+    direct_tma = (
+        tma_packed_scales
+        and mxfp8_mode
+        and group_size == 32
+        and H % 128 == 0
+        and T < 1024
+    )
+    if direct_tma:
+        scale_out, scale_bytes = allocate_mxfp8_tma_scale(T, H, hidden_states.device)
+    elif mxfp8_mode:
         num_groups = H // group_size
         scale_out = torch.empty(
-            (T, num_groups), dtype=torch.float32, device=hidden_states.device,
+            (T, num_groups),
+            dtype=torch.float32,
+            device=hidden_states.device,
         )
     else:
         scale_out = create_per_token_group_quant_fp8_output_scale(
@@ -458,7 +503,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         weight,
         bf16_out,
         fp8_out,
-        scale_out,
+        scale_bytes if direct_tma else scale_out,
         H,
         eps,
         fp8_max,
@@ -467,12 +512,13 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         residual.stride(0),
         bf16_out.stride(0),
         fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
+        4 if direct_tma else scale_out.stride(0),
+        ((T + 3) // 4 * 4) * 4 if direct_tma else scale_out.stride(1),
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
         ROUND_POW2=round_to_pow2 and not scale_ue8m0,
+        TMA_PACKED_SCALES=direct_tma,
         num_warps=_select_num_warps(H),
     )
     return bf16_out, fp8_out, scale_out
@@ -486,6 +532,7 @@ def fused_add_rmsnorm_fp8_quant(
     group_size: int = 128,
     scale_ue8m0: bool = False,
     round_to_pow2: bool = False,
+    tma_packed_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused add-residual + RMSNorm + per-token-group FP8 quant.
 
@@ -496,6 +543,8 @@ def fused_add_rmsnorm_fp8_quant(
     rounded to the nearest power of two (MXFP8 1×32 format). The returned
     scale is a row-major fp32 ``[T, H // group_size]`` tensor matching
     :func:`mxfp8_quant_act`'s contract.
+    Internal ``tma_packed_scales`` requests final int32 TMA scales only for
+    small MXFP8 group32/H<=8192/H%128==0 inputs; other cases keep this ABI.
     """
     assert hidden_states.dim() == 2, "hidden_states must be 2-D"
     assert residual.shape == hidden_states.shape
@@ -508,7 +557,12 @@ def fused_add_rmsnorm_fp8_quant(
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0,
+            hidden_states,
+            residual,
+            weight,
+            eps,
+            group_size,
+            scale_ue8m0,
             round_to_pow2=round_to_pow2,
         )
 
@@ -517,10 +571,21 @@ def fused_add_rmsnorm_fp8_quant(
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    if mxfp8_mode:
+    direct_tma = (
+        tma_packed_scales
+        and mxfp8_mode
+        and group_size == 32
+        and H % 128 == 0
+        and T < 1024
+    )
+    if direct_tma:
+        scale_out, scale_bytes = allocate_mxfp8_tma_scale(T, H, hidden_states.device)
+    elif mxfp8_mode:
         num_groups = H // group_size
         scale_out = torch.empty(
-            (T, num_groups), dtype=torch.float32, device=hidden_states.device,
+            (T, num_groups),
+            dtype=torch.float32,
+            device=hidden_states.device,
         )
     else:
         scale_out = create_per_token_group_quant_fp8_output_scale(
@@ -544,7 +609,7 @@ def fused_add_rmsnorm_fp8_quant(
         residual,
         weight,
         fp8_out,
-        scale_out,
+        scale_bytes if direct_tma else scale_out,
         H,
         eps,
         fp8_max,
@@ -552,12 +617,13 @@ def fused_add_rmsnorm_fp8_quant(
         hidden_states.stride(0),
         residual.stride(0),
         fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
+        4 if direct_tma else scale_out.stride(0),
+        ((T + 3) // 4 * 4) * 4 if direct_tma else scale_out.stride(1),
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
         ROUND_POW2=round_to_pow2 and not scale_ue8m0,
+        TMA_PACKED_SCALES=direct_tma,
         num_warps=_select_num_warps(H),
     )
     return fp8_out, scale_out

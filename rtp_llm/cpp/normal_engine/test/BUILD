@@ -3,6 +3,26 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "normal_generate_stream_output_wait_test",
+    srcs = ["NormalGenerateStreamOutputWaitTest.cc"],
+    copts = ["-fno-access-control"] + copts(),
+    deps = [
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({
+        "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+        "//conditions:default": [],
+    }),
+    env = {"CUDA_VISIBLE_DEVICES": "", "TEST_USING_DEVICE": "CPU"},
+    tags = ["local"],
+    timeout = "short",
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

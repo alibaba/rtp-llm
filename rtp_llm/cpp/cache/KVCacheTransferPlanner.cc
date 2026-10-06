@@ -1,8 +1,45 @@
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 namespace rtp_llm {
+
+CacheTransferPageRange cacheTransferPageRange(size_t context_tokens, size_t window_tokens, size_t tokens_per_block) {
+    if (tokens_per_block == 0) {
+        throw std::invalid_argument("cache transfer tokens_per_block must be positive");
+    }
+    const size_t first_token =
+        window_tokens != 0 && context_tokens > window_tokens ? context_tokens - window_tokens : 0;
+    // Avoid overflow in the usual (context_tokens + tokens_per_block - 1) ceil.
+    return {first_token / tokens_per_block,
+            context_tokens / tokens_per_block + static_cast<size_t>(context_tokens % tokens_per_block != 0)};
+}
+
+std::vector<CacheStoreBlockPair> buildFullCacheStoreBlockPlanForWindow(
+    size_t context_tokens, size_t window_tokens, size_t tokens_per_block, int cp_rank, int cp_size) {
+    if (cp_size < 1 || cp_rank < 0 || cp_rank >= cp_size) {
+        throw std::invalid_argument("cache transfer CP rank/size is invalid");
+    }
+    const auto range = cacheTransferPageRange(context_tokens, window_tokens, tokens_per_block);
+    if (range.end != 0 && range.end - 1 > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("cache transfer logical page index exceeds int capacity");
+    }
+    const size_t                     stride = static_cast<size_t>(cp_size);
+    const size_t                     rank   = static_cast<size_t>(cp_rank);
+    const size_t                     delta  = (rank + stride - range.begin % stride) % stride;
+    std::vector<CacheStoreBlockPair> plan;
+    if (delta >= range.end - range.begin) {
+        return plan;
+    }
+    const size_t first = range.begin + delta;
+    plan.reserve((range.end - 1 - first) / stride + 1);
+    for (size_t page = first; page < range.end; page += stride) {
+        plan.push_back({static_cast<int>(page), static_cast<int>(page / stride)});
+    }
+    return plan;
+}
 
 std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
                                                    size_t         reuse_block_size,
@@ -37,13 +74,13 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           int            cp_size) {
     std::vector<CacheStoreBlockPair> plan;
 
-    const bool sharded_full        = (cp_size > 1) && (group_type == CacheGroupType::FULL);
-    const bool compact_swa_by_cp   = (cp_size > 1) && (group_type == CacheGroupType::SWA);
+    const bool sharded_full      = (cp_size > 1) && (group_type == CacheGroupType::FULL);
+    const bool compact_swa_by_cp = (cp_size > 1) && (group_type == CacheGroupType::SWA);
     if (compact_swa_by_cp) {
         const size_t cp_size_t        = static_cast<size_t>(cp_size);
         const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
-        const size_t start = use_hybrid ? (canonical_blocks > 2 ? canonical_blocks - 2 : 0) :
-                                          std::min(reuse_block_size, canonical_blocks);
+        const size_t start            = use_hybrid ? (canonical_blocks > 2 ? canonical_blocks - 2 : 0) :
+                                                     std::min(reuse_block_size, canonical_blocks);
         plan.reserve(canonical_blocks - start);
         for (size_t compact_idx = start; compact_idx < canonical_blocks; ++compact_idx) {
             const size_t key_index = std::min((compact_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);

@@ -17,19 +17,21 @@ from rtp_llm.ops.compute_ops import PyModelInputs
 
 class MiniMaxM31MoeLayer(GenericMoeLayer):
     def prepare_prefill_router(self):
-        """Own exact gate parts only on the dedicated native-KV4 Prefill model."""
+        """Expand FP32 gates; BF16 gates retain their ordinary linear path."""
         if not isinstance(self.gate, CudaF16Linear) or self.gate.bias is not None:
-            raise ValueError(
-                "M3.1 Prefill router requires a bias-free FP32 linear gate"
-            )
+            raise ValueError("M3.1 Prefill router requires a bias-free linear gate")
+        part_names = ("_prefill_gate_high", "_prefill_gate_middle", "_prefill_gate_low")
+        if self.gate.weight.dtype == torch.bfloat16:
+            # Do not retain FP32 expansion buffers across a gate reload.
+            for name in part_names:
+                self._buffers.pop(name, None)
+            return
         from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
             expand_fp32_router_weight,
         )
 
         parts = expand_fp32_router_weight(self.gate.weight)
-        for name, tensor in zip(
-            ("_prefill_gate_high", "_prefill_gate_middle", "_prefill_gate_low"), parts
-        ):
+        for name, tensor in zip(part_names, parts):
             self.register_buffer(name, tensor, persistent=False)
 
     def clone_for_cuda_graph(self):

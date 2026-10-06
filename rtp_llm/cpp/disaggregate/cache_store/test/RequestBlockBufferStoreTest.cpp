@@ -51,6 +51,50 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     store->delRequestBlockBuffer("request-2");
 }
 
+TEST_F(RequestBlockBufferStoreTest, testPayloadAndMetadataReadyAtPublication) {
+    auto store       = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto request     = std::make_shared<RequestBlockBuffer>("tcp-batch");
+    auto passthrough = block_buffer_util_->makeBlockBuffer("cpu", 17, 42, false);
+    request->addBlock(passthrough);
+    for (size_t i = 0; i < 257; ++i) {
+        auto block             = block_buffer_util_->makeBlockBuffer(std::to_string(i), 1024 + i, char(i % 101), true);
+        block->partition_count = 4;
+        block->partition_id    = 2;
+        block->partition_kv_halves = true;
+        request->addBlock(block);
+    }
+    runtimeSyncAndCheck();  // Match runStoreTask's producer-event completion.
+    int  successful_callbacks = 0;
+    auto verify               = [&](bool success, const std::vector<std::shared_ptr<BlockBuffer>> blocks) {
+        if (!success) {
+            return;  // Existing request-close notification is separate.
+        }
+        ++successful_callbacks;
+        ASSERT_EQ(blocks.size(), 258);
+        for (const auto& block : blocks) {
+            if (block->key == "cpu") {
+                EXPECT_EQ(block, passthrough);
+                continue;
+            }
+            const size_t index = std::stoul(block->key);
+            EXPECT_FALSE(block->gpu_mem);
+            EXPECT_EQ(block->len, 1024 + index);
+            EXPECT_EQ(block->partition_count, 4);
+            EXPECT_EQ(block->partition_id, 2);
+            EXPECT_TRUE(block->partition_kv_halves);
+            const auto* bytes = static_cast<const unsigned char*>(block->addr.get());
+            for (size_t j = 0; j < block->len; ++j) {
+                ASSERT_EQ(bytes[j], index % 101);
+            }
+        }
+    };
+    ASSERT_TRUE(store->setRequestBlockBufferWatchFunc("tcp-batch", std::move(verify)));
+    EXPECT_EQ(successful_callbacks, 0);
+    ASSERT_TRUE(store->setRequestBlockBuffer(request));
+    EXPECT_EQ(successful_callbacks, 1);
+    EXPECT_EQ(store->getBlockBuffer("tcp-batch", "cpu"), passthrough);
+}
+
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
