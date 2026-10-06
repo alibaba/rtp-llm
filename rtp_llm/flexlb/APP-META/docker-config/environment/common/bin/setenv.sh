@@ -106,7 +106,10 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=2g"
+        # gRPC channel pools (hundreds of channels) plus large protobuf messages
+        # legitimately need more netty direct buffers under load; keep 2g default,
+        # allow operators to size it via FLEXLB_JVM_MAX_DIRECT.
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=${FLEXLB_JVM_MAX_DIRECT:-2g}"
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
