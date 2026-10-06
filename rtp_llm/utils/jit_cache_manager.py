@@ -91,11 +91,13 @@ class Component:
     scopes: tuple[str, ...] = ()
     backend: str | None = None
     local_dir: Path = Path()
+    empty_files: tuple[str, ...] = ()
 
-    def should_sync(self, rel: str, event_type: str | None = None) -> bool:
+    def should_sync(self, rel: str, event_type: str | None = None, size: int | None = None) -> bool:
         events = next((e for suffixes, e in self.rules if rel.endswith(suffixes)), ())
         parts = rel.split("/")
         return ((event_type in events if event_type else bool(events)) and ".." not in parts
+                and (size is None or size > 0 or parts[-1] in self.empty_files)
                 and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts))
 def rule(events: frozenset[str], *suffixes: str):
     return suffixes, events
@@ -105,7 +107,7 @@ CLOSED = MOVED | {"closed"}
 CREATED = CLOSED | {"created"}
 COMPONENTS = (
     Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
-    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin"),), ("accelerator", "@deep_gemm"), CUDA),
+    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("accelerator", "@deep_gemm"), CUDA, empty_files=(".committed",)),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
     # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).
@@ -233,7 +235,7 @@ class JitCacheManager(FileSystemEventHandler):
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
-                    if item.should_sync(rel, event.event_type) and path.stat().st_size:
+                    if item.should_sync(rel, event.event_type, path.stat().st_size):
                         self._dirty.set()
                 return
 
@@ -310,7 +312,7 @@ class JitCacheManager(FileSystemEventHandler):
                 with suppress(OSError):
                     st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
                     packable = S_ISREG(st.st_mode) and os.access(path, os.R_OK)
-                    if st.st_size and packable and item.should_sync(rel):
+                    if packable and item.should_sync(rel, size=st.st_size):
                         files[f"{item.name}/{rel}"] = path
         return files
 

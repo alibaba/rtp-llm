@@ -247,7 +247,9 @@ class WrapperCacheSetupTest(JitCacheTestBase):
             self.assertIsNone(cache_env.safe_local_path(self.root / "cache"))
 
     def test_no_writable_default_or_fallback_leaves_env_unchanged(self):
-        with mock.patch.object(cache_env, "ensure_writable_directory", return_value=None):
+        with mock.patch.object(
+            cache_env, "ensure_writable_directory", return_value=None
+        ):
             with self.assertRaisesRegex(OSError, "no writable triton"):
                 cache_env.configure_writable_cache_env(
                     "TRITON_CACHE_DIR", self.root / "default", "triton"
@@ -257,6 +259,50 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "local" / "deep_gemm",
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        products = {
+            "cache/hash/kernel.cu": b"source",
+            "cache/hash/kernel.cubin": b"binary",
+            "cache/hash/meta.json": b"{}",
+            "cache/hash/.committed": b"",
+            "cache/incomplete/kernel.cubin": b"",
+            "tmp/partial/.committed": b"",
+            "tmp.pid_42/partial/kernel.cubin": b"partial",
+        }
+        for rel, payload in products.items():
+            path = component.local_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        marker = component.local_dir / "cache/hash/.committed"
+        manager.on_any_event(
+            types.SimpleNamespace(
+                is_directory=False, event_type="closed", src_path=str(marker)
+            )
+        )
+        self.assertTrue(manager._dirty.is_set())
+        expected = {
+            f"deep_gemm/{rel}": data
+            for rel, data in products.items()
+            if rel.startswith("cache/hash/")
+        }
+        files = manager._snapshot_files()
+        self.assertEqual(set(files), set(expected))
+        snap_store = self.make_store()
+        snap_store.publish_snapshot(files)
+        restored = snap_store.prepare_restore(self.root / "restored")
+        self.assertEqual(contents(restored.staging), expected)
+        self.assertEqual(
+            (restored.staging / "deep_gemm/cache/hash/.committed").stat().st_mtime_ns,
+            marker.stat().st_mtime_ns,
+        )
+
     def test_publish_keeps_immutable_generations(self):
         snap_store, expected = self.make_store(), {}
         for index in range(3):
