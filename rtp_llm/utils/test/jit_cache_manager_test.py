@@ -78,7 +78,7 @@ def snapshots(snap_store):
 class JitCacheTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.addCleanup(self.tmp.cleanup)
         old_umask = os.umask(0)
         os.umask(old_umask)
@@ -86,7 +86,7 @@ class JitCacheTestBase(unittest.TestCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ["TEST_JIT_LOCAL_DIR"] = self.tmp.name
+        os.environ["TEST_JIT_LOCAL_DIR"] = str(self.root)
         for name in (*(item.env_name for item in jit.COMPONENTS), *COMPILE_FLAG_ENVS):
             os.environ.pop(name, None)
         jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
