@@ -31,17 +31,17 @@ device_runtime_deps = device_impl_target() + select({
 cc_library(
     name = "mock_engine",
     hdrs = [
-        "MockEngine.h"
+        "MockEngine.h",
     ],
     srcs = [
     ],
     copts = test_copts,
-    deps =  [
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/normal_engine:normal_engine",
-        "//rtp_llm/cpp/models:models",
+    deps = [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base:weights_converter",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
@@ -54,11 +54,12 @@ cc_test(
     srcs = ["NormalOutputDispatcherTest.cc"],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/normal_engine",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -71,14 +72,15 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/normal_engine:normal_engine",
-        "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -88,12 +90,13 @@ cc_test(
     ]),
     data = [],
     copts = test_copts,
-    deps =  [
+    deps = [
         ":mock_engine",
-        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache",
     ] + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -103,13 +106,14 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/normal_engine:normal_engine",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 # The executor caches RTP_LLM_STREAM_ASYNC, so test both settings in fresh processes.
@@ -118,7 +122,6 @@ cc_test(
         name = "engine_stop_{}_test".format(mode),
         srcs = ["EngineStopTest.cc"],
         copts = test_copts,
-        deps = [":mock_engine"] + cuda13_torch_link_deps,
         env = select({
             "@//:using_rocm": {
                 "TEST_USING_DEVICE": "ROCM",
@@ -130,7 +133,12 @@ cc_test(
                 "RTP_LLM_STREAM_ASYNC": stream_async,
             },
         }),
-        exec_properties = {"gpu": "A10"},
+        exec_properties = {"gpu": "A10_CU13"},
+        tags = ["A10_CU13"],
+        deps = [":mock_engine"] + cuda13_torch_link_deps,
     )
-    for mode, stream_async in [("sync", "0"), ("async", "1")]
+    for mode, stream_async in [
+        ("sync", "0"),
+        ("async", "1"),
+    ]
 ]

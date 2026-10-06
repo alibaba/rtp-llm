@@ -55,7 +55,8 @@ py_test(
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_library(
@@ -80,7 +81,8 @@ cc_binary(
 
 cc_library(
     name = "api_server_unittest_lib",
-    srcs = [ # TODO: use glob
+    srcs = [
+        # TODO: use glob
         "mock/MockEngineBase.h",
         "mock/MockHttpResponseWriter.h",
         "mock/MockTokenProcessor.h",

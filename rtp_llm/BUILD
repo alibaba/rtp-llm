@@ -50,10 +50,8 @@ rtp_kernel = [
     "rtp-kernel"
 ]
 
-flashattn = [
-    "flash_attn",
-    "flash-attn-3"
-]
+flashattn2 = ["flash_attn"]
+flashattn = flashattn2 + ["flash-attn-3"]
 
 xft_dep = select({
     "@//:using_arm": [],
@@ -308,10 +306,10 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 locks ship flashinfer-python (+apache-tvm-ffi, nvidia-cutlass-dsl)
-        # and flash-mla + tilelang, but not flashinfer-cubin/jit-cache or
-        # fast-hadamard; those rebuilds for torch 2.11+cu130 are tracked separately.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
+        # cuda13 test graphs link flashinfer-python only; the precompiled
+        # cubin/jit-cache wheels ride the rtp_llm wheel's Requires-Dist
+        # (pip lock) into runtime images and are not bazel test deps.
+        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
@@ -325,8 +323,7 @@ py_library(
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        # flash_attn / flash_attn_3 not yet rebuilt for torch 2.11 → cuda13 empty.
-        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_x86": flashattn2,
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
@@ -806,6 +803,8 @@ py_wheel(
 py_package(
     name = "rtp_llm_deepgemm_pkg",
     deps = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
         "//conditions:default": [],
     }),

@@ -1,0 +1,16 @@
+# Resolution overrides: force the versions below even though they differ from
+# the dependency metadata declared by upstream wheels.  The torch 2.11.0+cu130
+# wheel pins nvidia-nccl-cu13==2.28.9 and nvidia-nvshmem-cu13==3.4.5, so the
+# plain pins in the requirements files alone are unsatisfiable; --overrides is
+# the only way to force the needed versions through at resolution time (the
+# same approach as vLLM's UV_OVERRIDE for DeepEP's NCCL floor).
+# Per-entry reasons below.
+# cuda13 stack is validated against transformers 5.x; the upstream wheels in
+# this set declare an older range, so the version is forced via override.
+transformers==5.2.0
+# DeepEP 2.1.0 requires NCCL >=2.30.4
+nvidia-nccl-cu13==2.30.4
+# NVSHMEM 3.5.19 fixes RoCE IBGDA DCT address-handle initialization
+nvidia-nvshmem-cu13==3.5.19
+# CCCL 13.2.86 matches the CUDA 13.2 toolkit the cu13 stack is built against
+nvidia-cuda-cccl==13.2.86

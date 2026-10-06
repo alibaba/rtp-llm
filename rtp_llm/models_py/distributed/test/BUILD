@@ -5,11 +5,17 @@ py_test (
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py/distributed:collective_torch"
+        "//rtp_llm/models_py/distributed:collective_torch",
     ],
     env = {"GPU_COUNT": "2"},
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20', 'gpu_count':'2'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
 )
 
 py_test (
@@ -23,7 +29,10 @@ py_test (
     ],
     timeout = "eternal",
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'8'},
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "8",
+    },
 )
 
 # Needs 4 *visible* devices, not 4 devices that can talk directly: every
@@ -44,8 +53,14 @@ py_test(
     ],
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
+    tags = [
+        "A10_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "A10_CU13",
+        "gpu_count": "4",
+    },
 )
 
 py_test(
@@ -109,22 +124,34 @@ py_test(
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
     env = {"GPU_COUNT": "2"},
-    exec_properties = {"gpu": "H20", "gpu_count": "2"},
-    tags = ["H20", "open_skip"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
     timeout = "moderate",
 )
 
 py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],
-   deps = [
-       "//rtp_llm:testlib",
-       "//rtp_llm/models_py/distributed:user_buffers",
-       "//rtp_llm/models_py/distributed:collective_torch"
-   ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:user_buffers",
+    ],
    env = {"GPU_COUNT": "4"},
-   tags = ["open_skip", "H20"],
-   exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "4",
+    },
 )
 
 # Needs 4 visible devices, no interconnect: the roundtrip is plain NCCL
@@ -143,6 +170,12 @@ py_test(
     ],
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
+    tags = [
+        "A10_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "A10_CU13",
+        "gpu_count": "4",
+    },
 )

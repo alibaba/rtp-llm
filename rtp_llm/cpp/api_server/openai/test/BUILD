@@ -32,7 +32,8 @@ py_test(
         "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_library(
@@ -63,8 +64,8 @@ cc_library(
         "//rtp_llm/cpp/api_server/test:api_server_mock_hdrs",
     ],
     deps = test_deps + [
-        "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/api_server:openai",
+        "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
     data = [],

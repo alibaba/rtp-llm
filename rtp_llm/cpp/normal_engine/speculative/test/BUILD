@@ -27,7 +27,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/normal_engine",
         # FastTopKSampler::forward calls execMappingDraft2Target (draft-to-target
         # vocab mapping); pair exec_ops_test_lib with cuda_impl like models/test.
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -40,7 +40,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -51,14 +52,14 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/normal_engine:normal_engine",
-        "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/models:logits_processor",
-        "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
@@ -67,7 +68,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -78,14 +80,14 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/normal_engine:normal_engine",
-        "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/normal_engine/test:mock_engine",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
@@ -94,5 +96,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

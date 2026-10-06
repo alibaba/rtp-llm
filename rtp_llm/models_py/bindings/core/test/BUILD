@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts", "cc_test_wrapper")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 test_copts = [
     "-fno-access-control",
@@ -36,6 +36,7 @@ exec_ops_test_deps = [
 ] + torch_deps()
 
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+
 packed_mask_logits_test_filter = "ExecOpsTest.testRuntimeApplyPackedMaskLogits*"
 
 cc_test(
@@ -55,7 +56,8 @@ cc_test(
     args = ["--gtest_filter=" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 # Run the packed-mask boundary cases against the production CUDA kernel in
@@ -66,7 +68,8 @@ cc_test(
     args = ["--gtest_filter=" + packed_mask_logits_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 # Exercise the CPU fallback without initializing or allocating a GPU.
@@ -79,7 +82,8 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -107,9 +111,9 @@ cc_test(
     name = "distributed_comm_test",
     deps = [
         "//rtp_llm/cpp/testing:distributed_test",
-        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
@@ -123,7 +127,7 @@ cc_test_wrapper(
     # CUDA-only. cache_store_async_writer is deliberately under-linked, so each
     # platform has to supply the provider for its runtime* symbols.
     deps = [
-        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -133,21 +137,33 @@ cc_test_wrapper(
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
             "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
         "//conditions:default": [],
     }),
     copts = test_copts,
-    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
-    # falls through to "//conditions:default": {} -- empty exec_properties, which
-    # is not a GPU request at all. The test then lands on a CPU-only worker and
-    # dies with "libnvidia-ml.so.1: cannot open shared object file" (exit 127),
-    # as it did in run 69714248.
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {
+            "gpu": "H20_CU13",
+            "gpu_count": "2",
+        },
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "2",
+        },
         "//conditions:default": {},
     }),
+    env = {
+        "GPU_COUNT": "2",
+    },
+    # One cross-platform target: exec_properties selects the pool per build, so
+    # the tag list keeps both pools' labels addressable by filter-based lane
+    # selection (ut-sm9x selects it via H20_CU13; MI308X-ROCM7 mirrors the ROCm
+    # build branch). Placement is governed by exec_properties, not by tags.
+    tags = [
+        "H20_CU13",
+        "MI308X-ROCM7",
+    ],
 )

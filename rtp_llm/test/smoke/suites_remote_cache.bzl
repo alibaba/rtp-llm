@@ -6,14 +6,13 @@ load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 # and floor(499 * 0.001) = 0 retains no local entries. Request/storage references
 # keep the physical payload alive while the remote upload completes.
 REMOTE_CACHE_DEVICE_STORE_ARGS = (
-    " --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0"
-    + " --test_block_num 500"
-    + " --block_tree_device_evict_low_watermark_ratio 0.001"
-    + " --block_tree_device_evict_high_watermark_ratio 0.002"
+    " --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0" +
+    " --test_block_num 500" +
+    " --block_tree_device_evict_low_watermark_ratio 0.001" +
+    " --block_tree_device_evict_high_watermark_ratio 0.002"
 )
 
 def remote_cache_suites():
-
     # PPU Remote Cache (with KVCM server)
     native.test_suite(
         name = "smoke_cuda_remote_cache",
@@ -21,7 +20,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_basic",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 # Exact reuse counts require the previous asynchronous upload to be published.
                 sleep_time_qr = 10,
@@ -31,7 +30,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_basic_async",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
                 smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
@@ -40,7 +39,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_kill",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kill_remote = True,
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
@@ -50,7 +49,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_tp2",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
@@ -59,7 +58,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_pd",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 smoke_args = {
@@ -71,8 +70,9 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_match_fail",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
+                gpu_type = ["L20_CU13"],
+                kvcm_envs = [
+                    "SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_MATCH_FAILURE=1",
@@ -84,8 +84,9 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_write_start_fail",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
+                gpu_type = ["L20_CU13"],
+                kvcm_envs = [
+                    "SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_START_WRITE_FAILURE=1",
@@ -97,8 +98,9 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_write_finish_fail",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
+                gpu_type = ["L20_CU13"],
+                kvcm_envs = [
+                    "SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_FINISH_WRITE_FAILURE=1",
@@ -110,7 +112,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_edge",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=4", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
                 smoke_args = "--warm_up 0  --reuse_cache 1 --act_type FP16 --seq_size_per_block 4 --enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,

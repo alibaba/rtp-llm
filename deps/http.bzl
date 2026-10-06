@@ -140,12 +140,39 @@ def http_deps():
         sha256 = "8a50e27c6c009bb2e9d55c7ff44ccef53268cc0b67559b95fd7e22221f1e9600",
     )
 
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_40-cuda130.x86_64.rpm",
+        ],
+        sha256 = "392ac1aadf4ea9e3bad177a69ae8f35c5c1c59888c8505e8bee01cb8fe88d9e0",
+    )
+
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_39-cuda130.aarch64.rpm",
+        ],
+        sha256 = "84e482dfd219df4a7a240061f43627eafb0e79d582bd67228e2d5cac7ba8ffe4",
+    )
+
     http_archive(
         name = "remote_kv_cache_manager_server",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv_cache_manager_server_2026_04_29_14_32.tar.gz",
         ],
         sha256 = "6808080358f137c78205495b70b560261d59abff6eeddafc861e7511104c5b1a",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server_cuda130",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
+        ],
+        sha256 = "facbcee3395e3fa129cf45c7034d82e576fefc5af7017fead26ed795bb6f7bf6",
         build_file_content = """
 exports_files(["bin/kv_cache_manager_bin"])
         """,

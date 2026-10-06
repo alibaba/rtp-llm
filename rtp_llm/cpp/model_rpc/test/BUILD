@@ -25,15 +25,16 @@ py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
     deps = [
+        "//rtp_llm:testlib",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ] + telemetry_test_deps(),
     data = [
-        "//:th_transformer"
+        "//:th_transformer",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 test_deps = [
@@ -72,7 +73,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -87,7 +89,8 @@ cc_test(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -102,7 +105,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -117,7 +121,8 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -126,7 +131,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -135,7 +141,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -161,7 +168,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -176,7 +184,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -191,7 +200,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -204,7 +214,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(

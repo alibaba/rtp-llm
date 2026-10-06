@@ -4,7 +4,6 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
-
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],
@@ -12,24 +11,33 @@ py_test (
     # Not sm90-bound: the op under test has an sm86 cubin, but the in-test Triton
     # reference stores fp8e4nv, which Triton only allows at capability >= 89.
     # A10 (sm86) would hard-fail, so this runs on L20 (sm89) instead of H20.
-    tags = ["open_skip", "L20"],
-    exec_properties = {'gpu':'L20'},
+    tags = [
+        "L20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (
     name = "cutlass_fp8_grouped_gemm_test",
     srcs = ["cutlass_fp8_grouped_gemm_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test (
     name = "cutlass_w4a8_group_gemm_test",
     srcs = ["cutlass_w4a8_group_gemm_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test (
@@ -38,8 +46,11 @@ py_test (
     deps = py_test_deps,
     # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
     # reference across 18 shapes, 0 skips. Our AOT cubins cover sm86.
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "A10_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
 )
 
 py_test (
@@ -48,8 +59,11 @@ py_test (
     deps = py_test_deps,
     # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
     # reference across 18 shapes, 0 skips.
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "A10_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
 )
 
 py_test (
@@ -63,8 +77,11 @@ py_test (
     name = "pack_ue8m0_kernel_test",
     srcs = ["pack_ue8m0_kernel_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test (
@@ -79,11 +96,15 @@ py_test(
     srcs = ["test_xqa_batch_decode.py"],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
+        "@//:using_cuda13_x86": ["//rtp_llm:flashinfer-python"],
         "@//:cuda_pre_12_9": ["//rtp_llm:flashinfer-python"],
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 cuda13_sm100_py_test(

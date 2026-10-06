@@ -42,7 +42,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -54,15 +55,19 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
     name = "model_inputs_replay_test",
     srcs = ["model_inputs_replay_test.py"],
-    tags = ["manual"],
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
     deps = ["//rtp_llm/models_py/standalone:auto_model"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 cc_library(
@@ -71,12 +76,12 @@ cc_library(
     alwayslink = True,
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/models_py/bindings/common",
     ] + select({
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
@@ -106,7 +111,8 @@ py_test(
     data = [":th_pywrapped_model_cache_store_integration_test"],
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -137,8 +143,8 @@ py_test(
         "RTP_LLM_RUN_PYWRAPPED_DIRTY_CAPTURE_TEST": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
