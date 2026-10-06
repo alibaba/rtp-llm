@@ -76,7 +76,6 @@ cc_test(
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:flashinfer_runtime",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
