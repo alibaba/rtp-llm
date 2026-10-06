@@ -89,6 +89,24 @@ def upload_pkg(name, **kwargs):
 
     _upload_pkg( name = name, **kwargs)
 
+def _runfiles_alias_impl(ctx):
+    src = ctx.file.src
+    return DefaultInfo(
+        files = depset([src]),
+        runfiles = ctx.runfiles(
+            files = [src],
+            symlinks = {ctx.attr.runfile_path: src},
+        ),
+    )
+
+runfiles_alias = rule(
+    implementation = _runfiles_alias_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+        "runfile_path": attr.string(mandatory = True),
+    },
+)
+
 def upload_wheel(name, src, dir, wheel_prefix):
     oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
     native.genrule(
