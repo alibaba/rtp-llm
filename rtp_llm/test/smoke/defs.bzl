@@ -107,15 +107,19 @@ SMOKE_FRAMEWORK_DEPS = [
 
 SMOKE_CASE_TAGS = ["smoke_case", "manual"]
 
+def _require_single_gpu_type(macro_name, name, gpu_type):
+    if len(gpu_type) != 1:
+        fail("%s %s: gpu_type must contain exactly one hardware tag, got %s" % (macro_name, name, gpu_type))
+    return gpu_type[0]
+
 def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
     GPU exec_properties and legacy_create_init guarantees. smoke_args is the
     single source for GPU reservation, server arguments and WORLD_SIZE."""
+    gpu = _require_single_gpu_type("custom_smoke_test", name, gpu_type)
     gpu_count = get_world_size_from_smoke_args(smoke_args)
-    if not gpu_type:
-        fail("custom_smoke_test %s: gpu_type must be non-empty" % name)
     native.py_test(
         name = name,
         main = main,
@@ -134,10 +138,10 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
         # --test_env. Declared here only: these are the remote-cache smoke cases.
         env_inherit = ["REMOTE_JIT_DIR"],
         exec_properties = {
-            "gpu": gpu_type[0],
+            "gpu": gpu,
             "gpu_count": str(gpu_count),
         },
-        tags = tags + SMOKE_CASE_TAGS + gpu_type,
+        tags = tags + SMOKE_CASE_TAGS + [gpu],
         legacy_create_init = 0,
         visibility = ["//visibility:public"],
     )
@@ -145,6 +149,7 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
                kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+    gpu = _require_single_gpu_type("smoke_test", name, gpu_type)
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -213,13 +218,13 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "data/prompt_candidates.json",
             "//rtp_llm:sdk",
         ],
-        tags = tags + SMOKE_CASE_TAGS + gpu_type,
+        tags = tags + SMOKE_CASE_TAGS + [gpu],
         legacy_create_init=0,
         args = [
             "--suite_name", name,
             "--task_info", task_info,
             "--envs", env_str,
-            "--gpu_card", gpu_type[0],
+            "--gpu_card", gpu,
             "--smoke_args", smoke_args_str,
             "--kvcm_envs", kvcm_envs_str,
             "--sleep_time_qr", str(sleep_time_qr),
@@ -227,7 +232,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--concurrency_test", str(concurrency_test),
         ],
         exec_properties = {
-            'gpu':gpu_type[0],
+            'gpu':gpu,
             'gpu_count': str(gpu_count),
         },
         env = {
