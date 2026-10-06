@@ -1,7 +1,9 @@
 import logging
 import time
 import unittest
+from unittest.mock import patch
 
+from rtp_llm.utils import flash_attn_utils
 from rtp_llm.utils.util import has_overlap_kmp
 
 
@@ -41,6 +43,24 @@ class TestUtil(unittest.TestCase):
         logging.info(
             f"Performance test for large input: Result = {result}, Time taken = {avg_cost_time:.6f} seconds"
         )
+
+
+class FlashAttentionAvailabilityTest(unittest.TestCase):
+    @patch.object(flash_attn_utils.torch.cuda, "get_device_capability")
+    @patch.object(flash_attn_utils, "_flash_attn_2_available", return_value=False)
+    def test_missing_package_disables_flash_attention(self, _, get_capability):
+        self.assertFalse(flash_attn_utils.can_use_flash_attn())
+        get_capability.assert_not_called()
+
+    @patch.object(
+        flash_attn_utils.torch.cuda, "get_device_name", return_value="NVIDIA H20"
+    )
+    @patch.object(
+        flash_attn_utils.torch.cuda, "get_device_capability", return_value=(9, 0)
+    )
+    @patch.object(flash_attn_utils, "_flash_attn_2_available", return_value=True)
+    def test_available_package_enables_h20(self, *_):
+        self.assertTrue(flash_attn_utils.can_use_flash_attn())
 
 
 if __name__ == "__main__":
