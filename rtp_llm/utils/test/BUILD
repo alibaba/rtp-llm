@@ -4,6 +4,7 @@ load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 requirement([
     "grpcio",
     "protobuf",
+    "triton",
 ])
 
 filegroup(
@@ -29,6 +30,19 @@ py_test(
     name = "jit_cache_env_test",
     srcs = ["jit_cache_env_test.py"],
     deps = ["//rtp_llm:jit_cache_env"],
+)
+
+py_test(
+    name = "jit_cache_compile_test",
+    size = "large",
+    srcs = ["jit_cache_compile_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib", ":triton"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    tags = ["A10_CU13", "no-cache"],
+    exec_properties = {"gpu": "A10_CU13"},
 )
 
 py_test(
