@@ -1,6 +1,8 @@
 """V4.1 ViT/aligner adapter with row-major image spans and three delimiters."""
 
 import json
+import os
+import threading
 from pathlib import Path
 
 import torch
@@ -44,6 +46,17 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         for module in self.vision.modules():
             if isinstance(module, RMSNorm):
                 module.weight.data = module.weight.data.float()
+        # Image embeddings depend only on the frozen weights plus the content
+        # identity carried in every V41 request. Identical images (common in
+        # replayed conversations and cache-key-aligned bursts) collapse to one
+        # GPU forward instead of serially re-encoding under the v41 execution
+        # lock; see vit_rpc_server._v41_execution.
+        self._encode_cache = {}
+        self._encode_cache_order = []
+        self._encode_cache_lock = threading.Lock()
+        self._encode_cache_capacity = max(
+            0, int(os.environ.get("V41_IMAGE_ENCODE_CACHE_ITEMS", "16"))
+        )
 
     @property
     def _device(self):
@@ -90,6 +103,48 @@ class DeepSeekV41VisionEmbedding(nn.Module):
 
     @torch.inference_mode()
     def encode_image(self, image: V41ImageInput) -> torch.Tensor:
+        cached = self._encode_image_cached(image)
+        if cached is not None:
+            return cached
+        return self._encode_image_compute(image)
+
+    def _encode_cache_key(self, image: V41ImageInput):
+        # A v41 image embedding is a pure function of the frozen weights and
+        # the image payload. content_sha256 identifies the exact patch bytes,
+        # processor_identity the preprocessing contract, and the grid fixes
+        # the token layout; no other request field reaches the forward pass.
+        return (
+            image.processor_identity,
+            image.content_sha256,
+            image.n_vit_h,
+            image.n_vit_w,
+        )
+
+    def _encode_image_cached(self, image: V41ImageInput):
+        if self._encode_cache_capacity <= 0:
+            return None
+        key = self._encode_cache_key(image)
+        with self._encode_cache_lock:
+            if key in self._encode_cache:
+                self._encode_cache_order.remove(key)
+                self._encode_cache_order.append(key)
+                return self._encode_cache[key]
+        return None
+
+    def _encode_image_store(self, key, result: torch.Tensor):
+        if self._encode_cache_capacity <= 0:
+            return
+        with self._encode_cache_lock:
+            if key in self._encode_cache:
+                return
+            self._encode_cache[key] = result
+            self._encode_cache_order.append(key)
+            while len(self._encode_cache_order) > self._encode_cache_capacity:
+                evicted = self._encode_cache_order.pop(0)
+                self._encode_cache.pop(evicted, None)
+
+    @torch.inference_mode()
+    def _encode_image_compute(self, image: V41ImageInput) -> torch.Tensor:
         vit_h, vit_w = image.n_vit_h, image.n_vit_w
         patches = image.patches.to(device=self._device, dtype=self._data_type)
         aligned = self.aligner(self.vision(patches, vit_h, vit_w), vit_h, vit_w)
@@ -99,7 +154,9 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         )
         result = delimiters[types]
         result[types == IMAGE] = aligned
-        return result.contiguous()
+        result = result.contiguous()
+        self._encode_image_store(self._encode_cache_key(image), result)
+        return result
 
     @torch.inference_mode()
     def encode_prepared_images(self, images) -> list[torch.Tensor]:

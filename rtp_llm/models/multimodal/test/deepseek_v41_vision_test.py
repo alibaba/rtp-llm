@@ -153,6 +153,133 @@ class V41PreparedValidationTest(TestCase):
         self.assertTrue(torch.isfinite(output).all())
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
+    def test_identical_images_hit_encode_cache_and_preserve_values(self):
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 295936,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        with torch.no_grad():
+            for parameter in adapter.parameters():
+                parameter.fill_(0.125)
+        record = self.record()
+        record["processor_identity"] = adapter.processor_config.identity
+        first = adapter.encode_image(V41ImageInput(**record))
+        second = adapter.encode_image(V41ImageInput(**record))
+        self.assertIs(second, first)
+        torch.testing.assert_close(second, first, rtol=0, atol=0)
+        adapter._encode_cache.clear()
+        adapter._encode_cache_order.clear()
+        recomputed = adapter.encode_image(V41ImageInput(**record))
+        torch.testing.assert_close(recomputed, first, rtol=0, atol=0)
+
+    def test_distinct_content_and_identity_do_not_collide(self):
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 295936,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        with torch.no_grad():
+            for parameter in adapter.parameters():
+                parameter.fill_(0.125)
+        base = self.record()
+        base["processor_identity"] = adapter.processor_config.identity
+        different = self.record()
+        different["processor_identity"] = adapter.processor_config.identity
+        different["content_sha256"] = "b" * 64
+        left = adapter.encode_image(V41ImageInput(**base))
+        right = adapter.encode_image(V41ImageInput(**different))
+        self.assertIsNot(right, left)
+        self.assertEqual(
+            adapter._encode_cache_order[-1],
+            adapter._encode_cache_key(V41ImageInput(**different)),
+        )
+        self.assertEqual(len(adapter._encode_cache), 2)
+
+    def test_cache_capacity_zero_disables_caching(self):
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 295936,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        adapter._encode_cache_capacity = 0
+        with torch.no_grad():
+            for parameter in adapter.parameters():
+                parameter.fill_(0.125)
+        record = self.record()
+        record["processor_identity"] = adapter.processor_config.identity
+        first = adapter.encode_image(V41ImageInput(**record))
+        second = adapter.encode_image(V41ImageInput(**record))
+        self.assertIsNot(second, first)
+        torch.testing.assert_close(second, first, rtol=0, atol=0)
+        self.assertEqual(len(adapter._encode_cache), 0)
+
 
 class V41VisionEmbeddingTest(TestCase):
     @classmethod
