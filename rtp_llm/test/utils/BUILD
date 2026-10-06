@@ -29,7 +29,7 @@ py_library(
 py_library(
     name = "jit_sys_path_setup",
     srcs = ["jit_sys_path_setup.py"],
-    deps = [":filelock"],
+    deps = [":filelock", "//rtp_llm:jit_cache_env"],
 )
 
 py_binary(
@@ -48,7 +48,7 @@ py_library(
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
-    deps = [":test_util"],
+    deps = [":test_util", "//rtp_llm:jit_cache_env"],
     visibility = ["//visibility:public"],
 )
 

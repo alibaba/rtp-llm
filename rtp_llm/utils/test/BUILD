@@ -27,6 +27,12 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_env_test",
+    srcs = ["jit_cache_env_test.py"],
+    deps = ["//rtp_llm:jit_cache_env"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = [
@@ -41,6 +47,7 @@ py_test(
         "//rtp_llm:sdk",
         "//rtp_llm:torch",
         "//rtp_llm/model_loader/tipc",
+        "//rtp_llm/test/utils:jit_sys_path_setup",
     ],
 )
 

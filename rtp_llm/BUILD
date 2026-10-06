@@ -155,17 +155,19 @@ _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
     "utils/jit_cache_store.py",
 ]
+_JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
-    ], exclude = _JIT_CACHE_SRCS + [
+    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     deps = [
+        ":jit_cache_env",
         ":torch",
         ":safetensors",
         #":decord",
@@ -183,9 +185,16 @@ py_library(
 )
 
 py_library(
+    name = "jit_cache_env",
+    srcs = _JIT_CACHE_ENV_SRCS,
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "jit_cache_manager_lib",
     srcs = _JIT_CACHE_SRCS,
     deps = [
+        ":jit_cache_env",
         ":utils",
         ":watchdog",
         ":zstandard",
