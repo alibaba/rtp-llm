@@ -77,6 +77,18 @@ config_setting(
     },
 )
 
+# The SM10x DeepGEMM wheel includes FP8 GEMM/ReduceScatter. Keep the generic
+# CUDA 13 wheel for other architectures, including its SM120 kernels.
+config_setting(
+    name = "using_cuda13_sm10x",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+        "using_cuda13_sm10x": "true",
+    },
+)
+
 config_setting(
     name = "using_cuda12_x86",
     values = {"define": "using_cuda12_x86=true"},

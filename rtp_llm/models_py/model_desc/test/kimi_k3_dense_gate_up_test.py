@@ -5,12 +5,59 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3DenseMLP
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.models_py.modules.kimi_k3.linear import bf16_linear
 from rtp_llm.models_py.modules.kimi_k3.moe import situ
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
 
 
 class KimiK3DenseGateUpTest(unittest.TestCase):
+    def test_decode_split_gate_up_matches_dense_reference(self):
+        torch.manual_seed(306)
+        hidden_size, intermediate = 8, 16
+        weights = {
+            W.ffn_w1: torch.randn(hidden_size, intermediate, dtype=torch.bfloat16),
+            W.ffn_w3: torch.randn(hidden_size, intermediate, dtype=torch.bfloat16),
+            W.ffn_w2: torch.randn(intermediate, hidden_size, dtype=torch.bfloat16),
+        }
+        hidden = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+        beta, linear_beta = 2.0, 2.0
+        config = SimpleNamespace(k3_runtime_config=SimpleNamespace(
+            activation_situ_beta=beta, activation_situ_linear_beta=linear_beta,
+        ))
+        gate = F.linear(hidden, weights[W.ffn_w1].T)
+        up = F.linear(hidden, weights[W.ffn_w3].T)
+        expected = F.linear(situ(gate, up, beta, linear_beta), weights[W.ffn_w2].T)
+        model = KimiK3DenseMLP(
+            config, SimpleNamespace(role_type=RoleType.DECODE, tp_size=1, tp_rank=0), weights, None
+        )
+        self.assertIsNone(model.gate_up)
+        self.assertIsInstance(model.gate, CudaF16Linear)
+        self.assertIsInstance(model.up, CudaF16Linear)
+        self.assertIsInstance(model.down, CudaF16Linear)
+        torch.testing.assert_close(model(hidden), expected, rtol=0.02, atol=0.02)
+
+    def test_decode_tp_dense_weights_shard_on_matching_axes(self):
+        torch.manual_seed(307)
+        weights = {
+            W.ffn_w1: torch.randn(8, 16, dtype=torch.bfloat16),
+            W.ffn_w3: torch.randn(8, 16, dtype=torch.bfloat16),
+            W.ffn_w2: torch.randn(16, 8, dtype=torch.bfloat16),
+        }
+        originals = {name: value.clone() for name, value in weights.items()}
+        config = SimpleNamespace(k3_runtime_config=SimpleNamespace(
+            activation_situ_beta=2.0, activation_situ_linear_beta=2.0,
+        ))
+        model = KimiK3DenseMLP(
+            config, SimpleNamespace(role_type=RoleType.DECODE, tp_size=2, tp_rank=1),
+            weights, None,
+        )
+        self.assertIsNone(model.gate_up)
+        torch.testing.assert_close(weights[W.ffn_w1], originals[W.ffn_w1][:, 8:])
+        torch.testing.assert_close(weights[W.ffn_w3], originals[W.ffn_w3][:, 8:])
+        torch.testing.assert_close(weights[W.ffn_w2], originals[W.ffn_w2][8:, :])
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_bf16_linear_two_dimensional_result_owns_storage_for_situ(self):
         hidden = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)

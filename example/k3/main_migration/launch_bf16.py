@@ -150,7 +150,7 @@ def launch_config(args):
         "reuse_cache": int(not orthogonal_smoke or args.role == "PREFILL"),
         "enable_device_cache": 1,
         "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
-        "moe_strategy": "mega_moe",
+        "moe_strategy": args.moe_strategy,
         "enable_cuda_graph": int(args.role == "DECODE"),
         "cache_store_rdma_mode": 1,
         "cache_store_rdma_connect_timeout_ms": 30000,
@@ -345,6 +345,8 @@ def main():
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
     parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
+    parser.add_argument("--moe-strategy", choices=["mega_moe", "mega_moe_se"],
+                        default="mega_moe", help="Select the routed/shared MoE executor")
     parser.add_argument("--orthogonal-smoke", action="store_true",
                         help="Enable the complete 64K PageRR, Host cache, DCP and Graph smoke profile")
     parser.add_argument("--memory-cache-size-mb", type=int, default=32768,

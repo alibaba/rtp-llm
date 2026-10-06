@@ -96,6 +96,9 @@ if triton is not None:
         out_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
+        shared_input_ptr,
+        shared_output_ptr,
+        valid_mask_ptr,
         M,
         N: tl.constexpr,
         K: tl.constexpr,
@@ -106,8 +109,12 @@ if triton is not None:
         sf_stride_m: tl.constexpr,
         out_weights_stride_m: tl.constexpr,
         out_indices_stride_m: tl.constexpr,
+        shared_input_stride_m: tl.constexpr,
+        shared_output_stride_m: tl.constexpr,
         eps: tl.constexpr,
         fp8_max: tl.constexpr,
+        HAS_SHARED: tl.constexpr,
+        HAS_VALID_MASK: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         ASSUME_FINITE: tl.constexpr,
@@ -155,6 +162,23 @@ if triton is not None:
             mask=row_mask,
         )
 
+        if HAS_SHARED:
+            shared_cols = pid_blk * 256 + tl.arange(0, 256)
+            shared_mask = row_mask[:, None] & (shared_cols[None, :] < 2 * N)
+            shared = tl.load(
+                shared_input_ptr + offs_m[:, None] * shared_input_stride_m
+                + shared_cols[None, :],
+                mask=shared_mask, other=0,
+            )
+            if HAS_VALID_MASK:
+                valid = tl.load(valid_mask_ptr + offs_m, mask=row_mask, other=0)
+                shared = tl.where(valid[:, None], shared, 0)
+            tl.store(
+                shared_output_ptr + offs_m[:, None] * shared_output_stride_m
+                + shared_cols[None, :],
+                shared, mask=shared_mask,
+            )
+
         if pid_blk == 0:
             router_offs = tl.arange(0, BLOCK_K)
             router_mask = row_mask[:, None] & (router_offs[None, :] < K)
@@ -168,6 +192,10 @@ if triton is not None:
                 mask=router_mask,
                 other=0,
             ).to(tl.int64)
+            if HAS_VALID_MASK:
+                valid = tl.load(valid_mask_ptr + offs_m, mask=row_mask, other=0)
+                w = tl.where(valid[:, None], w, 0)
+                idx = tl.where(valid[:, None], idx, 0)
             tl.store(
                 out_weights_ptr
                 + offs_m[:, None] * out_weights_stride_m
@@ -550,11 +578,24 @@ def fused_pack_mega_moe_inputs_optimized(
     out_weights: torch.Tensor,
     *,
     assume_finite: bool = False,
+    shared_input: torch.Tensor | None = None,
+    shared_out: torch.Tensor | None = None,
+    valid_mask: torch.Tensor | None = None,
 ) -> None:
     """Stage FP8 MegaMoE inputs; skip NaN/Inf sanitization only when explicit."""
     T, D, topk = _validate_inputs(
         x, weights, indices, out_fp8, out_sf, out_indices, out_weights
     )
+    if (shared_input is None) != (shared_out is None):
+        raise ValueError("shared_input and shared_out must be supplied together")
+    if shared_input is not None:
+        expected = (T, 2 * D)
+        if (tuple(shared_input.shape) != expected or tuple(shared_out.shape) != expected
+                or shared_input.dtype != torch.bfloat16
+                or shared_out.dtype != torch.bfloat16):
+            raise ValueError("fused shared input/output must be BF16 [T, 2*latent]")
+    if valid_mask is not None and (shared_input is None or tuple(valid_mask.shape) != (T,)):
+        raise ValueError("valid_mask requires fused shared input and shape [T]")
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
@@ -574,6 +615,9 @@ def fused_pack_mega_moe_inputs_optimized(
         out_sf,
         out_weights,
         out_indices,
+        shared_input if shared_input is not None else x,
+        shared_out if shared_out is not None else x,
+        valid_mask if valid_mask is not None else x,
         T,
         D,
         topk,
@@ -584,8 +628,12 @@ def fused_pack_mega_moe_inputs_optimized(
         out_sf.stride(0),
         out_weights.stride(0),
         out_indices.stride(0),
+        shared_input.stride(0) if shared_input is not None else 0,
+        shared_out.stride(0) if shared_out is not None else 0,
         1.0e-4,
         fp8_max,
+        HAS_SHARED=shared_input is not None,
+        HAS_VALID_MASK=valid_mask is not None,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
         ASSUME_FINITE=assume_finite,
@@ -602,22 +650,30 @@ def fused_pack_mega_moe_inputs(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    shared_input: torch.Tensor | None = None,
+    shared_out: torch.Tensor | None = None,
+    valid_mask: torch.Tensor | None = None,
 ) -> None:
     impl = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").lower()
     if impl == "legacy":
+        if shared_input is not None:
+            raise ValueError("legacy MegaMoE packer does not support fused shared input")
         return fused_pack_mega_moe_inputs_legacy(
             x, weights, indices, out_fp8, out_sf, out_indices, out_weights
         )
     if impl == "optimized":
         return fused_pack_mega_moe_inputs_optimized(
-            x, weights, indices, out_fp8, out_sf, out_indices, out_weights
+            x, weights, indices, out_fp8, out_sf, out_indices, out_weights,
+            shared_input=shared_input, shared_out=shared_out, valid_mask=valid_mask,
         )
     if impl == "fast_finite":
         # General opt-in for callers that guarantee finite BF16 activations.
         # The safe optimized path remains the default for other models.
         return fused_pack_mega_moe_inputs_optimized(
             x, weights, indices, out_fp8, out_sf, out_indices, out_weights,
-            assume_finite=True,
+            assume_finite=True, shared_input=shared_input, shared_out=shared_out,
+            valid_mask=valid_mask,
         )
     raise ValueError(
         f"invalid MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; "

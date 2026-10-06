@@ -12,6 +12,24 @@ from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3DecoderLayer
 
 
 class KimiK3Fp8AttnResTest(unittest.TestCase):
+    def test_decode_fp8_producer_only_for_target_verify(self):
+        residual = KimiK3AttentionResidual(torch.ones(4), torch.ones(4), 1e-6)
+        residual.configure_verify_fp8(True)
+        hidden = torch.ones((2, 4))
+        anchors = torch.zeros((2, 1, 4))
+        kwargs = dict(output_norm_weight=torch.ones(4), output_norm_eps=1e-6,
+                      num_blocks=0, block_write_idx=-1)
+        sentinel = object()
+        with patch.object(residual, "forward_fp8", return_value=sentinel) as fused:
+            actual = residual(hidden, anchors,
+                              metadata=SimpleNamespace(is_target_verify=True), **kwargs)
+            self.assertIs(actual, sentinel)
+            self.assertEqual(fused.call_count, 1)
+            ordinary = residual(hidden, anchors,
+                                metadata=SimpleNamespace(is_target_verify=False), **kwargs)
+            self.assertIsInstance(ordinary, torch.Tensor)
+            self.assertEqual(fused.call_count, 1)
+
     def test_producer_falls_back_before_fp8_ag_capacity(self):
         class Hidden:
             is_cuda = True

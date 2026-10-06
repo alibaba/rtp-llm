@@ -1200,7 +1200,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         }
     } else {
         {
-            RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.forward(replayDecode,B=%d,capture=%d,Q=%d,T=%d,fake=0)",
+                state.current_batch_size, state.current_real_graph_bs, num_tokens_per_bs_, state.seq_len_sum);
             replayDecode(state.current_real_graph_bs);
         }
         static const bool smoke_evidence = [] {

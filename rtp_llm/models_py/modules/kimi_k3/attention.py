@@ -134,13 +134,7 @@ class KimiK3KDA(nn.Module):
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
         use_fused_ag = (
             self._fp8_collective is not None
-            and self._fp8_collective.enable_ag
-            and (hidden.shape[0] >= 4096 or isinstance(hidden, Fp8Activation))
-            and self._fp8_collective.can_run_ag(hidden.shape[0])
-            and attention_inputs.is_prefill
-            and not metadata.is_target_verify
-            and not getattr(attention_inputs, "is_mtp_draft_update", False)
-            and not torch.cuda.is_current_stream_capturing()
+            and self._fp8_collective.eligible_ag(hidden, attention_inputs, metadata)
         )
         use_overlap = (
             self._ag_local_fp8_overlap
@@ -213,16 +207,9 @@ class KimiK3KDA(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
                 )
-        use_fused_rs = (
-            self._fp8_collective is not None
-            and self._fp8_collective.enable_rs
-            and self._fp8_output_norm
-            and values.shape[0] >= 512
-            and self._fp8_collective.can_run_rs(values.shape[0])
-            and attention_inputs.is_prefill
-            and not metadata.is_target_verify
-            and not getattr(attention_inputs, "is_mtp_draft_update", False)
-            and not torch.cuda.is_current_stream_capturing()
+        use_fused_rs = self._fp8_collective is not None and self._fp8_collective.eligible_rs(
+            values.shape[0] if self._fp8_output_norm else 0,
+            attention_inputs, metadata, self._fp8_output_norm,
         )
         if use_fused_rs:
             with profile_scope("RTP::attention.fp8_gemm_rs"):
@@ -327,14 +314,7 @@ class KimiK3MLA(nn.Module):
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
         use_fused_ag = (
             self._fp8_collective is not None
-            and self._fp8_collective.enable_ag
-            and (hidden.shape[0] >= 4096 or isinstance(hidden, Fp8Activation))
-            and self._fp8_collective.can_run_ag(hidden.shape[0])
-            and attention_inputs is not None
-            and attention_inputs.is_prefill
-            and not getattr(metadata, "is_target_verify", False)
-            and not getattr(attention_inputs, "is_mtp_draft_update", False)
-            and not torch.cuda.is_current_stream_capturing()
+            and self._fp8_collective.eligible_ag(hidden, attention_inputs, metadata)
         )
         if isinstance(hidden, Fp8Activation) and not use_fused_ag:
             raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
@@ -386,17 +366,9 @@ class KimiK3MLA(nn.Module):
                     if output.is_cuda
                     else output * gate.sigmoid()
                 )
-        use_fused_rs = (
-            self._fp8_collective is not None
-            and self._fp8_collective.enable_rs
-            and self._fp8_output_gate
-            and values.shape[0] >= 512
-            and self._fp8_collective.can_run_rs(values.shape[0])
-            and attention_inputs is not None
-            and attention_inputs.is_prefill
-            and not getattr(metadata, "is_target_verify", False)
-            and not getattr(attention_inputs, "is_mtp_draft_update", False)
-            and not torch.cuda.is_current_stream_capturing()
+        use_fused_rs = self._fp8_collective is not None and self._fp8_collective.eligible_rs(
+            values.shape[0] if self._fp8_output_gate else 0,
+            attention_inputs, metadata, self._fp8_output_gate,
         )
         if use_fused_rs:
             with profile_scope("RTP::attention.fp8_gemm_rs"):

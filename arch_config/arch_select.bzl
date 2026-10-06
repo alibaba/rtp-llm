@@ -76,18 +76,26 @@ def subscribe_deps():
     )
 
 def whl_deps():
+    cuda13_pre = [
+        "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+        "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+    ]
+    cuda13_post = [
+        "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
+        "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl",
+        "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
+        "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+        "tilelang==0.1.9",
+    ]
     return select({
-        "@rtp_llm//:using_cuda13_x86": [
-            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+        "@rtp_llm//:using_cuda13_sm10x": cuda13_pre + [
+            # This pinned feat/k3_dev wheel exports fp8_gemm_rs_nt and GemmRSBuffer.
+            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-gemm/deep_gemm-2.6.1+72f2f3f.cu132-cp310-cp310-linux_x86_64.whl",
+        ] + cuda13_post,
+        "@rtp_llm//:using_cuda13_x86": cuda13_pre + [
             # CI-built DeepGEMM: native SM120 kernels plus MegaMoE shared_recipe.
             "deep_gemm@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/8bcfcab8757e7df2fcb0e4f65796da5cd5bdd6b4/deep_gemm-2.6.1%2B8bcfcab.cu132-cp310-cp310-linux_x86_64.whl",
-            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
-            "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl",
-            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
-            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
-            "tilelang==0.1.9",
-        ],
+        ] + cuda13_post,
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",

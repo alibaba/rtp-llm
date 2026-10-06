@@ -33,6 +33,23 @@ class Fp8CollectiveProjectionTest(unittest.TestCase):
         self.assertTrue(collective.can_run_rs(65536))
         self.assertFalse(collective.can_run_rs(65544))
 
+    def test_decode_reduce_scatter_is_limited_to_target_verify(self):
+        collective = object.__new__(Fp8CollectiveProjection)
+        collective.enable_rs = True
+        collective.decode_staging = True
+        collective.world_size = 8
+        collective.max_m = 128
+        inputs = SimpleNamespace(is_prefill=False, is_mtp_draft_update=False)
+        verify = SimpleNamespace(is_target_verify=True)
+        self.assertTrue(collective.eligible_rs(128, inputs, verify, True))
+        self.assertFalse(collective.eligible_rs(128, inputs, verify, False))
+        self.assertFalse(collective.eligible_rs(128, inputs, SimpleNamespace(is_target_verify=False), True))
+        inputs.is_mtp_draft_update = True
+        self.assertFalse(collective.eligible_rs(128, inputs, verify, True))
+        inputs.is_mtp_draft_update = False
+        with self.assertRaisesRegex(RuntimeError, "exceeds its initialized capacity"):
+            collective.eligible_rs(136, inputs, verify, True)
+
     def test_prequantized_input_reaches_consumer_without_requantization(self):
         values = torch.full((4, 512), 2, dtype=torch.float8_e4m3fn)
         scale_wire = torch.full((1, 4), 0x7F7F7F7F, dtype=torch.int32)
