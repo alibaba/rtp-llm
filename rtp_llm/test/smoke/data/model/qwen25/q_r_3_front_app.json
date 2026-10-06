@@ -4,15 +4,15 @@
     "query_result": [
         {
             "query": {
-                "prompt": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 04 Nov 2024\n\nYou are a pirate chatbot who always responds in pirate speak!<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nwhat is CAP Theorem ?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?<|im_end|>\n<|im_start|>assistant\n",
                 "generate_config": {
                     "max_new_tokens": 200,
                     "top_k": 1
                 },
-                "_prompt_source": "llama-template wrapping $prompt:s1"
+                "_prompt_source": "qwen2.5 chat-template wrapping $prompt:s1"
             },
             "result": {
-                "response": "The **Catalan's Theorem** is a theorem in combinatorics that states that the number of ways to partition a set of n elements into k non-empty subsets is given by the binomial coefficient:\n\n\\[ \\binom{n}{k} = \\frac{n!}{k!(n-k)!} \\]\n\nwhere \\( n! \\) denotes the factorial of n, which is the product of all positive integers up to n.\n\nFor example, if you have 5 elements (n=5) and you want to partition them into 3 non-empty subsets, the number of ways to do this is:\n\n\\[ \\binom{5}{3} = \\frac{5!}{3!(5-3)!} = \\frac{5 \\times 4 \\times 3 \\times 2 \\times 1}{(3 \\times 2 \\times 1)(2 \\times 1)} = 10 \\]\n\nSo, the Catalan's Theorem"
+                "response": "The CAP theorem is a fundamental result in the field of distributed computing, particularly in the context of distributed storage systems. It states that in a distributed storage system, if there are two nodes that can tolerate a certain level of data loss, then the system can tolerate a certain level of data loss as well.\n\nThe theorem is named after two researchers, Claude Shannon and Robert K. Cooper, who first introduced it in 1960. The theorem is often referred to as the \"CAP theorem\" because it applies to the capacity of a distributed storage system, which is the ability to store data.\n\nThe theorem states that if there are two nodes that can tolerate a certain level of data loss, then the system can tolerate a certain level of data loss as well. This means that if one node fails, the system can still continue to store data, and if the other node fails, the system can still continue to store data.\n\nThe theorem is important because it provides a way to design distributed storage systems"
             }
         },
         {
