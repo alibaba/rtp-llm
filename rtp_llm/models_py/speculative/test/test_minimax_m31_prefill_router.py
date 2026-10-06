@@ -1,6 +1,5 @@
-"""CPU ownership/dispatch gates and opt-in focused CUDA arithmetic checks."""
+"""CPU ownership/dispatch gates and focused CUDA arithmetic checks."""
 
-import os
 import types
 import unittest
 from unittest.mock import patch
@@ -195,14 +194,8 @@ class PrefillRouterOwnershipTest(unittest.TestCase):
         self.assertEqual(list(clone.named_buffers()), [])
 
 
-@unittest.skipUnless(
-    os.environ.get("M31_PREFILL_ROUTER_GPU_TEST") == "1", "opt-in CUDA gate"
-)
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillRouterCudaTest(unittest.TestCase):
-    @unittest.skipUnless(
-        os.environ.get("M31_PREFILL_ROUTER_LONG_GPU_TEST") == "1",
-        "opt-in long CUDA gate",
-    )
     def test_int32_boundary_and_one_million_rows(self):
         torch.manual_seed(1014)
         row = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16)

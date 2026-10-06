@@ -21,7 +21,7 @@ py_test(
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:fmha-sm100",
     ],
-    env = {"GPU_COUNT": "1", "RTP_TEST_NVFP4_PREFILL_GPU": "1"},
+    env = {"GPU_COUNT": "1"},
     tags = ["open_skip", "SM100_X86"],
     exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )

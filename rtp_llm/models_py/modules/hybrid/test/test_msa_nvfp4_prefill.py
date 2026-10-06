@@ -1,8 +1,8 @@
-"""Ordinary TP1 FP4 prefill contract; GPU tests require explicit opt-in.
+"""Ordinary TP1 FP4 prefill source and GPU contracts.
 
-CPU: python test_msa_nvfp4_prefill.py
-GPU (only on an authorized idle GPU): RTP_TEST_NVFP4_PREFILL_GPU=1 python ...
-No RTP, torch or CUDA module is imported by the default CPU checks.
+CPU: python test_msa_nvfp4_prefill.py SourceContractTest
+GPU: python test_msa_nvfp4_prefill.py NativeWrapperTest
+SourceContractTest imports no RTP, torch or CUDA module.
 """
 
 import ast
@@ -113,14 +113,13 @@ class SourceContractTest(unittest.TestCase):
             forward(model, None, SimpleNamespace(context_parallel_info=None), None)
 
 
-@unittest.skipUnless(
-    os.environ.get("RTP_TEST_NVFP4_PREFILL_GPU") == "1",
-    "GPU execution requires explicit opt-in",
-)
 class NativeWrapperTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import torch
+
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA required")
 
         from rtp_llm.models_py.modules.hybrid import msa_attention
 

@@ -1,8 +1,7 @@
-"""CPU source contracts; opt-in real production writer GPU regressions."""
+"""CPU source contracts and real production writer GPU regressions."""
 
 import ast
 import importlib.util
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -154,10 +153,6 @@ class CPWriterSourceTest(unittest.TestCase):
         self.assertGreaterEqual(kernel.count(".to(tl.int64)"), 4)
 
 
-@unittest.skipUnless(
-    os.environ.get("RTP_TEST_NVFP4_CP_MAPPED_GPU") == "1",
-    "opt-in GPU test; source tests import no Torch",
-)
 class CPWriterGPURegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -462,10 +457,6 @@ class CPWriterGPURegressionTest(unittest.TestCase):
 
             self.compare(case, lambda: self.run_chain(case, False), legacy)
 
-    @unittest.skipUnless(
-        os.environ.get("RTP_TEST_NVFP4_CP_MAPPED_LARGE_STRIDE") == "1",
-        "additional ~4GiB allocation",
-    )
     def test_first_int32_source_address_overflow(self):
         torch = self.torch
         case = self.case(3)

@@ -10,6 +10,9 @@ py_test(
     srcs = ["test_minimax_m31_prefill_router.py"],
     main = "test_minimax_m31_prefill_router.py",
     deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )
 
 py_test(

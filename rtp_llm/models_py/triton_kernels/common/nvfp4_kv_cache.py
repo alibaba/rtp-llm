@@ -592,7 +592,8 @@ def _quantize_main_index_rows_kernel(
     )
 
 
-@triton.jit
+# Counts/capacities only bound accesses; reuse the binary across Prefill shapes.
+@triton.jit(do_not_specialize=["N", "NUM_BLOCKS", "PERSIST_NUM_BLOCKS"])
 def _quantize_main_index_rows_d128_kernel(
     k_ptr,
     v_ptr,
@@ -619,7 +620,7 @@ def _quantize_main_index_rows_d128_kernel(
     MAIN_SCALE_S0: tl.constexpr,
     IDX_PACKED_S0: tl.constexpr,
     IDX_SCALE_S0: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr,
+    NUM_BLOCKS,
     NUM_HEADS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     MMA_SCALE_LAYOUT: tl.constexpr,
@@ -636,7 +637,7 @@ def _quantize_main_index_rows_d128_kernel(
     PERSIST_MAIN_SCALE_S0: tl.constexpr = 0,
     PERSIST_IDX_PACKED_S0: tl.constexpr = 0,
     PERSIST_IDX_SCALE_S0: tl.constexpr = 0,
-    PERSIST_NUM_BLOCKS: tl.constexpr = 0,
+    PERSIST_NUM_BLOCKS=0,
     WRITE_PERSISTENT: tl.constexpr = False,
 ):
     """One row/plane CTA, eight independent groups by eight nibble pairs.

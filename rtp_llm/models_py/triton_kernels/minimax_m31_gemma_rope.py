@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _gemma_norm_rope(
     QKV,
     IQ,
@@ -29,7 +29,7 @@ def _gemma_norm_rope(
     HK: tl.constexpr,
     HI: tl.constexpr,
     EPS: tl.constexpr,
-    ROWS: tl.constexpr,
+    ROWS,
     GROUP: tl.constexpr,
     OQ=None,
     OK=None,
@@ -46,6 +46,9 @@ def _gemma_norm_rope(
     # one-dimensional gather and FP32 reduction/FMA order for each row.
     for offset in tl.static_range(GROUP):
         row = tl.program_id(0).to(tl.int64) * GROUP + offset
+        # Live token count changes on every mixed-length Prefill batch. It is
+        # only a bounds mask, not tile geometry: share the compiled kernel
+        # across counts while retaining GROUP/head/stride specialization.
         valid = row < ROWS
         # CP4 at 1M tokens has ~250K rows. The fused projection row stride is
         # 9856 elements, so row * stride crosses INT32 at row 217886. Widen BEFORE

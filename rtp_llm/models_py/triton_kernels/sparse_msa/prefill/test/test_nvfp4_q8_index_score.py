@@ -84,10 +84,6 @@ def cpu_oracle(q, packed, scales, cu, lengths, prefixes, offsets, table, blocks)
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestQ8KV4PrefillIndexScore(unittest.TestCase):
-    @unittest.skipUnless(
-        os.environ.get("RTP_TEST_Q8KV4_LARGE_STRIDE") == "1",
-        "additional ~2GiB allocation",
-    )
     def test_query_address_crosses_int32_element_boundary(self):
         q = torch.empty_strided(
             (129, 4, 128),

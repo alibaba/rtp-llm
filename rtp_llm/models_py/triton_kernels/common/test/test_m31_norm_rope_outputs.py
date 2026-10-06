@@ -3,6 +3,7 @@
 import unittest
 
 import torch
+import triton
 
 from rtp_llm.models_py.triton_kernels.minimax_m31_gemma_rope import (
     _gemma_norm_rope,
@@ -12,6 +13,43 @@ from rtp_llm.models_py.triton_kernels.minimax_m31_gemma_rope import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class ContiguousNormRopeTest(unittest.TestCase):
+    def test_live_rows_reuse_binary_and_mask_tail(self):
+        params = {param.name: param for param in _gemma_norm_rope.params}
+        self.assertFalse(params["ROWS"].is_constexpr)
+        self.assertTrue(params["ROWS"].do_not_specialize)
+        previous = None
+        for rows in (129, 131, 143, 129):
+            with self.subTest(rows=rows):
+                storage = torch.full((rows + 9, 9856), 7, device="cuda", dtype=torch.bfloat16)
+                storage[1:rows + 1].fill_(2)
+                expected = storage.clone()
+                expected[1:rows + 1, :8704] = 1
+                expected[1:rows + 1, 9216:] = 1
+                weights = tuple(
+                    torch.zeros(128, device="cuda", dtype=torch.bfloat16)
+                    for _ in range(4)
+                )
+                positions = torch.zeros(rows + 8, device="cuda", dtype=torch.int32)
+                cache = torch.cat(
+                    (torch.ones(1, 32, device="cuda"), torch.zeros(1, 32, device="cuda")),
+                    dim=1,
+                )
+                compiled = _gemma_norm_rope[(triton.cdiv(rows, 8), 73)](
+                    storage[1:rows + 1, :9216],
+                    storage[1:rows + 1, 9216:9728],
+                    storage[1:rows + 1, 9728:],
+                    *weights,
+                    positions,
+                    cache,
+                    9856, 9856, 9856, 1, 64, 64, 4, 4, 1e-6,
+                    rows, 8, num_warps=1, enable_fp_fusion=False,
+                )
+                torch.cuda.synchronize()
+                self.assertTrue(torch.equal(storage, expected))
+                if previous is not None:
+                    self.assertEqual(compiled.hash, previous)
+                previous = compiled.hash
+
     def test_query_fp8_outputs_preserve_bf16_rounding_and_graph(self):
         torch.manual_seed(20261006)
         for rows in (0, 1, 2047, 2048, 2049):

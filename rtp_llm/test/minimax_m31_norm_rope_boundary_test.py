@@ -1,6 +1,5 @@
 """GPU regression for CP4/1M norm-RoPE projection address overflow."""
 
-import os
 import unittest
 
 import torch
@@ -11,10 +10,7 @@ from rtp_llm.models_py.triton_kernels.minimax_m31_gemma_rope import (
 )
 
 
-@unittest.skipUnless(
-    os.environ.get("RTP_TEST_M31_NORM_BOUNDARY_GPU") == "1",
-    "opt-in GPU test allocates about 4.6 GiB",
-)
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class NormRopeBoundaryTest(unittest.TestCase):
     def test_fused_projection_stride_across_int32_boundary(self):
         if not torch.cuda.is_available():

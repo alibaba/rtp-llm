@@ -25,17 +25,19 @@ MX_BLOCK = 32
 _FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "ALIGNED_MN"])
 def _pack_flashinfer_mxfp8_scale_kernel(
     scale_u8_ptr,
     packed_ptr,
-    M: tl.constexpr,
+    M,
     K_GROUPS: tl.constexpr,
     K_PACKED: tl.constexpr,
-    ALIGNED_MN: tl.constexpr,
+    ALIGNED_MN,
     BLOCK_M: tl.constexpr,
     BLOCK_K_PACKED: tl.constexpr,
 ):
+    # Live row count and aligned output stride vary between Prefill batches;
+    # neither changes the byte packing or tile geometry.
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
