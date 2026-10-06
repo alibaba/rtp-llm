@@ -266,6 +266,8 @@ class JitCacheManager(FileSystemEventHandler):
         finally:
             if restore_fd is not None:
                 os.close(restore_fd)
+            if self._stop.is_set() and self.store:
+                self.store.close()
 
     def bootstrap(self, timeout_s: float) -> bool:
         """Restore under a deadline, then watch; -1 waits without limit."""

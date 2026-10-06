@@ -912,6 +912,34 @@ class ManagerTest(JitCacheTestBase):
             finally:
                 blocked.set()
 
+    def test_stop_closes_remote_store_that_resolves_after_deadline(self):
+        manager = self.make_manager(self.make_scope())
+        remote = self.root / "late_remote"
+        remote.mkdir()
+        late_store = store.RemoteSnapshotStore(remote)
+        entered, release = threading.Event(), threading.Event()
+
+        def resolve_late(*_args):
+            entered.set()
+            release.wait(5)
+            return late_store
+
+        try:
+            with mock.patch.object(
+                store, "resolve_remote", side_effect=resolve_late
+            ), mock.patch.object(jit, "STOP_TIMEOUT_S", 0.01):
+                self.assertFalse(manager.bootstrap(timeout_s=0.1))
+                self.assertTrue(entered.wait(5))
+                manager.stop()
+                self.assertIsNone(manager.store)
+                release.set()
+                manager._prepare_thread.join(5)
+                self.assertFalse(manager._prepare_thread.is_alive())
+                self.assertTrue(late_store._closed)
+        finally:
+            release.set()
+            manager.stop()
+
     def test_publish_then_restore_round_trip(self):
         scope = self.make_scope()
         producer = self.make_manager(scope)
