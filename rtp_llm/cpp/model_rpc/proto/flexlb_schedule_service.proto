@@ -89,7 +89,9 @@ message FlexlbScheduleRequestPB {
     // Estimated MM encoder tokens already cached when this Encoder request is
     // routed. Absent means the client did not provide a cache estimate; zero
     // means it checked and found no cached encoder tokens.
-    optional int64 encoder_cache_hit_len = 18;
+    oneof encoder_cache_hit_len_presence {
+        int64 encoder_cache_hit_len = 18;
+    }
 }
 
 message FlexlbServerStatusPB {
@@ -99,7 +101,9 @@ message FlexlbServerStatusPB {
     int32 grpc_port = 4;
     reserved 5;
     // Present only for a multi-engine frontend; zero is a valid selected index.
-    optional int32 engine_index = 6;
+    oneof engine_index_presence {
+        int32 engine_index = 6;
+    }
     // Requests on this Decode engine that must finish cancellation and resource
     // release before the incoming request executes. Empty means no preemption.
     repeated string preempt_request_ids = 7;
