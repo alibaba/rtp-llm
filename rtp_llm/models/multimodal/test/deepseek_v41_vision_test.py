@@ -153,6 +153,127 @@ class V41PreparedValidationTest(TestCase):
         self.assertTrue(torch.isfinite(output).all())
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
+    def test_empty_hash_bypasses_cache_without_aliasing(self):
+        # An empty content_sha256 is accepted by the RPC/prepared-input checks;
+        # two different images at the same grid/processor must NOT alias via the
+        # encode cache, and nothing with an untrusted identity is stored.
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 295936,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        torch.manual_seed(1234)
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        with torch.no_grad():
+            for parameter in adapter.named_parameters():
+                parameter[1].copy_(torch.randn_like(parameter[1]))
+        patches_one = torch.randn(
+            18, 3, 14, 14, generator=torch.Generator().manual_seed(11)
+        ).to(torch.bfloat16)
+        patches_two = torch.randn(
+            18, 3, 14, 14, generator=torch.Generator().manual_seed(22)
+        ).to(torch.bfloat16)
+        one = dict(self.record(), patches=patches_one, content_sha256="")
+        one["processor_identity"] = adapter.processor_config.identity
+        two = dict(self.record(start=8), patches=patches_two, content_sha256="")
+        two["processor_identity"] = adapter.processor_config.identity
+
+        forwards = []
+        hook = adapter.vision.register_forward_hook(lambda *args: forwards.append(1))
+        try:
+            first = adapter.encode_image(V41ImageInput(**one))
+            second = adapter.encode_image(V41ImageInput(**two))
+        finally:
+            hook.remove()
+
+        self.assertEqual(len(forwards), 2)
+        self.assertFalse(torch.equal(first, second))
+        self.assertEqual(len(adapter._encode_cache), 0)
+        self.assertEqual(len(adapter._encode_cache_order), 0)
+
+        # Same untrusted input recomputes every call (reference-test contract).
+        recomputed = adapter.encode_image(V41ImageInput(**one))
+        self.assertIsNot(recomputed, first)
+        torch.testing.assert_close(recomputed, first, rtol=0, atol=0)
+        self.assertEqual(len(adapter._encode_cache), 0)
+
+    def test_empty_hash_leaves_valid_hash_hits_untouched(self):
+        # The bypass must not break fast hits for trusted identities, the
+        # disabled cache, or LRU eviction.
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 295936,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        torch.manual_seed(1234)
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        with torch.no_grad():
+            for parameter in adapter.named_parameters():
+                parameter[1].copy_(torch.randn_like(parameter[1]))
+        patches = torch.randn(
+            18, 3, 14, 14, generator=torch.Generator().manual_seed(11)
+        ).to(torch.bfloat16)
+        trusted = dict(self.record(), patches=patches, content_sha256="c" * 64)
+        trusted["processor_identity"] = adapter.processor_config.identity
+        other = dict(self.record(start=8), patches=patches, content_sha256="d" * 64)
+        other["processor_identity"] = adapter.processor_config.identity
+
+        first = adapter.encode_image(V41ImageInput(**trusted))
+        second = adapter.encode_image(V41ImageInput(**trusted))
+        self.assertIs(second, first)
+        adapter.encode_image(V41ImageInput(**other))
+        self.assertEqual(len(adapter._encode_cache), 2)
+
+        adapter._encode_cache_capacity = 1
+        adapter._encode_cache.clear()
+        adapter._encode_cache_order.clear()
+        adapter.encode_image(V41ImageInput(**trusted))
+        adapter.encode_image(V41ImageInput(**other))
+        self.assertEqual(len(adapter._encode_cache), 1)
+        self.assertEqual(list(adapter._encode_cache.keys())[0][1], "d" * 64)
+
     def test_identical_images_hit_encode_cache_and_preserve_values(self):
         config = V41Config.from_dict(
             {
