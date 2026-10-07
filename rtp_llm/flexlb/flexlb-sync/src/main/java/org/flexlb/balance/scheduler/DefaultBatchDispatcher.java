@@ -288,13 +288,21 @@ public class DefaultBatchDispatcher {
                 dispatchExecutor.execute(() -> {
                     try {
                         delivery.run((items, batchId, predictedMs, reason, observer) ->
-                                doDispatch(dispatchTask(items, batchId, predictedMs, reason, observer)));
+                                doDispatch(dispatchTask(items, batchId, predictedMs,
+                                        reason, observer, PermitReservation.this)));
                     } catch (Throwable deliveryFailure) {
                         // Delivery owns admission cleanup; do not infer a
                         // second per-request outcome from task failure.
                         Logger.error("Batch delivery task failed", deliveryFailure);
                     } finally {
-                        finishSubmitted();
+                        // The permit is intentionally NOT released here: it is
+                        // held until the EnqueueBatch RPC completes
+                        // (released in the completion observer) so admission
+                        // bounds IN-FLIGHT payload, not just dispatch calls.
+                        // If delivery failed before dispatching, release now.
+                        if (phase.get() == PermitPhase.SUBMITTED) {
+                            finishSubmitted();
+                        }
                     }
                 });
             } catch (RuntimeException | Error submissionFailure) {
@@ -317,6 +325,21 @@ public class DefaultBatchDispatcher {
                 releasePermit();
             }
         }
+
+        /**
+         * Releases the admission permit when the dispatched EnqueueBatch RPC
+         * has completed (success, failure, or uncertain). Idempotent via the
+         * phase CAS; also covers the case where the dispatch task failed
+         * before invocation (PREPARED -> RELEASED).
+         */
+        void releaseOnRpcCompletion() {
+            if (phase.compareAndSet(
+                    PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releasePermit();
+                return;
+            }
+            finishSubmitted();
+        }
     }
 
     private static DispatchTask dispatchTask(
@@ -324,7 +347,8 @@ public class DefaultBatchDispatcher {
             long batchId,
             long predictedMs,
             String decisionReason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+            BiConsumer<ScheduledRequest, DeliveryResult> observer,
+            PermitReservation permitReservation) {
         List<ScheduledRequest> frozenItems = List.copyOf(exactItems);
         if (frozenItems.isEmpty()) {
             throw new IllegalArgumentException("batch cannot be empty");
@@ -333,13 +357,23 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException(
                     "batchId must be positive and predictedMs non-negative");
         }
+        // Permit release is idempotent (PermitReservation phase CAS). It is
+        // invoked exactly once when the EnqueueBatch RPC completes, so the
+        // admission semaphore bounds IN-FLIGHT batches, not merely dispatched
+        // ones. This is the direct-buffer retention root-cause fix (the
+        // ~23min 8GiB direct OOM under ramp: permits returned while RPC
+        // futures still held serialized payloads).
+        Runnable permitRelease = permitReservation == null
+                ? () -> { }
+                : permitReservation::releaseOnRpcCompletion;
         return new DispatchTask(
                 frozenItems,
                 frozenItems.getFirst().prefillEp(),
                 batchId,
                 predictedMs,
                 Objects.requireNonNull(decisionReason, "decisionReason"),
-                Objects.requireNonNull(observer, "observer"));
+                Objects.requireNonNull(observer, "observer"),
+                permitRelease);
     }
 
     private record DispatchTask(List<ScheduledRequest> items,
@@ -348,7 +382,8 @@ public class DefaultBatchDispatcher {
                                 long predictedMs,
                                 String reason,
                                 BiConsumer<ScheduledRequest,
-                                        DeliveryResult> observer) {
+                                        DeliveryResult> observer,
+                                Runnable rpcCompletionPermitRelease) {
     }
 
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
@@ -369,6 +404,9 @@ public class DefaultBatchDispatcher {
                 failItems(task.items(), task.batchId(),
                         unexpectedFailure, task.observer());
             }
+            // The RPC will never complete through the observer on this path;
+            // release the in-flight permit (idempotent).
+            task.rpcCompletionPermitRelease().run();
         }
     }
 
@@ -477,12 +515,18 @@ public class DefaultBatchDispatcher {
                     }
                 } finally {
                     finishCompletion();
+                    // Release the in-flight admission permit now that the
+                    // EnqueueBatch RPC has completed (retention root-cause fix).
+                    task.rpcCompletionPermitRelease().run();
                 }
             });
         } catch (Throwable registrationFailure) {
             finishCompletion();
             // Callback registration is post-invocation. The RPC may already
             // be in flight even though no completion observer was installed.
+            // The permit release is idempotent: the (unlikely) registered
+            // observer may also run, but only one release takes effect.
+            task.rpcCompletionPermitRelease().run();
             markUncertain(items, batchId, registrationFailure, observer);
         }
     }
