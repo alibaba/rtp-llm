@@ -640,9 +640,7 @@ class PreprocessMetricTest(TestCase):
 
     @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     @mock.patch("rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result")
-    def test_embedding_length_once_for_sync_async_cache_and_hash_only(
-        self, hashes, report
-    ):
+    def test_embedding_length_and_success_log_once_per_request(self, hashes, report):
         hashes.side_effect = lambda result: [
             torch.zeros(result[0].shape[0], dtype=torch.int64)
         ]
@@ -651,7 +649,7 @@ class PreprocessMetricTest(TestCase):
         config.use_local_preprocess = True
         config.mm_cache_gpu_max_bytes = 0
         config.mm_cache_cpu_max_bytes = 4096
-        config.disable_access_log = True
+        config.disable_access_log = False
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -659,6 +657,7 @@ class PreprocessMetricTest(TestCase):
             ProfilingDebugLoggingConfig(),
             device="cpu",
         )
+        engine._access_logger = mock.Mock()
         preprocess = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
 
         def inputs(index):
@@ -669,8 +668,8 @@ class PreprocessMetricTest(TestCase):
             ]
 
         try:
-            engine.mm_embedding_impl(inputs(0))
-            engine.mm_embedding_impl(inputs(0))  # synchronous cache hit
+            engine.mm_embedding_impl(inputs(0), request_id=10)
+            engine.mm_embedding_impl(inputs(0), request_id=11)  # sync cache hit
             engine.get_embedding_result(inputs(1), request_id=1)  # new async task
             engine.get_embedding_result(inputs(1), request_id=2)  # cache hit
             result = engine.get_embedding_result(
@@ -678,6 +677,21 @@ class PreprocessMetricTest(TestCase):
             )
             self.assertEqual(result[0].embeddings, [])
             self.assertEqual(model.mm_part.embedding_calls, 2)
+            engine.get_embedding_result(inputs(2) + inputs(3), request_id=4)
+            success = engine._access_logger.log_success_access
+            self.assertEqual(
+                [call.kwargs["request_id"] for call in success.call_args_list],
+                [10, 11, 1, 2, 3, 4],
+            )
+            with mock.patch.object(
+                engine, "_compute_embeddings", side_effect=RuntimeError("injected")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    engine.get_embedding_result(inputs(4), request_id=5)
+            self.assertEqual(success.call_count, 6)
+            config.disable_access_log = True
+            engine.get_embedding_result(inputs(1), request_id=6)
+            self.assertEqual(success.call_count, 6)
         finally:
             engine.stop()
         values = [
@@ -685,7 +699,7 @@ class PreprocessMetricTest(TestCase):
             for call in report.call_args_list
             if call.args[0] == GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC
         ]
-        self.assertEqual(values, [1, 1, 1, 1, 1])
+        self.assertEqual(values, [1, 1, 1, 1, 1, 2, 1])
 
     def test_embedding_length_counts_tokens_not_hidden_width(self):
         from rtp_llm.multimodal.mm_process_engine import _embedding_token_length

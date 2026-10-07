@@ -754,6 +754,7 @@ class MMProcessEngine:
         self._access_logger = MMAccessLogger(
             get_log_path(),
             profiling_debug_logging_config.log_file_backup_count,
+            server_id=self.server_id,
         )
 
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
@@ -833,6 +834,7 @@ class MMProcessEngine:
         defer_cache_complete=False,
         report_image_count=True,
         report_embedding_length=True,
+        report_success_access=True,
     ):
         work_items = []
         self.inc_query_num()
@@ -866,7 +868,7 @@ class MMProcessEngine:
                 )
                 if report_embedding_length:
                     _report_embedding_length([result])
-                if not self.vit_config.disable_access_log:
+                if report_success_access and not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
                         mm_inputs, str(result), request_id=request_id
                     )
@@ -1119,6 +1121,14 @@ class MMProcessEngine:
                 del raw_result
 
             _report_embedding_length(results, hashes_only=hashes_only)
+            # Log once at the request boundary, including cache hits. Internal
+            # async computations suppress their per-item success records.
+            if not self.vit_config.disable_access_log:
+                self._access_logger.log_success_access(
+                    mm_inputs,
+                    "; ".join(str(result) for result in results),
+                    request_id=request_id,
+                )
             return results
         except Exception as error:
             if hashes_only:
@@ -1442,6 +1452,7 @@ class MMProcessEngine:
                     request_id=request_id,
                     report_image_count=False,
                     report_embedding_length=False,
+                    report_success_access=False,
                 )
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:

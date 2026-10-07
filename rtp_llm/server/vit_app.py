@@ -19,7 +19,7 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_RDMA, PyEnvConfigs
-from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.config.uvicorn_config import configure_uvicorn_access_logging
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
@@ -229,12 +229,13 @@ class VitEndpointApp:
         # 获取配置
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
-        # 创建 uvicorn 配置
+        # dictConfig would close the already-running MM access log handlers.
+        configure_uvicorn_access_logging()
         config = Config(
             app,
             fd=fd,
             loop=loop,
-            log_config=get_uvicorn_logging_config(),
+            log_config=None,
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=1024 * 1024,
         )

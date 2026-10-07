@@ -36,9 +36,19 @@ def vit_start_server(
         f"(grpc_port={grpc_port}, http_port={http_port}, is_proxy_mode={is_proxy_mode})"
     )
 
+    # ViT workers are independent replicas. Select their device explicitly;
+    # inherited language-model local_rank is shared by spawned children.
+    if is_proxy_mode:
+        py_env_configs.parallelism_config.local_rank = server_id
     engine_config = EngineConfig.create(py_env_configs)
     local_rank = engine_config.parallelism_config.local_rank
     setup_cuda_device_and_accl_env(local_rank)
+    logging.info(
+        "[VIT_DEVICE_BINDING] worker=%s local_rank=%s proxy_worker=%s",
+        server_id,
+        local_rank,
+        is_proxy_mode,
+    )
 
     model_config = ModelFactory.create_model_config(
         model_args=py_env_configs.model_args,

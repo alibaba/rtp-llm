@@ -1,6 +1,7 @@
+from typing import Any, Dict
 
-from typing import Dict, Any
 from rtp_llm.config.log_config import get_log_path
+
 
 def get_uvicorn_logging_config(log_path: str = get_log_path()) -> Dict[str, Any]:
     return {
@@ -23,6 +24,35 @@ def get_uvicorn_logging_config(log_path: str = get_log_path()) -> Dict[str, Any]
             },
         },
         "loggers": {
-            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": "INFO",
+                "propagate": False,
+            },
         },
     }
+
+
+def configure_uvicorn_access_logging(log_path: str = get_log_path()) -> None:
+    """Configure HTTP access logging without closing unrelated async handlers."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from uvicorn.logging import AccessFormatter
+
+    config = get_uvicorn_logging_config(log_path)
+    handler_options = dict(config["handlers"]["access"])
+    handler_options.pop("class")
+    handler_options.pop("formatter")
+    formatter_options = dict(config["formatters"]["access"])
+    formatter_options.pop("()")
+    handler = RotatingFileHandler(**handler_options)
+    handler.setFormatter(AccessFormatter(**formatter_options))
+    logger = logging.getLogger("uvicorn.access")
+    for old_handler in list(logger.handlers):
+        logger.removeHandler(old_handler)
+        old_handler.close()
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.disabled = False
