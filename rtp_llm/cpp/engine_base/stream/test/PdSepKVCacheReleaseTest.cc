@@ -1011,7 +1011,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             WriteCacheStoreOp(inputs.input_lengths_host,
                               inputs.prefix_lengths_host,
                               blockIdsTensor(prefill_resource, gid),
-                              inputs,
+                              &inputs,
                               layer_cache);
         }
     }

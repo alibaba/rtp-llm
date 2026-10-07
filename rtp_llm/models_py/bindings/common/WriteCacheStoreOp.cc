@@ -6,16 +6,16 @@ namespace rtp_llm {
 
 using namespace torch_ext;
 
-void WriteCacheStoreOp(const torch::Tensor&                         input_lengths,
-                       const torch::Tensor&                         prefix_lengths,
-                       const torch::Tensor&                         kv_cache_block_id_host,
-                       std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
-                       std::optional<torch_ext::LayerKVCache>       kv_cache) {
-    if (!kv_cache.has_value() || !cache_store_member.has_value()) {
+void WriteCacheStoreOp(const torch::Tensor&                    input_lengths,
+                       const torch::Tensor&                    prefix_lengths,
+                       const torch::Tensor&                    kv_cache_block_id_host,
+                       const torch_ext::PyCacheStoreInputs*    cache_store_member,
+                       std::optional<torch_ext::LayerKVCache>  kv_cache) {
+    if (!kv_cache.has_value() || !cache_store_member) {
         return;
     }
 
-    const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
+    const PyCacheStoreInputs& cache_store_inputs = *cache_store_member;
 
     // Capture all torch::Tensors by value so the underlying memory stays alive
     // in the background thread. torch::Tensor copy is a cheap refcount bump.
@@ -31,7 +31,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     auto run = [captured_input_lengths,
                 captured_prefix_lengths,
                 captured_kv_cache_block_id_host,
-                captured_cache_store,
+                captured_cache_store = std::move(captured_cache_store),
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
         auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
@@ -95,7 +95,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.decoder_batch_size,
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
-                                captured_cache_store.cache_keys,
+                                std::move(captured_cache_store.cache_keys),
                                 layer_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,
