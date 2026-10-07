@@ -308,7 +308,7 @@ class FaultInjectionE2ETest {
 
             AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
                     "the first enqueue must trigger the configured engine crash");
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 1
+            AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 1
                             && prefillEndpoint.getInflightBatchCount() == 1
                             && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
@@ -341,7 +341,7 @@ class FaultInjectionE2ETest {
                     ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0
+            AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 0
                             && h.decodeEndpoint(0).getInflightCount() == 0,
                     2_000, "TTL must release the crashed request's scheduler and Decode accounting");
             assertTrue(prefill.isStopped(), "cleanup cannot depend on the crashed Engine returning");

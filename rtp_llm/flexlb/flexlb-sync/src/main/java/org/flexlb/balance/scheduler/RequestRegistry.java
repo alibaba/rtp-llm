@@ -110,7 +110,7 @@ public class RequestRegistry {
     /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
     public boolean replaceQueuedDecodeReservations(
             DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims,
-            String incomingRequestId, long hardKv, long expectedKv, int priority,
+            String incomingRequestId, long requiredKv, long kvBudget, int priority,
             DecodeEndpoint.AdmissionCapacity capacity) {
         GlobalQueueCoordinator queue = globalQueue;
         if (queue == null || shuttingDown.get()) { return false; }
@@ -128,7 +128,7 @@ public class RequestRegistry {
                 }
             }
             replaced = endpoint.replaceQueuedRequests(
-                    victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+                    victims, incomingRequestId, requiredKv, kvBudget, priority, capacity);
             return replaced;
         } finally {
             Throwable failure = null;
@@ -607,12 +607,12 @@ public class RequestRegistry {
                         prefill.getServerIp(), prefill.getGrpcPort());
     }
 
-    public int liveRequestCount() {
-        return liveRequestCount(RequestPhase.GENERATION)
-                + liveRequestCount(RequestPhase.ENCODER);
+    public int trackedRequestCount() {
+        return trackedRequestCount(RequestPhase.GENERATION)
+                + trackedRequestCount(RequestPhase.ENCODER);
     }
 
-    public int liveRequestCount(RequestPhase phase) {
+    public int trackedRequestCount(RequestPhase phase) {
         int live = 0;
         for (RequestSlot slot : slots(phase).values()) {
             synchronized (slot) {
@@ -624,6 +624,38 @@ public class RequestRegistry {
         }
         return live;
     }
+
+    /**
+     * Collect both request counts and the oldest live age in one traversal.
+     */
+    public TrackedRequestStats trackedRequestStats() {
+        int generation = 0;
+        int encoder = 0;
+        long oldest = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        for (RequestPhase phase : RequestPhase.values()) {
+            if (phase != RequestPhase.GENERATION && phase != RequestPhase.ENCODER) {
+                continue;
+            }
+            for (RequestSlot slot : slots(phase).values()) {
+                synchronized (slot) {
+                    if (!isCurrentSlot(slot) || !slot.isLiveGeneration()) {
+                        continue;
+                    }
+                    if (phase == RequestPhase.GENERATION) {
+                        generation++;
+                    } else {
+                        encoder++;
+                    }
+                    oldest = Math.min(oldest, slot.createdAtMs());
+                }
+            }
+        }
+        return new TrackedRequestStats(generation, encoder,
+                oldest == Long.MAX_VALUE ? 0L : Math.max(0L, now - oldest));
+    }
+
+    public record TrackedRequestStats(int generationRequests, int encoderRequests, long oldestAgeMs) { }
 
     public long oldestLiveSlotAgeMs() {
         long oldest = Long.MAX_VALUE;

@@ -69,8 +69,8 @@ class DecodeEndpointAdmissionTest {
 
         // Hard (500), not expected (600), is subtracted from the report.
         assertEquals(9_500, endpoint.realKvAvailable());
-        assertEquals(500, endpoint.routingView().inflightHardKv());
-        assertEquals(600, endpoint.routingView().inflightExpectedKv());
+        assertEquals(500, endpoint.routingView().inputKvReserved());
+        assertEquals(600, endpoint.routingView().inputAndMaxOutputKvReserved());
 
         DecodeEndpoint.DecodeRequestView entry = reserved().get("1");
         assertEquals(70, entry.priority());
@@ -90,8 +90,8 @@ class DecodeEndpointAdmissionTest {
         release(1L);
         assertEquals(v0 + 2, endpoint.routingView().admissionVersion());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
+        assertEquals(0, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     @Test
@@ -137,13 +137,13 @@ class DecodeEndpointAdmissionTest {
 
         assertFalse(endpoint.release(stale, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
         assertReservationIdentity(replacement, reserved().get(Long.toString(requestId)));
-        assertEquals(200, endpoint.routingView().inflightHardKv());
-        assertEquals(220, endpoint.routingView().inflightExpectedKv());
+        assertEquals(200, endpoint.routingView().inputKvReserved());
+        assertEquals(220, endpoint.routingView().inputAndMaxOutputKvReserved());
 
         assertTrue(endpoint.release(current, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
         assertFalse(reserved().containsKey(Long.toString(requestId)));
-        assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
+        assertEquals(0, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     // ==================== atomic release+reserve: success ====================
@@ -162,7 +162,7 @@ class DecodeEndpointAdmissionTest {
         assertFalse(reserved().containsKey("2"));
         assertEquals(70, reserved().get("9").priority());
         assertEquals(1, endpoint.routingView().totalLoad());
-        assertEquals(700, endpoint.routingView().inflightHardKv());
+        assertEquals(700, endpoint.routingView().inputKvReserved());
         assertTrue(endpoint.routingView().admissionVersion() > version);
     }
 
@@ -183,7 +183,7 @@ class DecodeEndpointAdmissionTest {
         assertFalse(endpoint.replaceQueuedRequests(List.of(stale), "9", 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
         assertTrue(reserved().containsKey("1"));
         assertFalse(reserved().containsKey("9"));
-        assertEquals(100, endpoint.routingView().inflightHardKv());
+        assertEquals(100, endpoint.routingView().inputKvReserved());
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -201,7 +201,7 @@ class DecodeEndpointAdmissionTest {
         assertFalse(endpoint.replaceQueuedRequests(List.of(exact, absent), "9", 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
         assertTrue(reserved().containsKey("1"));
         assertFalse(reserved().containsKey("9"));
-        assertEquals(100, endpoint.routingView().inflightHardKv());
+        assertEquals(100, endpoint.routingView().inputKvReserved());
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -435,8 +435,8 @@ class DecodeEndpointAdmissionTest {
                 endpoint.beginPreemption(101L, List.of(stale), 5L, 100, 110, 50, new DecodeEndpoint.AdmissionCapacity(1, 100)));
 
         assertTrue(reserved().isEmpty());
-        assertEquals(0L, endpoint.routingView().inflightHardKv());
-        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0L, endpoint.routingView().inputKvReserved());
+        assertEquals(0L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     @Test
@@ -449,8 +449,8 @@ class DecodeEndpointAdmissionTest {
 
         assertNull(endpoint.reservationHandle(1L));
         assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
-        assertEquals(0L, endpoint.routingView().inflightHardKv());
-        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0L, endpoint.routingView().inputKvReserved());
+        assertEquals(0L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     @Test
@@ -752,7 +752,7 @@ class DecodeEndpointAdmissionTest {
         assertTrue(reserved().isEmpty());
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(1, endpoint.routingView().totalLoad());
-        assertEquals(0, endpoint.routingView().inflightHardKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
     }
 
     @Test
@@ -840,9 +840,9 @@ class DecodeEndpointAdmissionTest {
             reserve.get(5, TimeUnit.SECONDS);
 
             assertNotNull(blockingEndpoint.reservationHandle(71L));
-            assertEquals(500L, blockingEndpoint.routingView().inflightHardKv());
+            assertEquals(500L, blockingEndpoint.routingView().inputKvReserved());
             assertEquals(600L,
-                    blockingEndpoint.routingView().inflightExpectedKv());
+                    blockingEndpoint.routingView().inputAndMaxOutputKvReserved());
             assertEquals(9_500L, blockingEndpoint.realKvAvailable(),
                     "the post-calibration reservation must be retained");
         } finally {
@@ -889,7 +889,7 @@ class DecodeEndpointAdmissionTest {
                 }
             }
             assertEquals(3, admitted);
-            assertEquals(9000L, endpoint.routingView().inflightExpectedKv());
+            assertEquals(9000L, endpoint.routingView().inputAndMaxOutputKvReserved());
             assertEquals(3, endpoint.routingView().engineCapacityUsed());
             assertEquals(0, endpoint.resourceSnapshot().queuedCount());
         } finally {
@@ -928,7 +928,7 @@ class DecodeEndpointAdmissionTest {
                 endpoint.acquireDispatchPermit(staleGeneration, capacity).status());
         assertEquals(1, endpoint.routingView().engineLoad());
         assertEquals(1, endpoint.routingView().engineCapacityUsed());
-        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     @Test
@@ -989,11 +989,11 @@ class DecodeEndpointAdmissionTest {
         assertFalse(acquired.permit().release());
         assertThrows(IllegalStateException.class,
                 () -> endpoint.release(handle, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
-        assertEquals(1000L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(1000L, endpoint.routingView().inputAndMaxOutputKvReserved());
         TaskInfo finished = new TaskInfo();
         finished.setRequestId("71");
         updateStatus(Map.of(), Map.of("71", finished), 10_000L);
-        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
     @Test
@@ -1027,8 +1027,8 @@ class DecodeEndpointAdmissionTest {
 
     private DecodeEndpoint.ReservationHandle reserve(
             long requestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
@@ -1036,7 +1036,7 @@ class DecodeEndpointAdmissionTest {
                         "Decode endpoint generation is retired");
             }
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+                    endpoint.reserveUnqueued(pin, requestId, requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -1044,8 +1044,8 @@ class DecodeEndpointAdmissionTest {
 
     private DecodeEndpoint.ReservationHandle reserveQueued(
             long requestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
@@ -1053,7 +1053,7 @@ class DecodeEndpointAdmissionTest {
                         "Decode endpoint generation is retired");
             }
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserve(pin, requestId, hardKv, expectedKv, priority);
+                    endpoint.reserve(pin, requestId, requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -1108,10 +1108,10 @@ class DecodeEndpointAdmissionTest {
             long attemptToken,
             List<Long> victimIds,
             long incomingRequestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
-        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, hardKv, expectedKv, priority, new DecodeEndpoint.AdmissionCapacity(
+        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, requiredKv, kvBudget, priority, new DecodeEndpoint.AdmissionCapacity(
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 

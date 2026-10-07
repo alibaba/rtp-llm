@@ -43,8 +43,8 @@ class DecodeRequestExpirationTest {
         assertFalse(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
+        assertEquals(0, endpoint.routingView().inputAndMaxOutputKvReserved());
         assertEquals(0, endpoint.resourceSnapshot().queuedCount());
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
@@ -80,8 +80,8 @@ class DecodeRequestExpirationTest {
 
         assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
         assertEquals(0, endpoint.routingView().engineLoad());
-        assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, endpoint.routingView().inputKvReserved());
+        assertEquals(0, endpoint.routingView().inputAndMaxOutputKvReserved());
         assertFalse(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
     }
 
@@ -112,7 +112,7 @@ class DecodeRequestExpirationTest {
         endpoint.evictExpiredRequests(-1L, requestId -> false);
         DecodeEndpoint.ReservationHandle replacement = reserve(1L, 300, 450, 0);
         assertFalse(endpoint.release(original, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertEquals(300, endpoint.routingView().inflightHardKv());
+        assertEquals(300, endpoint.routingView().inputKvReserved());
         assertTrue(endpoint.release(replacement, DecodeEndpoint.ReleaseReason.EXPIRED).released());
     }
 
@@ -201,13 +201,13 @@ class DecodeRequestExpirationTest {
 
     private DecodeEndpoint.ReservationHandle reserve(
             long requestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+                    endpoint.reserveUnqueued(pin, requestId, requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -233,10 +233,10 @@ class DecodeRequestExpirationTest {
             long attemptToken,
             List<Long> victimIds,
             long incomingRequestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
-        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, hardKv, expectedKv, priority, new DecodeEndpoint.AdmissionCapacity(
+        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, requiredKv, kvBudget, priority, new DecodeEndpoint.AdmissionCapacity(
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 

@@ -41,6 +41,24 @@ class PrefillStateSnapshotTest {
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
     @Test
+    void inflightExcludesQueuedAndConfirmedWorkerRequests() {
+        enqueue(item(9));
+        assertEquals(0, state.stats().inflightRequests());
+        try (var reservation = state.reserveUnqueuedRoute(item(8), 10, Long.MAX_VALUE).reservation()) {
+            assertEquals(0, state.stats().inflightRequests());
+        }
+        var request = item(1);
+        try (var reservation = state.reserveUnqueuedRoute(request, 10, Long.MAX_VALUE).reservation();
+             var handoff = state.commitRouteGroup(List.of(request), List.of(reservation),
+                     generation.tryAcquireHandoff())) {
+            assertEquals(1, state.stats().inflightRequests());
+        }
+        reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RUNNING, 0, 0)), unused -> 0L);
+        assertEquals(0, state.stats().inflightRequests());
+        assertEquals(1, state.stats().locallyOwnedRequests());
+    }
+
+    @Test
     void concurrentReadersShareACompleteImmutableMaterialization() throws Exception {
         var second = state.reserveUnqueuedRoute(item(2), 20, Long.MAX_VALUE).reservation();
         var first = state.reserveUnqueuedRoute(item(1), 10, Long.MAX_VALUE).reservation();

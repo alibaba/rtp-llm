@@ -913,7 +913,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             + "exceptional=%d scheduler_inflight=%d queued=%d "
                             + "engine_received=%d%n",
                     requestCount, completed, successful, completed - successful,
-                    scheduler.getInflightSize(), scheduler.getQueuedRequestCount(),
+                    scheduler.getTrackedRequestCount(), scheduler.getQueuedRequestCount(),
                     receivedEngineRequestCount());
             for (int index = 0; index < futures.size(); index++) {
                 CompletableFuture<TimedResponse> future = futures.get(index);
@@ -1135,7 +1135,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         long expected = simulatedResponseCount.get();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while ((simulatedCompletionCount.get() < expected || !acceptedRequests.isEmpty()
-                || !simulatedCompletions.isEmpty() || scheduler.getInflightSize() != 0)
+                || !simulatedCompletions.isEmpty() || scheduler.getTrackedRequestCount() != 0)
                 && simulatedStatusFailure.get() == null
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1);
@@ -1148,7 +1148,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "every successful route must receive actual-worker completion evidence");
         assertTrue(acceptedRequests.isEmpty(), "accepted batches must all match a published route");
         assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
-        assertEquals(0, scheduler.getInflightSize(), "request lifecycle registry must be drained");
+        assertEquals(0, scheduler.getTrackedRequestCount(), "request lifecycle registry must be drained");
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
             assertEquals(0, endpoint.getInflightBatchCount(), address + " retained batch credits");

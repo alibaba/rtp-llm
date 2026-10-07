@@ -123,7 +123,7 @@ class PrefillCompletionProjectionTest {
                 assertTrue(slot.isLiveGeneration(), "Prefill completion must retain the Decode lifecycle");
                 assertTrue(slot.decisionDeadlineAtMs().isEmpty());
             }
-            assertEquals(decodeAlreadyAccepted ? 0L : 32L, decode.routingView().inflightExpectedKv(),
+            assertEquals(decodeAlreadyAccepted ? 0L : 32L, decode.routingView().inputAndMaxOutputKvReserved(),
                     "missing Decode acceptance must retain this request's reservation");
             assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L).fits(),
                     "a suspected lost request must not isolate a worker with available capacity");

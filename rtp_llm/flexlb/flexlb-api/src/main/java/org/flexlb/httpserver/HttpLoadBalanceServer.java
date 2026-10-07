@@ -249,7 +249,7 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", requestScheduler.getInflightSize());
+            result.put("scheduler_inflight", requestScheduler.getTrackedRequestCount());
             result.put("scheduler_blocked", requestScheduler.getBlockedRequestCount());
             result.put("decode_max_engine_requests",
                     configService.loadBalanceConfig().getRouter().getRoles()
@@ -300,9 +300,9 @@ public class HttpLoadBalanceServer {
                 ep.put("engine_facing_kv_available",
                         view.routing().engineFacingKvAvailable());
                 ep.put("total_kv", view.routing().totalKv());
-                ep.put("inflight_hard_kv", view.routing().inflightHardKv());
+                ep.put("inflight_hard_kv", view.routing().inputKvReserved());
                 ep.put("inflight_expected_kv",
-                        view.routing().inflightExpectedKv());
+                        view.routing().inputAndMaxOutputKvReserved());
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);

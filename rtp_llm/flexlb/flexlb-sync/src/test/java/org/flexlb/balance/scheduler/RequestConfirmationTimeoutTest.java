@@ -119,11 +119,11 @@ class RequestConfirmationTimeoutTest {
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
                 claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
             }
-            assertEquals(1, requests.liveRequestCount());
+            assertEquals(1, requests.trackedRequestCount());
             assertFalse(future.isDone());
             assertEquals(1L, prefill.observedRequestCount());
-            assertEquals(16L, decode.routingView().inflightHardKv());
-            assertEquals(32L, decode.routingView().inflightExpectedKv());
+            assertEquals(16L, decode.routingView().inputKvReserved());
+            assertEquals(32L, decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
@@ -134,11 +134,11 @@ class RequestConfirmationTimeoutTest {
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getLocallyOwnedRequestCount());
-            assertEquals(0L, decode.routingView().inflightHardKv());
-            assertEquals(0L, decode.routingView().inflightExpectedKv());
+            assertEquals(0L, decode.routingView().inputKvReserved());
+            assertEquals(0L, decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, decode.routingView().engineCapacityUsed());
 
             // Local expiration restores admission capacity without an Engine Cancel channel.
@@ -153,7 +153,7 @@ class RequestConfirmationTimeoutTest {
             requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {

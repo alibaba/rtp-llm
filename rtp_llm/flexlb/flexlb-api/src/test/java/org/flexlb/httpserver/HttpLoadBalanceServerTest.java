@@ -27,7 +27,7 @@ class HttpLoadBalanceServerTest {
     @Test
     void inflightStatusExposesExactBlockedRequestCount() {
         RequestScheduler scheduler = mock(RequestScheduler.class);
-        when(scheduler.getInflightSize()).thenReturn(9);
+        when(scheduler.getTrackedRequestCount()).thenReturn(9);
         when(scheduler.getBlockedRequestCount()).thenReturn(2);
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 mock(LBStatusConsistencyService.class),

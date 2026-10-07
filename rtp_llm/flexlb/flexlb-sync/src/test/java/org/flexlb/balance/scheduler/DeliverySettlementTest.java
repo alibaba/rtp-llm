@@ -565,7 +565,7 @@ class DeliverySettlementTest {
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+        RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
         assertSame(response, member.item().future().join());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);

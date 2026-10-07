@@ -81,10 +81,10 @@ class EvictionPlannerDecodeContractTest {
     }
 
     private static DecodeEvictionProposal plan(
-            int priority, long hardKvTokens, DecodeEndpointSnapshot ep,
+            int priority, long requiredKvTokens, DecodeEndpointSnapshot ep,
             Map<String, String> failures) {
         return EvictionPlanner.planDecode(
-                priority, hardKvTokens, hardKvTokens, List.of(ep), engineOwned(), SUPPORTING_CHANNEL, failures);
+                priority, requiredKvTokens, requiredKvTokens, List.of(ep), engineOwned(), SUPPORTING_CHANNEL, failures);
     }
 
     private static List<String> victimIds(DecodeEvictionProposal p) {

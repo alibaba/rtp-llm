@@ -297,7 +297,7 @@ class DefaultRouterTest {
             requests.expireInactiveRequest(slot, System.currentTimeMillis()
                     + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(9L, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            assertEquals(0, requests.trackedRequestCount());
             verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify((PrefillEndpoint) prefill.endpoint).expireCommittedItem(any(ScheduledRequest.class));
         } finally {
@@ -347,7 +347,7 @@ class DefaultRouterTest {
             "9223372036854775806,100,9223372036854775806,9223372036854775807",
             "-1,100,0,100", "500,-1,500,500"})
     void queuedRouteRetainsSelectedDemandLimitsAndCostFormulaAcrossLaterContextChanges(
-            long prompt, int output, long hardKv, long expectedKv) {
+            long prompt, int output, long requiredKv, long kvBudget) {
         var config = SchedulingTestConfig.newConfig();
         var context = RequestLifecycleTestSupport.context(config, 701L);
         context.getRequest().setSeqLen(prompt);
@@ -391,7 +391,7 @@ class DefaultRouterTest {
             assertSame(frozen.costFormula(), item.decodeBinding().costFormula());
             assertSame(reservation, item.decodeBinding().reservation());
             assertSame(decode, item.decodeBinding().endpoint());
-            assertEquals(hardKv, item.seqLen());
+            assertEquals(requiredKv, item.seqLen());
             assertEquals(DecodeMode.WAIT_AT_PLACEMENT, frozen.mode());
 
             var delivery = PrefillAdmissionResources.prepareMember(item);
@@ -400,7 +400,7 @@ class DefaultRouterTest {
             assertFalse(delivery.boundary().availability().isAvailable());
             verify(decode).shouldRetryDispatch("701", frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
-            verify(decode).reserve(any(), eq("701"), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
+            verify(decode).reserve(any(), eq("701"), eq(requiredKv), eq(kvBudget), eq(73), eq(frozen.capacity()));
             verify(decode, never()).reserve(any(), anyString(), anyLong(), anyLong(), anyInt());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);

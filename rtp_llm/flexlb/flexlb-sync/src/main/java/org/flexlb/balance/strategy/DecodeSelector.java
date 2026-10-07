@@ -69,7 +69,7 @@ public class DecodeSelector {
             }
             if (allWorkersTooSmall) {
                 return PlacementResult.rejected(oversizedRequestFailure(
-                        request.expectedKvTokens(), largestKvBudget));
+                        request.inputAndMaxOutputKvTokens(), largestKvBudget));
             }
             if (preferredAvailability == Availability.IMPOSSIBLE) {
                 return classifyCapacityFailure(request, decodeWorkerViews);
@@ -133,7 +133,7 @@ public class DecodeSelector {
                     var snapshot = ((DecodeEndpoint) pin.endpoint()).admissionSummary();
                     evidence.add(Map.of("endpoint", view.address(), "version", snapshot.routing().admissionVersion(),
                             "engineLoad", snapshot.routing().engineLoad(), "totalLoad", snapshot.routing().totalLoad(),
-                            "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().placementUsage().hardKvAvailable()));
+                            "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().placementUsage().availableKvAfterReservations()));
                     workerFailure = classifyCapacityFailure(request, snapshot);
                 }
             }
@@ -160,7 +160,7 @@ public class DecodeSelector {
         var routing = snapshot.routing();
         var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
         if (usage.totalKvTokens() > 0
-                && request.expectedKvTokens() > request.capacity().kvBudget(usage.totalKvTokens())) {
+                && request.inputAndMaxOutputKvTokens() > request.capacity().kvBudget(usage.totalKvTokens())) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         }
         CapacityRelease lower = CapacityRelease.NONE;
@@ -179,32 +179,32 @@ public class DecodeSelector {
         }
         // Removing lower-priority occupancy is a counterfactual for attribution,
         // not an authorization to preempt its owners.
-        var residual = request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens(), lower);
+        var residual = request.capacity().evaluate(usage, request.inputKvTokens(), request.inputAndMaxOutputKvTokens(), lower);
         if (residual.fits()) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         }
         CapacityRelease attributed = higher.plus(same);
         if (residual.requests() > attributed.requests()
-                || residual.hardKvTokens() > attributed.hardKvTokens()
-                || residual.expectedKvTokens() > attributed.expectedKvTokens()) {
+                || residual.requiredKvTokens() > attributed.requiredKvTokens()
+                || residual.kvBudgetTokens() > attributed.kvBudgetTokens()) {
             return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
         }
         boolean higherBlocks = residual.requests() > 0 && higher.requests() > 0
-                || residual.hardKvTokens() > 0 && higher.hardKvTokens() > 0
-                || residual.expectedKvTokens() > 0 && higher.expectedKvTokens() > 0;
+                || residual.requiredKvTokens() > 0 && higher.requiredKvTokens() > 0
+                || residual.kvBudgetTokens() > 0 && higher.kvBudgetTokens() > 0;
         return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, higherBlocks
                 ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
     private static Availability availability(DecodeBinding request, DecodeRoutingView view) {
-        if (view.totalKv() > 0L && request.expectedKvTokens() > request.capacity().kvBudget(view.totalKv())) {
+        if (view.totalKv() > 0L && request.inputAndMaxOutputKvTokens() > request.capacity().kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
         }
         var usage = switch (request.mode()) {
             case IMMEDIATE -> view.dispatchUsage();
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> view.placementUsage();
         };
-        return request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens()).fits()
+        return request.capacity().evaluate(usage, request.inputKvTokens(), request.inputAndMaxOutputKvTokens()).fits()
                 ? Availability.READY : Availability.BUSY;
     }
 
