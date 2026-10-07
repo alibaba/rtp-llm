@@ -544,7 +544,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             return;
         }
         if (!src.defined() || src.numel() <= 0) {
-            dst.zero_();
+            if (dst.is_contiguous()) {
+                std::memset(dst.data_ptr(), 0, dst.numel() * dst.element_size());
+            } else {
+                dst.zero_();
+            }
             return;
         }
         const auto geometry = blockTableCopyGeometry(src, dst);
@@ -552,7 +556,24 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // part not overwritten by this replay so a request that left the batch
         // cannot survive in the host-pinned page table consumed by the next
         // FlashInfer/TRT-LLM plan. Device tables have the same contract above.
-        if (dst.dim() < 2) {
+        if (dst.is_contiguous() && (dst.dim() < 2 || dst.stride(1) == 1)) {
+            auto* dst_ptr = reinterpret_cast<char*>(dst.data_ptr());
+            const size_t element_bytes = dst.element_size();
+            if (dst.dim() < 2) {
+                std::memset(dst_ptr + geometry.cols * element_bytes,
+                            0,
+                            (dst.numel() - geometry.cols) * element_bytes);
+            } else {
+                const size_t row_bytes = dst.size(1) * element_bytes;
+                const size_t live_bytes = geometry.cols * element_bytes;
+                for (int64_t row = 0; row < geometry.rows; ++row) {
+                    std::memset(dst_ptr + row * row_bytes + live_bytes, 0, row_bytes - live_bytes);
+                }
+                std::memset(dst_ptr + geometry.rows * row_bytes,
+                            0,
+                            (dst.size(0) - geometry.rows) * row_bytes);
+            }
+        } else if (dst.dim() < 2) {
             if (geometry.cols < dst.numel()) {
                 dst.view({-1}).narrow(0, geometry.cols, dst.numel() - geometry.cols).zero_();
             }
@@ -734,15 +755,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #endif
 
-    if (!has_tagged_cache) {
-        // The host mirror must be cleared with the device block table. fillParams
-        // walks every graph-batch row and may dereference padding rows when a
-        // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
-        // this reset, a padding row can retain a previous replay's block ID and
-        // route a KV write into a live request's block. Block 0 is reserved and is
-        // therefore the safe destination for padding rows.
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
-    }
+    // stridedCopyHost clears every region not overwritten by the current table,
+    // including padding rows. Avoid clearing the live region a second time here.
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
@@ -820,9 +834,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
-                dst_inputs.kv_cache_kernel_block_id.zero_();
-            }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
         }
