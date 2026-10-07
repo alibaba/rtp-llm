@@ -113,6 +113,12 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         # the image payload. content_sha256 identifies the exact patch bytes,
         # processor_identity the preprocessing contract, and the grid fixes
         # the token layout; no other request field reaches the forward pass.
+        # An EMPTY content_sha256 is not a trusted identity: RPC/prepared-input
+        # checks still admit it, and two different images with the same grid
+        # and processor would alias to one cached embedding. Bypass the cache
+        # entirely when the trusted content identity is absent.
+        if not image.content_sha256:
+            return None
         return (
             image.processor_identity,
             image.content_sha256,
@@ -124,6 +130,8 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         if self._encode_cache_capacity <= 0:
             return None
         key = self._encode_cache_key(image)
+        if key is None:
+            return None
         with self._encode_cache_lock:
             if key in self._encode_cache:
                 self._encode_cache_order.remove(key)
@@ -132,7 +140,7 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         return None
 
     def _encode_image_store(self, key, result: torch.Tensor):
-        if self._encode_cache_capacity <= 0:
+        if key is None or self._encode_cache_capacity <= 0:
             return
         with self._encode_cache_lock:
             if key in self._encode_cache:
