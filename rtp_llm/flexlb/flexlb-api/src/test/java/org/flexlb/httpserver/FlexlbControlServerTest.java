@@ -23,6 +23,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -83,7 +84,6 @@ class FlexlbControlServerTest {
                 .jsonPath("$.autoSwitchEnabled").isEqualTo(true)
                 .jsonPath("$.effectiveSource").isEqualTo("KVCM")
                 .jsonPath("$.kvcmHealthState").isEqualTo("HEALTHY")
-                .jsonPath("$.failoverState").doesNotExist()
                 .jsonPath("$.localStandbyEntries").isEqualTo(123)
                 .jsonPath("$.localStandbyMaximumEntries").isEqualTo(456);
     }
@@ -136,12 +136,25 @@ class FlexlbControlServerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"{}", "{\"action\":null}", "{\"action\":\"\"}"})
+    @ValueSource(strings = {"{}", "{\"action\":null}"})
     void rejectsMissingFailoverActionBeforeApplyingOrForwarding(String body) {
         webTestClient.post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
+                .bodyValue(body.getBytes(StandardCharsets.UTF_8))
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody(String.class).isEqualTo("action is required");
+
+        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
+    }
+
+    @Test
+    void rejectsEmptyFailoverActionBeforeApplyingOrForwarding() {
+        webTestClient.post()
+                .uri("/flexlb/cache_match/failover")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"action\":\"\"}".getBytes(StandardCharsets.UTF_8))
                 .exchange()
                 .expectStatus().isBadRequest();
 

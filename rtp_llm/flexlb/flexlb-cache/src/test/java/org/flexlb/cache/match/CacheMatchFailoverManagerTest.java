@@ -1,5 +1,7 @@
 package org.flexlb.cache.match;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -11,6 +13,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -76,6 +79,41 @@ class CacheMatchFailoverManagerTest {
 
         manager.recoverPrimaryManually();
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+    }
+
+    @Test
+    void warnsOncePerUnhealthyPeriodWhenManualFailoverIsRequired() {
+        KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+        when(client.healthSnapshot()).thenReturn(
+                health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CacheMatchFailoverManager.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
+                    configuration(false), client, mock(CacheMetricsReporter.class));
+            Consumer<KvcmHealthSnapshot> listener = healthSnapshotListener(client);
+
+            listener.accept(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "first failure"));
+            listener.accept(health(KvcmHealthState.UNHEALTHY, 4, 0, 2, "continued failure"));
+            assertEquals(1, manualFailoverWarnings(appender));
+            assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+
+            listener.accept(health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
+            listener.accept(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "new failure"));
+            assertEquals(2, manualFailoverWarnings(appender));
+            assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    private long manualFailoverWarnings(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .filter(event -> event.getFormattedMessage().contains("manual failover is required"))
+                .count();
     }
 
     @Test

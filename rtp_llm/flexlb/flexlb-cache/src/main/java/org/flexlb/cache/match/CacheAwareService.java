@@ -44,7 +44,7 @@ public class CacheAwareService {
         try {
             CacheMatchResult result = queryOrchestrator.findMatchingEngines(query);
             cacheMetricsReporter.reportFindMatchingEnginesRT(
-                    query.roleType(), startTimeUs, "0");
+                    query.roleType(), startTimeUs, result.querySucceeded() ? "0" : "1");
             return result;
         } catch (RuntimeException error) {
             CacheMatchSource source = queryOrchestrator.effectiveSource();

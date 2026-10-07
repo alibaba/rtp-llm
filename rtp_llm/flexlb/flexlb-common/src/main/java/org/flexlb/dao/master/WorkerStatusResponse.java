@@ -37,9 +37,6 @@ public class WorkerStatusResponse {
     @JsonProperty("running_task_info")
     private Map<String, TaskInfo> runningTaskInfo;
 
-    @JsonProperty("waiting_task_info")
-    private Map<String, TaskInfo> waitingTaskInfo;
-
     @JsonProperty("finished_task_info")
     private Map<String, TaskInfo> finishedTaskInfo;
 

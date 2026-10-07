@@ -79,6 +79,20 @@ import static org.mockito.Mockito.withSettings;
 class TransientCapacityQueueContractTest {
 
     @Test
+    void placementMetricsKeepNonNumericRequestId() {
+        Request request = new Request();
+        request.setRequestId("request-a");
+        BalanceContext context = new BalanceContext(config());
+        context.setRequest(request);
+        PlacementMetrics metrics = new PlacementMetrics();
+
+        metrics.placementStarted(context);
+
+        assertSame(context, metrics.context("request-a"));
+        assertEquals(List.of("request-a"), metrics.requestIdsFrom(0));
+    }
+
+    @Test
     @Timeout(20)
     void higherPriorityTakesQueuedReservationAndVictimReplansWithoutCompletingItsFuture() throws Exception {
         FlexlbConfig config = config();
@@ -286,7 +300,7 @@ class TransientCapacityQueueContractTest {
                     fixture.metrics, attemptsBeforeStatus + 1, 5_000));
             assertTrue(awaitPlacementQuiescence(
                     fixture.metrics, 100L, 5_000L));
-            List<Long> capacityRetryOrder =
+            List<String> capacityRetryOrder =
                     fixture.metrics.requestIdsFrom(attemptsBeforeStatus);
             assertFalse(capacityRetryOrder.isEmpty());
             assertEquals(1, fixture.submission.requestIds().size(),
@@ -333,7 +347,7 @@ class TransientCapacityQueueContractTest {
             // yet. Any request that was observed must retain its original
             // context and absolute deadline across exact-capacity retries.
             BalanceContext observed =
-                    fixture.metrics.context(Long.parseLong(context.getRequestId()));
+                    fixture.metrics.context(context.getRequestId());
             if (observed != null) {
                 assertSame(context, observed,
                         "placement retry replaced the BalanceContext");
@@ -341,7 +355,7 @@ class TransientCapacityQueueContractTest {
                         context.schedulingMetadata().expiresAtMs(),
                         "placement retry changed the absolute deadline");
                 assertEquals(absoluteDeadline,
-                        fixture.metrics.deadline(Long.parseLong(context.getRequestId())),
+                        fixture.metrics.deadline(context.getRequestId()),
                         "placement observed a different absolute deadline");
             }
         }
@@ -1215,18 +1229,18 @@ class TransientCapacityQueueContractTest {
     private static final class PlacementMetrics {
         private final AtomicInteger totalAttempts = new AtomicInteger();
         private final AtomicLong placementWakeups = new AtomicLong();
-        private final Map<Long, AtomicInteger> attemptsByRequest =
+        private final Map<String, AtomicInteger> attemptsByRequest =
                 new ConcurrentHashMap<>();
-        private final Map<Long, BalanceContext> contexts =
+        private final Map<String, BalanceContext> contexts =
                 new ConcurrentHashMap<>();
-        private final Map<Long, Long> deadlines = new ConcurrentHashMap<>();
+        private final Map<String, Long> deadlines = new ConcurrentHashMap<>();
         private final List<Long> placementLatenciesNanos =
                 new CopyOnWriteArrayList<>();
-        private final List<Long> placementRequestIds =
+        private final List<String> placementRequestIds =
                 new CopyOnWriteArrayList<>();
 
         private long placementStarted(BalanceContext context) {
-            long requestId = Long.parseLong(context.getRequestId());
+            String requestId = context.getRequestId();
             totalAttempts.incrementAndGet();
             placementRequestIds.add(requestId);
             attemptsByRequest.computeIfAbsent(
@@ -1275,11 +1289,11 @@ class TransientCapacityQueueContractTest {
             placementWakeups.set(0L);
         }
 
-        private BalanceContext context(long requestId) {
+        private BalanceContext context(String requestId) {
             return contexts.get(requestId);
         }
 
-        private long deadline(long requestId) {
+        private long deadline(String requestId) {
             return deadlines.getOrDefault(requestId, -1L);
         }
 
@@ -1290,7 +1304,7 @@ class TransientCapacityQueueContractTest {
                     .orElse(0);
         }
 
-        private List<Long> requestIdsFrom(int attemptIndex) {
+        private List<String> requestIdsFrom(int attemptIndex) {
             return List.copyOf(placementRequestIds.subList(
                     Math.min(attemptIndex, placementRequestIds.size()),
                     placementRequestIds.size()));
