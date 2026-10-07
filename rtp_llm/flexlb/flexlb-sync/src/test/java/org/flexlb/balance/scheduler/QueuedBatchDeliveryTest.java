@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -176,7 +177,7 @@ class QueuedBatchDeliveryTest {
         // Rejection is the expected, safe outcome — not a leaked permit.
         CapacityBoundary.Attempt<?> admission = dispatcher.tryPrepareSubmission();
         if (admission.accepted()) {
-            admission.value().close();
+            assertInstanceOf(PreparedSubmission.class, admission.value()).close();
         }
     }
 
