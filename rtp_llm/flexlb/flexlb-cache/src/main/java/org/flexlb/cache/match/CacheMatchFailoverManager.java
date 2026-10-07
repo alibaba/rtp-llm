@@ -43,8 +43,8 @@ public class CacheMatchFailoverManager {
         this.activeSource = new AtomicReference<>(initialSource);
         this.cacheMetricsReporter.reportActiveCacheMatchSource(initialSource);
         if (kvcmEnabled) {
-            this.kvcmGrpcClient.setHealthSnapshotListener(this::updateFromKvcmHealth);
-            updateFromKvcmHealth(this.kvcmGrpcClient.healthSnapshot());
+            this.kvcmGrpcClient.setHealthSnapshotListener(ignored -> updateFromKvcmHealth());
+            updateFromKvcmHealth();
         }
     }
 
@@ -56,10 +56,11 @@ public class CacheMatchFailoverManager {
      * Reconciles the active cache source with the latest KVCM health snapshot.
      * This method is called after every scheduled heartbeat and must remain idempotent.
      */
-    void updateFromKvcmHealth(KvcmHealthSnapshot health) {
+    synchronized void updateFromKvcmHealth() {
         if (!kvcmEnabled) {
             return;
         }
+        KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
 
         // A manual fallback is an operator override and has higher priority than health updates.
         if (manualFallbackActive.get()) {
@@ -93,7 +94,7 @@ public class CacheMatchFailoverManager {
         }
     }
 
-    public void activateFallbackManually() {
+    public synchronized void activateFallbackManually() {
         manualFallbackActive.set(true);
         if (!updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated")) {
             lastFailoverReason.set("manual failover activated");
@@ -102,13 +103,13 @@ public class CacheMatchFailoverManager {
         log.info("Manual cache failover activated; Local Standby is the active cache source");
     }
 
-    public void recoverPrimaryManually() {
+    public synchronized void recoverPrimaryManually() {
         KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
         if (!health.isHealthy()) {
             throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
         }
         manualFallbackActive.set(false);
-        updateFromKvcmHealth(health);
+        updateFromKvcmHealth();
         log.info("Manual cache failover cleared; active cache source follows KVCM health, source={}", activeSource());
     }
 

@@ -23,6 +23,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -289,6 +290,25 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(Map.of(), result.hostMatches());
         assertEquals(empty.blockSize(), result.blockSize());
         verify(localStandbyProvider, never()).asyncLocalStandbyMatch(empty);
+    }
+
+    @Test
+    void noCacheKeysWithZeroBlockSizeSucceedsOnLocalStandby() {
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        CacheMatchQuery empty = new CacheMatchQuery(
+                "request-no-cache", List.of(), 0L, RoleType.PREFILL, "default");
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(empty);
+
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+        assertTrue(result.querySucceeded());
+        assertEquals(Map.of(), result.hostMatches());
+        assertEquals(0L, result.blockSize());
+        verify(localStandbyProvider, never()).findMatchingEngines(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
     }
 
     private CacheMatchQueryOrchestrator orchestrator() {

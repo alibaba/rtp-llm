@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.EvictionManager;
@@ -43,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -187,6 +189,35 @@ class EncoderSchedulingIntegrationTest {
             }
         });
         assertFalse(pending.isDone());
+    }
+
+    @Test
+    void rejectedEncoderEntryIsRemovedWhenItsRequestSlotIsMissing() {
+        DefaultRouter router = mock(DefaultRouter.class);
+        RequestRegistry registry = mock(RequestRegistry.class);
+        BalanceContext context = mock(BalanceContext.class);
+        when(context.getRequestId()).thenReturn("rejected-without-slot");
+        when(context.getPriority()).thenReturn(50);
+        when(router.selectEncoder(context)).thenReturn(
+                PlacementResult.rejected(Response.error(StrategyErrorType.REQUEST_CANCELLED)));
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        EncoderQueueCoordinator queue = new EncoderQueueCoordinator(router, registry, false);
+        try {
+            assertTrue(queue.offer(context, pending));
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                while (queue.size() != 0) {
+                    Thread.sleep(5L);
+                }
+            });
+
+            verify(router).selectEncoder(context);
+            verify(registry).publishDecisionResponseAsync(
+                    eq("rejected-without-slot"), eq(pending),
+                    org.mockito.ArgumentMatchers.any(Response.class), eq(RequestPhase.ENCODER));
+            assertFalse(pending.isDone());
+        } finally {
+            queue.close();
+        }
     }
 
     @Test

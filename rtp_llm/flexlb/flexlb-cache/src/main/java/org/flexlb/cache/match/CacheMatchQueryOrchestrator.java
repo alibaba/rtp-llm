@@ -153,11 +153,11 @@ public class CacheMatchQueryOrchestrator {
 
     private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
         try {
-            if (query.blockSize() <= 0) {
-                return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
-            }
             if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
                 return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs, query.blockSize());
+            }
+            if (query.blockSize() <= 0) {
+                return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
             }
             Map<String, HostCacheMatch> matches = localStandbyProvider.findMatchingEngines(
                     query.requestId(), query.blockCacheKeys(), query.blockSize(),
