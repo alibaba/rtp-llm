@@ -205,3 +205,47 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
             max(512, triton.next_power_of_2(width)),
         )
     return out, scale_wire.T[:rows, :]
+
+
+@triton.jit(do_not_specialize=["rows"])
+def _quantize_strided_group128_kernel(
+    x,
+    out,
+    scales,
+    rows,
+    row_stride: tl.constexpr,
+    block_rows: tl.constexpr,
+):
+    row = tl.program_id(0) * block_rows + tl.arange(0, block_rows)
+    column = tl.arange(0, 128)
+    values = tl.load(
+        x + row[:, None] * row_stride + column[None, :],
+        row[:, None] < rows,
+        other=0,
+    ).to(tl.float32)
+    amax = tl.maximum(tl.max(tl.abs(values), axis=1), 1.0e-4)
+    scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(amax / 448.0, 1.0e-10))))
+    quantized = tl.minimum(tl.maximum(values / scale[:, None], -448.0), 448.0)
+    tl.store(out + row[:, None] * 128 + column[None, :], quantized, row[:, None] < rows)
+
+    exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
+    packed = tl.where(row < rows, exponent | 0x7F7F7F00, 0x7F7F7F7F)
+    tl.store(scales + row, packed, row < ((rows + 3) // 4) * 4)
+
+
+def quantize_strided_group128_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a row-strided BF16 [M,128] view without a staging copy."""
+    if x.ndim != 2 or x.shape[1] != 128 or x.stride(1) != 1 or x.stride(0) < 128:
+        raise ValueError("FP8 strided group128 input must be row-strided [M,128]")
+    if not x.is_cuda or x.dtype != torch.bfloat16:
+        raise ValueError("FP8 strided group128 input must be CUDA BF16")
+    rows = x.shape[0]
+    out = torch.empty((rows, 128), dtype=torch.float8_e4m3fn, device=x.device)
+    scale_wire = torch.empty(
+        (1, triton.cdiv(rows, 4) * 4), dtype=torch.int32, device=x.device
+    ).T
+    if rows:
+        _quantize_strided_group128_kernel[(triton.cdiv(rows, 4),)](
+            x, out, scale_wire, rows, x.stride(0), 4, num_warps=4
+        )
+    return out, scale_wire[:rows]

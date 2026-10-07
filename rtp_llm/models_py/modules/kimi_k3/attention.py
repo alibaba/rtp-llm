@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
+from rtp_llm.ops import RoleType
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     _get_group,
@@ -102,6 +103,14 @@ class KimiK3KDA(nn.Module):
         self.fa_width = forget_weight.shape[
             1 if forget_weight.dtype == torch.float8_e4m3fn else 0
         ]
+        self._project_forget = self._project_forget_contiguous
+        if parallelism.role_type == RoleType.DECODE and self.fa_width == 128:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+                CudaFp8GEMMLinear,
+            )
+
+            if isinstance(self.f_b, CudaFp8GEMMLinear) and self.f_b.scale_ue8m0:
+                self._project_forget = self._project_forget_strided_fp8
         self.norm = KimiK3GatedNorm(
             weights[W.linear_attn_norm_w],
             eps=config.layernorm_eps,
@@ -130,6 +139,17 @@ class KimiK3KDA(nn.Module):
         self.prefill.intermediate_states_in_fp32 = True
         self.prefill.gate_lower_bound = runtime.kda_gate_lower_bound
         self.decode.gate_lower_bound = runtime.kda_gate_lower_bound
+
+    def _project_forget_contiguous(self, latent):
+        return self.f_b(latent.contiguous())
+
+    def _project_forget_strided_fp8(self, latent):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
+            quantize_strided_group128_fp8,
+        )
+
+        values, scales = quantize_strided_group128_fp8(latent)
+        return self.f_b.forward_quantized(values, scales)
 
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
         use_fused_ag = (
@@ -176,7 +196,7 @@ class KimiK3KDA(nn.Module):
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
         with profile_scope("RTP::attention.kda.forget_proj"):
-            forget = self.f_b(fa.contiguous())
+            forget = self._project_forget(fa)
         kernel = (
             self.prefill
             if attention_inputs.is_prefill and not metadata.is_target_verify
