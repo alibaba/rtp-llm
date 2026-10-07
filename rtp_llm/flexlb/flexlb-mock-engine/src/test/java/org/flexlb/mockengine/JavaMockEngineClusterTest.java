@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
@@ -58,9 +58,9 @@ class JavaMockEngineClusterTest {
     void ackIsImmediateWhileQueuedBatchTransitionsFromWaitingToRunningToFinished() throws Exception {
         JavaMockEngineCluster.FastRpcService service = service(model("180", 1.0));
 
-        EngineRpcService.EnqueueBatchResponsePB firstAck = enqueue(
+        EngineRpcService.EnqueueBatchResponsePB firstAck = enqueueAndFetch(
                 service, batch(11, slot(0, input(1, 100), input(2, 200))));
-        EngineRpcService.EnqueueBatchResponsePB secondAck = enqueue(
+        EngineRpcService.EnqueueBatchResponsePB secondAck = enqueueAndFetch(
                 service, batch(12, slot(0, input(3, 300), input(4, 400), input(5, 500))));
 
         assertEquals(2, firstAck.getSuccessesCount());
@@ -100,7 +100,7 @@ class JavaMockEngineClusterTest {
     void dpSlotsAreIndependentBatchesWithPerSlotExecutionTime() throws Exception {
         JavaMockEngineCluster.FastRpcService service = service(model("100*batchSize", 1.0));
 
-        enqueue(service, batch(21,
+        enqueueAndFetch(service, batch(21,
                 slot(0, input(1, 100)),
                 slot(1, input(2, 100))));
 

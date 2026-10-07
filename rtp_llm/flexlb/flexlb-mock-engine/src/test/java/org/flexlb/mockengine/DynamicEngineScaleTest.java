@@ -68,7 +68,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *       cases;</li>
  *   <li>graceful specifics → in-flight request completes normally, drain
  *       deadline expiry falls back to teardown (drained=false), concurrent
- *       removes of one engine leave a consistent teardown, and a mid-drain engine stays
+ *       removes of one engine are idempotent, and a mid-drain engine stays
  *       out of the discovery file even under a concurrent add_engine;</li>
  *   <li>concurrent add×N + remove×M crossfire → the discovery file always
  *       parses completely and its entry set equals the services map;</li>
@@ -94,6 +94,7 @@ class DynamicEngineScaleTest {
     private DynamicEngineManager engineManager;
     private DiscoveryFileStore discoveryFileStore;
     private Path discoveryFile;
+    private JavaMockEngineCluster.Config clusterConfig;
 
     @AfterEach
     void tearDown() throws InterruptedException {
@@ -133,6 +134,41 @@ class DynamicEngineScaleTest {
     // ════════════════════════════════════════════════════════════════
     //  Tests
     // ════════════════════════════════════════════════════════════════
+
+    @Test
+    void whaleBundleCanScaleAndNewEngineReceivesMetricHooks() throws Exception {
+        startCluster(model("10", 1), 1, 1);
+        clusterConfig.whale = true;
+        clusterConfig.whaleBundle = true;
+        var initialized = new AtomicInteger();
+        clusterConfig.engineInitializer = service -> initialized.incrementAndGet();
+        var added = engineManager.addEngine("decode", null);
+        assertEquals(1, initialized.get());
+        assertTrue(Files.readString(discoveryFile).contains(":" + (added.grpcPort() - 1)));
+        var executorField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("responseExecutor");
+        executorField.setAccessible(true);
+        var responseExecutor = (ExecutorService) executorField.get(services.get(added.grpcPort()));
+        assertTrue(responseExecutor.submit(() -> Thread.currentThread().isVirtual()).get(3, TimeUnit.SECONDS),
+                "Fetch waiters must always use virtual threads");
+        clusterConfig.whaleBundle = false;
+        org.junit.jupiter.api.Assertions.assertThrows(DynamicEngineManager.EngineOperationException.class,
+                () -> engineManager.addEngine("decode", null));
+    }
+
+    @Test
+    void newAndReplacementEnginesUseStartupPerformance() throws Exception {
+        int basePort = startCluster(model("10", 1.0), 1, 1);
+        postOk("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":9}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
+        int addedPort = added.path("port").asInt();
+        assertEquals(1L, services.get(addedPort).getPerformance().decodeMs(1, 1));
+        postOk("/set_perf", "{\"port\":" + addedPort + ",\"decode_scale\":4}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        postOk("/remove_engine", "{\"port\":" + addedPort + "}");
+        JsonNode replacement = postOk("/add_engine", "{\"role\":\"decode\"}");
+        assertEquals(1L, services.get(replacement.path("port").asInt()).getPerformance().decodeMs(1, 1));
+    }
 
     @Test
     void addEngineExposesNewGrpcPortSnapshotAndDiscoveryEntry() throws Exception {
@@ -300,46 +336,91 @@ class DynamicEngineScaleTest {
     }
 
     @Test
-    void concurrentRemoveOfSameEngineKeepsTeardownConsistent() throws Exception {
-        startCluster(model("10", 1.0), 1, 1);
+    void transportShutdownDoesNotSerializeOtherEngineRemovalsOrAdds() throws Exception {
+        startCluster(model("10", 1.0), 2, 1);
+        List<JavaMockEngineCluster.FastRpcService> victims = services.values().stream()
+                .filter(v -> "PREFILL".equals(v.getRoleName())).toList();
+        CountDownLatch closing = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        for (var victim : victims) {
+            serversByPort.get(victim.getGrpcPort()).shutdownNow();
+            serversByPort.put(victim.getGrpcPort(), new Server() {
+                private volatile boolean terminated;
+                @Override public Server start() { return this; }
+                @Override public Server shutdown() { return this; }
+                @Override public Server shutdownNow() { terminated = true; return this; }
+                @Override public boolean isShutdown() { return true; }
+                @Override public boolean isTerminated() { return terminated; }
+                @Override public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+                    closing.countDown();
+                    // Controlled transport stall: release in finally even if the assertion fails.
+                    terminated = release.await(10, TimeUnit.SECONDS);
+                    return terminated;
+                }
+                @Override public void awaitTermination() throws InterruptedException { release.await(); }
+            });
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            List<Future<DynamicEngineManager.RemovedEngine>> removed = new ArrayList<>();
+            for (var victim : victims) {
+                removed.add(pool.submit(() -> engineManager.removeEngine(victim, "graceful", 1000)));
+            }
+            assertTrue(closing.await(3, TimeUnit.SECONDS), "transport closes must overlap, not hold mutationLock");
+            assertEquals(List.of(), hostList(readDiscoveryFile(), "mock.prefill.hosts.address"));
+            assertTrue(victims.stream().allMatch(v -> services.containsKey(v.getGrpcPort())),
+                    "ports remain reserved while transports are closing");
+            var added = pool.submit(() -> engineManager.addEngine("decode", null)).get(3, TimeUnit.SECONDS);
+            assertTrue(services.containsKey(added.grpcPort()), "a stalled close must not block other mutations");
+            release.countDown();
+            for (var future : removed) {
+                var result = future.get(3, TimeUnit.SECONDS);
+                assertTrue(result.drained());
+                assertTrue(result.remainingWork().values().stream().allMatch(n -> n == 0));
+                assertTrue(result.totalMs() >= result.drainMs());
+                assertFalse(services.containsKey(result.grpcPort()));
+            }
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentRemoveOfSameEngineIsIdempotent() throws Exception {
+        startCluster(model("10", 1500.0), 1, 1);
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
         int victimPort = added.path("port").asInt();
 
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(victimPort).generateStreamCall(input(6005, 10), collector);
+        awaitCondition(() -> services.get(victimPort).getRunningCount() >= 1, 2_000,
+                "decode request must keep the graceful drain in progress for both removals");
+
         CountDownLatch startGate = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
-        List<Future<HttpResponse<String>>> outcomes = new ArrayList<>();
+        List<Future<JsonNode>> outcomes = new ArrayList<>();
         try {
             for (int i = 0; i < 2; i++) {
                 outcomes.add(pool.submit(() -> {
                     startGate.await();
-                    return post("/remove_engine", "{\"port\":" + victimPort + "}");
+                    return postOk("/remove_engine", "{\"port\":" + victimPort + "}");
                 }));
             }
             startGate.countDown();
-            int successfulRemovals = 0;
-            for (Future<HttpResponse<String>> outcome : outcomes) {
-                // An overlapping drain shares its result. If teardown finishes
-                // before the other handler resolves the victim, the documented
-                // "victim gone" response is 404; client start gates cannot
-                // impose ordering on those server-side lookups.
-                HttpResponse<String> response = outcome.get(30, TimeUnit.SECONDS);
-                JsonNode removed = MAPPER.readTree(response.body());
-                if (response.statusCode() == 200) {
-                    successfulRemovals++;
-                    assertEquals("ok", removed.path("status").asText());
-                    assertEquals("removed", removed.path("action").asText());
-                    assertEquals(victimPort, removed.path("port").asInt());
-                } else {
-                    assertEquals(404, response.statusCode(), response.body());
-                    assertEquals("engine not found for port " + victimPort,
-                            removed.path("error").asText());
-                }
+            for (Future<JsonNode> outcome : outcomes) {
+                // Both callers observe the SAME teardown outcome — one drives
+                // the drain, the other awaits its future; neither sees an
+                // error and neither resurrects the engine.
+                JsonNode removed = outcome.get(30, TimeUnit.SECONDS);
+                assertEquals("ok", removed.path("status").asText());
+                assertEquals(victimPort, removed.path("port").asInt());
+                assertTrue(removed.path("drained").asBoolean());
+                assertTrue(removed.path("running_at_removal").asInt() >= 1);
             }
-            assertTrue(successfulRemovals >= 1, "at least one caller must remove the victim");
         } finally {
             pool.shutdownNow();
         }
-        awaitPortRefused(victimPort);
         assertFalse(services.containsKey(victimPort), "services map still holds removed port");
         assertFalse(serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
         // The bootstrap decode-0 is STILL hosted — only the dynamic victim is
@@ -584,6 +665,7 @@ class DynamicEngineScaleTest {
         serversByPort = new ConcurrentHashMap<>();
         JavaMockEngineCluster.ClusterStats stats = new JavaMockEngineCluster.ClusterStats();
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        clusterConfig = config;
         config.host = "127.0.0.1";
         // This suite pins discovery-file contents with literal 127.0.0.1
         // addresses; disable the unique-IP advertisement so the assertions

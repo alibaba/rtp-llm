@@ -1,0 +1,12 @@
+{
+  "block_size": 1024,
+  "sleep_scale": 1,
+  "jitter_pct": 0,
+  "prefill": {
+    "scale": 1
+  },
+  "decode": {
+    "scale": 1
+  },
+  "calibration": "../online_eval/data/performance/dsv4_l20_mock_calibration.json"
+}

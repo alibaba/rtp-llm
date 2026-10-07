@@ -1,0 +1,97 @@
+"""Both stress inputs materialize through the same registered source contract."""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from traffic.prefix_lineage import encode
+from traffic.datasets import build_manifest
+
+
+class TrafficEntrypointTest(unittest.TestCase):
+    def test_stress_rejects_raw_trace_and_synthetic_replay(self):
+        script = ROOT / "scripts/commands/run_stress.py"
+        raw = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                             env=dict(os.environ, TRACE_FILE="/tmp/raw.jsonl"))
+        self.assertEqual(2, raw.returncode)
+        self.assertIn("TRACE_FILE is generated", raw.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "source.json"
+            spec.write_text(json.dumps(dict(kind="synthetic", model="realistic", version="1",
+                parameters=dict(seed=1, count=2))))
+            replay = subprocess.run([sys.executable, str(script), "--traffic-source-spec", str(spec),
+                                     "--send-mode", "replay", "--dry-run"], capture_output=True, text=True)
+            self.assertEqual(2, replay.returncode)
+            self.assertIn("synthetic traffic has ordinal timestamps", replay.stderr)
+
+    def test_pinned_dag_and_synthetic_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            model = directory / "small.xz"
+            model.write_bytes(encode([(0, 512, -1, 0), (10, 1024, 0, 1)]))
+            model.with_suffix(".manifest.json").write_text(json.dumps(build_manifest(model)))
+            lineage = directory / "lineage.jsonl"
+            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
+                            "--lineage-model", str(model), "--namespace", "check",
+                            "--max-requests", "2", "--out", str(lineage)], check=True, capture_output=True)
+            rows = [json.loads(line) for line in lineage.read_text().splitlines()]
+            self.assertEqual(["check:0", "check:1"], [row["rid"] for row in rows])
+            self.assertEqual(rows[0]["input_token_blocks"][0],
+                             rows[1]["input_token_blocks"][0])
+            self.assertEqual(420, rows[0]["ol"])
+            manifest = json.loads(lineage.with_suffix(".manifest.json").read_text())
+            self.assertEqual("EMPIRICAL_PREFIX_STRUCTURE", manifest["realism"])
+            self.assertEqual(2, manifest["projection"]["selected_requests"])
+
+            spec = directory / "synthetic.json"
+            spec.write_text(json.dumps(dict(kind="synthetic", model="realistic", version="1",
+                parameters=dict(seed=7, count=3, families=2, prefix_blocks=1,
+                    suffix_blocks=1, zipf_alpha=1, cold_fraction=0,
+                    output_tokens=4))))
+            synthetic = directory / "synthetic.jsonl"
+            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
+                            "--spec", str(spec), "--namespace", "check",
+                            "--max-requests", "2", "--out", str(synthetic)], check=True, capture_output=True)
+            self.assertEqual(2, len(synthetic.read_text().splitlines()))
+            model.write_bytes(model.read_bytes() + b"tampered")
+            failed = subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
+                                     "--lineage-model", str(model), "--namespace", "bad",
+                                     "--out", str(directory / "bad.jsonl")], capture_output=True)
+            self.assertNotEqual(0, failed.returncode)
+            self.assertFalse((directory / "bad.jsonl").exists())
+
+    def test_java_templates_are_reproducible_from_model(self):
+        from scripts.pipeline.derive_master_templates import derive
+
+        from traffic.datasets import model_path
+        model = model_path()
+        generated = derive(model)
+        core = {key: value for key, value in generated.items() if key != "transformations"}
+        legacy_bytes = (json.dumps(core, separators=(",", ":")) + "\n").encode()
+        self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(),
+                         "8b5a033c707489c598dd6d2d1c77690ebb7251b96e5f65027313221d9969df24")
+        transformations = generated["transformations"]
+        self.assertEqual(transformations["source_sha256"], generated["source_sha256"])
+        self.assertEqual(transformations["selected_requests"], len(generated["templates"]))
+        self.assertEqual([item["kind"] for item in transformations["applied"]],
+                         ["fixture_shape_clip", "request_limit", "fixed_output_length"])
+        self.assertGreaterEqual(len({row["il"] for row in generated["templates"]}), 32)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "templates.json"
+            script = ROOT / "scripts/pipeline/derive_master_templates.py"
+            subprocess.run([sys.executable, str(script), "--model", str(model),
+                            "--out", str(output)], check=True)
+            self.assertEqual(generated, json.loads(output.read_text()))
+            self.assertFalse(model.with_suffix(".templates.json").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

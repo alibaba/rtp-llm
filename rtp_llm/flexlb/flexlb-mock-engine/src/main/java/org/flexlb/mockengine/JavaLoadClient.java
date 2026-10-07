@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -73,7 +74,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   java -cp <jar> org.flexlb.mockengine.JavaLoadClient
  * }</pre>
  */
-public final class JavaLoadClient {
+public final class JavaLoadClient implements AutoCloseable {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
@@ -122,9 +123,48 @@ public final class JavaLoadClient {
     final AtomicInteger successCount = new AtomicInteger();
     final AtomicInteger errorCount = new AtomicInteger();
     final AtomicInteger inflightCount = new AtomicInteger();
+    final AtomicInteger scheduleInflightCount = new AtomicInteger();
     final AtomicInteger sentTotal = new AtomicInteger();
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
+    private final boolean retainRequestEvidence = !"aggregate".equals(System.getenv("COLLECTION_PROFILE"));
+    private final io.micrometer.prometheus.PrometheusMeterRegistry monitor =
+            new io.micrometer.prometheus.PrometheusMeterRegistry(io.micrometer.prometheus.PrometheusConfig.DEFAULT);
+    private com.sun.net.httpserver.HttpServer metricsServer;
+    private final AtomicInteger monitoredCompleted = new AtomicInteger();
+
+    private void startMetricsServer() throws IOException {
+        if (!"true".equalsIgnoreCase(System.getenv("CLIENT_MONITORING"))) return;
+        metricsServer = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_send", sentTotal, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_actual_send", actualSentCount, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_completed", monitoredCompleted, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_success", successCount, AtomicInteger::doubleValue).register(monitor);
+        io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_error", errorCount, AtomicInteger::doubleValue).register(monitor);
+        metricsServer.createContext("/metrics", exchange -> {
+            byte[] body = monitor.scrape().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) { output.write(body); }
+        });
+        metricsServer.start();
+        Files.writeString(Path.of(config.outputDir, "metrics-target.json"),
+                "{\"url\":\"http://127.0.0.1:" + metricsServer.getAddress().getPort() + "/metrics\"}");
+    }
+
+    private void observeLatency(String name, double milliseconds) {
+        if (milliseconds > 0 && Double.isFinite(milliseconds)) {
+            io.micrometer.core.instrument.Timer.builder("flexlb_client_" + name)
+                    .publishPercentileHistogram().minimumExpectedValue(Duration.ofMillis(1))
+                    .maximumExpectedValue(Duration.ofMinutes(2)).register(monitor)
+                    .record((long) (milliseconds * 1_000_000), TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private ClientEventJournal liveJournal;
+    private Playback playback;
+    private long tokenStride = 1;
+    private FlowControl flowControl;
     private volatile double lastGradientLogS = -10.0;
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
     final List<String> fallbackDecodeAddrs = new ArrayList<>();
@@ -143,15 +183,17 @@ public final class JavaLoadClient {
         }
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
         if (config.isMultiTarget()) {
-            // HA mode (GRPC_TARGETS >= 2): every target gets its own
-            // N_CHANNELS pool inside the router; the legacy arrays stay empty.
-            this.router = new MasterTargetRouter(
-                    config.grpcTargets, config.nChannels, eventLoopGroup);
+            // A discovery file enables the frontend-style VIP + /master/info
+            // route. GRPC_TARGETS alone retains the older transport-only mode.
+            String discoveryFile = System.getenv("MASTER_DISCOVERY_FILE");
+            this.router = discoveryFile == null || discoveryFile.isBlank()
+                    ? new MasterTargetRouter(config.grpcTargets, config.nChannels, eventLoopGroup)
+                    : new MasterTargetRouter(Path.of(discoveryFile), config.nChannels, eventLoopGroup);
             this.scheduleChannels = new ManagedChannel[0];
             this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
             System.out.println("HA multi-target mode: targets=" + config.grpcTargets
-                    + ", sticky=" + router.stickyTarget()
-                    + " (gRPC UNAVAILABLE retries same-request on the next target)");
+                    + ", selected=" + router.stickyTarget()
+                    + ", discovery_file=" + discoveryFile);
             return;
         }
         this.router = null;
@@ -187,22 +229,33 @@ public final class JavaLoadClient {
     }
 
     void run() throws Exception {
+        run(new Playback(System.getenv(), config.loop, config.durationS));
+    }
+
+    void run(Playback policy) throws Exception {
+        this.playback = policy;
+        boolean controlled = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank();
+        if (controlled && (config.maxInputLen > 0 || config.maxOutputLen > 0
+                || config.replayUniquePrefix || config.forcePriority > 0)) {
+            throw new IllegalArgumentException("controlled traces forbid truncation, prefix salting and priority overrides");
+        }
+        if (playback.controls.enabled() && (config.maxInputLen > 0 || config.maxOutputLen > 0
+                || config.replayUniquePrefix || config.forcePriority > 0 || config.gradient))
+            throw new IllegalArgumentException("advanced playback requires canonical trace without runtime overrides");
+        if (playback.controls.curve != null && !config.isUniform() && config.replaySpeed <= 0)
+            throw new IllegalArgumentException("replay rate_curve requires positive REPLAY_SPEED");
         List<TraceRecord> records = loadTrace(config.traceFile);
         if (records.isEmpty()) {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
         }
 
-        // Parity with the legacy Python load client: load_replay_requests applies
-        // duration/limit filters FIRST, then num_shards slicing — so LIMIT applies
-        // to the whole trace, not per shard. Loop mode skips both filters (duration
-        // becomes a wall-clock timeout, limit a total sent cap) but still slices
-        // the trace across shards so N workers do not each replay the full trace.
-        // Uniform send mode reuses the loop-mode record semantics (shard slice
-        // only, wall-clock duration, total sent cap): request bodies still come
-        // from cycling the trace shard, only the arrival process changes.
-        boolean cyclic = config.loop || config.isUniform();
-        records = filterAndShard(records,
-                cyclic ? 0 : config.durationS,
+        long sourceFirstTsMs = records.get(0).tsMs;
+        long sourceSpanMs = Math.max(1, records.get(records.size()-1).tsMs-sourceFirstTsMs) + 1;
+        // Playback owns wall duration and explicit laps. Source timestamps
+        // must not be truncated before replay-speed scaling or sharding.
+        boolean cyclic = playback.maxLaps != 1;
+        if (!playback.controls.enabled()) records = filterAndShard(records,
+                0,
                 cyclic ? 0 : config.limit,
                 config.numShards, config.shardIndex);
         if (records.isEmpty()) {
@@ -237,12 +290,52 @@ public final class JavaLoadClient {
         }
 
         Files.createDirectories(Path.of(config.outputDir));
+        Map<String,Object> playbackManifest = new java.util.LinkedHashMap<>(playback.manifest());
+        playbackManifest.put("mode", config.sendMode);
+        playbackManifest.put("qps", config.sendModeQps);
+        playbackManifest.put("speed", config.replaySpeed);
+        playbackManifest.put("ramp_up_seconds", config.rampUpSeconds);
+        // Additive evidence also covers output-only trace transformations; scheduling is unchanged.
+        playbackManifest.putIfAbsent("planner_version", "PLAYBACK_LEGACY_V1");
+        playbackManifest.put("trace_sha256", PlaybackPlan.sha256(Path.of(config.traceFile)));
+        playbackManifest.put("num_shards", config.numShards);
+        playbackManifest.put("shard_index", config.shardIndex);
+        playbackManifest.put("duration_seconds", config.durationS);
+        playbackManifest.put("limit", config.limit);
+        playbackManifest.put("trace_first_ts_ms", sourceFirstTsMs);
+        playbackManifest.put("trace_span_ms", sourceSpanMs);
+        playbackManifest.put("token_stride", tokenStride);
+        playbackManifest.put("offline_plan_supported", config.maxInputLen == 0 && config.maxOutputLen == 0
+                && config.forcePriority == 0 && !config.gradient);
+        MAPPER.writeValue(Path.of(config.outputDir,"playback.json").toFile(), playbackManifest);
+        String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
+        if (controlDirectory != null && !controlDirectory.isBlank()) {
+            flowControl = new FlowControl(Path.of(controlDirectory),
+                    System.getenv().getOrDefault("FLOW_RUN_ID", ""),
+                    System.getenv().getOrDefault("FLOW_GROUP_ID", ""),
+                    System.getenv().getOrDefault("FLOW_PHASE_ID", ""));
+            flowControl.publish("STARTING", 0, 0, 0);
+        }
+        startMetricsServer();
+        if (metricsServer != null) {
+            long monitorDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!Files.exists(Path.of(config.outputDir, "metrics-ready"))) {
+                if (System.nanoTime() >= monitorDeadline) throw new IOException("monitor did not acknowledge initial scrape");
+                Thread.sleep(50);
+            }
+            long startAt = Long.parseLong(Files.readString(Path.of(config.outputDir, "metrics-ready")).trim());
+            long remainingMs = startAt - System.currentTimeMillis();
+            if (remainingMs > 0) Thread.sleep(remainingMs);
+        }
+        if (retainRequestEvidence && (flowControl != null || "true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS")))) {
+            liveJournal = new ClientEventJournal(Path.of(config.outputDir, "client_lifecycle.jsonl"));
+        }
         if (!config.skipServerLatency) {
             resetServerLatency();
         }
 
-        long firstTsMs = records.get(0).tsMs;
-        long traceSpanMs = Math.max(records.get(records.size() - 1).tsMs - firstTsMs, 1);
+        long firstTsMs = sourceFirstTsMs;
+        long traceSpanMs = sourceSpanMs;
 
         if (config.gradient && config.isUniform()) {
             System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
@@ -281,14 +374,22 @@ public final class JavaLoadClient {
         List<Future<RequestResult>> futures = new ArrayList<>();
         int sentCount = 0;
         int loopIdx = 0;
-        // Per-shard uniform interval: total target rate SEND_MODE_QPS is split
-        // evenly across NUM_SHARDS instances.
-        double uniformIntervalS = config.isUniform()
-                ? config.numShards / config.sendModeQps : 0.0;
+        Playback.Clock playbackClock = playback.new Clock();
 
+        if (flowControl != null) flowControl.publish("SENDING", 0, 0, 0);
+        sending:
         while (true) {
+            int sourceIndex = -1;
             for (TraceRecord record : records) {
-                if (cyclic && config.durationS > 0) {
+                sourceIndex++;
+                long globalIndex = playback.controls.enabled() ? (long)loopIdx*records.size()+sourceIndex
+                        : (long)sentCount*config.numShards+config.shardIndex;
+                if (playback.controls.enabled()) {
+                    if (config.limit > 0 && globalIndex >= config.limit) break sending;
+                    if (globalIndex % config.numShards != config.shardIndex) continue;
+                }
+                if (flowControl != null && flowControl.stopRequested()) break sending;
+                if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -324,27 +425,34 @@ public final class JavaLoadClient {
                     // linear-QPS-climb schedule (see uniformDueSeconds):
                     // pacing lag keeps measuring send_start against the
                     // ramped ideal schedule, so it is not polluted by ramp.
-                    dueSeconds = config.rampUpSeconds > 0
-                            ? uniformDueSeconds(sentCount,
-                                    config.sendModeQps / config.numShards,
-                                    config.rampUpSeconds)
-                            : sentCount * uniformIntervalS;
+                    dueSeconds = playbackClock.due(globalIndex,
+                            config.sendModeQps, config.rampUpSeconds);
+                    if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        if (flowControl != null) {
+                            if (!flowControl.awaitDue(dueNanos)) break sending;
+                        } else {
+                            Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        }
                     }
-                } else if (currentSpeed > 0 && record.tsMs > 0) {
+                } else if (currentSpeed > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
-                    dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
+                    dueSeconds = playback.controls.inverse((record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed);
+                    if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        if (flowControl != null) {
+                            if (!flowControl.awaitDue(dueNanos)) break sending;
+                        } else {
+                            Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        }
                     }
                 }
 
-                if (cyclic && config.durationS > 0) {
+                if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -357,12 +465,25 @@ public final class JavaLoadClient {
                     loopRecord = record;
                 }
                 final double dueS = dueSeconds;
-                futures.add(executor.submit(() -> handleRequest(loopRecord, semaphore, dueS)));
+                boolean permitHeld = false;
+                if (flowControl != null) {
+                    while (!semaphore.tryAcquire(50, TimeUnit.MILLISECONDS)) {
+                        if (flowControl.stopRequested()) break sending;
+                    }
+                    if (flowControl.stopRequested()) {
+                        semaphore.release();
+                        break sending;
+                    }
+                    permitHeld = true;
+                }
+                final boolean acquiredBySender = permitHeld;
+                futures.add(executor.submit(() -> handleRequest(loopRecord, semaphore, dueS, acquiredBySender)));
                 sentCount++;
                 sentTotal.set(sentCount);
+                if (flowControl != null) flowControl.progress(sentCount, actualSentCount.get(), responseCount.get());
             }
 
-            if (!cyclic) {
+            if (!playback.more(loopIdx)) {
                 break;
             }
             if (config.durationS > 0
@@ -380,7 +501,7 @@ public final class JavaLoadClient {
                     if (future.isDone()) {
                         try {
                             RequestResult collected = future.get();
-                            if (collected != null) {
+                            if (collected != null && retainRequestEvidence) {
                                 results.add(collected);
                             }
                         } catch (Exception ignored) {
@@ -395,6 +516,8 @@ public final class JavaLoadClient {
                     + " requests, elapsed " + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L + "s");
         }
 
+        if (flowControl != null) flowControl.publish("DRAINING", sentCount,
+                actualSentCount.get(), responseCount.get());
         sendEndNanos = System.nanoTime();
         double sendDurationS = (sendEndNanos - sendStartNanos) / 1_000_000_000.0;
         System.out.println("sending complete: sent=" + sentCount + " requests dispatched in "
@@ -414,7 +537,8 @@ public final class JavaLoadClient {
 
         long deadlineNanos = System.nanoTime()
                 + TimeUnit.SECONDS.toNanos(config.responseTimeoutSeconds);
-        results.addAll(collectOutstandingResults(futures, deadlineNanos));
+        List<RequestResult> tail = collectOutstandingResults(futures, deadlineNanos);
+        if (retainRequestEvidence) results.addAll(tail);
         progressMonitor.shutdownNow();
         executor.shutdownNow();
 
@@ -426,6 +550,9 @@ public final class JavaLoadClient {
         JsonNode serverLatency = config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
         writePerRequestResults();
         writeServerLatencySnapshot(serverLatency);
+        if (flowControl != null) flowControl.publish(
+                responseCount.get() == sentCount ? "DRAINED" : "INCOMPLETE",
+                sentCount, actualSentCount.get(), responseCount.get());
         stopPushgateway();
     }
 
@@ -565,30 +692,26 @@ public final class JavaLoadClient {
         String newSourceRid = req.sourceRid + loopSuffix;
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
-        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
-        // round presents byte-identical block_cache_keys, so cache affinity
-        // routes each rid to the SAME prefill engine round after round and
-        // the P-side load collapses onto a handful of engines (Gini ~0.56).
-        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
-        // request prefix reuse) while giving every round a unique routing
-        // prefix. The source list is shared across rounds, so it is copied
-        // here and never mutated in place.
-        List<Long> blockKeys = req.blockKeys;
-        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
-            List<Long> salted = new ArrayList<>(blockKeys);
-            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
-            blockKeys = salted;
-        }
+        Playback policy = playback != null ? playback : new Playback(Map.of("MAX_LAPS","1"), false, config.durationS);
+        if (req.tokenIds == null) throw new IllegalArgumentException("lap relabel requires token-backed plans");
+        if (playback == null) tokenStride = req.tokenIds.stream().mapToLong(t -> (long)t+1).max().orElse(1);
+        List<Integer> tokens = policy.relabel(req.tokenIds, req.blockKeys, req.cacheKeyBlockSize, loopIdx, tokenStride);
+        List<Long> blockKeys = tokens == req.tokenIds ? req.blockKeys : computeBlockKeys(tokens, req.cacheKeyBlockSize);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
+                req.inputLen, req.outputLen, blockKeys, tokens, req.priority, req.cacheKeyBlockSize, loopIdx);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
+        return handleRequest(record, semaphore, dueS, false);
+    }
+
+    private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS, boolean acquiredBySender) {
         long startedNanos = System.nanoTime();
         double sendDueEpochMs = replayStartedEpochMs + dueS * 1000.0;
 
         RequestResult result = new RequestResult();
         result.rid = record.sourceRid;
+        result.iteration = record.iteration;
         result.traceId = record.traceId;
         result.requestId = record.requestId;
         result.ts = record.tsMs;
@@ -606,7 +729,7 @@ public final class JavaLoadClient {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB scheduleResponse = null;
 
         try {
-            semaphore.acquire();
+            if (!acquiredBySender) semaphore.acquire();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             result.status = "exception";
@@ -617,257 +740,260 @@ public final class JavaLoadClient {
             return result;
         }
 
-        Exception scheduleExc = null;
         inflightCount.incrementAndGet();
         try {
-            double sendStartEpochMs = replayStartedEpochMs
-                    + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
-            result.sendStartEpochMs = sendStartEpochMs;
-            result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
-            actualSentCount.incrementAndGet();
+            Exception scheduleExc = null;
+            scheduleInflightCount.incrementAndGet();
+            try {
+                double sendStartEpochMs = replayStartedEpochMs
+                        + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
+                result.sendStartEpochMs = sendStartEpochMs;
+                result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
+                actualSentCount.incrementAndGet();
+                if (liveJournal != null) {
+                    ObjectNode event = perRequestNode(result);
+                    if (flowControl != null) flowControl.identify(event);
+                    liveJournal.record("issued", event);
+                }
 
-            inputPb = buildGenerateInput(record);
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
+                inputPb = buildGenerateInput(record);
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
 
-            long scheduleStartNanos = System.nanoTime();
-            if (router != null) {
-                // HA multi-target mode: one failover-aware Schedule call —
-                // sticky target first, same-request retry on the next target
-                // ONLY on gRPC UNAVAILABLE (see MasterTargetRouter).
-                // schedule_ms spans the whole attempt chain, so
-                // send_start_epoch_ms + schedule_ms stays one wall clock.
-                MasterTargetRouter.ScheduleOutcome outcome =
-                        router.schedule(scheduleReq, config.timeoutMs);
-                scheduleResponse = outcome.response;
-                result.masterTarget = outcome.lastTarget;
-                result.failover = outcome.failover;
-                result.errorKind = outcome.errorKind.label;
-                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                if (scheduleResponse == null) {
-                    // No target produced a response: all-targets transport
-                    // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
-                    // error. Route/fallback semantics are decided after the
-                    // try block (terminating-failure boundary lives there).
-                    scheduleExc = outcome.failure;
-                    result.status = "exception";
-                    result.error = outcome.failure == null
-                            ? "no master response" : outcome.failure.toString();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                long scheduleStartNanos = System.nanoTime();
+                if (router != null) {
+                    // HA mode: MasterTargetRouter owns discovery and any
+                    // same-request retry; the attempt ledger records both.
+                    // schedule_ms spans the whole attempt chain, so
+                    // send_start_epoch_ms + schedule_ms stays one wall clock.
+                    MasterTargetRouter.ScheduleOutcome outcome =
+                            router.schedule(scheduleReq, config.timeoutMs);
+                    scheduleResponse = outcome.response;
+                    result.masterTarget = outcome.lastTarget;
+                    result.failover = outcome.failover;
+                    result.scheduleAttempts = outcome.attempts;
+                    result.errorKind = outcome.errorKind.label;
+                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
+                    if (scheduleResponse == null) {
+                        // No target produced a response: all-targets transport
+                        // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
+                        // error. Route/fallback semantics are decided after the
+                        // try block (terminating-failure boundary lives there).
+                        scheduleExc = outcome.failure;
+                        result.status = "exception";
+                        result.error = outcome.failure == null
+                                ? "no master response" : outcome.failure.toString();
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    } else {
+                        result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                    }
                 } else {
+                    FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
+                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+                    long attemptEpochMs = System.currentTimeMillis();
+                    long attemptNanos = System.nanoTime();
+                    String attemptStatus = "OK";
+                    Integer attemptCode = null;
+                    try {
+                        scheduleResponse = stub.schedule(scheduleReq);
+                        attemptCode = scheduleResponse.getCode();
+                    } catch (RuntimeException e) {
+                        attemptStatus = Status.fromThrowable(e).getCode().name();
+                        throw e;
+                    } finally {
+                        result.scheduleAttempts = List.of(new MasterTargetRouter.ScheduleAttempt(
+                                config.grpcTarget, attemptEpochMs, attemptNanos, attemptStatus, attemptCode));
+                    }
+
+                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                    // sched_done epoch-ms (client_events.jsonl): the absolute moment the
+                    // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
+                    // same wall clock as the engine-side engine_arrival_ms stamps.
+                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
                     result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
                 }
-            } else {
-                FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-                scheduleResponse = stub.schedule(scheduleReq);
 
-                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                // sched_done epoch-ms (client_events.jsonl): the absolute moment the
-                // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
-                // same wall clock as the engine-side engine_arrival_ms stamps.
-                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                if (scheduleResponse == null) {
+                    // HA mode only (the legacy path throws into the catch below):
+                    // no target answered — status/error/total_ms were already
+                    // stamped by the router branch above; the terminating-failure
+                    // handling right after the try block takes it from here.
+                } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
+                    result.status = "schedule_error";
+                    result.error = scheduleResponse.getErrorMessage().isEmpty()
+                            ? "code=" + scheduleResponse.getCode()
+                            : scheduleResponse.getErrorMessage();
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    // Master answered (8431 admission rejection, 8511 forwarding
+                    // terminal code, ...): business-error boundary — never
+                    // retried, never switched, never sent direct-to-engine.
+                    // 8511 is additionally a no-retry terminal code; the harness
+                    // asserts it via status=schedule_error + the code in error.
+                    result.errorKind = "business";
+                } else {
+                    result.prefill = roleAddr(scheduleResponse, "PREFILL");
+                    result.decode = roleAddr(scheduleResponse, "DECODE");
+
+                    if (!config.fetchOutputStream) {
+                        // Under a NON_BATCH dispatcher the engine only receives the
+                        // request through the client's own GenerateStreamCall
+                        // (submission and stream reading are the same streaming
+                        // call), so skipping the fetch would mean the request
+                        // never reaches any engine. Fail fast instead of silently
+                        // producing a run with zero engine load.
+                        if (!scheduleResponse.getEnqueuedByMaster()) {
+                            System.err.println(
+                                    "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                    + "schedule response reports enqueued_by_master=false "
+                                    + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                    + "dispatcher the engine only receives requests through the "
+                                    + "client's GenerateStreamCall stream, so skipping the fetch "
+                                    + "would leave the engine idle. Re-enable stream reading or "
+                                    + "switch the master to a BATCH dispatcher.");
+                            System.exit(86);
+                        }
+                        result.status = "scheduled";
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                        // Route through tallyResult so the result lands in
+                        // completedResults (drives flexlb_client_completed_total and
+                        // the schedule-latency pushgateway series) instead of
+                        // bumping counters by hand and skipping the record.
+                        tallyResult(result);
+                        responseCount.incrementAndGet();
+                        return result;
+                    }
+                }
+            } catch (Exception e) {
+                scheduleExc = e;
+                result.status = "exception";
+                result.error = e.toString();
+                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                // Same taxonomy as the HA router path (the legacy single-target
+                // mode also stamps error_kind; its routing/fallback behavior is
+                // untouched).
+                result.errorKind = MasterTargetRouter.classifyThrowable(e);
+            } finally {
+                scheduleInflightCount.decrementAndGet();
             }
 
-            if (scheduleResponse == null) {
-                // HA mode only (the legacy path throws into the catch below):
-                // no target answered — status/error/total_ms were already
-                // stamped by the router branch above; the terminating-failure
-                // handling right after the try block takes it from here.
-            } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
-                result.status = "schedule_error";
-                result.error = scheduleResponse.getErrorMessage().isEmpty()
-                        ? "code=" + scheduleResponse.getCode()
-                        : scheduleResponse.getErrorMessage();
-                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                // Master answered (8431 admission rejection, 8511 forwarding
-                // terminal code, ...): business-error boundary — never
-                // retried, never switched, never sent direct-to-engine.
-                // 8511 is additionally a no-retry terminal code; the harness
-                // asserts it via status=schedule_error + the code in error.
-                result.errorKind = "business";
-            } else {
-                result.prefill = roleAddr(scheduleResponse, "PREFILL");
-                result.decode = roleAddr(scheduleResponse, "DECODE");
+            // Escape hatch (default OFF — see enableFallback javadoc): on schedule
+            // failure, try fallback direct to engines under the same request permit. Only
+            // reachable when the operator explicitly opted in; standard load tests
+            // keep it off so every failure surfaces as an error row instead of
+            // bypassing the master.
+            //
+            // Trigger semantics are mode-dependent (HA case-test brief p7,
+            // defect-8 fix — scoped to the HA mode only):
+            //  - Legacy single-target mode: ANY schedule failure (exception or
+            //    schedule_error) may trigger the fallback attempt — byte-identical
+            //    to the historical behavior the existing pressure-test line
+            //    relies on.
+            //  - HA multi-target mode: only connection failure after all
+            //    eligible targets were attempted (error_kind="transport")
+            //    may bypass the master. Business responses and deadlines do not.
+            boolean legacyScheduleFailure = scheduleResponse == null
+                    || "schedule_error".equals(result.status)
+                    || "exception".equals(result.status);
+            boolean terminating = router == null
+                    ? legacyScheduleFailure
+                    : (scheduleResponse == null || "schedule_error".equals(result.status));
+            if (terminating) {
+                // Fallback eligibility is mode-dependent (same contract as the
+                // trigger-semantics comment above): the legacy single-target
+                // mode restores the historical ANY-schedule-failure trigger
+                // (exception OR schedule_error); the HA mode only bypasses the
+                // master on the double-connection failure (error_kind=transport
+                // AND no master answer anywhere in the target chain).
+                boolean fallbackEligible = (router == null)
+                        ? legacyScheduleFailure
+                        : ("transport".equals(result.errorKind)
+                            && scheduleResponse == null);
+                if (fallbackEligible && config.enableFallback
+                        && !fallbackPrefillAddrs.isEmpty()) {
+                    String prefix = scheduleExc != null
+                            ? "master=" + scheduleExc
+                            : "master=" + result.error;
+                    attemptFallback(record, result, startedNanos, prefix);
+                } else if (router != null && scheduleResponse == null) {
+                    // HA mode, no master answer, no (or disabled) direct fallback:
+                    // nobody served this request — route_path="failed" separates
+                    // these rows from master-answered rows (route_path="master",
+                    // including schedule_error business failures) and from
+                    // direct-to-engine rows (route_path="fallback").
+                    result.routePath = "failed";
+                }
+                tallyResult(result);
+                responseCount.incrementAndGet();
+                return result;
+            }
 
-                if (!config.fetchOutputStream) {
-                    // Under a NON_BATCH dispatcher the engine only receives the
-                    // request through the client's own GenerateStreamCall
-                    // (submission and stream reading are the same streaming
-                    // call), so skipping the fetch would mean the request
-                    // never reaches any engine. Fail fast instead of silently
-                    // producing a run with zero engine load.
-                    if (!scheduleResponse.getEnqueuedByMaster()) {
-                        System.err.println(
-                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
-                                + "schedule response reports enqueued_by_master=false "
-                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
-                                + "dispatcher the engine only receives requests through the "
-                                + "client's GenerateStreamCall stream, so skipping the fetch "
-                                + "would leave the engine idle. Re-enable stream reading or "
-                                + "switch the master to a BATCH dispatcher.");
-                        System.exit(86);
+            // Phase 2: engine stream reading (same request permit)
+            if (scheduleResponse != null && config.fetchOutputStream) {
+                try {
+
+                    String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
+                    if (prefillAddr.isEmpty()) {
+                        prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
                     }
-                    result.status = "scheduled";
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    // Route through tallyResult so the result lands in
-                    // completedResults (drives flexlb_client_completed_total and
-                    // the schedule-latency pushgateway series) instead of
-                    // bumping counters by hand and skipping the record.
-                    tallyResult(result);
-                    responseCount.incrementAndGet();
-                    return result;
+                    if (prefillAddr.isEmpty()) {
+                        throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
+                    }
+
+                    EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
+                    ManagedChannel engineChannel = getEngineChannel(prefillAddr);
+                    RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
+                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+
+                    Iterator<EngineRpcService.GenerateOutputsPB> stream;
+                    if (scheduleResponse.getEnqueuedByMaster()) {
+                        stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                                .setRequestId(inputPb.getRequestId())
+                                .build());
+                    } else {
+                        stream = engineStub.generateStreamCall(modifiedInput);
+                    }
+
+                    consumeStream(stream, result, startedNanos);
+                    result.wallClockTs = System.currentTimeMillis() / 1000.0;
+                } catch (Exception e) {
+                    // Escape hatch (default OFF): on fetch/stream failure, try
+                    // fallback — only when the operator explicitly opted in;
+                    // otherwise the failure is recorded as an error row.
+                    // HA mode: a stream-read failure is an ENGINE-side problem,
+                    // not a master connection failure — never falls back (brief
+                    // p7 defect-8: the legacy any-failure parity behavior is
+                    // retired for the HA mode only).
+                    if (router == null
+                            && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                        attemptFallback(record, result, startedNanos, "fetch=" + e);
+                    } else {
+                        result.status = "exception";
+                        result.error = e.toString();
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    }
                 }
             }
-        } catch (Exception e) {
-            scheduleExc = e;
-            result.status = "exception";
-            result.error = e.toString();
-            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-            // Same taxonomy as the HA router path (the legacy single-target
-            // mode also stamps error_kind; its routing/fallback behavior is
-            // untouched).
-            result.errorKind = MasterTargetRouter.classifyThrowable(e);
+
+            tallyResult(result);
+            responseCount.incrementAndGet();
+            return result;
         } finally {
             inflightCount.decrementAndGet();
             semaphore.release();
         }
-
-        // Escape hatch (default OFF — see enableFallback javadoc): on schedule
-        // failure, try fallback direct to engines, outside the semaphore. Only
-        // reachable when the operator explicitly opted in; standard load tests
-        // keep it off so every failure surfaces as an error row instead of
-        // bypassing the master.
-        //
-        // Trigger semantics are mode-dependent (HA case-test brief p7,
-        // defect-8 fix — scoped to the HA mode only):
-        //  - Legacy single-target mode: ANY schedule failure (exception or
-        //    schedule_error) may trigger the fallback attempt — byte-identical
-        //    to the historical behavior the existing pressure-test line
-        //    relies on.
-        //  - HA multi-target mode: ONLY the double-connection failure (every
-        //    GRPC_TARGETS target answered gRPC UNAVAILABLE, error_kind=
-        //    "transport") may bypass the master. Business error codes (8431 /
-        //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
-        //    (production connection_failed contract).
-        boolean legacyScheduleFailure = scheduleResponse == null
-                || "schedule_error".equals(result.status)
-                || "exception".equals(result.status);
-        boolean terminating = router == null
-                ? legacyScheduleFailure
-                : (scheduleResponse == null || "schedule_error".equals(result.status));
-        if (terminating) {
-            // Fallback eligibility is mode-dependent (same contract as the
-            // trigger-semantics comment above): the legacy single-target
-            // mode restores the historical ANY-schedule-failure trigger
-            // (exception OR schedule_error); the HA mode only bypasses the
-            // master on the double-connection failure (error_kind=transport
-            // AND no master answer anywhere in the target chain).
-            boolean fallbackEligible = (router == null)
-                    ? legacyScheduleFailure
-                    : ("transport".equals(result.errorKind)
-                        && scheduleResponse == null);
-            if (fallbackEligible && config.enableFallback
-                    && !fallbackPrefillAddrs.isEmpty()) {
-                String prefix = scheduleExc != null
-                        ? "master=" + scheduleExc
-                        : "master=" + result.error;
-                attemptFallback(record, result, startedNanos, prefix);
-            } else if (router != null && scheduleResponse == null) {
-                // HA mode, no master answer, no (or disabled) direct fallback:
-                // nobody served this request — route_path="failed" separates
-                // these rows from master-answered rows (route_path="master",
-                // including schedule_error business failures) and from
-                // direct-to-engine rows (route_path="fallback").
-                result.routePath = "failed";
-            }
-            tallyResult(result);
-            responseCount.incrementAndGet();
-            return result;
-        }
-
-        // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchOutputStream) {
-            try {
-                Double firstFrameNanos = null;
-                Double terminalNanos = null;
-
-                String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
-                if (prefillAddr.isEmpty()) {
-                    prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
-                }
-                if (prefillAddr.isEmpty()) {
-                    throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
-                }
-
-                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
-                ManagedChannel engineChannel = getEngineChannel(prefillAddr);
-                RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-
-                Iterator<EngineRpcService.GenerateOutputsPB> stream;
-                if (scheduleResponse.getEnqueuedByMaster()) {
-                    stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                            .setRequestId(inputPb.getRequestId())
-                            .build());
-                } else {
-                    stream = engineStub.generateStreamCall(modifiedInput);
-                }
-
-                while (stream.hasNext()) {
-                    EngineRpcService.GenerateOutputsPB output = stream.next();
-                    long now = System.nanoTime();
-                    if (firstFrameNanos == null) {
-                        firstFrameNanos = (double) now;
-                    }
-                    EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
-                    for (int j = 0; j < flatten.getFinishedCount(); j++) {
-                        if (flatten.getFinished(j)) {
-                            terminalNanos = (double) now;
-                        }
-                    }
-                }
-
-                if (firstFrameNanos == null) {
-                    // Stream completed with zero outputs — mark as error to avoid
-                    // masking underlying engine issues as successful requests.
-                    result.status = "empty_response";
-                    result.error = "stream completed with zero outputs";
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                } else {
-                    long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
-                    result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
-                    result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-                    result.status = "ok";
-                }
-                result.wallClockTs = System.currentTimeMillis() / 1000.0;
-            } catch (Exception e) {
-                // Escape hatch (default OFF): on fetch/stream failure, try
-                // fallback — only when the operator explicitly opted in;
-                // otherwise the failure is recorded as an error row.
-                // HA mode: a stream-read failure is an ENGINE-side problem,
-                // not a master connection failure — never falls back (brief
-                // p7 defect-8: the legacy any-failure parity behavior is
-                // retired for the HA mode only).
-                if (router == null
-                        && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
-                    attemptFallback(record, result, startedNanos, "fetch=" + e);
-                } else {
-                    result.status = "exception";
-                    result.error = e.toString();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                }
-            }
-        }
-
-        tallyResult(result);
-        responseCount.incrementAndGet();
-        return result;
     }
 
     private void tallyResult(RequestResult result) {
-        completedResults.add(result);
+        if (liveJournal != null) {
+            ObjectNode event = perRequestNode(result);
+            if (flowControl != null) flowControl.identify(event);
+            liveJournal.record("terminal", event);
+        }
+        monitoredCompleted.incrementAndGet();
+        observeLatency("schedule", result.scheduleMs);
+        observeLatency("total", result.totalMs);
+        observeLatency("ttft", result.ttftMs);
+        if (retainRequestEvidence) completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
             successCount.incrementAndGet();
         } else {
@@ -917,39 +1043,56 @@ public final class JavaLoadClient {
                 .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
         Iterator<EngineRpcService.GenerateOutputsPB> stream = stub.generateStreamCall(fbInput);
 
-        Double firstFrameNanos = null;
-        Double terminalNanos = null;
-        while (stream.hasNext()) {
-            EngineRpcService.GenerateOutputsPB output = stream.next();
-            long now = System.nanoTime();
-            if (firstFrameNanos == null) {
-                firstFrameNanos = (double) now;
-            }
-            EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
-            for (int j = 0; j < flatten.getFinishedCount(); j++) {
-                if (flatten.getFinished(j)) {
-                    terminalNanos = (double) now;
-                }
-            }
-        }
-
         result.scheduleMs = 0.0;
         result.prefill = prefillAddr;
         result.decode = decodeAddr;
         result.routePath = "fallback";
         result.wallClockTs = System.currentTimeMillis() / 1000.0;
-        if (firstFrameNanos == null) {
-            // Parity with the main stream path: a stream that completes with
-            // zero outputs is an error, not a 0-ms TTFT success.
+        consumeStream(stream, result, startedNanos);
+    }
+
+    /** A nonempty transport EOF is not business completion, on either route. */
+    static void consumeStream(Iterator<EngineRpcService.GenerateOutputsPB> stream,
+                              RequestResult result, long startedNanos) {
+        Long first = null;
+        Long terminal = null;
+        String businessError = null;
+        while (stream.hasNext()) {
+            EngineRpcService.GenerateOutputsPB output = stream.next();
+            long now = System.nanoTime();
+            if (first == null) first = now;
+            if (output.hasErrorInfo() && output.getErrorInfo().getErrorCodeValue() != 0) {
+                businessError = "engine error code=" + output.getErrorInfo().getErrorCodeValue()
+                        + ": " + output.getErrorInfo().getErrorMessage();
+            }
+            for (boolean finished : output.getFlattenOutput().getFinishedList()) {
+                if (finished) terminal = now;
+            }
+            // Single-request/single-output client: the terminal AuxInfo carries
+            // cumulative generated length, unlike the requested outputLen or
+            // incremental tensor payloads. Missing evidence stays absent.
+            var flat = output.getFlattenOutput();
+            if (flat.getFinishedCount() == 1 && flat.getFinished(0)
+                    && flat.getAuxInfoCount() == 1) {
+                result.observedOutputTokens = flat.getAuxInfo(0).getOutputLen();
+            }
+        }
+        result.ttftMs = first == null ? 0 : (first - startedNanos) / 1_000_000.0;
+        result.totalMs = ((terminal == null ? System.nanoTime() : terminal) - startedNanos) / 1_000_000.0;
+        if (businessError != null) {
+            result.status = "engine_error";
+            result.errorKind = "business";
+            result.error = businessError;
+        } else if (first == null) {
             result.status = "empty_response";
             result.error = "stream completed with zero outputs";
-            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-            return;
+        } else if (terminal == null) {
+            result.status = "incomplete_response";
+            result.error = "stream ended without business finished";
+        } else {
+            result.status = "ok";
+            result.error = "";
         }
-        long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
-        result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
-        result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-        result.status = "ok";
     }
 
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
@@ -1070,7 +1213,7 @@ public final class JavaLoadClient {
                 .setForceDisableSpRun(false)
                 .setModel(config.model)
                 .setApiKey(config.apiKey)
-                .setCacheKeyBlockSize(BLOCK_SIZE);
+                .setCacheKeyBlockSize(record.cacheKeyBlockSize);
         if (record.priority > 0) {
             builder.setPriority(record.priority);
         }
@@ -1141,22 +1284,111 @@ public final class JavaLoadClient {
 
     private List<TraceRecord> loadTrace(String path) throws IOException {
         List<TraceRecord> records = new ArrayList<>();
-        for (String line : Files.readAllLines(Path.of(path))) {
-            if (line.isBlank()) {
-                continue;
-            }
-            try {
-                JsonNode raw = MAPPER.readTree(line);
-                TraceRecord record = parseTraceRecord(raw);
-                if (record != null) {
-                    records.add(record);
+        java.util.Set<Long> controlledIds = new java.util.HashSet<>();
+        boolean strict = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
+                || (playback != null && playback.controls.enabled());
+        try (java.io.BufferedReader reader = Files.newBufferedReader(Path.of(path))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
                 }
-            } catch (Exception e) {
-                System.err.println("skipping malformed trace line: " + e.getMessage());
+                try {
+                    JsonNode raw = MAPPER.readTree(line);
+                    if (strict) validateControlledTrace(raw);
+                    TraceRecord record = parseTraceRecord(raw);
+                    if (record != null) {
+                        if (strict && !controlledIds.add(record.requestId)) {
+                            throw new IOException("duplicate controlled trace request identity");
+                        }
+                        records.add(record);
+                    }
+                } catch (Exception e) {
+                    if (strict) {
+                        throw new IOException("invalid controlled trace; no rows may be silently filtered", e);
+                    }
+                    System.err.println("skipping malformed trace line: " + e.getMessage());
+                }
             }
         }
         records.sort(Comparator.comparingLong(r -> r.tsMs));
         return records;
+    }
+
+    private static boolean validCacheKeyBlockSize(int value) {
+        return value >= 64 && value <= 4096 && (value & (value - 1)) == 0;
+    }
+
+    static void validateControlledTrace(JsonNode raw) {
+        int il = raw.path("il").asInt(0);
+        if (!raw.path("il").isIntegralNumber() || il <= 0
+                || !raw.path("ol").isIntegralNumber() || raw.path("ol").asInt() <= 0
+                || raw.path("rid").asText().isBlank()
+                || !raw.path("ts").isIntegralNumber() || raw.path("ts").asLong() < 0
+                || !raw.path("cache_key_block_size").isIntegralNumber()
+                || !validCacheKeyBlockSize(raw.path("cache_key_block_size").asInt())
+                || !raw.path("priority").isIntegralNumber()
+                || !PriorityNormalizer.isValid(raw.path("priority").asInt())) {
+            throw new IllegalArgumentException("controlled trace requires exact shape, identity, tokens, timing, block size and priority");
+        }
+        List<Integer> decodedTokens = decodeInputTokens(raw, il);
+        if (decodedTokens == null) throw new IllegalArgumentException("controlled trace requires tokens");
+        if (raw.has("bh") || raw.has("block_cache_keys")) {
+            JsonNode supplied = raw.has("bh") ? raw.get("bh") : raw.get("block_cache_keys");
+            List<Long> expected = computeBlockKeys(decodedTokens, raw.path("cache_key_block_size").asInt());
+            if (!supplied.isArray() || supplied.size() != expected.size()) {
+                throw new IllegalArgumentException("controlled trace cache key count mismatch");
+            }
+            for (int i = 0; i < expected.size(); i++) {
+                if (!supplied.get(i).isIntegralNumber() || !supplied.get(i).canConvertToLong()
+                        || supplied.get(i).asLong() != expected.get(i)) {
+                    throw new IllegalArgumentException("controlled trace keys disagree with tokens");
+                }
+            }
+        }
+    }
+
+    // A lossless run encoding for synthetic token blocks. Hashing and RPCs still
+    // consume the expanded token sequence; supplied KV hashes cannot bypass it.
+    static List<Integer> decodeInputTokens(JsonNode raw, int inputLen) {
+        if (raw.has("input_ids") && raw.has("input_token_blocks")) {
+            throw new IllegalArgumentException("ambiguous token encoding");
+        }
+        boolean compact = raw.has("input_token_blocks");
+        JsonNode values = raw.get(compact ? "input_token_blocks" : "input_ids");
+        if (values == null) return null;
+        int block = raw.path("cache_key_block_size").asInt(BLOCK_SIZE);
+        if (inputLen <= 0 || !validCacheKeyBlockSize(block) || !values.isArray()
+                || values.size() != (compact ? ((inputLen - 1) / block + 1) : inputLen)) {
+            throw new IllegalArgumentException("token encoding length mismatch");
+        }
+        List<List<Integer>> blocks = new ArrayList<>();
+        List<Integer> tokens = new ArrayList<>();
+        for (JsonNode value : values) {
+            if (compact && value.isArray()) {
+                if (value.size() != block) throw new IllegalArgumentException("pinned block size mismatch");
+                List<Integer> exact = new ArrayList<>();
+                for (JsonNode token : value) {
+                    if (!token.isIntegralNumber() || !token.canConvertToInt() || token.asInt()<0)
+                        throw new IllegalArgumentException("invalid pinned token");
+                    exact.add(token.asInt());
+                }
+                blocks.add(exact);
+            } else {
+                if (!value.isIntegralNumber() || !value.canConvertToInt() || value.asInt()<0)
+                    throw new IllegalArgumentException("invalid token label");
+                if (compact) blocks.add(Collections.nCopies(block,value.asInt()));
+                else tokens.add(value.asInt());
+            }
+        }
+        if (!compact) return tokens;
+        return new java.util.AbstractList<Integer>() {
+            @Override public Integer get(int index) {
+                java.util.Objects.checkIndex(index, inputLen);
+                return blocks.get(index/block).get(index%block);
+            }
+            @Override public int size() { return inputLen; }
+        };
     }
 
     // Package-visible for per-record priority parsing assertions in tests.
@@ -1193,14 +1425,13 @@ public final class JavaLoadClient {
         long tsMs = raw.path("ts").asLong(raw.path("request_enter_ts_epoch_ms")
                 .asLong(raw.path("ts_epoch_ms").asLong(0)));
 
-        List<Integer> tokenIds = null;
-        JsonNode inputIdsNode = raw.get("input_ids");
-        if (inputIdsNode != null && inputIdsNode.isArray()) {
-            tokenIds = new ArrayList<>(inputIdsNode.size());
-            for (JsonNode token : inputIdsNode) {
-                tokenIds.add(token.asInt());
-            }
-        } else {
+        JsonNode encoded = raw.has("input_token_blocks") ? raw.get("input_token_blocks") : raw.get("input_ids");
+        if (encoded != null && encoded.isArray()) for (JsonNode value : encoded) {
+            if (value.isArray()) for (JsonNode token : value) tokenStride = Math.max(tokenStride, token.asLong()+1);
+            else tokenStride = Math.max(tokenStride, value.asLong()+1);
+        }
+        List<Integer> tokenIds = decodeInputTokens(raw, inputLen);
+        if (tokenIds == null) {
             tokenIds = Collections.nCopies(inputLen, 0);
         }
 
@@ -1214,7 +1445,7 @@ public final class JavaLoadClient {
                 blockKeys.add(toSignedInt64(key.bigIntegerValue()));
             }
         } else if (tokenIds != null) {
-            blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
+            blockKeys = computeBlockKeys(tokenIds, raw.path("cache_key_block_size").asInt(BLOCK_SIZE));
         }
 
         // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
@@ -1240,7 +1471,8 @@ public final class JavaLoadClient {
         }
 
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
-                inputLen, outputLen, blockKeys, tokenIds, priority);
+                inputLen, outputLen, blockKeys, tokenIds, priority,
+                raw.path("cache_key_block_size").asInt(BLOCK_SIZE));
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -1279,7 +1511,7 @@ public final class JavaLoadClient {
         return "";
     }
 
-    private static List<Long> computeBlockKeys(List<Integer> tokenIds, int blockSize) {
+    static List<Long> computeBlockKeys(List<Integer> tokenIds, int blockSize) {
         List<Long> keys = new ArrayList<>();
         int numBlocks = tokenIds.size() / blockSize;
         for (int b = 0; b < numBlocks; b++) {
@@ -1296,17 +1528,6 @@ public final class JavaLoadClient {
         return Hashing.murmur3_128()
                 .hashString(value, StandardCharsets.UTF_8)
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
-    }
-
-    // Package-visible for loop-mode unique-prefix assertions in tests.
-    // Deterministic per-round salt: the same (key, loop) pair always maps to
-    // the same value, different loops map to different values.
-    static long roundSaltedKey(long blockKey, int loopIdx) {
-        return Hashing.murmur3_128().newHasher()
-                .putLong(blockKey)
-                .putInt(loopIdx)
-                .hash()
-                .asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1350,6 +1571,7 @@ public final class JavaLoadClient {
     // ---- Output Writing ----
 
     private void writePerRequestResults() throws IOException {
+        if (!retainRequestEvidence) return;
         // client_events.jsonl (renamed from per_request.jsonl): the client-side
         // half of the multi-component JSONL event streams — one row per
         // request, rid-joined offline by aggregate_canvas_run.py against the
@@ -1357,7 +1579,9 @@ public final class JavaLoadClient {
         Path perRequestPath = Path.of(config.outputDir, "client_events.jsonl");
         try (BufferedWriter writer = Files.newBufferedWriter(perRequestPath)) {
             for (RequestResult result : results) {
-                writer.write(perRequestNode(result).toString());
+                ObjectNode row = perRequestNode(result);
+                if (flowControl != null) flowControl.identify(row);
+                writer.write(row.toString());
                 writer.newLine();
             }
         }
@@ -1379,6 +1603,9 @@ public final class JavaLoadClient {
         node.put("ts", result.ts);
         node.put("input_len", result.inputLen);
         node.put("output_len", result.outputLen);
+        if (result.observedOutputTokens != null) {
+            node.put("observed_output_tokens", result.observedOutputTokens);
+        }
         node.put("status", result.status);
         node.put("schedule_ms", result.scheduleMs);
         node.put("sched_done_epoch_ms", result.schedDoneEpochMs);
@@ -1398,10 +1625,24 @@ public final class JavaLoadClient {
         // also covers phase-2 stream failures, where the master leg itself
         // succeeded).
         node.put("master_target", result.masterTarget);
+        var attempts = node.putArray("schedule_attempts");
+        for (int index = 0; index < result.scheduleAttempts.size(); index++) {
+            MasterTargetRouter.ScheduleAttempt attempt = result.scheduleAttempts.get(index);
+            ObjectNode observed = attempts.addObject();
+            observed.put("attempt", index + 1);
+            observed.put("master_target", attempt.target);
+            observed.put("started_epoch_ms", attempt.startedEpochMs);
+            observed.put("ended_epoch_ms", attempt.endedEpochMs);
+            observed.put("status", attempt.status);
+            if (attempt.responseCode != null) {
+                observed.put("response_code", attempt.responseCode);
+            }
+        }
         node.put("failover", result.failover);
         node.put("error_kind", result.errorKind);
         node.put("wall_clock_ts", result.wallClockTs);
         node.put("send_due_epoch_ms", result.sendDueEpochMs);
+        node.put("iteration", result.iteration);
         node.put("send_start_epoch_ms", result.sendStartEpochMs);
         node.put("pacing_lag_ms", result.pacingLagMs);
         if (!result.synthetic) {
@@ -1490,12 +1731,12 @@ public final class JavaLoadClient {
                     tokens = new ArrayList<>(tokens.subList(0, Math.min(maxInputLen, tokens.size())));
                 }
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority);
+                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority, cur.cacheKeyBlockSize);
                 truncated++;
             }
             if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority);
+                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority, cur.cacheKeyBlockSize);
                 truncated++;
             }
             out.add(cur);
@@ -1545,9 +1786,10 @@ public final class JavaLoadClient {
     String buildPushMetricsBody() {
         List<String> lines = new ArrayList<>();
         int inflight = inflightCount.get();
+        lines.add("flexlb_client_schedule_inflight{route_path=\"master\"} " + scheduleInflightCount.get());
         lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
         lines.add("flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
-        lines.add("flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
+        lines.add("flexlb_client_completed_total{route_path=\"master\"} " + (retainRequestEvidence ? completedResults.size() : monitoredCompleted.get()));
         lines.add("flexlb_client_success_total{route_path=\"master\"} " + successCount.get());
         lines.add("flexlb_client_error_total{route_path=\"master\"} " + errorCount.get());
         lines.add("flexlb_client_inflight_count{route_path=\"master\"} " + inflight);
@@ -1667,7 +1909,7 @@ public final class JavaLoadClient {
      *
      * <p>Package-visible for the ramp-up schedule unit tests.
      */
-    static double uniformDueSeconds(int index, double perShardQps, double rampUpSeconds) {
+    static double uniformDueSeconds(long index, double perShardQps, double rampUpSeconds) {
         if (rampUpSeconds <= 0) {
             return index / perShardQps;
         }
@@ -1694,7 +1936,20 @@ public final class JavaLoadClient {
 
     // ---- Cleanup ----
 
-    private void close() {
+    @Override public void close() {
+        if (metricsServer != null) {
+            try {
+                Files.writeString(Path.of(config.outputDir, "metrics-complete.json"),
+                        "{\"epoch_s\":" + System.currentTimeMillis() / 1000.0 + "}");
+            } catch (IOException error) {
+                System.err.println("monitor completion manifest failed: " + error);
+            }
+            metricsServer.stop(0);
+        }
+        monitor.close();
+        if (liveJournal != null) {
+            liveJournal.close();
+        }
         if (router != null) {
             router.shutdown();
         }
@@ -2202,6 +2457,8 @@ public final class JavaLoadClient {
         final List<Integer> tokenIds;
         /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
         final int priority;
+        final int cacheKeyBlockSize;
+        final int iteration;
 
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds) {
@@ -2211,6 +2468,23 @@ public final class JavaLoadClient {
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
                     int priority) {
+            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, priority, BLOCK_SIZE);
+        }
+
+        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
+                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
+                    int priority, int cacheKeyBlockSize) {
+            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, priority, cacheKeyBlockSize, 0);
+        }
+
+        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
+                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
+                    int priority, int cacheKeyBlockSize, int iteration) {
+            this.iteration = iteration;
+            if (!validCacheKeyBlockSize(cacheKeyBlockSize)) {
+                throw new IllegalArgumentException("invalid cache key block size");
+            }
+            this.cacheKeyBlockSize = cacheKeyBlockSize;
             this.requestId = requestId;
             this.sourceRid = sourceRid;
             this.traceId = traceId;
@@ -2230,6 +2504,7 @@ public final class JavaLoadClient {
         long ts;
         int inputLen;
         int outputLen;
+        Integer observedOutputTokens;
         String status = "unknown";
         double scheduleMs;
         /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */
@@ -2244,6 +2519,7 @@ public final class JavaLoadClient {
         /** Actually-served (or last-attempted) flexlb gRPC address; empty on
          *  synthetic rows (collector timeout / dead-future fallbacks). */
         String masterTarget = "";
+        List<MasterTargetRouter.ScheduleAttempt> scheduleAttempts = List.of();
         /** True when the same request was retried on another GRPC_TARGETS
          *  target (transport-failure failover). Always false in the legacy
          *  single-target mode. */
@@ -2255,6 +2531,7 @@ public final class JavaLoadClient {
         String errorKind = "none";
         double wallClockTs;
         double sendDueEpochMs;
+        int iteration;
         double sendStartEpochMs;
         double pacingLagMs;
         /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */

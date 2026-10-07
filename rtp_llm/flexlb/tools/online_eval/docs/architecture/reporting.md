@@ -1,0 +1,33 @@
+# 报告装配契约
+
+报告装配用于把分析结果组织成可离线阅读的图表和审计信息。门禁、阈值、统计值由分析层决定；装配层只决定名称、分组、轴、颜色、显示顺序和说明文字。新增报告时先复用 `reporting/` 的词汇表、配对函数和 bundle 写入入口，不从 HTML 或已写出的报告反向提取数据。
+
+流程为「读取并校验既有分析产物 → 分析层给出结果与有效性 → 装配 spec → `write_bundle`」。`reporting/catalog.py` 管理曲线展示名称、分组、轴、颜色和默认可见性。`reporting/pairing.py` 接收已分析的序列，按阶段边界、事件时间或相对秒平移，配对时保留缺采样的 `null`；差值仅在同一时刻两侧都有数值时产生。累计计数的差分在 `reporting/statistics.py` 定义。新增曲线先补 catalog，再让报告装配器按数据身份取定义；不得以展示名作为统计或门禁依据。
+
+`reporting/assembly.py` 是 panel 适配入口。历史的 `x`/`xNums` + `series.data` 和 `series.points` 均可读取；时间曲线在写入时派生 `points`，保留原字段和空值。overlay 与普通图表可混排，`representation` 指定交互组件；bar/scatter 仍保留其类目或二维坐标。旧归档不改写，`read_bundle` 继续校验原 manifest 和 SHA，`load_analysis` 读取旧 `analysis.json`。新 bundle 仍写自包含 HTML、`analysis.json`、`report-spec.json`、`manifest.json`，由 `write_bundle` 最后写 manifest。
+
+`kind` 表示制品关系：`run` 是单次运行，`comparison` 是两个或多个运行的对照（含时间线），`sweep` 是参数扫描。`discover_reports(root, kind=..., role=...)` 在所选 kind 下读取并校验 bundle；`role` 可选，由生产者声明，不从目录名猜测。默认 kind 为 `run`，兼容现有门禁发现调用。
+
+workload case 在 YAML 的 `reports` 中列出视图文件，例如 `reports: [workload.yaml, cache_scale_in_overview.yaml]`。文件位于 `config/report_views/`，每个文件产出一份独立 HTML。`workload.yaml` 是默认视图：每个监控指标族一张图，按 `engine_name`、`pod` 展开的原始线放在同一图，可在图例和预设中切换均值、最大值及逐引擎明细。HTML 为控制体积保留分桶极值和缺采点；`analysis.json` 保留原始序列全集，派生线标明来源与计算方式。未声明的旧 workload case 仍产出默认视图；functional variant 不继承顶层报告配置。
+
+`cache_scale_in` 同时声明默认视图和 `cache_scale_in_overview.yaml`：后者定义专属报告的标题、副标题、轴、曲线预设及审计栏目，`cache_gate.py` 提供已分析的曲线、有效性和判定并据此发布报告。`master_performance.yaml` 同样定义性能报告的静态布局。case 列出的专属报告以 producer 和 bundle 身份校验后直接链接，不重复生成一份缩水的图。每份单次报告都保留运行身份、检查和门禁详细结果；默认视图与专属视图保留各自的时间原点。YAML 不计算统计值或改变判定。
+
+输入归档保持各自的历史格式。`reporting.core.load_analysis` 接受旧分析 JSON 与带 manifest 的新 bundle；cache 和性能证据仍由对应分析器按原格式读取。不得因为呈现格式统一，就把不同证据类型混作同一分析输入。
+
+独立的 `traffic_fidelity_report.py` 保留自包含 `fidelity.html` 作为显式例外：它提供可调阈值、ECDF 和三幅联合密度热图，通用 renderer 尚无等价交互组件。该例外只影响合成输入保真度诊断，不进入运行门禁或 `discover_reports`。若迁入 bundle，先为这些交互补齐通用组件并逐项核对信息完整性。压测的 `aggregate.py` 子进程链路属于证据生成，不改变装配契约；它继续经 `write_bundle` 发布报告。
+
+`stress_report.py`、`monitoring/session.py` 的专属装配保留：其图表或监控视图重复度低，整体迁移成本高，均经 `write_bundle` 和 panel 适配入口发布。豁免只覆盖各自的专属布局，不允许新增独立配色、配对或落盘规则；需要复用的呈现决策仍应进入 `reporting/`。
+
+## 冻结报告对照
+
+`reporting/comparison.py` 是通用对比实现，`scripts/commands/compare_runs.py` 是命令入口。
+输入为两个或多个 `kind=run` 的完整 bundle。先校验 manifest，再读取 `analysis.json` 与
+`report-spec.json`；不导入业务分析器，不消费原始 evidence，也不重新生成单 run 报告。
+
+对比保留每侧的结果、KPI、说明、缺采点和原始报告链接，链接依赖输入归档仍保留在原位置。
+合图仅配对同 ID、指标集合、单位和坐标轴一致的时间面板；时间原点不同且没有显式事件对齐时
+分别展示。事件无法唯一定位时，所有 run 保留原时间轴。没有自动统计窗口、差异排名或归因。
+
+控制变量来自归档 `run_meta` 的 configuration、workload、environment 及归档 criteria；
+字段缺失标为 UNKNOWN，不从证据推测。原始门禁标准和检查仍完整显示在各 run 的报告说明中。
+对比不产生顶层 verdict 或 gate；命令退出码只描述读写与校验是否成功。

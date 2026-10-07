@@ -1,0 +1,113 @@
+schema_version: 2
+case: cache_churn
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  decode_cache_blocks: 12
+  perf_preset: default
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: lru_affinity
+  environment:
+    prefill_cache_blocks: 4
+    decode_cache_blocks: 4
+  program: lru_affinity
+metadata:
+  description: Bounded LRU replay retry, cache affinity and capacity eviction.
+  category: kv
+parameters:
+  lru_affinity:
+    setup_timeout_s: 180
+    prime:
+      count: 1
+      input_len: 3056
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810002
+      - 810003
+      stream_timeout_s: 15
+    prime_done_timeout_s: 15
+    prime_sync:
+      seconds: 2
+    replay:
+      count: 1
+      input_len: 3056
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810002
+      - 810003
+      stream_timeout_s: 15
+    replay_done_timeout_s: 15
+    retry_timeout_s: 60
+    retry:
+      keys:
+      - 810001
+      - 810002
+      - 810003
+      input_len: 3056
+      output_len: 2
+      settle_s: 2
+      request_timeout_s: 15
+    prime_snapshot_timeout_s: 10
+    prime_snapshot:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    prime_keys:
+      op: ge
+      expected: 2
+    prime_evictions:
+      op: eq
+      expected: 0
+    cold_blocks:
+      fields:
+      - referenced_blocks
+      - held_blocks
+      - cache_key_set
+    pressure:
+      count: 1
+      input_len: 3056
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810004
+      - 810005
+      stream_timeout_s: 15
+    pressure_done_timeout_s: 15
+    pressure_settle:
+      seconds: 0.5
+    pressure_snapshot_timeout_s: 10
+    pressure_snapshot:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    pressure_keys:
+      op: le
+      expected: 4
+    pressure_evictions:
+      op: ge
+      expected: 1
+    step_26:
+      stat: latest
+      op: eq
+    expected_cold:
+      referenced_blocks: 0
+      held_blocks: 0
+      key_count: 3
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

@@ -1,0 +1,52 @@
+schema_version: 2
+case: request_completion
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: immediate
+  program: immediate
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+metadata:
+  description: Submitted requests reach a business terminal without stream errors.
+  category: status
+  tags:
+  - smoke
+  - lifecycle
+parameters:
+  completion:
+    setup_timeout_s: 180
+    step_5:
+      op: eq
+    expected:
+      completed: true
+      no_errors: 0
+  input_len: 2048
+  output_len: 2
+  count: 1
+parameter_schema:
+  input_len:
+    minimum: 1
+    maximum: 2147483647
+    integer: true
+  output_len:
+    minimum: 1
+    maximum: 2147483647
+    integer: true
+  count:
+    minimum: 1
+    maximum: 10000
+    integer: true
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

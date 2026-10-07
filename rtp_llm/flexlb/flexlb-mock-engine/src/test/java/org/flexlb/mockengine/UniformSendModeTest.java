@@ -115,7 +115,7 @@ class UniformSendModeTest {
         Path outDir = tempDir.resolve("uniform_out");
         // 50 QPS for 2s -> 100 sends at exactly 20ms spacing (single shard).
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                2, 0, 1, 0, false, "uniform", 50.0));
+                2, 0, 1, 0, true, "uniform", 50.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
@@ -151,7 +151,7 @@ class UniformSendModeTest {
         Path outDir = tempDir.resolve("shard_out");
         // 200 QPS over 4 shards -> 50 QPS per shard (20ms interval) for 1s.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                1, 0, 4, 1, false, "uniform", 200.0));
+                1, 0, 4, 1, true, "uniform", 200.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
@@ -180,9 +180,9 @@ class UniformSendModeTest {
     void uniformLimitCapsTotalSends() throws Exception {
         Path trace = writeTrace(3);
         Path outDir = tempDir.resolve("limit_out");
-        // DURATION_S=0: LIMIT alone stops the run (loop-replay semantics).
+        // Loop playback requires a bounded duration; LIMIT must stop it first.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                0, 10, 1, 0, false, "uniform", 1000.0));
+                1, 10, 1, 0, true, "uniform", 1000.0));
         client.run();
 
         assertEquals(10, readPerRequest(outDir).size());

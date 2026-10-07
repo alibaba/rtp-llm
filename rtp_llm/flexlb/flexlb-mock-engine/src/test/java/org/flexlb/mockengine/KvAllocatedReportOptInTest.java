@@ -118,6 +118,8 @@ class KvAllocatedReportOptInTest {
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         assertEquals(2, status.getWaitingQueryLen());
+        assertEquals(2, decode.whaleMetrics().get("rtp_llm_wait_stream_size").intValue(),
+                "only streams queued behind the Decode execution gate count as scheduler WAITING");
         assertEquals(1, phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING),
                 "exactly the one truly running request reports RUNNING");
         assertEquals(2, phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED),

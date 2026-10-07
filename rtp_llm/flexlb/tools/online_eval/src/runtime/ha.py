@@ -1,0 +1,400 @@
+"""HA traffic and observation helpers used by the case executor."""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Optional
+
+from runtime.harness import ClientOps, http_get_json
+
+HA_TRACE_ROWS = 20
+HA_TRACE_SPACING_MS = 100
+HA_TRACE_IL = 16
+HA_TRACE_OL = 4
+
+
+class HaMasterStateSampler:
+    """Record both Masters' HTTP inflight state during the traffic window."""
+
+    def __init__(self, env, path: Path, interval_s: float = 1.0):
+        self.path = path
+        self.urls = {
+            name: f"http://{spec.bind_ip}:{spec.http_port}/rtp_llm/inflight_status"
+            for name, spec in env.master_specs.items()
+        }
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="ha-master-state", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise TimeoutError("HA Master state sampler did not stop")
+
+    def _run(self):
+        with self.path.open("w", encoding="utf-8") as stream:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                for name, url in self.urls.items():
+                    data = http_get_json(url, timeout=0.4)
+                    valid = isinstance(data, dict) and isinstance(
+                        data.get("scheduler_inflight"), (int, float)
+                    )
+                    row = {"epoch_s": time.time(), "master": name, "http_up": int(valid)}
+                    if valid:
+                        row.update(
+                            scheduler_inflight=data["scheduler_inflight"],
+                            prefill_inflight_requests=sum(
+                                ep.get("inflight_requests", 0)
+                                for ep in data.get("prefill_endpoints", [])
+                            ),
+                            decode_master_queued=sum(
+                                ep.get("master_queued", 0)
+                                for ep in data.get("decode_endpoints", [])
+                            ),
+                            decode_confirmed_running=sum(
+                                ep.get("confirmed_running", 0)
+                                for ep in data.get("decode_endpoints", [])
+                            ),
+                        )
+                    stream.write(json.dumps(row, allow_nan=False) + "\n")
+                stream.flush()
+                self._stop.wait(max(0, self.interval_s - (time.monotonic() - started)))
+
+
+def write_ha_trace(case_dir: Path) -> Path:
+    path = case_dir / "ha_trace.jsonl"
+    lines = []
+    for i in range(HA_TRACE_ROWS):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": i * HA_TRACE_SPACING_MS,
+                    "il": HA_TRACE_IL,
+                    "ol": HA_TRACE_OL,
+                    "bh": [i * 1_000_003 + 7],
+                    "priority": 50,
+                },
+                separators=(",", ":"),
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+class HaTrafficRunner:
+    """Background JavaLoadClient using a refreshable Master candidate file.
+
+    The client probes /master/info and chooses the healthy leader, then
+    retries a healthy backup only after a Schedule connection failure.
+
+    Phase bookkeeping: the runner stamps wall-clock epoch seconds at
+    ``mark()`` call sites; row windows are then sliced offline by
+    send_start_epoch_ms (falling back to wall_clock_ts) — the assertions
+    compare pre/post-injection WINDOWS, never exact totals (rows buffered
+    at a SIGTERM instant may be lost; natural DURATION_S exit flushes all).
+    """
+
+    def __init__(
+        self,
+        manager,
+        env,
+        case_dir: Path,
+        name: str,
+        targets: list,
+        *,
+        duration_s: int = 60,
+        timeout_ms: int = 30_000,
+        enable_fallback: bool = False,
+        replay_speed: float = 2.0,
+        max_concurrency: int = 8,
+        live_events: bool = False,
+        source: dict | None = None,
+        source_dir: Path | None = None,
+        max_requests: int | None = None,
+        loop: bool = False,
+    ):
+        self.manager = manager
+        self.env = env
+        self.name = name
+        self.targets = list(targets)
+        self.loop = loop
+        self.out_dir = case_dir / f"{name}_out"
+        self.log_file = case_dir / f"{name}.log"
+        self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl")
+        specs_by_target = {
+            manager.master_instance_target(env, master_name): spec
+            for master_name, spec in env.master_specs.items()
+        }
+        discovery_file = case_dir / "master-discovery.json"
+        discovery_file.write_text(json.dumps({"hosts": [
+            {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}",
+             "grpc": target}
+            for target in targets
+        ]}), encoding="utf-8")
+        heap = "8g" if source is not None else "1g"
+        self._client = ClientOps(manager, heap, heap)
+        if source is None:
+            trace = write_ha_trace(case_dir)
+        else:
+            from traffic.traffic_source import materialize
+
+            trace = materialize(
+                case_dir / "ha_trace.jsonl",
+                source,
+                name,
+                source_dir,
+                max_requests=max_requests,
+            )
+            if not loop:
+                first_ts = last_ts = None
+                with trace.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        ts = json.loads(line)["ts"]
+                        if first_ts is None:
+                            first_ts = ts
+                        last_ts = ts
+                if first_ts is None or (last_ts - first_ts) / replay_speed < duration_s * 1000:
+                    raise ValueError("one-pass HA trace ends before the requested duration")
+        overrides = {
+            "TRACE_FILE": str(trace),
+            "LIVE_CLIENT_EVENTS": str(live_events).lower(),
+            "GRPC_TARGETS": ",".join(self.targets),
+            "MASTER_DISCOVERY_FILE": str(discovery_file),
+            "DURATION_S": str(int(duration_s)),
+            "REPLAY_SPEED": str(replay_speed),
+            "MAX_CONCURRENCY": str(max_concurrency),
+            "TIMEOUT_MS": str(int(timeout_ms)),
+            # A short capture repeated with structural relabeling destroys
+            # cross-lap cache reuse; repeating it without relabeling invents
+            # identical future users. HA defaults to one pass of a long trace.
+            "LOOP": str(loop).lower(),
+            "N_CHANNELS": "8" if source is not None else "2",
+            "EVENT_LOOP_THREADS": "8" if source is not None else "4",
+            "SKIP_SERVER_LATENCY": "true",
+            "PRIORITY": "50",
+        }
+        if enable_fallback:
+            # Direct-connect engine addresses: the mock's endpoints.json
+            # snapshot (brief p7 — static engine set, equivalent to the
+            # production domain query).
+            overrides["ENABLE_FALLBACK"] = "true"
+            overrides["ENDPOINTS_FILE"] = str(env.endpoint_file)
+        self._overrides = overrides
+        self.proc = None
+
+    def start(self) -> None:
+        self.state_sampler.start()
+        try:
+            self.proc, self.out_dir = self._client.run_async(
+                self._overrides, self.out_dir, self.log_file, label=self.name
+            )
+        except Exception:
+            self.state_sampler.stop()
+            raise
+
+    @staticmethod
+    def now() -> float:
+        return time.time()
+
+    def wait_finish(self, extra_s: float = 60.0):
+        """Wait for the natural DURATION_S exit (all rows flushed); the
+        stop_async SIGTERM path is only a timeout fallback."""
+        result = None
+        if self.proc is not None:
+            if not self.proc.wait(extra_s):
+                # Timeout fallback: SIGTERM (buffered rows may be lost —
+                # the window-comparison assertions tolerate that).
+                result = self._client.stop_async(self.proc, self.out_dir)
+            else:
+                result = self._client.stop_async(self.proc, self.out_dir)
+        return result
+
+    def rows(self) -> list:
+        path = self.out_dir / "client_events.jsonl"
+        rows = []
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        return rows
+
+
+def row_ts_ms(row: dict) -> Optional[float]:
+    """Row send timestamp (ms epoch) — send_start_epoch_ms preferred,
+    wall_clock_ts (s) as the fallback."""
+    v = row.get("send_start_epoch_ms")
+    if isinstance(v, (int, float)) and v > 0:
+        return float(v)
+    w = row.get("wall_clock_ts")
+    if isinstance(w, (int, float)) and w > 0:
+        return float(w) * 1000.0
+    return None
+
+
+def rows_between(rows: list, lo_s: Optional[float], hi_s: Optional[float]) -> list:
+    """Rows whose send timestamp falls in [lo_s, hi_s) (epoch seconds)."""
+    out = []
+    for row in rows:
+        ts = row_ts_ms(row)
+        if ts is None:
+            continue
+        if lo_s is not None and ts < lo_s * 1000.0:
+            continue
+        if hi_s is not None and ts >= hi_s * 1000.0:
+            continue
+        out.append(row)
+    return out
+
+
+def prefill_assignment_buckets(rows: list) -> dict:
+    """Count assigned Prefill endpoints by send second, including failed requests."""
+    from collections import Counter, defaultdict
+
+    buckets = defaultdict(Counter)
+    for row in rows:
+        address = row.get("prefill")
+        if not address:
+            continue
+        timestamp = row_ts_ms(row)
+        if timestamp is None:
+            raise ValueError("assigned HA request lacks send timestamp")
+        buckets[int(timestamp // 1000)][address] += 1
+    return dict(buckets)
+
+
+def prefill_assignment_windows(rows: list, seconds: int = 5) -> dict:
+    """Rolling Prefill counts at one-second steps over complete windows."""
+    from collections import Counter
+
+    buckets = prefill_assignment_buckets(rows)
+    if not buckets:
+        return {}
+    first, last = min(buckets), max(buckets)
+    return {
+        end: sum((buckets.get(second, Counter())
+                  for second in range(end - seconds + 1, end + 1)), Counter())
+        for end in range(first + seconds - 1, last + 1)
+    }
+
+
+class LiveClientEvents:
+    """Incremental journal reader; incomplete trailing writes are retried, not lost."""
+
+    def __init__(self, path, *, max_events=50_000):
+        if type(max_events) is not int or not 1 <= max_events <= 2_000_000:
+            raise ValueError("live client event budget must be in 1..2000000")
+        self.max_events = max_events
+        self.path = Path(path)
+        self.offset = 0
+        self.pending = b""
+        self.sequence = 0
+        self.issued = {}
+        self.terminal = {}
+
+    def read(self):
+        if not self.path.exists():
+            return
+        if self.path.stat().st_size < self.offset:
+            raise ValueError("live client journal was truncated")
+        # Read a finite snapshot in bounded chunks; a delayed poll is not data loss.
+        end = self.path.stat().st_size
+        with self.path.open("rb") as stream:
+            stream.seek(self.offset)
+            while self.offset < end:
+                chunk = stream.read(min(8_000_000, end - self.offset))
+                if not chunk:
+                    raise ValueError("live client journal was truncated")
+                self.offset += len(chunk)
+                self._consume(chunk)
+
+    def _consume(self, chunk):
+        import math
+
+        lines = (self.pending + chunk).split(b"\n")
+        self.pending = lines.pop()
+        if len(self.pending) > 8_000_000 or any(len(line) > 8_000_000 for line in lines):
+            raise ValueError("live client row exceeds read budget")
+        for line in lines:
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("invalid live client row")
+            rid = row.get("rid")
+            if (
+                not isinstance(rid, str)
+                or not rid
+                or type(row.get("sequence")) is not int
+                or row.get("sequence") != self.sequence + 1
+            ):
+                raise ValueError("live client identity or sequence gap")
+            for field in ("send_start_epoch_ms", "recorded_epoch_ms"):
+                value = row.get(field)
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise ValueError("live client timestamp is missing or invalid")
+            event = row.get("event")
+            if event == "issued":
+                if rid in self.issued:
+                    raise ValueError("duplicate live request issue")
+                self.issued[rid] = row
+            elif event == "terminal":
+                if rid not in self.issued or rid in self.terminal:
+                    raise ValueError("orphan or duplicate live terminal")
+                if (
+                    row["send_start_epoch_ms"]
+                    != self.issued[rid]["send_start_epoch_ms"]
+                ):
+                    raise ValueError("live terminal does not match issue")
+                if row.get("status") not in {
+                    "ok",
+                    "schedule_error",
+                    "exception",
+                    "engine_error",
+                    "empty_response",
+                    "incomplete_response",
+                    "timeout",
+                    "scheduled",
+                }:
+                    raise ValueError("live terminal is not a completed stream outcome")
+                if (
+                    row.get("route_path") not in {"master", "fallback", "failed"}
+                    or type(row.get("failover")) is not bool
+                ):
+                    raise ValueError("live terminal lacks route evidence")
+                self.terminal[rid] = row
+            else:
+                raise ValueError("unknown live client event")
+            self.sequence += 1
+            if self.sequence > self.max_events:
+                raise ValueError("live client journal exceeds event budget")
+
+    def cohort(self, lower_ms, upper_ms, transition=False):
+        selected = {}
+        for rid, row in self.issued.items():
+            if row["send_start_epoch_ms"] >= upper_ms:
+                continue
+            terminal = self.terminal.get(rid)
+            if row["send_start_epoch_ms"] < lower_ms and not (
+                transition
+                and (terminal is None or terminal["recorded_epoch_ms"] >= lower_ms)
+            ):
+                continue
+            selected[rid] = row
+        return selected

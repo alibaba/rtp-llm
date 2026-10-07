@@ -1,0 +1,87 @@
+schema_version: 2
+case: master_ha_failover
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  master_layout: dual_standalone
+  discovery: discovery_file
+  perf_preset: glm_5_3_l20d
+  metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_,flexlb_app_request_network_delay_ms,flexlb_app_grpc_server_process_ms,flexlb_app_routing_queue_wait_time_ms
+execution:
+  timeout_s: 2400
+  stage_timeout_s: 180
+  cleanup_timeout_s: 300
+variants:
+- id: dual_master_cycle
+  program: dual_master_cycle
+metadata:
+  description: One real frontend prefix-lineage replay across a selectable dual-master restart cycle.
+  category: master
+parameters:
+  dual_master_cycle:
+    restart_mode: rolling # non_rolling keeps both masters down before restarting A
+    setup_timeout_s: 600
+    flow:
+      targets: [A, B]
+      duration_s: 240
+      timeout_ms: 120000
+      # The long trace is played once. The first 20 minutes at 5x average
+      # about 68 QPS; looping a 15-minute trace either breaks cross-lap cache
+      # reuse when relabeled or invents repeated users when labels are kept.
+      replay_speed: 5
+      loop: false
+      max_concurrency: 4096
+      max_requests: 20000
+      fallback: false
+      source:
+        kind: trace
+        model: prefix_lineage
+        version: '2'
+        parameters:
+          path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
+          sha256: 241ac71c5bde834afd9dc656fefae6462c6f99767a203b54bba21059e9948f04
+          count: 587711
+          output_tokens: 8192
+          output_distribution:
+            kind: geometric
+            mean_tokens: 420
+            seed: 20260913
+          priority: 50
+    baseline_wait: {wait_s: 20}
+    settle: {wait_s: 5}
+    survivor_wait: {wait_s: 30}
+    outage_wait: {wait_s: 45}
+    both_wait: {wait_s: 30}
+    kill_a: {mode: kill, target: A}
+    kill_b: {mode: kill, target: B}
+    b_ready: {target: B, inflight_zero: false}
+    a_ready: {target: A, inflight_zero: false}
+    restart_timeout_s: 300
+    finish_timeout_s: 360
+    checks:
+      baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_route: {metric: target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
+      b_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      outage_failures: {metric: failed_count, op: ge, expected: 1, min_samples: 50}
+      outage_no_master: {metric: route_count, route: master, op: eq, expected: 0, min_samples: 50}
+      outage_terminal: {metric: visible_terminal_share, op: eq, expected: 1, min_samples: 50}
+      a_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      a_route: {metric: target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
+      a_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      both_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      handover_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
+      late_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
+      rolling_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
+      to_b_balance: {metric: prefill_peak_skew, op: le, expected: 4.0, min_samples: 200}
+      to_a_balance: {metric: prefill_peak_skew, op: le, expected: 4.0, min_samples: 200}
+      unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
+test:
+  kind: workload
+  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master restart cycle
+  collection: request
+reports:
+- workload.yaml
+- master_ha_core.yaml

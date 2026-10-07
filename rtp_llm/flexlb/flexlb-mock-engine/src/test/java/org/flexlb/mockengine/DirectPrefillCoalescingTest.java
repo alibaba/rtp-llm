@@ -166,6 +166,109 @@ class DirectPrefillCoalescingTest {
 
     // ──────────── Harness ────────────
 
+    @Test void fifoDefersPhysicalKvUntilBatchSelection() throws Exception {
+        verifyFifoPhysicalPool(false);
+    }
+
+    @Test void fifoCancelsWaitingRequestWithoutAllocatingKv() throws Exception {
+        verifyFifoPhysicalPool(true);
+    }
+
+    @Test void fifoRespectsInitializedStreamLimitWithSpareBlocks() throws Exception {
+        verifyFifoPhysicalPool(false, 100, 1);
+    }
+
+    private void verifyFifoPhysicalPool(boolean cancelLast) throws Exception {
+        verifyFifoPhysicalPool(cancelLast, 5, 128);
+    }
+
+    private void verifyFifoPhysicalPool(boolean cancelLast, int blocks, int initializedCap) throws Exception {
+        Path config = tempDir.resolve("pool-fifo.json");
+        Path master = tempDir.resolve("pool-master.json");
+        MAPPER.writeValue(config.toFile(), Map.of("block_size", 1024,
+                "prefill", Map.of("fifo", Map.of("max_requests", 64,
+                        "max_batch_tokens", 100000, "max_batch_kv_len", 100000,
+                        "max_seq_len", 10000, "max_waiting_requests", 10,
+                        "max_inited_kv_streams", initializedCap)),
+                "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
+        MockMasterConfig.writeWithPrefillExpression(master, "500");
+        var model = MockPerformanceModel.load(config.toString(), master.toString());
+        var prefill = new JavaMockEngineCluster.FastRpcService("prefill",
+                EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, BASE_PORT, services,
+                scheduler, model, blocks, stats);
+        services.put(BASE_PORT, prefill);
+        var first = generateAsync(prefill, input(5001, 3500));
+        var second = generateAsync(prefill, input(5002, 3500));
+        var last = generateAsync(prefill, input(5003, 3500));
+        assertFalse(second.isDone(), "temporary P KV shortage must queue, not reject");
+        assertFalse(last.isDone());
+        assertEquals(2, prefill.getWaitingCount());
+        if (cancelLast) prefill.cancel(5003);
+        assertNull(first.get(5, TimeUnit.SECONDS));
+        assertNull(second.get(5, TimeUnit.SECONDS));
+        if (cancelLast) assertNotNull(last.get(5, TimeUnit.SECONDS));
+        else assertNull(last.get(5, TimeUnit.SECONDS));
+        awaitCompleted(prefill, cancelLast ? 2 : 3, 5000);
+        assertEquals(1, stats.maxPrefillBatchSize.get(), "KV capacity or initialized-stream cap limits batch to one");
+        assertEquals(0, prefill.getWaitingCount());
+        assertEquals(blocks * 1024L, ((Number) prefill.getSnapshot().get("available_kv_tokens")).longValue());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
+    void productionFifoCoalescesNonBatchUnderCandidateBudget() throws Exception {
+        Path performance = tempDir.resolve("fifo.json");
+        Path master = tempDir.resolve("fifo-master.json");
+        MAPPER.writeValue(performance.toFile(), Map.of("block_size", 1024,
+                "prefill", Map.of("fifo", Map.of("max_requests", 64,
+                        "max_batch_tokens", 100, "max_batch_kv_len", 1000,
+                        "max_seq_len", 10000, "max_waiting_requests", 10)),
+                "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
+        MockMasterConfig.writeWithPrefillExpression(master, "500");
+        var loaded = MockPerformanceModel.load(performance.toString(), master.toString());
+        assertNotNull(loaded.forEngine().prefillBatchPolicy(), "engine clone preserves policy");
+        var prefill = startPrefill(loaded.forEngine());
+        var first = generateAsync(prefill, input(4000, 1));
+        var a = generateAsync(prefill, input(4001, 60));
+        var skipped = generateAsync(prefill, input(4002, 40));
+        var smaller = generateAsync(prefill, input(4003, 39));
+        assertNull(first.get(5, TimeUnit.SECONDS));
+        assertNull(a.get(5, TimeUnit.SECONDS));
+        assertNull(smaller.get(5, TimeUnit.SECONDS));
+        assertFalse(skipped.isDone(), "40-token candidate must wait; later 39-token candidate fits");
+        assertNull(skipped.get(5, TimeUnit.SECONDS));
+        awaitCompleted(prefill, 4, 5000);
+        assertEquals(3, stats.prefillBatches.sum());
+        assertEquals(2, stats.maxPrefillBatchSize.get());
+        assertEquals(0, prefill.getWaitingCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test void fifoRematchesCachePopulatedWhileWaiting() throws Exception {
+        Path config = tempDir.resolve("cache-fifo.json");
+        Path master = tempDir.resolve("cache-master.json");
+        MAPPER.writeValue(config.toFile(), Map.of("block_size", 16,
+                "prefill", Map.of("fifo", Map.of("max_requests", 64,
+                        "max_batch_tokens", 100, "max_batch_kv_len", 1000,
+                        "max_seq_len", 10000, "max_waiting_requests", 10)),
+                "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
+        MockMasterConfig.writeWithPrefillExpression(master, "500");
+        var model = MockPerformanceModel.load(config.toString(), master.toString());
+        model.nativeTokenCacheKeys = true;
+        var prefill = startPrefill(model);
+        var first = generateAsync(prefill, input(6001, 60));
+        var second = generateAsync(prefill, input(6002, 60));
+        var third = generateAsync(prefill, input(6003, 60));
+        assertNull(first.get(5, TimeUnit.SECONDS));
+        assertNull(second.get(5, TimeUnit.SECONDS));
+        assertNull(third.get(5, TimeUnit.SECONDS));
+        awaitCompleted(prefill, 3, 5000);
+        assertEquals(2, stats.prefillBatches.sum(),
+                "queued 60+60 now compute only 12+12 after first batch caches 48 tokens");
+        assertEquals(2, stats.maxPrefillBatchSize.get());
+        assertFalse(prefill.isLeakDetected());
+    }
+
     private JavaMockEngineCluster.FastRpcService startPrefill(MockPerformanceModel model) {
         JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                 "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
@@ -210,6 +313,7 @@ class DirectPrefillCoalescingTest {
         EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setReuseCache(true).setEnableDeviceCache(true)
                         .setMaxNewTokens(1)
                         .build());
         for (int token = 0; token < inputTokens; token++) {
@@ -231,6 +335,9 @@ class DirectPrefillCoalescingTest {
         service.generateStreamCall(input, new StreamObserver<>() {
             @Override
             public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                if (value.hasErrorInfo() && value.getErrorInfo().getErrorCodeValue() != 0) {
+                    future.complete(new IllegalStateException(value.getErrorInfo().toString()));
+                }
             }
 
             @Override

@@ -5,7 +5,7 @@
   * engine key counter 差分三窗（= 3 个 prefill 请求）：
       0/3（冷启动，keys=[k1,k2,k3] 无命中）→ 3/3（暖，全命中）→
       2/3（部分前缀，keys=[k1,k2,k90] 命中 k1,k2）
-    → key 级 run = 5/9 ≈ 55.6%（对齐生产 recent_cache_key_hit）
+    → key 级 run = 5/9 ≈ 55.6%（mock 累计 key 口径）
   * token 时序窗口 (with_cache−context)/with_cache = 600/1000 = 60%；
     run 级 = Σhit_tokens_total(120) ÷ Σok il(3×80=240) = 50%
     （对齐生产 reuse/input）
@@ -25,8 +25,8 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "aggregate_canvas_run.py"
-CANVAS = TOOLS_DIR / "canvas_report_gen.py"
+AGGREGATE = TOOLS_DIR / "src/analysis/aggregate.py"
+CANVAS = TOOLS_DIR / "src/reporting/stress_report.py"
 T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 _P1 = 'role="prefill",engine_ip="10.1.1.1",engine_name="p1"'
@@ -36,8 +36,8 @@ _ROUTE_TOTAL = (
 )
 _KEY_HITS = "mock_engine_cache_key_hits_total{" + _P1 + "}"
 _KEY_REQ = "mock_engine_cache_keys_requested_total{" + _P1 + "}"
-_CTX_TPS = "rtp_llm_context_tps{" + _P1 + "}"
-_CTX_WC = "rtp_llm_context_tps_with_cache{" + _P1 + "}"
+_CTX_TPS = "rtp_llm_context_wall_tps{" + _P1 + "}"
+_CTX_WC = "rtp_llm_context_wall_tps_with_cache{" + _P1 + "}"
 
 
 def _run(cmd, cwd):
@@ -193,6 +193,12 @@ def _write_full_run(run_dir):
                 },
             }
         )
+    for row in per_engine:
+        row["metrics"].update({
+            "rtp_llm_context_tps{" + _P1 + "}": 3000,
+            "rtp_llm_context_tps_with_cache{" + _P1 + "}": 1000,
+            "rtp_llm_wall_tps_report_interval_us{" + _P1 + "}": 1000000,
+        })
     with gzip.open(run_dir / "mock_per_engine_timeseries.json.gz", "wt") as f:
         json.dump(per_engine, f)
     _write_engine_events(run_dir, 3)

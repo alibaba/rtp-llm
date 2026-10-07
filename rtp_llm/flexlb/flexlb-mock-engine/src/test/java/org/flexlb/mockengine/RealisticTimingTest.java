@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
@@ -62,7 +62,7 @@ class RealisticTimingTest {
                 int decodePort = decodeServices.get(i % nDecode).getGrpcPort();
                 inputs[i] = inputWithDecode(i + 1, 10, decodePort, 10);
             }
-            EngineRpcService.EnqueueBatchResponsePB response = enqueue(
+            EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(
                     prefillServices.get(0), batch(1000, slot(0, inputs)));
 
             assertEquals(nRequests, response.getSuccessesCount(),

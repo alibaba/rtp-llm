@@ -16,7 +16,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpPost;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
@@ -54,7 +54,7 @@ class MetricsValidationTest {
 
     /** Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value} */
     private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"(?:,engine_incarnation=\"[^\"]+\")?\\}\\s+(\\d+)");
 
     /** Pattern: {@code metric_name{role="prefill"} value} */
     private static final Pattern ROLE_METRIC_PATTERN = Pattern.compile(
@@ -93,7 +93,7 @@ class MetricsValidationTest {
                             (i * count + j) % nDecode).getGrpcPort();
                     inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
+                EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(
                         prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
                 totalEnqueueErrors += response.getErrorsCount();
             }
@@ -127,6 +127,13 @@ class MetricsValidationTest {
             for (JsonNode engineNode : snapshotArray) {
                 int port = engineNode.get("port").asInt();
                 String role = engineNode.get("role").asText();
+                var full = services.get(port).getSnapshot();
+                var lightweight = services.get(port).getMetricsSnapshot();
+                for (String detail : List.of("cache_key_set", "cancelled_rids", "request_lifecycle")) {
+                    assertTrue(full.containsKey(detail));
+                    assertFalse(lightweight.containsKey(detail));
+                }
+                lightweight.forEach((key, value) -> assertEquals(full.get(key), value, key));
                 long accepted = engineNode.get("accepted").asLong();
                 long completed = engineNode.get("completed").asLong();
                 long inflight = engineNode.get("inflight").asLong();
@@ -143,24 +150,24 @@ class MetricsValidationTest {
                                 + ") leak_detected should be false");
 
                 // ── Cross-verify /metrics per-engine Python series match /snapshot ──
-                long running = engineNode.get("running").asLong();
+                long running = engineNode.get("scheduler_running").asLong();
                 Map<Integer, Long> acceptedMetrics =
                         perEngineMetrics.get("mock_engine_accepted_total");
                 Map<Integer, Long> completedMetrics =
                         perEngineMetrics.get("mock_engine_completed_total");
                 Map<Integer, Long> runningMetrics =
-                        perEngineMetrics.get("mock_engine_running");
+                        perEngineMetrics.get("rtp_llm_running_stream_size");
                 Map<Integer, Long> waitingMetrics =
-                        perEngineMetrics.get("mock_engine_waiting");
+                        perEngineMetrics.get("rtp_llm_wait_stream_size");
 
                 assertNotNull(acceptedMetrics,
                         "mock_engine_accepted_total should exist in per-engine /metrics");
                 assertNotNull(completedMetrics,
                         "mock_engine_completed_total should exist in per-engine /metrics");
                 assertNotNull(runningMetrics,
-                        "mock_engine_running should exist in per-engine /metrics");
+                        "rtp_llm_running_stream_size should exist in per-engine /metrics");
                 assertNotNull(waitingMetrics,
-                        "mock_engine_waiting should exist in per-engine /metrics");
+                        "rtp_llm_wait_stream_size should exist in per-engine /metrics");
 
                 assertEquals(accepted, acceptedMetrics.getOrDefault(port, -1L),
                         "/metrics accepted mismatch for port " + port);
@@ -207,9 +214,9 @@ class MetricsValidationTest {
 
             // ── Verify Prometheus metrics contain expected Python metric names ──
             for (String metric : new String[]{
-                    "mock_engine_running", "mock_engine_waiting",
+                    "rtp_llm_running_stream_size", "rtp_llm_wait_stream_size",
                     "mock_engine_accepted_total", "mock_engine_completed_total",
-                    "mock_engine_active_kv_tokens", "mock_engine_rpc_total"}) {
+                    "rtp_llm_kv_cache_pool_total_blocks", "rtp_llm_kv_cache_pool_available_blocks"}) {
                 assertTrue(metricsBody.contains(metric),
                         "/metrics should contain " + metric);
             }
@@ -257,7 +264,7 @@ class MetricsValidationTest {
             // Request A (3 fresh hash keys) completes → keys parked in the LRU.
             EngineRpcService.GenerateInputPB a = inputWithBlockKeys(
                     101L, (int) (3 * spb), List.of(11L, 22L, 33L));
-            assertEquals(0, enqueue(prefill, batch(1, slot(0, a))).getErrorsCount());
+            assertEquals(0, enqueueAndFetch(prefill, batch(1, slot(0, a))).getErrorsCount());
             awaitEngine(cluster, prefill.getGrpcPort(),
                     snap -> snap.get("cache_keys").asInt() == 3, 5_000,
                     "request A completion must index its 3 keys");
@@ -270,7 +277,7 @@ class MetricsValidationTest {
             // referenced → availability drops by exactly 3 blocks.
             EngineRpcService.GenerateInputPB b = inputWithBlockKeys(
                     102L, (int) (3 * spb), List.of(11L, 22L, 33L));
-            assertEquals(0, enqueue(prefill, batch(2, slot(0, b))).getErrorsCount());
+            assertEquals(0, enqueueAndFetch(prefill, batch(2, slot(0, b))).getErrorsCount());
             awaitEngine(cluster, prefill.getGrpcPort(),
                     snap -> snap.get("available_kv_tokens").asLong() == idleAvailable - 3 * spb,
                     2_000,

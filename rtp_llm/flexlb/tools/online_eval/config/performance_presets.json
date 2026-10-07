@@ -1,0 +1,17 @@
+{
+  "default": {
+    "performance": "data/performance/dsv4_l20_mock_calibration.json"
+  },
+  "fault_env": {
+    "performance": "data/performance/synthetic_prefill_100ms.json",
+    "calibration": "../data/performance/dsv4_l20_mock_calibration.json"
+  },
+  "glm_5_3_l20d": {
+    "performance": "data/performance/glm_5_3_l20d.json",
+    "mock_heap": "32g"
+  },
+  "deepseek_v4_flash_l20c": {
+    "performance": "data/performance/deepseek_v4_flash_l20c.json",
+    "mock_heap": "32g"
+  }
+}

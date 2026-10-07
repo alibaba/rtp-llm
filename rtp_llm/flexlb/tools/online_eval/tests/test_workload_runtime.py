@@ -1,0 +1,136 @@
+"""Different execution policies retain original failures and cleanup evidence."""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from scenario import compile_scenarios, load_scenarios
+from scenario.catalog import handlers
+from scenario.runtime import execute_instance
+from scenario.suites import classify, preselect_documents
+from workload.runtime import execute_workload
+from test_scenario_runtime import Backend, Clock, source
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class WorkloadRuntimeTests(unittest.TestCase):
+    def test_core_inventory_does_not_compile_large_workload(self):
+        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
+        self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 2)
+
+    def run_plan(
+        self, workload, observation=True, setup_error=False, cleanup_error=False
+    ):
+        doc = source()
+        doc["stages"][-1]["purpose"] = "observation" if observation else "operation"
+        doc["stages"].append(dict(doc["stages"][-1], id="independent"))
+        plan = compile_scenarios([("fixture", doc)])[0]
+        plan.update(
+            test_kind="workload" if workload else "functional",
+            workload_runtime={
+                "capture_metrics": False,
+                "sample_interval_s": 1,
+                "collector_shutdown_s": 2,
+            },
+        )
+        clock = Clock()
+        backend = Backend(clock)
+        backend.completed = False
+        backend.fail_setup = setup_error
+        backend.fail_cleanup = cleanup_error
+        with tempfile.TemporaryDirectory() as out:
+            result = (execute_workload if workload else execute_instance)(
+                plan, backend, artifact_dir=out, clock=clock, sleeper=clock.sleep
+            )
+            if workload:
+                self.assertTrue(Path(result["workload"]["report"]).is_file())
+                report = json.loads(
+                    Path(result["workload"]["report"])
+                    .with_name("analysis.json")
+                    .read_text()
+                )["result"]
+                self.assertEqual(result["status"], report["status"])
+            return result
+
+    def test_functional_failure_blocks(self):
+        r = self.run_plan(False)
+        self.assertEqual(r["status"], "FAIL")
+        self.assertEqual(r["stages"][-1]["status"], "BLOCKED")
+
+    def test_workload_preserves_independent_failures(self):
+        r = self.run_plan(True)
+        self.assertEqual(r["status"], "FAIL")
+        self.assertEqual([s["status"] for s in r["stages"][-2:]], ["FAIL", "FAIL"])
+        self.assertEqual(r["workload"]["runtime_validity"], "VALID")
+        self.assertEqual(r["workload"]["performance_verdict"], "NOT_EVALUATED")
+
+    def test_prerequisite_failure_blocks(self):
+        self.assertEqual(
+            self.run_plan(True, observation=False)["stages"][-1]["status"], "BLOCKED"
+        )
+
+    def test_setup_error_is_invalid(self):
+        r = self.run_plan(True, setup_error=True)
+        self.assertEqual(r["status"], "ERROR")
+        self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
+
+    def test_cleanup_error_is_invalid_even_after_fail(self):
+        r = self.run_plan(True, cleanup_error=True)
+        self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
+        self.assertTrue(any(c["status"] != "PASS" for c in r["cleanup"]))
+
+    def test_catalog_is_disjoint_and_complete(self):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
+            )
+        f = {p["id"] for p in classify(plans, "functional")}
+        w = {p["id"] for p in classify(plans, "workload")}
+        self.assertFalse(f & w)
+        self.assertEqual(f | w, {p["id"] for p in plans})
+        self.assertIn("master_ha_failover::dual_master_cycle::batch-window", w)
+        self.assertEqual(
+            {
+                plan["scenario_id"] + "::" + plan["variant_id"]
+                for plan in classify(plans, "functional")
+            },
+            {
+                "request_completion::immediate",
+                "cache_churn::lru_affinity",
+                "engine_fault_recovery::generation_bump",
+                "master_lifecycle::kill_single",
+            },
+        )
+        self.assertEqual(len(plans), 21)
+        self.assertIn("cache_scale_in::step::single-nonbatch", w)
+
+    def test_core_suite_is_two_stable_contracts_for_every_master_profile(self):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
+            )
+        expected = {
+            "request_completion::immediate",
+            "cache_churn::lru_affinity",
+        }
+        for profile in (
+            "batch-window",
+            "single-batch",
+            "single-nonbatch",
+            "window-nonbatch",
+        ):
+            selected = classify(
+                [plan for plan in plans if plan["profile"] == profile], "core"
+            )
+            self.assertEqual(len(selected), 2)
+            self.assertEqual(
+                {
+                    plan["scenario_id"] + "::" + plan["variant_id"]
+                    for plan in selected
+                },
+                expected,
+            )

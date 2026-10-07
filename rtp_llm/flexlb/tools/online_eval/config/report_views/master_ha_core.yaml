@@ -1,0 +1,21 @@
+kind: ha
+title: 双 Master HA · 核心观测
+subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
+events:
+  kill_a: A kill
+  kill_b: B kill
+  restart_a: A restart
+  restart_b: B restart
+panels:
+- id: request_qps
+  title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
+  fields: [sent, success, failed, http_up]
+  caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
+- id: inflight
+  title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
+  fields: [scheduler_inflight, prefill_inflight_requests, decode_master_queued, decode_confirmed_running, http_up]
+  caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
+- id: prefill_balance
+  title: Prefill 5 秒滚动分配均衡性
+  fields: [prefill_peak_qps, prefill_mean_qps, prefill_skew]
+  caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数；竖线标出 Master 事件。

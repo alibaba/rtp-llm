@@ -1,0 +1,78 @@
+{
+  "block_size": 64,
+  "sleep_scale": 1,
+  "jitter_pct": 0,
+  "prefill": {
+    "scale": 1.0,
+    "max_waiting_batches": 256,
+    "direct_batch_size_max": 1,
+    "max_batch_requests": 1,
+    "fifo": {
+      "max_requests": 64,
+      "max_batch_tokens": 512000,
+      "max_batch_kv_len": 3145728,
+      "max_seq_len": 1048576,
+      "cp_size": 8,
+      "force_single": false,
+      "max_batch_tokens_without_cache": 50000,
+      "max_waiting_requests": 1024,
+      "max_inited_kv_streams": 128
+    },
+    "memory_cache": {
+      "enabled": true,
+      "capacity_blocks": 95311,
+      "read_ms_per_block": 0,
+      "copy_lifecycle": true,
+      "write_ms_per_block": 0,
+      "enable_prefix_tree": false
+    },
+    "enable_gpu_prefix_tree": true,
+    "reserve_block_ratio": 1.0
+  },
+  "decode": {
+    "scale": 1.0,
+    "tokens_per_step": 2.8638118322884645,
+    "step_base_ms": 33.42547963178996,
+    "step_per_running_ms": 0.2785192715553533,
+    "eos": {
+      "enabled": true,
+      "distribution": "geometric",
+      "mean_tokens": 420,
+      "seed": 20260913
+    },
+    "reuse_cache": false,
+    "reserve_block_ratio": 8
+  },
+  "master": {
+    "config_overrides": {
+      "max_inflight_per_prefill_worker": 1024,
+      "prefill_expression": "77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)",
+      "cache_affinity_max_extra_ttft_ms": 1000000000,
+      "cache_affinity_min_prefix_hit_percent": 5
+    },
+    "provenance": {
+      "status": "legacy_unverified",
+      "source": "Paired GLM scenario baseline; cache affinity anchored to archived historical Master experiment, not independently verified against production. Execution estimator uses the current calibrated expression."
+    }
+  },
+  "capture": {
+    "status": "legacy_unverified",
+    "identity": {
+      "model": "glm_5_3",
+      "hardware": "l20d",
+      "deployment": null
+    },
+    "capture_window": null,
+    "record_sha256": "c45c2ea040801670342f1c9562084440f631d19d80d84908f0956a9500f4179c",
+    "n_prefill": 125,
+    "n_decode": 536,
+    "prefill_kv_pool_blocks": 31218,
+    "decode_kv_pool_blocks": 46157,
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "64"
+    ]
+  }
+}

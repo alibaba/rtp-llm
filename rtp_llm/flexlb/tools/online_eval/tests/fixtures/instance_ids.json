@@ -1,0 +1,23 @@
+[
+  "cache_churn::lru_affinity::batch-window",
+  "cache_churn::lru_affinity::single-batch",
+  "cache_churn::lru_affinity::single-nonbatch",
+  "cache_churn::lru_affinity::window-nonbatch",
+  "cache_scale_in::step::batch-window",
+  "cache_scale_in::step::single-nonbatch",
+  "engine_fault_recovery::generation_bump::batch-window",
+  "engine_fault_recovery::generation_bump::single-batch",
+  "engine_fault_recovery::generation_bump::single-nonbatch",
+  "engine_fault_recovery::generation_bump::window-nonbatch",
+  "master_ha_failover::dual_master_cycle::batch-window",
+  "master_lifecycle::kill_single::batch-window",
+  "master_lifecycle::kill_single::single-batch",
+  "master_lifecycle::kill_single::single-nonbatch",
+  "master_lifecycle::kill_single::window-nonbatch",
+  "master_performance::flash_frozen_mock::batch-window",
+  "master_performance::flash_frozen_mock::single-nonbatch",
+  "request_completion::immediate::batch-window",
+  "request_completion::immediate::single-batch",
+  "request_completion::immediate::single-nonbatch",
+  "request_completion::immediate::window-nonbatch"
+]
