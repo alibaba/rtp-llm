@@ -41,7 +41,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -50,14 +51,15 @@ cc_test(
         "TreeLogitsProcessorTest.cc",
     ],
     data = [
-        "gir_prefix_dict.json"
+        "gir_prefix_dict.json",
     ],
     copts = test_copts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -71,7 +73,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -84,7 +87,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 # The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
@@ -110,8 +114,11 @@ cc_test(
     # having measured nothing -- while still reserving a GPU. The ut jobs ask for
     # the ... wildcard and filter -manual, so this removes it from CI without
     # deleting it: run the benchmark on demand by explicit label.
-    tags = ["manual"],
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "A10_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
 )
 
 cc_test(
@@ -129,10 +136,11 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "@xgrammar//:xgrammar",
+        "@xgrammar",
     ] + torch_deps(),
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

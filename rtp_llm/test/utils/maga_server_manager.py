@@ -17,6 +17,7 @@ import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils.jit_cache_env import configure_cache_env
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -201,7 +202,12 @@ class MagaServerManager(object):
             and not current_env.get("REMOTE_JIT_DIR", "").strip()
         ):
             home_dir = os.environ.get("HOME", os.path.expanduser("~"))
-            current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
+            configure_cache_env(
+                "DG_JIT_CACHE_DIR",
+                os.path.join(home_dir, ".deep_gemm"),
+                automatic=False,
+                environ=current_env,
+            )
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)

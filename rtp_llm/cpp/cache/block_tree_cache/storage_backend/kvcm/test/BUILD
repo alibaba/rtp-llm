@@ -3,7 +3,7 @@ load("//:def.bzl", "cc_test_wrapper", "copts")
 cc_test_wrapper(
     name = "client_wrapper_test",
     testonly = True,
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = [
         "ClientWrapperTest.cc",
         "MockKVCMClient.h",
@@ -20,11 +20,12 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+    tags = ["A10_CU13"],
 )
 
 cc_test_wrapper(
     name = "kvcm_internal_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["KVCMInternalTest.cc"],
     copts = copts(),
     target_compatible_with = select({
@@ -38,6 +39,7 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+    tags = ["A10_CU13"],
 )
 
 kvcm_backend_test_deps = [
@@ -55,14 +57,17 @@ kvcm_backend_test_deps = [
 
 cc_test_wrapper(
     name = "kvcm_local_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = [
         "KVCMLocalTest.cc",
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
     copts = ["-fno-access-control"] + copts(),
-    tags = ["exclusive-if-local"],
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -72,14 +77,17 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_full_linear_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = [
         "KVCMMockFullLinearTest.cc",
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
     copts = ["-fno-access-control"] + copts(),
-    tags = ["exclusive-if-local"],
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -89,14 +97,17 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_only_full_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = [
         "KVCMMockOnlyFullTest.cc",
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
     copts = ["-fno-access-control"] + copts(),
-    tags = ["exclusive-if-local"],
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -123,12 +134,12 @@ cc_test_wrapper(
     testonly = True,
     srcs = [
         "VIPServerSubscriberTest.cc",
-        "vipserver_stubs/option.h",
         "vipserver_stubs/iphost.h",
+        "vipserver_stubs/option.h",
         "vipserver_stubs/vipclient.h",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:Subscriber.h",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:VIPServerSubscriber.cc",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:VIPServerSubscriber.h",
-        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:Subscriber.h",
     ],
     copts = copts() + [
         "-DKVCM_INTERNAL=1",
@@ -136,19 +147,26 @@ cc_test_wrapper(
     ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "@havenask//aios/autil:env_util",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:env_util",
     ],
 )
 
 cc_test_wrapper(
     name = "kvcm_independent_pool_test",
     testonly = True,
-    exec_properties = {"gpu": "A10"},
-    srcs = ["KVCMIndependentPoolTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
+    exec_properties = {"gpu": "A10_CU13"},
+    srcs = [
+        "KVCMIndependentPoolTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
     copts = ["-fno-access-control"] + copts(),
-    tags = ["exclusive-if-local"],
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],

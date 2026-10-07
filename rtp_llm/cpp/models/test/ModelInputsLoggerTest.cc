@@ -1,10 +1,13 @@
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
+#include <dirent.h>
+#include <unistd.h>
 #include "gtest/gtest.h"
 #include "torch/all.h"
 #include "torch/serialize.h"
@@ -21,7 +24,19 @@ public:
         setenv("LOG_PATH", root_.c_str(), 1);
     }
     ~DumpDirectory() {
-        std::filesystem::remove_all(root_);
+        // Raw POSIX cleanup on purpose: std::filesystem::remove_all segfaults
+        // on the CUDA 13 A10 test workers.
+        const auto output_dir = output();
+        if (auto* dir = ::opendir(output_dir.c_str())) {
+            while (auto* entry = ::readdir(dir)) {
+                if (std::strcmp(entry->d_name, ".") != 0 && std::strcmp(entry->d_name, "..") != 0) {
+                    ::unlinkat(::dirfd(dir), entry->d_name, 0);
+                }
+            }
+            ::closedir(dir);
+        }
+        ::rmdir(output_dir.c_str());
+        ::rmdir(root_.c_str());
         unsetenv("LOG_PATH");
     }
     std::filesystem::path output() const {

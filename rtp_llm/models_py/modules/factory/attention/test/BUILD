@@ -1,9 +1,9 @@
 py_test(
     name = "attn_factory_generation_prefill_cuda_graph_test",
     srcs = ["attn_factory_generation_prefill_cuda_graph_test.py"],
-    tags = ["H20"],
+    tags = ["H20_CU13"],
     exec_properties = {
-        "gpu": "H20",
+        "gpu": "H20_CU13",
         "gpu_count": "1",
     },
     deps = [

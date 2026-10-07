@@ -11,11 +11,15 @@ py_test(
     name = "fused_moe_allreduce_contract_test",
     srcs = ["fused_moe_allreduce_contract_test.py"],
     deps = py_test_deps + [
-        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
+        "//rtp_llm/models_py:models",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu':'A10', 'gpu_count':'1'},
+    exec_properties = {
+        "gpu": "A10_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -23,10 +27,13 @@ py_test(
     srcs = ["fused_moe_allreduce_contract_test.py"],
     main = "fused_moe_allreduce_contract_test.py",
     deps = py_test_deps + [
-        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
+        "//rtp_llm/models_py:models",
     ],
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'1'},
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "1",
+    },
 )

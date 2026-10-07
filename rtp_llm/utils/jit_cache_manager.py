@@ -21,6 +21,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from rtp_llm.utils import jit_cache_store as store
+from rtp_llm.utils.jit_cache_env import (
+    CacheEnvConfig,
+    configure_cache_env,
+    read_cache_env,
+)
 
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
 RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
@@ -86,11 +91,13 @@ class Component:
     scopes: tuple[str, ...] = ()
     backend: str | None = None
     local_dir: Path = Path()
+    empty_files: tuple[str, ...] = ()
 
-    def should_sync(self, rel: str, event_type: str | None = None) -> bool:
+    def should_sync(self, rel: str, event_type: str | None = None, size: int | None = None) -> bool:
         events = next((e for suffixes, e in self.rules if rel.endswith(suffixes)), ())
         parts = rel.split("/")
         return ((event_type in events if event_type else bool(events)) and ".." not in parts
+                and (size is None or size > 0 or parts[-1] in self.empty_files)
                 and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts))
 def rule(events: frozenset[str], *suffixes: str):
     return suffixes, events
@@ -100,7 +107,7 @@ CLOSED = MOVED | {"closed"}
 CREATED = CLOSED | {"created"}
 COMPONENTS = (
     Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
-    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin"),), ("accelerator", "@deep_gemm"), CUDA),
+    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("accelerator", "@deep_gemm"), CUDA, empty_files=(".committed",)),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
     # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).
@@ -116,7 +123,11 @@ Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
 
 
-def resolve_scope(local_root: Path) -> Scope | None:
+def resolve_scope(
+    local_root: Path, cache_env_config: CacheEnvConfig | None = None
+) -> Scope | None:
+    if cache_env_config is None:
+        cache_env_config = read_cache_env(item.env_name for item in COMPONENTS)
     import torch
 
     from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
@@ -139,7 +150,10 @@ def resolve_scope(local_root: Path) -> Scope | None:
     if flags:  # toolchain overrides change codegen: they belong in the key
         keys.append("flags-" + sha256("\0".join(flags).encode()).hexdigest()[:12])
     for item in COMPONENTS:
-        if item.backend not in (None, backend) or item.env_name in os.environ:
+        if (
+            item.backend not in (None, backend)
+            or item.env_name in cache_env_config.explicit_envs
+        ):
             continue
         with suppress(importlib.metadata.PackageNotFoundError):
             parts = tuple(
@@ -197,7 +211,7 @@ def setup_jit_cache_env() -> Scope | None:
         if scope.root.exists() and not os.access(scope.root, os.W_OK):
             raise OSError(f"scope root not shared by its owner: {scope.root}")
         for item in scope.components:
-            os.environ[item.env_name] = str(item.local_dir)
+            configure_cache_env(item.env_name, item.local_dir, automatic=False)
             # Only torch/aiter use existence batons; tvm_ffi's same-named file is flocked.
             if item.name in ("torch_extensions", "aiter"):
                 store.reap_stale_batons(item.local_dir)
@@ -221,7 +235,7 @@ class JitCacheManager(FileSystemEventHandler):
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
-                    if item.should_sync(rel, event.event_type) and path.stat().st_size:
+                    if item.should_sync(rel, event.event_type, path.stat().st_size):
                         self._dirty.set()
                 return
 
@@ -254,6 +268,8 @@ class JitCacheManager(FileSystemEventHandler):
         finally:
             if restore_fd is not None:
                 os.close(restore_fd)
+            if self._stop.is_set() and self.store:
+                self.store.close()
 
     def bootstrap(self, timeout_s: float) -> bool:
         """Restore under a deadline, then watch; -1 waits without limit."""
@@ -296,7 +312,7 @@ class JitCacheManager(FileSystemEventHandler):
                 with suppress(OSError):
                     st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
                     packable = S_ISREG(st.st_mode) and os.access(path, os.R_OK)
-                    if st.st_size and packable and item.should_sync(rel):
+                    if packable and item.should_sync(rel, size=st.st_size):
                         files[f"{item.name}/{rel}"] = path
         return files
 

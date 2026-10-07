@@ -1,19 +1,28 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
-
 load("@arch_config//:arch_select.bzl", "requirement")
 
-requirement(["triton", "torch", "numpy"])
+requirement([
+    "triton",
+    "torch",
+    "numpy",
+])
 
 py_test(
     name = "test_remap_local_ids",
     srcs = ["test_remap_local_ids.py"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:moe",
-    ] + [":triton", ":torch"],
+    ] + [
+        ":torch",
+        ":triton",
+    ],
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
-    exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "1",
+    },
 )
 
 py_test(
@@ -21,9 +30,14 @@ py_test(
     srcs = ["test_ep_kernels.py"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:moe",
-    ] + [":triton", ":torch", ":numpy"],
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
     visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -31,9 +45,12 @@ py_test(
     srcs = ["test_ep_scatter.py"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:moe",
-    ] + [":triton", ":torch"],
+    ] + [
+        ":torch",
+        ":triton",
+    ],
     visibility = ["//visibility:public"],
-    tags = ["H20"],
+    tags = ["H20_CU13"],
     # The crash source is gone: test_old_kernel_reads_poison is now opt-in behind
     # RTP_LLM_EP_SCATTER_POISON_DIAG. It asserted nothing and only printed a
     # mismatch count, yet drove a knowingly racy kernel 100 times, and when that
@@ -46,7 +63,7 @@ py_test(
     # sm86 was never isolated -- it could have been the 200-round stress case in
     # TestEpScatter1Correctness rather than the poison class. Candidate for A10 once
     # someone confirms a clean sm86 run with the diagnostic gated.
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
@@ -54,18 +71,21 @@ py_test(
     srcs = ["test_mega_moe_gate_pack.py"],
     deps = [
         "//rtp_llm/models_py/triton_kernels:moe",
-    ] + [":triton", ":torch"],
+    ] + [
+        ":torch",
+        ":triton",
+    ],
     visibility = ["//visibility:public"],
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 cuda13_sm100_py_test(
     name = "test_gate_fused",
     srcs = ["test_gate_fused.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
 )
 
@@ -73,8 +93,8 @@ cuda13_sm100_py_test(
     name = "test_silu_mul_split",
     srcs = ["test_silu_mul_split.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
 )
 
@@ -82,16 +102,16 @@ cuda13_sm100_py_test(
     name = "test_silu_mul_fp8_quant",
     srcs = ["test_silu_mul_fp8_quant.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
 )
 
 dsv4_sm100_py_test(
     name = "test_mega_moe_se_input_pack",
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
 )
@@ -100,8 +120,8 @@ dsv4_sm100_py_test(
     name = "test_mega_moe_gate_pack_cuda13",
     src = "test_mega_moe_gate_pack.py",
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
 )

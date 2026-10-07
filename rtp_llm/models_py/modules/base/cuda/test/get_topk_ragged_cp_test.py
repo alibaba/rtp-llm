@@ -262,7 +262,7 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
 
         reference_logits = deep_gemm.fp8_mqa_logits(
             q_fp8[total_local_ids].contiguous(),
-            (gathered_k, gathered_scale_bytes.view(torch.float32)),
+            (gathered_k, gathered_scale_bytes.view(torch.float32).view(-1)),
             q_scale[total_local_ids].squeeze(-1).contiguous(),
             row_starts,
             row_ends,

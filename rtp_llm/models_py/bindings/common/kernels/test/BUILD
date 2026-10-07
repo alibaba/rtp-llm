@@ -1,4 +1,4 @@
-load("//:def.bzl", "cc_test_wrapper", "any_cuda_copts")
+load("//:def.bzl", "any_cuda_copts", "cc_test_wrapper")
 
 cc_test = cc_test_wrapper
 
@@ -23,5 +23,6 @@ cc_test(
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
         "@com_google_googletest//:gtest",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

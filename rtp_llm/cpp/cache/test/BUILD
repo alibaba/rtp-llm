@@ -61,9 +61,9 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
-
 
 cc_library(
     name = "cache_config_test_utils",
@@ -170,7 +170,7 @@ cc_binary(
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
-        "BlockPoolTestHelper.h"
+        "BlockPoolTestHelper.h",
     ],
     srcs = [
     ],
@@ -199,9 +199,9 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-        ":cache_config_test_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -213,16 +213,26 @@ cc_test(
         ],
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
-            "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:hip",
+            "@local_config_rocm//rocm:rocm_headers",
         ],
         "//conditions:default": [],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {
+            "gpu": "H20_CU13",
+            "gpu_count": "2",
+        },
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "2",
+        },
         "//conditions:default": {},
     }),
+    env = {
+        "GPU_COUNT": "2",
+    },
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -234,7 +244,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -251,7 +262,8 @@ cc_test(
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -262,12 +274,13 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/testing:device_test_utils",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/testing:device_test_utils",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -290,7 +303,8 @@ cc_test(
         "//rtp_llm/cpp/normal_engine",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -304,7 +318,8 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -321,7 +336,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -337,7 +353,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -349,12 +366,13 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -367,11 +385,12 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
-        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -383,7 +402,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -406,8 +426,8 @@ cc_test(
     srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
     deps = [
-        ":cache_config_test_utils",
         ":block_tree_cache_allocator_test_helper",
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "@com_google_googletest//:gtest_main",
@@ -423,5 +443,6 @@ cc_test(
     env = {
         "LOG_LEVEL": "ERROR",
     },
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
