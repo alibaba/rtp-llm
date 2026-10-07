@@ -881,7 +881,7 @@ class DefaultBatchDispatcherTest {
                 .thenAnswer(invocation -> pending);
 
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
         // Exhaust the single admission permit with one in-flight batch.
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         PreparedSubmission permit = reservePermit();
