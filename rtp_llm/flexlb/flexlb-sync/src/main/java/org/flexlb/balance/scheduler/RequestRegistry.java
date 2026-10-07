@@ -527,32 +527,6 @@ public class RequestRegistry {
         requestReporter.reportPriorityPreempt("prefill_queued");
     }
 
-    public void finishYieldedReservation(
-            String requestId, long reservationToken, String detail) {
-        if (reservationToken <= 0L) {
-            throw new IllegalArgumentException("reservationToken must be positive");
-        }
-        RequestSlot entry = requestSlots.get(requestId);
-        ScheduledRequest victim = null;
-        if (entry != null) {
-            synchronized (entry) {
-                victim = entry.activeItemForReservation(reservationToken);
-            }
-        }
-        if (victim != null) {
-            finishYielded(victim, detail);
-            return;
-        }
-        Logger.debug("finishYieldedReservation miss: request_id={} token={} detail={}",
-                requestId, reservationToken, detail);
-        try {
-            requestReporter.reportInflightSettleMiss("yielded");
-        } catch (RuntimeException metricFailure) {
-            Logger.warn("Failed to report yielded settle miss: request_id={}",
-                    requestId, metricFailure);
-        }
-    }
-
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
         RequestSlot slot = entryFor(item);
         if (slot != null) { slot.recordSchedulingFailure(error, detail); }

@@ -117,7 +117,7 @@ public class WorkerAddressService {
             future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(endpoint));
         } catch (RejectedExecutionException e) {
             logger.error("query service discovery rejected, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
             return lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of());
         }
         try {
@@ -131,15 +131,15 @@ public class WorkerAddressService {
         } catch (TimeoutException e) {
             future.cancel(true);
             logger.error("query service discovery timeout, model={}, address={}", modelName, address);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
         } catch (InterruptedException e) {
             future.cancel(true);
             Thread.currentThread().interrupt();
             logger.warn("query service discovery interrupted, model={}, address={}", modelName, address);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         } catch (ExecutionException e) {
             logger.error("query service discovery error, model={}, address={}", modelName, address, e.getCause());
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         }
         return lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of());
     }

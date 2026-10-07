@@ -2,9 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import io.micrometer.core.instrument.FunctionCounter;
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -21,9 +18,13 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -58,7 +59,6 @@ import java.util.function.BiConsumer;
 @Component
 public class DefaultBatchDispatcher {
 
-    private static final String METRIC_PREFIX = "flexlb.";
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
     private static final RouteProjection.AdmissionBlockSemantics
             CAPACITY_BLOCK_SEMANTICS =
@@ -77,7 +77,7 @@ public class DefaultBatchDispatcher {
     // Admission ends at RPC handoff; this separate count keeps the callback
     // executor alive while accepted RPCs are still awaiting completion.
     private final AtomicInteger pendingCompletions = new AtomicInteger();
-    private final MeterRegistry meterRegistry;
+    private final FlexMonitor monitor;
     private final ReentrantReadWriteLock admissionLifecycle =
             new ReentrantReadWriteLock(true);
     private final Lock admissionReadLock = admissionLifecycle.readLock();
@@ -109,20 +109,22 @@ public class DefaultBatchDispatcher {
 
     @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                                  @Autowired(required = false) MeterRegistry meterRegistry) {
-        this(grpcClient, configService, meterRegistry,
+                                  FlexMonitor monitor) {
+        this(grpcClient, configService, monitor,
                 configService.loadBalanceConfig().getInternalRuntime()
                         .getBatchDispatchThreads(),
                 configService.loadBalanceConfig().getInternalRuntime()
                         .getBatchDispatchQueueCapacity());
     }
 
-    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
+    /**
+     * Package-visible sizing injection keeps integration fixtures bounded and deterministic.
+     */
     DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                           MeterRegistry meterRegistry, int poolSize, int queueSize) {
+                           FlexMonitor monitor, int poolSize, int queueSize) {
         this.grpcClient = grpcClient;
         this.configService = configService;
-        this.meterRegistry = meterRegistry;
+        this.monitor = Objects.requireNonNull(monitor, "monitor");
         this.admissionCapacity = Math.addExact(poolSize, queueSize);
         this.admissionPermits = new Semaphore(admissionCapacity);
         Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
@@ -146,48 +148,27 @@ public class DefaultBatchDispatcher {
                 new NamedThreadFactory("flexlb-dispatch-completion"),
                 new ThreadPoolExecutor.AbortPolicy());
         registerMetrics();
+        reportExecutorMetrics();
     }
 
     /**
-     * Register Micrometer gauges and function counters for the dispatch executor.
-     *
-     * <p>Metrics exposed:
-     * <ul>
-     *   <li>{@code flexlb_dispatch_executor_active_threads} — gauge: active thread count</li>
-     *   <li>{@code flexlb_dispatch_executor_queue_size} — gauge: pending task queue length</li>
-     *   <li>{@code flexlb_dispatch_executor_pool_size} — gauge: current thread pool size</li>
-     *   <li>{@code flexlb_dispatch_executor_completed_tasks_total} — counter: completed task count</li>
-     * </ul>
-     *
-     * <p>When {@link MeterRegistry} is not available, metric registration is silently skipped.
+     * Register gauges for the current executor state.
      */
     private void registerMetrics() {
-        if (meterRegistry == null) {
-            Logger.info("MeterRegistry not available, skipping dispatch executor metrics");
-            return;
-        }
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS);
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE);
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE);
+    }
 
-        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
-                        dispatchExecutor, ThreadPoolExecutor::getActiveCount)
-                .description("Dispatch executor active thread count")
-                .register(meterRegistry);
+    private void registerGauge(String metricName) {
+        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
 
-        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
-                        dispatchExecutor, exec -> exec.getQueue().size())
-                .description("Dispatch executor pending task queue size")
-                .register(meterRegistry);
-
-        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
-                        dispatchExecutor, ThreadPoolExecutor::getPoolSize)
-                .description("Dispatch executor current pool size")
-                .register(meterRegistry);
-
-        FunctionCounter.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS,
-                        dispatchExecutor, ThreadPoolExecutor::getCompletedTaskCount)
-                .description("Dispatch executor total completed tasks")
-                .register(meterRegistry);
-
-        Logger.info("FlexLB dispatch executor metrics registered with MeterRegistry");
+    @Scheduled(fixedRate = 2000)
+    void reportExecutorMetrics() {
+        monitor.report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, dispatchExecutor.getActiveCount());
+        monitor.report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, dispatchExecutor.getQueue().size());
+        monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
     }
 
     public CapacityBoundary.Attempt<PreparedSubmission>
