@@ -342,7 +342,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         reserveQueued(endpoint, 91L, 100L, 2_000L, 50);
-        Assertions.assertEquals(100L, endpoint.routingView().inflightHardKv());
+        Assertions.assertEquals(100L, endpoint.routingView().inputKvReserved());
         Assertions.assertEquals(2_500L, endpoint.routingView().realKvUsed());
 
         ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
@@ -781,10 +781,10 @@ class DecodeSelectorTest {
             DecodeEndpoint endpoint,
             long requestId,
             long kvTokens,
-            long expectedKvTokens,
+            long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserve(pin, requestId, kvTokens, expectedKvTokens, priority);
+            endpoint.reserve(pin, requestId, kvTokens, kvBudgetTokens, priority);
         }
     }
 
@@ -799,10 +799,10 @@ class DecodeSelectorTest {
             DecodeEndpoint endpoint,
             long requestId,
             long kvTokens,
-            long expectedKvTokens,
+            long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserveUnqueued(pin, requestId, kvTokens, expectedKvTokens, priority);
+            endpoint.reserveUnqueued(pin, requestId, kvTokens, kvBudgetTokens, priority);
         }
     }
 

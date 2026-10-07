@@ -28,6 +28,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DecodeStateTest {
     private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
 
+    private static void assertAdmissionMetricsMatch(DecodeState state) {
+        var full = state.resourceSnapshot();
+        var metrics = state.admissionStats();
+        assertEquals(full.reserved().size(), metrics.reserved());
+        assertEquals(full.runningCount(), metrics.running());
+        assertEquals(full.acceptedCount(), metrics.accepted());
+        assertEquals(full.routing().inputKvReserved(), metrics.inputKvTokens());
+        assertEquals(full.routing().engineLoad(), metrics.engineLoad());
+    }
+
     @Test
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
         WorkerStatus status = status();
@@ -36,6 +46,8 @@ class DecodeStateTest {
         var first = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
         assertTrue(state.resourceSnapshot().isQueued(1));
+        assertEquals(0, state.stats().inflight());
+        assertAdmissionMetricsMatch(state);
 
         var replacement = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertEquals(OWNERSHIP_LOST, state.dispatch(first, DispatchOutcome.ENGINE_OWNED).status());
@@ -44,11 +56,14 @@ class DecodeStateTest {
         assertEquals(TRANSFERRED, state.dispatch(replacement, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
         assertEquals(1, state.routingView().engineLoad());
+        assertEquals(1, state.stats().inflight());
+        assertAdmissionMetricsMatch(state);
         assertThrows(IllegalStateException.class, () -> state.release(reservation, ReleaseReason.LOCAL_ROLLBACK));
         assertEquals(STILL_OWNED, state.release(reservation, ReleaseReason.COUNTERPART_FINISHED));
         assertEquals(RELEASED, state.release(reservation, ReleaseReason.EXPIRED));
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineLoad());
+        assertAdmissionMetricsMatch(state);
     }
 
     @Test
@@ -63,12 +78,20 @@ class DecodeStateTest {
         var accepted = calibrate(state, status, Map.of("2", task), Map.of());
         assertEquals(reservation, accepted.facts().getFirst().reservation());
         assertTrue(state.isAcceptedByEngine(reservation));
+        assertEquals(0, state.stats().inflight());
+        assertAdmissionMetricsMatch(state);
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
         assertTrue(state.resourceSnapshot().reserved().isEmpty());
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
 
+        task.setPhase(TaskPhase.RUNNING);
+        calibrate(state, status, Map.of("2", task), Map.of());
+        assertAdmissionMetricsMatch(state);
+        assertEquals(1, state.admissionStats().running());
+
         var finished = calibrate(state, status, Map.of(), Map.of("2", task));
+        assertAdmissionMetricsMatch(state);
         assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, finished.facts().getFirst().kind());
         assertEquals(reservation, finished.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(reservation));
@@ -177,9 +200,12 @@ class DecodeStateTest {
             assertTrue(emptyReportResult.facts().isEmpty());
             assertEquals(0, state.routingView().engineCapacityUsed());
             assertEquals(0, state.routingView().engineLoad());
+        assertAdmissionMetricsMatch(state);
             assertTrue(state.resourceSnapshot().reserved().isEmpty());
             assertTrue(state.hasOwnedResources(reservation));
             assertTrue(state.isAcceptedByEngine(reservation));
+        assertEquals(0, state.stats().inflight());
+        assertAdmissionMetricsMatch(state);
         }
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(STILL_OWNED, state.release(reservation, ReleaseReason.COUNTERPART_FINISHED));

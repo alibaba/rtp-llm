@@ -314,9 +314,19 @@ WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 最后一项在首次 WorkerStatus 前采用 Client 的 MM token 预测值，之后采用活动任务的合成输入
 `input_length`；两者口径可能略有差异，finished 中的长度不参与该指标。
 通用 KV 指标仍上报，但不参与 Encoder 选点。
-`app.flexlb.scheduler.inflight.size` 按
+`app.flexlb.tracked.request.count` 按
 `role=PREFILL`（Generation）和 `role=ENCODER`（Encoder）分别上报，
-`engineIp=scheduler`；原有 Prefill 序列仍只统计 Generation。
+`engineIp=scheduler`；Prefill 序列只统计 Generation。节点侧使用 `app.flexlb.inflight.request.count`，按真实 `engineIp` 和
+`role=PREFILL/DECODE` 分开展示，只统计已提交给引擎且尚未在 WorkerStatus 中确认的请求。
+排队请求和已确认请求不计入节点在途数。大盘分为正在跟踪的请求数、Prefill 在途请求数、
+Decode 在途请求数三个独立面板。
+Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
+`inputAndMaxOutputKvTokens = inputKvTokens + max(0, maxNewTokens)`（溢出时饱和）。
+两者分别表示输入预留和输入加最大输出预留，不是输出长度预测，后者包含前者。
+引擎确认后的容量使用引擎上报的实际 KV 数，不再使用请求上限。
+监控上报名保留现有协议，中文图例使用上述计算口径。
+周期统计复用 Prefill 快照，调度器一次遍历计算数量和最大年龄；Decode admission
+上报仅收集数值，不构造请求明细。
 
 上报器分布在 common、grpc、cache、sync 模块。新增指标应复用现有 reporter ownership，
 不要恢复已删除的旧监控层。

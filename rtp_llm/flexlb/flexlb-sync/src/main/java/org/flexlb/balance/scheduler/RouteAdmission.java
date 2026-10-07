@@ -204,14 +204,14 @@ public final class RouteAdmission implements AutoCloseable {
             case IMMEDIATE -> decodeEndpoint().reserve(
                     decodePin(),
                     requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
+                    decodeBinding.inputKvTokens(),
+                    decodeBinding.inputAndMaxOutputKvTokens(),
                     decodeBinding.priority());
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
                     decodePin(),
                     requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
+                    decodeBinding.inputKvTokens(),
+                    decodeBinding.inputAndMaxOutputKvTokens(),
                     decodeBinding.priority(),
                     decodeBinding.capacity());
         };

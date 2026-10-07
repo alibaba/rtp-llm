@@ -48,10 +48,10 @@ class LeakCanaryLongRunE2ETest {
             assertEquals(8510, rejected.getCode());
             assertEquals(1, h.decodeEndpoint(0).getInflightCount(),
                     "Prefill rejection alone cannot prove that Decode is safe to release");
-            assertTrue(h.decodeEndpoint(0).routingView().inflightHardKv() > 0);
+            assertTrue(h.decodeEndpoint(0).routingView().inputKvReserved() > 0);
             AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
                     7_000, "an unobserved rejected request must expire without a Decode terminal report");
-            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inputKvReserved());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
             assertEquals(0, h.decodeEngines.get(0).getAcceptedCount(),
                     "this scenario must not manufacture a Decode completion to reclaim ownership");
@@ -148,7 +148,7 @@ class LeakCanaryLongRunE2ETest {
                     INACTIVITY_TIMEOUT_MS + 1_000, "failed requests must settle within the inactivity bound");
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
-            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inputKvReserved(),
                     "no orphaned hard-KV reservation");
             assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().acceptedCount());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());

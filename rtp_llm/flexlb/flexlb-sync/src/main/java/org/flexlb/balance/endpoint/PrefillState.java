@@ -127,11 +127,12 @@ public final class PrefillState {
 
     public record Stats(
             int locallyOwnedRequests,
+            int inflightRequests,
             int individuallyOwnedRequests,
             int batchCount,
             long maxObservedAgeMs) {
         public Stats {
-            if (locallyOwnedRequests < 0 || individuallyOwnedRequests < 0
+            if (locallyOwnedRequests < 0 || inflightRequests < 0 || individuallyOwnedRequests < 0
                     || batchCount < 0 || maxObservedAgeMs < 0L) {
                 throw new IllegalArgumentException(
                         "Prefill state stats must be non-negative");
@@ -1831,6 +1832,7 @@ public final class PrefillState {
         lock.lock();
         try {
             int locallyOwned = 0;
+            int inflight = 0;
             int individual = 0;
             long maxAgeMs = 0L;
             Set<BatchWork> batches = java.util.Collections.newSetFromMap(
@@ -1841,6 +1843,12 @@ public final class PrefillState {
                     continue;
                 }
                 locallyOwned++;
+                Phase phase = entry.batchWork == null
+                        ? entry.individualPhase : entry.batchWork.servicePhase;
+                if (phase == Phase.COMMITTED && (entry.batchWork != null
+                        || entry.reservation != null && entry.reservation.state == LeaseState.OWNED)) {
+                    inflight++;
+                }
                 if (entry.batchWork == null) {
                     individual++;
                     maxAgeMs = Math.max(
@@ -1857,6 +1865,7 @@ public final class PrefillState {
             }
             return new Stats(
                     locallyOwned,
+                    inflight,
                     individual,
                     batches.size(),
                     maxAgeMs);

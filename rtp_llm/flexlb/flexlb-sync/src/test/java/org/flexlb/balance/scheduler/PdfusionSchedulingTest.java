@@ -127,7 +127,7 @@ class PdfusionSchedulingTest {
             assertEquals(List.of(RoleType.PDFUSION), response.getServerStatus().stream()
                     .map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
-            assertEquals(1, lifecycle.liveRequestCount());
+            assertEquals(1, lifecycle.trackedRequestCount());
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
                     RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.observedRequestCount());
@@ -161,7 +161,7 @@ class PdfusionSchedulingTest {
                 assertEquals(RequestState.Phase.COMPLETED,
                         lifecycle.getRequestState(
                                 Long.toString(requestId), 0L).state());
-                assertEquals(0, lifecycle.liveRequestCount());
+                assertEquals(0, lifecycle.trackedRequestCount());
             }
         } finally {
             runtime.shutdown();

@@ -184,7 +184,7 @@ public final class ScheduledRequest implements Prioritized {
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return decodeBinding.hardKvTokens();
+        return decodeBinding.inputKvTokens();
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
@@ -210,15 +210,20 @@ public final class ScheduledRequest implements Prioritized {
         }
     }
 
-    /** Request values are frozen before selection; selected ownership is attached once known. */
+    /**
+     * Request values frozen before selection.
+     * inputKvTokens is max(0, seqLen). inputAndMaxOutputKvTokens is
+     * inputKvTokens + max(0, maxNewTokens), saturated at Long.MAX_VALUE.
+     * Neither value is an estimate of the actual generated output length.
+     */
     public record DecodeBinding(
             ServerStatus status,
             DecodeEndpoint endpoint,
             DecodeEndpoint.ReservationHandle reservation,
             String requestId,
             int priority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpoint.AdmissionCapacity capacity,
             DecodeMode mode,
             DecodeCostFormula costFormula) {
@@ -237,11 +242,11 @@ public final class ScheduledRequest implements Prioritized {
             var decode = config.getRouter().getRoles().getDecode();
             var availability = decode.getAvailability();
             long promptTokens = Math.max(0L, request.getSeqLen());
-            long outputTokens = Math.max(0L, request.getMaxNewTokens());
-            long expectedTokens = promptTokens > Long.MAX_VALUE - outputTokens
-                    ? Long.MAX_VALUE : promptTokens + outputTokens;
+            long maxOutputTokens = Math.max(0L, request.getMaxNewTokens());
+            long inputAndMaxOutputTokens = promptTokens > Long.MAX_VALUE - maxOutputTokens
+                    ? Long.MAX_VALUE : promptTokens + maxOutputTokens;
             return new DecodeBinding(null, null, null, request.getRequestId(), context.getPriority(),
-                    promptTokens, expectedTokens,
+                    promptTokens, inputAndMaxOutputTokens,
                     new DecodeEndpoint.AdmissionCapacity(
                             availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
                             availability.getMaxKvUsagePercent()), DecodeMode.from(config),
@@ -251,7 +256,7 @@ public final class ScheduledRequest implements Prioritized {
         DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
                            DecodeEndpoint.ReservationHandle selectedReservation) {
             return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
-                    requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode,
+                    requestId, priority, inputKvTokens, inputAndMaxOutputKvTokens, capacity, mode,
                     costFormula);
         }
 

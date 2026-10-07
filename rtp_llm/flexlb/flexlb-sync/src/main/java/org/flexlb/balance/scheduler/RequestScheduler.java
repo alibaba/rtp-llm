@@ -223,8 +223,8 @@ public final class RequestScheduler {
         return requestRegistry.cancelRequest(requestId, expectedBatchId, reason, phase);
     }
 
-    public int getInflightSize() {
-        return requestRegistry.liveRequestCount();
+    public int getTrackedRequestCount() {
+        return requestRegistry.trackedRequestCount();
     }
 
     public int getQueuedRequestCount() {

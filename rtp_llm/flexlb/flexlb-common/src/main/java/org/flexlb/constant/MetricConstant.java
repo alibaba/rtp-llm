@@ -63,9 +63,14 @@ public class MetricConstant {
     public static final String INFLIGHT_BATCH_COUNT = "app.flexlb.inflight.batch.count";
 
     /**
-     * FlexLB scheduler inflight request count per worker (dispatched but not yet confirmed by engine).
-     * <p>Unified metric for both prefill and decode workers, tagged by role and engineIp.
-     * Replaces the former separate BATCH_INFLIGHT_REQUEST_COUNT (prefill) and DECODE_INFLIGHT_COUNT (decode).
+     * Requests whose lifecycle is still tracked by the scheduler.
+     * Includes queued requests and requests awaiting lifecycle completion.
+     */
+    public static final String TRACKED_REQUEST_COUNT = "app.flexlb.tracked.request.count";
+
+    /**
+     * Per-worker dispatched requests not yet confirmed by WorkerStatus.
+     * Tagged by role and engineIp; excludes queued and confirmed requests.
      */
     public static final String INFLIGHT_REQUEST_COUNT = "app.flexlb.inflight.request.count";
 
@@ -91,14 +96,14 @@ public class MetricConstant {
     public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";
 
     /**
-     * FlexLB scheduler inflight KV cache reserved tokens per decode worker (local inflight reservation not yet confirmed by the engine)
+     * Sum of input tokens plus max_new_tokens for local Decode reservations, including queued requests.
      */
-    public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
+    public static final String DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
 
     /**
-     * FlexLB scheduler inflight hard KV cache reserved tokens per decode worker (hard reservation that cannot be reclaimed)
+     * Sum of input tokens for local Decode reservations, including queued requests.
      */
-    public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
+    public static final String DECODE_INPUT_KV_RESERVED_TOKENS =
             "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
 
     /**
@@ -175,15 +180,6 @@ public class MetricConstant {
     /** Tasks dispatched by FlexLB but not yet confirmed by the worker. */
     public static final String ENGINE_IN_TRANSIT_TASK_SIZE =
             "app.engine.health.check.in.transit.task.size";
-
-    /**
-     * FlexLB scheduler inflight size — the scheduler's own inflight request count.
-     * <p>Reported by BatchSchedulerReporter with role=PREFILL for Generation or role=ENCODER
-     * for Encoder, and engineIp="scheduler".
-     * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
-     * to avoid tag schema conflict (per-engine vs scheduler-level).
-     */
-    public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
 
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests

@@ -47,7 +47,7 @@ public final class DecodePreemptionCoordinator {
             DecodeEndpoint endpoint,
             String incomingRequestId,
             long incomingKvTokens,
-            long incomingExpectedKvTokens,
+            long incomingKvBudgetTokens,
             int incomingPriority,
             DecodeEndpoint.AdmissionCapacity capacity,
             List<DecodeRequestView> victims,
@@ -116,7 +116,7 @@ public final class DecodePreemptionCoordinator {
                         victims,
                         command.incomingRequestId(),
                         command.incomingKvTokens(),
-                        command.incomingExpectedKvTokens(),
+                        command.incomingKvBudgetTokens(),
                         command.incomingPriority(),
                         command.capacity());
         return CompletableFuture.completedFuture(new PreemptionResult(
@@ -178,7 +178,7 @@ public final class DecodePreemptionCoordinator {
                             victimReservations,
                             command.incomingRequestId(),
                             command.incomingKvTokens(),
-                            command.incomingExpectedKvTokens(),
+                            command.incomingKvBudgetTokens(),
                             command.incomingPriority(),
                             command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {

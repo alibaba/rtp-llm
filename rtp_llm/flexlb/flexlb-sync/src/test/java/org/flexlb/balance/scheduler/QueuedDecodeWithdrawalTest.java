@@ -242,7 +242,7 @@ class QueuedDecodeWithdrawalTest {
         when(queue.requeue(item)).thenReturn(false);
         assertTrue(replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertNull(decode.reservationHandle(6));
     }
     @Test
@@ -266,7 +266,7 @@ class QueuedDecodeWithdrawalTest {
         when(queue.requeue(item)).thenThrow(new IllegalStateException("injected requeue failure"));
         assertThrows(IllegalStateException.class, () -> replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertEquals(0, decode.routingView().totalLoad());
     }
 
