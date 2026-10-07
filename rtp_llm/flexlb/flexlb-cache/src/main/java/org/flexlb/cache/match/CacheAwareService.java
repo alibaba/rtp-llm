@@ -6,10 +6,8 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -29,19 +27,16 @@ public class CacheAwareService {
     private final CacheHitFeedbackTracker feedbackTracker;
     private final LocalStandbyComparisonService comparisonService;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
-    private final RequestBlockHashService requestBlockHashService;
 
     public CacheAwareService(CacheMetricsReporter cacheMetricsReporter,
                              CacheMatchQueryOrchestrator queryOrchestrator,
                              LocalStandbyComparisonService comparisonService,
-                             CacheMetadataUpdateOrchestrator updateOrchestrator,
-                             RequestBlockHashService requestBlockHashService) {
+                             CacheMetadataUpdateOrchestrator updateOrchestrator) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
         this.comparisonService = comparisonService;
         this.feedbackTracker = new CacheHitFeedbackTracker(comparisonService);
         this.updateOrchestrator = updateOrchestrator;
-        this.requestBlockHashService = requestBlockHashService;
     }
 
     public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
@@ -68,10 +63,6 @@ public class CacheAwareService {
 
     public void removeEngineBlockCache(String engineIpPort) {
         updateOrchestrator.removeEngineBlockCache(engineIpPort);
-    }
-
-    public CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
-        return requestBlockHashService.prepareBlockCacheKeys(context).toFuture();
     }
 
     public void updateFromRoutedRequest(

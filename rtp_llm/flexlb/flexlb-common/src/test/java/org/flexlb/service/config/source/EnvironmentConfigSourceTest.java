@@ -2,7 +2,6 @@ package org.flexlb.service.config.source;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.enums.BlockHashStrategyType;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
@@ -28,14 +27,12 @@ class EnvironmentConfigSourceTest {
                           "observability":{"logging":{
                             "level":"debug","stdoutEnabled":true
                           }},
-                          "enableFallback":true,
-                          "blockHashStrategy":"SGLANG"
+                          "enableFallback":true
                         }
                         """,
                 "FLEXLB_LOG_LEVEL", "ERROR",
                 "ENABLE_STDOUT_LOG", "false",
                 "ENABLE_FALLBACK", "false",
-                "BLOCK_HASH_STRATEGY", "VLLM",
                 "MODEL_SERVICE_CONFIG",
                 "{\"service_id\":\"test-service\",\"role_endpoints\":[]}");
         ConfigService configService = new EnvironmentVariables(environment).execute(() -> {
@@ -50,8 +47,6 @@ class EnvironmentConfigSourceTest {
 
         FlexlbConfig config = configService.loadBalanceConfig();
         assertThat(config.isDirect()).isTrue();
-        assertThat(config.getBlockHashStrategy())
-                .isEqualTo(BlockHashStrategyType.SGLANG);
         assertThat(config.getObservability().getLogging().getLevel())
                 .isEqualTo(LogLevel.DEBUG);
         assertThat(config.getObservability().getLogging().isStdoutEnabled()).isTrue();

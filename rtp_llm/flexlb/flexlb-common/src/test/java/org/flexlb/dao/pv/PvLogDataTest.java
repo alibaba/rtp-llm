@@ -173,7 +173,7 @@ class PvLogDataTest {
     }
 
     @Test
-    void includesBlockHashAndKvcmTimings() {
+    void includesKvcmTimings() {
         Request request = new Request();
         request.setRequestId("1");
         request.setSeqLen(128);
@@ -184,7 +184,6 @@ class PvLogDataTest {
         context.setRequest(request);
         context.setResponse(new Response());
         context.recordRequestTiming(request.getRequestTimeMs(), 9L);
-        context.recordBlockHashTiming(12, 34);
         context.recordCacheQuery("KVCM", 56);
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.1", 256);
         context.recordCacheQuery("KVCM", 78);
@@ -235,7 +234,6 @@ class PvLogDataTest {
         Request request = new Request();
         request.setRequestId("2");
         request.setSeqLen(999);
-        request.setInputIds(new int[]{1, 2, 3});
 
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
@@ -324,7 +322,6 @@ class PvLogDataTest {
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             executor.submit(() -> {
                 for (int i = 1; i <= 5_000; i++) {
-                    context.recordBlockHashTiming(i, i);
                     context.recordCacheQuery("KVCM", 2);
                 }
             }).get(5, java.util.concurrent.TimeUnit.SECONDS);

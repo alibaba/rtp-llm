@@ -2,9 +2,6 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.cache.domain.CacheMatchQuery;
-import org.flexlb.cache.domain.LocalStandbyHashResult;
-import org.flexlb.cache.hash.LocalStandbyHashService;
-import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
@@ -15,7 +12,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -29,14 +25,12 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -50,7 +44,7 @@ class FlexlbScheduleLocalStandbyTest {
 
     @ParameterizedTest
     @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
-    void successfulScheduleWarmsIndexWithoutWaitingForHash(RoleType role) throws Exception {
+    void successfulScheduleWarmsIndexWithClientProvidedKeys(RoleType role) throws Exception {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         when(configuration.isLocalStandbyEnabled()).thenReturn(true);
         when(configuration.getLocalStandbyConfig()).thenReturn(new LocalStandbyConfig());
@@ -67,19 +61,10 @@ class FlexlbScheduleLocalStandbyTest {
             indexed.complete(null);
             return null;
         }).when(manager).addRoutedRequestBlocks(any(), any());
-        LocalStandbyHashService hashes = mock(LocalStandbyHashService.class);
-        CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
-        when(hashes.getHashResult("warmup", null, 4096)).thenReturn(pendingHash);
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                configuration, manager, hashes, mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class));
-        RequestBlockHashService requestHashes = mock(RequestBlockHashService.class);
-        when(requestHashes.prepareBlockCacheKeys(any())).thenAnswer(invocation -> {
-            BalanceContext context = invocation.getArgument(0);
-            context.getRequest().setLocalStandbyBlockSize(4096);
-            return Mono.empty();
-        });
+                configuration, manager, metrics);
         CacheAwareService cache = new CacheAwareService(metrics, null, null,
-                new CacheMetadataUpdateOrchestrator(configuration, null, provider), requestHashes);
+                new CacheMetadataUpdateOrchestrator(configuration, null, provider));
         RouteService router = mock(RouteService.class);
         CompletableFuture<Response> routed = new CompletableFuture<>();
         when(router.route(any())).thenReturn(routed);
@@ -92,18 +77,10 @@ class FlexlbScheduleLocalStandbyTest {
             routed.complete(response(role, true));
             verify(observer).onCompleted();
             verify(observer).onNext(org.mockito.ArgumentMatchers.argThat(result -> result.getSuccess()));
-            assertFalse(pendingHash.isDone());
-            assertEquals(0, manager.mappingCount());
-
-            pendingHash.complete(new LocalStandbyHashResult(List.of(11L, 22L, 33L), 4096));
             indexed.get(5, TimeUnit.SECONDS);
             assertEquals(3, manager.mappingCount());
-            when(hashes.getHashResult("followup", List.of(11L, 22L, 33L), 4096))
-                    .thenReturn(CompletableFuture.completedFuture(
-                            new LocalStandbyHashResult(List.of(11L, 22L, 33L), 4096)));
             var prediction = provider.asyncLocalStandbyMatch(new CacheMatchQuery(
-                    "followup", List.of(11L, 22L, 33L), 4096,
-                    List.of(11L, 22L, 33L), 4096, role, "default")).get(5, TimeUnit.SECONDS);
+                    "followup", List.of(11L, 22L, 33L), 4096, role, "default")).get(5, TimeUnit.SECONDS);
             assertEquals(3, prediction.exactHostMatch(worker.getLogicalIpPort()).localMatchBlocks());
             assertEquals(4096, prediction.blockSize());
         } finally {
@@ -116,7 +93,7 @@ class FlexlbScheduleLocalStandbyTest {
     void failedScheduleDoesNotUpdateIndex() {
         RouteService router = mock(RouteService.class);
         when(router.route(any())).thenReturn(CompletableFuture.completedFuture(response(RoleType.PREFILL, false)));
-        CacheAwareService cache = preparedCache();
+        CacheAwareService cache = mock(CacheAwareService.class);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service(router, cache).schedule(request(), observer);
@@ -129,8 +106,8 @@ class FlexlbScheduleLocalStandbyTest {
     void metadataUpdateFailurePreservesSuccessfulSchedule() {
         RouteService router = mock(RouteService.class);
         when(router.route(any())).thenReturn(CompletableFuture.completedFuture(response(RoleType.PREFILL, true)));
-        CacheAwareService cache = preparedCache();
-        doThrow(new IllegalStateException("hash task unavailable")).when(cache).updateFromRoutedRequest(any(), any());
+        CacheAwareService cache = mock(CacheAwareService.class);
+        doThrow(new IllegalStateException("metadata update unavailable")).when(cache).updateFromRoutedRequest(any(), any());
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service(router, cache).schedule(request(), observer);
@@ -138,12 +115,6 @@ class FlexlbScheduleLocalStandbyTest {
         verify(observer).onNext(org.mockito.ArgumentMatchers.argThat(result -> result.getSuccess()));
         verify(observer).onCompleted();
         verify(observer, never()).onError(any());
-    }
-
-    private CacheAwareService preparedCache() {
-        CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.prepareBlockCacheKeys(any())).thenReturn(CompletableFuture.completedFuture(null));
-        return cache;
     }
 
     private FlexlbServiceImpl service(RouteService router, CacheAwareService cache) {
@@ -157,7 +128,8 @@ class FlexlbScheduleLocalStandbyTest {
 
     private FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("warmup").setSeqLen(12288).addInputIds(1).build();
+                .setRequestId("warmup").setSeqLen(12288)
+                .setCacheKeyBlockSize(4096).addAllBlockCacheKeys(List.of(11L, 22L, 33L)).build();
     }
 
     private Response response(RoleType role, boolean success) {

@@ -3,7 +3,6 @@ package org.flexlb.config;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
-import org.flexlb.enums.BlockHashStrategyType;
 
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
@@ -28,7 +27,6 @@ public final class FlexlbConfig {
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
     private ConsistencyConfig consistency = new NoConsistencyConfig();
-    private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 

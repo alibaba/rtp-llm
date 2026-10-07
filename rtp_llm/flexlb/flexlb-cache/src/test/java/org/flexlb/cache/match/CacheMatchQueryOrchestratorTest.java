@@ -42,8 +42,7 @@ class CacheMatchQueryOrchestratorTest {
     private final CacheMetricsReporter cacheMetricsReporter =
             mock(CacheMetricsReporter.class);
     private final CacheMatchQuery query = new CacheMatchQuery(
-            "request-1", List.of(11L, 22L), 2192L,
-            List.of(), 0, RoleType.PREFILL, "default");
+            "request-1", List.of(11L, 22L), 2192L, RoleType.PREFILL, "default");
 
     @Test
     void usesLocalSyncWhenKvcmIsDisabled() {
@@ -177,8 +176,7 @@ class CacheMatchQueryOrchestratorTest {
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
         CacheMatchQuery empty = new CacheMatchQuery(
-                "request-2", List.of(), 2192L,
-                List.of(), 0, RoleType.PREFILL, "default");
+                "request-2", List.of(), 2192L, RoleType.PREFILL, "default");
 
         CacheMatchResult result = orchestrator().findMatchingEngines(empty);
 
@@ -209,8 +207,6 @@ class CacheMatchQueryOrchestratorTest {
                 "request-standby",
                 List.of(11L, 22L),
                 2192L,
-                List.of(101L),
-                4096,
                 RoleType.PREFILL,
                 "default");
     }

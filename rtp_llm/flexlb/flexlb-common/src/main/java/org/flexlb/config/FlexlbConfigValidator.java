@@ -136,7 +136,6 @@ public final class FlexlbConfigValidator {
         require(config.getCacheMatching() != null, "cacheMatching", "is required");
         require(config.getOptimizer() != null, "optimizer", "is required");
         require(config.getConsistency() != null, "consistency", "is required");
-        require(config.getBlockHashStrategy() != null, "blockHashStrategy", "is required");
         positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
 
         if (!config.isDirect()) {
@@ -381,10 +380,6 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateLocalStandby(LocalStandbyConfig localStandby) {
-        require(localStandby.getBlockSize() >= 0
-                        && localStandby.getBlockSize() <= Integer.MAX_VALUE,
-                "cacheMatching.localStandby.blockSize",
-                "must be in [0, " + Integer.MAX_VALUE + "]");
         positive(localStandby.getTtlMs(), "cacheMatching.localStandby.ttlMs");
         positive(localStandby.getMinimumTtlMs(),
                 "cacheMatching.localStandby.minimumTtlMs");
@@ -404,10 +399,6 @@ public final class FlexlbConfigValidator {
                 "must be finite and greater than or equal to 1");
         positive(localStandby.getAsyncQueueCapacity(),
                 "cacheMatching.localStandby.asyncQueueCapacity");
-        positive(localStandby.getHashThreadCount(),
-                "cacheMatching.localStandby.hashThreadCount");
-        positive(localStandby.getHashQueueCapacity(),
-                "cacheMatching.localStandby.hashQueueCapacity");
     }
 
     private static void validateOptimizer(OptimizerRuntimeConfig optimizer) {

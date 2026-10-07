@@ -32,8 +32,12 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
     private List<String> medium = List.of();
     /**
      * Logical engines with the longest local match to compute remote hits for.
+     * Zero requests local matches only.
      */
     private int globalKvsHostCount = DEFAULT_GLOBAL_KVS_HOST_COUNT;
+    /**
+     * Enables P2P matches in the combined global prefix hit count.
+     */
     private boolean enableP2p;
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();
 
