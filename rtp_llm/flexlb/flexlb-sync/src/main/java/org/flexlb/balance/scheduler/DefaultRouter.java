@@ -72,9 +72,11 @@ public class DefaultRouter {
         if (!isEncoderOnly(context)) {
             return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
         }
-        SelectedRole selected = encoderSelector.select(context, resolvePolicyGroup(context));
+        String policyGroup = resolvePolicyGroup(context);
+        SelectedRole selected = encoderSelector.select(context, policyGroup);
         return selected == null
-                ? PlacementResult.blocked(new PlacementKey(RoleType.ENCODER, resolvePolicyGroup(context)))
+                ? PlacementResult.blocked(new PlacementKey(RoleType.ENCODER, policyGroup),
+                        Response.error(StrategyErrorType.NO_ENCODER_WORKER))
                 : PlacementResult.success(selected);
     }
 

@@ -416,7 +416,7 @@ class RequestLifecycleDeliveryLockContractTest {
         DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
                 lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
-        RequestSlot original = lifecycle.requestSlot(207L);
+        RequestSlot original = lifecycle.requestSlot("207");
 
         new EndpointEventProjector(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
                 List.of(PrefillState.WorkerStatusFact.terminal(
@@ -446,7 +446,7 @@ class RequestLifecycleDeliveryLockContractTest {
             SchedulingTestConfig.useNonBatchDispatcher(config);
         }
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 208L, 1L);
+        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, "208", 1L);
         when(decode.isAcceptedByEngine(reservation)).thenReturn(true);
         BalanceContext context = context(208L);
         CompletableFuture<Response> future = lifecycle.register(context);
@@ -468,7 +468,7 @@ class RequestLifecycleDeliveryLockContractTest {
         } else {
             lifecycle.publishRoute(claim, precedingWork, 30_000L);
         }
-        RequestSlot slot = lifecycle.requestSlot(208L);
+        RequestSlot slot = lifecycle.requestSlot("208");
         synchronized (slot) {
             assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
             assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
@@ -523,11 +523,11 @@ class RequestLifecycleDeliveryLockContractTest {
 
         assertTrue(registered.future().join().isSuccess());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
-                lifecycle.getRequestState(205L, 0L).state());
+                lifecycle.getRequestState("205", 0L).state());
         // The observation window includes the 10-second handoff grace and is
         // independent of worker-status RPC timing and request inactivity.
         assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
-            while (!lifecycle.getRequestState(205L, 0L).detail().contains("SUSPECTED_LOST")) {
+            while (!lifecycle.getRequestState("205", 0L).detail().contains("SUSPECTED_LOST")) {
                 Thread.sleep(5L);
             }
         });

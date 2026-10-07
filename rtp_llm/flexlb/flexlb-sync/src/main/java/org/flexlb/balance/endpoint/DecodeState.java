@@ -137,12 +137,6 @@ final class DecodeState {
         }
     }
 
-    ReservationHandle reserve(long requestId, long requiredKv, long kvBudget, int priority,
-                              boolean queued, AdmissionCapacity capacity) {
-        return reserve(Long.toString(requestId), requiredKv, kvBudget, priority,
-                queued, capacity);
-    }
-
     private ReservationHandle reserveLocked(String requestId,
                                             long kvTokens,
                                             long kvBudgetTokens,

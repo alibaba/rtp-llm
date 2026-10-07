@@ -34,7 +34,7 @@ import xlsxwriter
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 PV_MARKER = "pvLogger - "
-LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})")
+LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d{3,6})")
 SOURCE_SUFFIXES = {".csv", ".log", ".txt", ".snapshot"}
 # PDFUSION is the prefill-equivalent role in fused deployments.  It must be
 # treated alongside PREFILL for route/cache/decision reconstruction, but DECODE
@@ -64,7 +64,7 @@ class PvSource:
     instance: str
 
 
-def _instance_from_path(path: Path, collection_root: Path | None = None) -> str:
+def _instance_from_path(path: Path) -> str:
     """Infer a stable instance label when no collector manifest is present."""
 
     name = path.name
@@ -75,8 +75,6 @@ def _instance_from_path(path: Path, collection_root: Path | None = None) -> str:
     generic_names = {"pv", "pv.log", "snapshot", "content", "export", "pvlog", "raw"}
     if name.lower() not in generic_names:
         return name
-    if collection_root is not None and path.parent != collection_root:
-        return path.parent.name
     return path.parent.name or name
 
 
@@ -105,7 +103,7 @@ def _manifest_sources(manifest_path: Path) -> list[PvSource]:
         if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         instance = (item.get("instance") or item.get("pod")
-                    or item.get("instance_id") or _instance_from_path(path, manifest_path.parent))
+                    or item.get("instance_id") or _instance_from_path(path))
         result.append(PvSource(path.resolve(), str(instance)))
     return result
 
@@ -133,7 +131,7 @@ def discover_sources(input_path: str | Path) -> list[PvSource]:
     manifested = (_manifest_sources(root / "collect_manifest.json")
                   or _manifest_sources(root / "manifest.json"))
     discovered = manifested or [
-        PvSource(path.resolve(), _instance_from_path(path, root))
+        PvSource(path.resolve(), _instance_from_path(path))
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES
     ]
@@ -214,7 +212,7 @@ def epoch_ms_to_text(value: Any) -> str | None:
 
 def log_time_from_content(content: str) -> str | None:
     match = LOG_TIME_RE.match(content)
-    return match.group(1) if match else None
+    return match.group(1).replace(",", ".") if match else None
 
 
 def parse_pv_record(content: str) -> tuple[str | None, dict[str, Any]] | None:
@@ -306,10 +304,12 @@ def get_route_cache_selection(route: dict[str, Any] | None) -> dict[str, Any]:
     if selection:
         return selection
     decision = get_prefill_decision(route)
-    for candidate in decision.get("candidates", []):
+    for candidate in decision.get("workers", []) or []:
+        if not isinstance(candidate, dict):
+            continue
         if candidate.get("selected"):
             return {"hitCacheTokens": candidate.get("routingMatchTokens"),
-                    "selectedIp": candidate.get("endpoint", "").split(":")[0]}
+                    "selectedIp": candidate.get("ip")}
     return {}
 
 
@@ -321,7 +321,7 @@ def get_prefill_decision(route: dict[str, Any] | None) -> dict[str, Any]:
         # Only normalize identity. Current millisecond estimates must never populate
         # legacy token-work columns, even when their names look similar.
         workers = []
-        for candidate in current.get("candidates", []):
+        for candidate in current.get("candidates", []) or []:
             if not isinstance(candidate, dict):
                 continue
             endpoint = candidate.get("endpoint", "")
@@ -389,11 +389,17 @@ def availability_text(route: bool, cache: bool, status: bool, has_ttft: bool) ->
     return " | ".join(missing) if missing else "COMPLETE"
 
 
-def route_success(route: dict[str, Any] | None) -> bool:
+def route_response_code(route: dict[str, Any] | None) -> Any:
     if not route:
-        return False
-    response = route.get("response", {})
-    return bool(route.get("success")) and route.get("code", response.get("code")) == 200
+        return None
+    if "code" in route:
+        return route["code"]
+    response = route.get("response")
+    return response.get("code") if isinstance(response, dict) else None
+
+
+def route_success(route: dict[str, Any] | None) -> bool:
+    return bool(route and route.get("success")) and route_response_code(route) == 200
 
 
 def largest_phase(row: dict[str, Any]) -> tuple[str, float | None]:
@@ -697,7 +703,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "selected_snapshot_tracked_running_remaining_prefill_tokens": as_number(selected_snapshot.get("trackedRunningRemainingPrefillTokens")),
             "selected_snapshot_engine_waiting_uncached_tokens": as_number(selected_snapshot.get("engineWaitingUncachedTokens")),
             "selected_snapshot_engine_running_remaining_prefill_tokens": as_number(selected_snapshot.get("engineRunningRemainingPrefillTokens")),
-            "route_response_code": route.get("code", route.get("response", {}).get("code")) if route else None,
+            "route_response_code": route_response_code(route),
             "prefill_route_code": server_status.get("code") if server_status else None,
             "route_success": route_success(route),
             "telemetry_status": availability_text(bool(route), bool(cache), bool(status), prefill_engine_ttft_ms is not None),
@@ -1147,7 +1153,9 @@ def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     index = 1
     for row in rows:
         for decision in row.get("_routing_decisions", []):
-            for candidate in decision.get("candidates", []) or [{}]:
+            candidates = [candidate for candidate in decision.get("candidates", []) or []
+                          if isinstance(candidate, dict)]
+            for candidate in candidates or [{}]:
                 values = [row["request_id"], row.get("flexlb_instance")] + [decision.get(key) for key in common[2:]]
                 values += [candidate.get(key) for key in fields]
                 values += [(decision.get("prefillPolicy") or {}).get(key) for key in policy_fields]

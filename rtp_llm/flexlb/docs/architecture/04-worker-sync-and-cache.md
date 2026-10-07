@@ -13,8 +13,15 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 Worker Status 的共享 PB 协议定义为 `string TaskInfoPB.request_id = 1`，
 Java、C++ 和 Python 使用同一字段定义生成代码。
-`RequestId.parse` 保留原始字符串，并兼容旧版本同字段编号的整数编码；缺失 ID 会报错。
+对 Worker Status 和客户端请求中的字符串 ID，`RequestId.parse` 优先保留原始字符串；
+字符串缺失时，从同字段编号的 unknown fields 中读取旧 int64 编码并转换成字符串；两者都缺失时会报错。
 Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调度请求使用同一 ID 关联。
+Master 的请求模型、调度、取消、状态查询、资源预留和 tracing 接口均只接收字符串 ID。
+客户端的 Schedule、Cancel、GetRequestState gRPC 请求使用相同的边界兼容读取；HTTP JSON 的数字 ID 在反序列化请求模型时转换成字符串。
+Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64 字段；
+相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
+`GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
+对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
 
 ### 调度拓扑
 
@@ -73,17 +80,23 @@ Encoder 使用常规 `GetWorkerStatus`，角色字符串为 `ENCODER`，`RoleTyp
 `running_task_info` 和 `finished_task_list` 投影到 Encoder 阶段的请求记录；运行中的
 任务使本地待观察并发与引擎并发对账，完成任务中的错误码决定完成或失败。当前
 PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
-响应字段（`WorkerStatusResponse`）：`alive`、`available_concurrency`、running/waiting/finished
-任务表（Map<requestId, TaskInfo>）、`status_version`、`step_latency_ms`、`iterate_count`、
-dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_match_rollback_blocks`、
-`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
+`WorkerStatusPB` 由 `EngineStatusConverter.convertToStatusObservation` 转成不可变的
+`WorkerStatus.StatusObservation`。其中 `runningTasks` 对应引擎的 `running_task_info`，
+保存所有尚未完成的任务，包括 `PENDING`、`RECEIVED`、`KV_ALLOCATED` 和 `RUNNING` 阶段；
+`finishedTasks` 单独保存完成上报。任务按字符串 request ID 索引，并保留各自的 `phase`。
+纯运行任务需按 `phase == RUNNING` 筛选，不能用 `runningTasks.size()` 代替；
+`runningQueryLen` 与 `waitingQueryLen` 则直接保留引擎上报的数量。
+其余字段包括 `alive`、`available_concurrency`、`status_version`、`step_latency_ms`、
+`iterate_count`、dp/tp size、KV cache 容量、`block_size`、`block_hash_lookahead_tokens`、
+`cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次 RPC 失败会把该逻辑 worker 标为不健康并移除其 endpoint；同一 frontend 的其他已发布
-logical worker 不受影响。
+连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
+同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
+旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
 新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
 （`status_version=0`）与响应处理异常跳过本轮更新。
 

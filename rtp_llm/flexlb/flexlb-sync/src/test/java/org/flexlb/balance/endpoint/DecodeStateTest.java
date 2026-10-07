@@ -42,10 +42,10 @@ class DecodeStateTest {
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("1", 100, 200, 50, true, CAPACITY);
         var first = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
-        assertTrue(state.resourceSnapshot().isQueued(1));
+        assertTrue(state.resourceSnapshot().isQueued("1"));
         assertEquals(0, state.stats().inflight());
         assertAdmissionMetricsMatch(state);
 
@@ -70,7 +70,7 @@ class DecodeStateTest {
     void calibrationConvertsTheSameReservationWithoutDoubleChargingAndSettlesTerminal() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(2, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("2", 100, 200, 50, true, CAPACITY);
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         TaskInfo task = new TaskInfo();
         task.setRequestId("2");
@@ -106,7 +106,7 @@ class DecodeStateTest {
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = owner.tryPinGeneration()) {
-                reservation = owner.reserve(pin, 3, 100, 200, 50);
+                reservation = owner.reserve(pin, "3", 100, 200, 50);
             }
             var permit = owner.acquireDispatchPermit(reservation, CAPACITY).permit();
             assertThrows(IllegalArgumentException.class, () -> other.dispatch(permit, DispatchOutcome.ENGINE_OWNED));
@@ -124,7 +124,7 @@ class DecodeStateTest {
     void regressedActivePhaseRetainsIdentityAcrossRepeatedReportsAndResumption(TaskPhase regressed) {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 2; i++) {
             var observation = calibrate(state, status, Map.of("10", task(10, regressed)), Map.of());
@@ -146,8 +146,8 @@ class DecodeStateTest {
     void expiryOfRegressedRequestDoesNotSubtractAnotherRunningRequestsSlot() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var regressed = state.reserve(10, 100, 200, 50, true, CAPACITY);
-        var running = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        var regressed = state.reserve("10", 100, 200, 50, true, CAPACITY);
+        var running = state.reserve("11", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING), "11", task(11, TaskPhase.RUNNING)), Map.of());
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED), "11", task(11, TaskPhase.RUNNING)), Map.of());
         // These are local Engine ownership slots, not physical GPU running concurrency.
@@ -164,12 +164,12 @@ class DecodeStateTest {
     void regressedClaimKeepsOneHoldAndExplicitFinishedWinsOverActiveSnapshot(PreemptionCancelPhase reply) {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var victim = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
                 1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
         assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelReply(10, reply)));
+        assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelReply("10", reply)));
         for (int i = 0; i < 2; i++) {
             calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED)), Map.of());
             assertEquals(2, state.routingView().engineCapacityUsed(), "one victim hold plus one incoming shadow");
@@ -192,7 +192,7 @@ class DecodeStateTest {
     void emptyWorkerReportReleasesCapacityAndLateFinishedKeepsOriginalReservation() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("10", 100, 200, 50, true, CAPACITY);
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 3; i++) {
@@ -210,7 +210,7 @@ class DecodeStateTest {
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(STILL_OWNED, state.release(reservation, ReleaseReason.COUNTERPART_FINISHED));
         assertThrows(IllegalStateException.class, () -> state.release(reservation, ReleaseReason.LOCAL_ROLLBACK));
-        var other = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        var other = state.reserve("11", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)), Map.of());
         var terminal = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
                 Map.of("10", task(10, TaskPhase.RUNNING)));
@@ -232,13 +232,13 @@ class DecodeStateTest {
     void requestMissingFromWorkerReportCanResumeAndExpireWithoutReleasingAnotherRequestsCapacity() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         calibrate(state, status, Map.of(), Map.of());
         var resumed = calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(reservation, resumed.facts().getFirst().reservation());
         assertEquals(1, state.routingView().engineCapacityUsed());
-        var other = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        var other = state.reserve("11", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)), Map.of());
         assertEquals(RELEASED, state.release(reservation, ReleaseReason.EXPIRED));
         assertFalse(state.hasOwnedResources(reservation));
@@ -254,7 +254,7 @@ class DecodeStateTest {
     void requestWaitingForFinishedRemainsUntilSchedulerCleanupOrEndpointRemoval() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         calibrate(state, status, Map.of(), Map.of());
         state.evictExpiredRequests(-1, requestId -> true);
@@ -267,7 +267,7 @@ class DecodeStateTest {
     void requestWaitingForFinishedWithoutSchedulerTrackingIsRemovedAfterTimeout() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         calibrate(state, status, Map.of(), Map.of());
         state.evictExpiredRequests(-1, requestId -> false);
@@ -277,7 +277,7 @@ class DecodeStateTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setInputLength(100L);
         task.setPhase(phase);
         return task;

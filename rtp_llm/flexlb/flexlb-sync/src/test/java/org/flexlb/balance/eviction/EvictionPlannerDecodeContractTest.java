@@ -63,7 +63,7 @@ class EvictionPlannerDecodeContractTest {
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
         return new DecodeRequestView(
-                id, priority, kvTokens, kvTokens,
+                Long.toString(id), priority, kvTokens, kvTokens,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                 true, 0L, false, false);
     }

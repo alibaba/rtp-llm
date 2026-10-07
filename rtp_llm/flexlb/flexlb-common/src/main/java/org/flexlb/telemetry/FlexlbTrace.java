@@ -161,11 +161,6 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void setRequestAttributes(Span span, long requestId) {
-        // Match the C++ and Python registries without changing the business ID.
-        setAttribute(span, REQUEST_ID, Long.toString(requestId));
-    }
-
     public static void setRequestAttributes(Span span, String requestId) {
         setAttribute(span, REQUEST_ID, requestId);
     }

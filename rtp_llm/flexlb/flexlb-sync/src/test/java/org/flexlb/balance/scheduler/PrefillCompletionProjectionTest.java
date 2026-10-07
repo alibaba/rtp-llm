@@ -80,7 +80,7 @@ class PrefillCompletionProjectionTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(101L, future);
+            try (var mutation = requests.claimAdmissionHandle("101", future);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
@@ -109,7 +109,7 @@ class PrefillCompletionProjectionTest {
             task.setInputLength(16L);
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
-            RequestSlot slot = requests.requestSlot(101L);
+            RequestSlot slot = requests.requestSlot("101");
             synchronized (slot) {
                 assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "running Prefill is positive Engine evidence");
             }

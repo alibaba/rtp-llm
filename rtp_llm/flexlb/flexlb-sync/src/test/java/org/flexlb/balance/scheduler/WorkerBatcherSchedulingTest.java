@@ -17,6 +17,9 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -176,7 +180,7 @@ class WorkerBatcherSchedulingTest {
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                 .projectionPolicy();
         RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, new RouteProjection.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+                inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
@@ -226,7 +230,7 @@ class WorkerBatcherSchedulingTest {
             finish.countDown();
             var shared = first.get(2, TimeUnit.SECONDS);
             for (var follower : followers) {
-                org.junit.jupiter.api.Assertions.assertSame(shared, follower.get(2, TimeUnit.SECONDS));
+                assertSame(shared, follower.get(2, TimeUnit.SECONDS));
             }
         } finally {
             finish.countDown();
@@ -318,8 +322,8 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "NON_BATCH,SINGLE,1,0,single_request",
             "BATCH,SINGLE,1,0,single_request",
             "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
@@ -417,8 +421,8 @@ class WorkerBatcherSchedulingTest {
         assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
     }
 
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void existingRuntimeUsesUpdatedWindowOnNextDecision(boolean increaseWindow) throws Exception {
         FlexlbConfig initial = fixedConfig();
@@ -438,7 +442,7 @@ class WorkerBatcherSchedulingTest {
         current.set(updated);
         assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
         if (increaseWindow) {
-            org.junit.jupiter.api.Assertions.assertFalse(delivery.firstAttempt.await(100L, TimeUnit.MILLISECONDS));
+            assertFalse(delivery.firstAttempt.await(100L, TimeUnit.MILLISECONDS));
             current.set(initial);
             runtime.signalSchedulingInputsChanged();
         }

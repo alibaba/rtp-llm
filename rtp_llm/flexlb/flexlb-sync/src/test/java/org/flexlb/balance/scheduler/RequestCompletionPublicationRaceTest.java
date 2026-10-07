@@ -68,13 +68,13 @@ class RequestCompletionPublicationRaceTest {
         try {
             BalanceContext context = RequestLifecycleTestSupport.context(config, 501L);
             CompletableFuture<Response> future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(501L);
+            RequestSlot slot = registry.requestSlot("501");
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             WorkerStatus prefillStatus = mock(WorkerStatus.class);
             when(prefillStatus.getMetricIpPort()).thenReturn("prefill");
             when(prefill.getStatus()).thenReturn(prefillStatus);
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 501L, 1L);
+            var reservation = new DecodeEndpoint.ReservationHandle(1L, "501", 1L);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
                     prefill, decode, reservation, slot.createdAtMs());
             RequestLifecycleTestSupport.bind(registry,
@@ -114,7 +114,7 @@ class RequestCompletionPublicationRaceTest {
             // A second response on the single publisher worker proves the old ACK's
             // queued publication has run while the TTL response is still withheld.
             var barrier = registry.register(RequestLifecycleTestSupport.context(config, 502L));
-            registry.cancelRequest(502L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancelRequest("502", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(future.isDone(), "an obsolete success permit cannot win after TTL claims cleanup");
 

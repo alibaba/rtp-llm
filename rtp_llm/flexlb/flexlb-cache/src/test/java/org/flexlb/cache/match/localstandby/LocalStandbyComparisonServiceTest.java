@@ -137,7 +137,7 @@ class LocalStandbyComparisonServiceTest {
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-index-1",
                 List.of(11L),
-                1024,
+                12000,
                 RoleType.PREFILL,
                 "default");
         comparisonService.trackResolvedLocalStandbyPrediction(query, new CacheMatchResult(
@@ -149,7 +149,7 @@ class LocalStandbyComparisonServiceTest {
                 1024));
 
         CacheHitFeedback feedback = new CacheHitFeedback(
-                "cache_hit_comparison", "request-index-1", "LOCAL_STANDBY", "PREFILL", "default",
+                "cache_hit_comparison", "request-index-1", "KVCM", "PREFILL", "default",
                 "10.0.0.1", 8080, 1, "running", 12000, 1024, 1024,
                 false, 0, 0,
                 9000, 7976);
@@ -158,8 +158,8 @@ class LocalStandbyComparisonServiceTest {
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertEquals("10.0.0.1:8080@1", result.worker());
-        assertEquals(1024, result.localStandbyPrediction().predictedHitTokens());
-        assertEquals(7976, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(2048, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(6952, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test
@@ -180,7 +180,7 @@ class LocalStandbyComparisonServiceTest {
                 1024));
 
         CacheHitFeedback feedback = new CacheHitFeedback(
-                "cache_hit_comparison", "request-miss-1", "LOCAL_STANDBY", "PREFILL", "default",
+                "cache_hit_comparison", "request-miss-1", "KVCM", "PREFILL", "default",
                 "10.0.0.1", 8080, 1, "running", 12000, 1024, 1024,
                 false, 0, 0,
                 9000, 7976);
@@ -189,8 +189,8 @@ class LocalStandbyComparisonServiceTest {
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertNotNull(result.localStandbyPrediction());
-        assertEquals(1024, result.localStandbyPrediction().predictedHitTokens());
-        assertEquals(7976, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(0, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(9000, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test

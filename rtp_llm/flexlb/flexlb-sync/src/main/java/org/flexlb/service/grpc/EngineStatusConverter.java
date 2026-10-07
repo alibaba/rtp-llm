@@ -1,12 +1,10 @@
 package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatus.TaskObservation;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
@@ -25,61 +23,13 @@ import java.util.Set;
  */
 public class EngineStatusConverter {
 
-    /** Convert WorkerStatusPB to the mutable response DTO used by older callers. */
-    public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-
-        response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
-        // LocalRpcServer::GetWorkerStatus does not currently populate this field.
-        // Preserve it for telemetry, but do not use it as a scheduling or batching limit.
-        response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
-        response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
-        response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
-        response.setStepLatencyMs(workerStatusPB.getStepLatencyMs());
-        response.setIterateCount(workerStatusPB.getIterateCount());
-        response.setLastStepMetrics(convertStepMetrics(workerStatusPB));
-        response.setDpSize(workerStatusPB.getDpSize());
-        response.setTpSize(workerStatusPB.getTpSize());
-        response.setDpRank(workerStatusPB.getDpRank());
-        response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
-        response.setCacheMatchRollbackBlocks(workerStatusPB.getCacheMatchRollbackBlocks());
-        response.setKvCacheGroupMode(convertKvCacheGroupMode(
-                workerStatusPB.getKvCacheGroupMode()));
-        response.setStatusVersion(workerStatusPB.getStatusVersion());
-        response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
-        response.setAlive(workerStatusPB.getAlive());
-        response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
-        response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
-        response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
-        response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
-        if (workerStatusPB.getBlockSize() > 0) {
-            response.setCacheStatus(CacheStatus.builder()
-                    .availableKvCache(workerStatusPB.getAvailableKvCache())
-                    .totalKvCache(workerStatusPB.getTotalKvCache())
-                    .blockSize(workerStatusPB.getBlockSize())
-                    .version(workerStatusPB.getStatusVersion())
-                    .build());
-        }
-
-        List<EngineRpcService.TaskInfoPB> runningTaskInfoList =
-                workerStatusPB.getRunningTaskInfoList();
-        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList =
-                runningTaskInfoList.stream()
-                        .filter(taskInfoPB -> resolvePhase(taskInfoPB)
-                                != TaskPhase.RUNNING)
-                        .toList();
-        response.setWaitingTaskInfo(convertToTaskInfoList(waitingTaskInfoList));
-        response.setRunningTaskInfo(convertToTaskInfoList(runningTaskInfoList));
-        response.setFinishedTaskInfo(convertToTaskInfoList(
-                workerStatusPB.getFinishedTaskListList()));
-
-        return response;
-    }
-
-    /** Convert one protobuf response directly into the immutable status boundary. */
+    /**
+     * Convert one protobuf response into an immutable observation, retaining all
+     * active task phases from {@code running_task_info}.
+     */
     public static StatusObservation convertToStatusObservation(WorkerStatus owner,
                                                                EngineRpcService.WorkerStatusPB workerStatusPB) {
-        Map<String, TaskObservation> runningTasks = convertTasks(
+        Map<String, TaskObservation> activeTasks = convertTasks(
                 workerStatusPB.getRunningTaskInfoList());
         Map<String, TaskObservation> finishedTasks = convertTasks(
                 workerStatusPB.getFinishedTaskListList());
@@ -88,7 +38,7 @@ public class EngineStatusConverter {
                 (long) workerStatusPB.getAvailableConcurrency(),
                 workerStatusPB.getAvailableKvCache(),
                 workerStatusPB.getTotalKvCache(),
-                runningTasks,
+                activeTasks,
                 workerStatusPB.getStepLatencyMs(),
                 workerStatusPB.getIterateCount(),
                 workerStatusPB.getDpSize(),
@@ -147,81 +97,6 @@ public class EngineStatusConverter {
         cacheStatus.setCachedKeys(cachedKeysSet);
         cacheStatus.setCacheKeySize(cacheKeysMap.size());
         return cacheStatus;
-    }
-
-    /**
-     * Convert list of TaskInfoPB to the mutable DTO map used by compatibility
-     * response callers.
-     */
-    private static Map<String, TaskInfo> convertToTaskInfoList(
-            List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
-        if (taskInfoPBList == null) {
-            return null;
-        }
-        Map<String, TaskInfo> taskInfoMap = new HashMap<>(taskInfoPBList.size());
-
-        for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
-            TaskInfo taskInfo = new TaskInfo();
-            String requestId = RequestId.parse(taskInfoPB);
-            taskInfo.setRequestId(requestId);
-            taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
-            taskInfo.setPrefixLengthValid(taskInfoPB.getPrefixLengthValid());
-            taskInfo.setInputLength(taskInfoPB.getInputLength());
-            taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
-            taskInfo.setIterateCount(taskInfoPB.getIterateCount());
-            taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
-            taskInfo.setDpRank(taskInfoPB.getDpRank());
-            taskInfo.setBatchId(taskInfoPB.getBatchId());
-            taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
-            taskInfo.setPhase(resolvePhase(taskInfoPB));
-            taskInfo.setPriorityPreemptionProgress(switch (
-                    taskInfoPB.getPriorityPreemptionProgress()) {
-                case PRIORITY_PREEMPTION_CANCELING ->
-                        PriorityPreemptionProgress.CANCELING;
-                case PRIORITY_PREEMPTION_CANCELED ->
-                        PriorityPreemptionProgress.CANCELED;
-                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
-                        PriorityPreemptionProgress.NONE;
-            });
-            if (taskInfoPB.hasErrorInfo()
-                    && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
-                taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
-                taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
-            }
-            taskInfo.setWaitingEnteredTimeMs(taskInfoPB.getWaitingEnteredTimeMs());
-            taskInfo.setRunningEnteredTimeMs(taskInfoPB.getRunningEnteredTimeMs());
-            taskInfo.setRequestReceivedTimeMs(taskInfoPB.getRequestReceivedTimeMs());
-            taskInfo.setInputQueueEnqueueTimeMs(taskInfoPB.getInputQueueEnqueueTimeMs());
-            taskInfo.setInputQueueDrainTimeMs(taskInfoPB.getInputQueueDrainTimeMs());
-            taskInfo.setRemoteKvWaitMs(taskInfoPB.getRemoteKvWaitMs());
-            taskInfo.setFirstTokenTimeMs(taskInfoPB.getFirstTokenTimeMs());
-            taskInfo.setHbmLocalMatchTokens(taskInfoPB.getHbmLocalMatchTokens());
-            taskInfo.setRemoteKvAddedMatchTokens(
-                    taskInfoPB.getRemoteKvAddedMatchTokens());
-            taskInfo.setFirstPrefillStepId(taskInfoPB.getFirstPrefillStepId());
-            taskInfo.setLastPrefillStepId(taskInfoPB.getLastPrefillStepId());
-            taskInfo.setPrefillStepCount(taskInfoPB.getPrefillStepCount());
-            taskInfo.setPrefillNonfinalChunkTokensMin(
-                    taskInfoPB.getPrefillNonfinalChunkTokensMin());
-            taskInfo.setPrefillNonfinalChunkTokensMax(
-                    taskInfoPB.getPrefillNonfinalChunkTokensMax());
-            if (taskInfoPB.hasCompletedPrefillTokens()) {
-                taskInfo.setCompletedPrefillTokens(
-                        taskInfoPB.getCompletedPrefillTokens());
-            }
-            if (taskInfoPB.hasRemainingPrefillTokens()) {
-                taskInfo.setRemainingPrefillTokens(
-                        taskInfoPB.getRemainingPrefillTokens());
-            }
-            if (taskInfoPB.hasLastCompletedPrefillStepId()) {
-                taskInfo.setLastCompletedPrefillStepId(
-                        taskInfoPB.getLastCompletedPrefillStepId());
-            }
-
-            taskInfoMap.put(String.valueOf(requestId), taskInfo);
-        }
-
-        return taskInfoMap;
     }
 
     /**

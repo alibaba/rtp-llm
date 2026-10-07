@@ -83,7 +83,7 @@ class RequestConfirmationTimeoutTest {
             }
             var context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
             var future = requests.register(context);
-            RequestSlot slot = requests.requestSlot(REQUEST_ID);
+            RequestSlot slot = requests.requestSlot(Long.toString(REQUEST_ID));
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
@@ -91,7 +91,7 @@ class RequestConfirmationTimeoutTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future);
+            try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
@@ -133,7 +133,7 @@ class RequestConfirmationTimeoutTest {
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
+            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getLocallyOwnedRequestCount());
@@ -152,7 +152,7 @@ class RequestConfirmationTimeoutTest {
             }
             requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
+            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, decode.routingView().engineCapacityUsed());

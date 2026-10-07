@@ -52,7 +52,7 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
     @Override
     public List<WorkerHost> getHosts(Endpoint endpoint) {
         bindRuntimeConfig(endpoint);
-        List<WorkerHost> discoveredHosts = providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
+        List<WorkerHost> discoveredHosts = validatedProviderFor(endpoint).getHosts(endpoint);
         return normalizeHosts(discoveredHosts, endpoint);
     }
 
@@ -62,7 +62,7 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
         ServiceHostListener normalizedListener = listener == null
                 ? null
                 : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
-        providers.get(endpoint.getDiscovery().getType()).listen(endpoint, normalizedListener);
+        validatedProviderFor(endpoint).listen(endpoint, normalizedListener);
     }
 
     @Override

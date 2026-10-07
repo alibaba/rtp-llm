@@ -266,7 +266,7 @@ class WorkerBatcherRequestCapacityTest {
 
     private static ScheduledRequest item(FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(100L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);

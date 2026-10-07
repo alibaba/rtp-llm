@@ -309,7 +309,7 @@ public class FlexlbGrpcForwarder {
         String masterHost = nullToEmpty(guard.masterHostIpPort());
         if (grpcFailure) {
             Logger.warn(
-                    "event=flexlb_forward_failed request_id=" + requestId
+                    "event=flexlb_forward_failed request_id=" + logDescription(requestId)
                             + " operation=" + operation.logValue()
                             + " forward_hop=" + guard.nextHop()
                             + " master=" + masterHost
@@ -319,7 +319,7 @@ public class FlexlbGrpcForwarder {
                     error);
             reportForwardResult(ipOfOrLocal(masterHost), "GRPC_FAILED");
         } else {
-            Logger.error("event=flexlb_forward_failed request_id=" + requestId
+            Logger.error("event=flexlb_forward_failed request_id=" + logDescription(requestId)
                     + " operation=" + operation.logValue()
                     + " forward_hop=" + guard.nextHop()
                     + " master=" + masterHost
@@ -335,7 +335,11 @@ public class FlexlbGrpcForwarder {
             return "";
         }
         String singleLine = description.replace('\r', ' ').replace('\n', ' ');
-        return singleLine.length() > 512 ? singleLine.substring(0, 512) : singleLine;
+        if (singleLine.length() <= 512) {
+            return singleLine;
+        }
+        int end = Character.isHighSurrogate(singleLine.charAt(511)) ? 511 : 512;
+        return singleLine.substring(0, end);
     }
 
     private void reportForwardResult(String target, String result) {

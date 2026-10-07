@@ -53,6 +53,14 @@ class SglangBlockHashStrategyTest {
                 () -> strategy.calculate(TokenIds.wrap(new int[]{1}), 0, 0));
         assertThrows(
                 IllegalArgumentException.class,
+                () -> strategy.calculate(TokenIds.wrap(new int[]{1}), (long) Integer.MAX_VALUE + 1L, 0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> strategy.calculate(TokenIds.wrap(new int[]{1}), 1L << 32, 0));
+        assertEquals(List.of(),
+                strategy.calculate(TokenIds.wrap(new int[]{1}), Integer.MAX_VALUE, 0));
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> strategy.calculate(TokenIds.wrap(new int[]{1}), 4, -1));
         assertThrows(
                 IllegalArgumentException.class,

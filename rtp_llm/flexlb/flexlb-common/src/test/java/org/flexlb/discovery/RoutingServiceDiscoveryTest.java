@@ -12,8 +12,26 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RoutingServiceDiscoveryTest {
+
+    @Test
+    void rejectsInvalidDiscoveryConfigurationOnQueriesAndSubscriptions() {
+        RoutingServiceDiscovery discovery =
+                new RoutingServiceDiscovery(List.of(new RecordingProvider()));
+        Endpoint missingDiscovery = endpoint();
+        missingDiscovery.setDiscovery(null);
+        Endpoint missingType = endpoint();
+        missingType.getDiscovery().setType(null);
+        Endpoint missingProvider = endpoint();
+        missingProvider.getDiscovery().setType(ServiceDiscoveryType.VIPSERVER);
+
+        for (Endpoint endpoint : new Endpoint[] {null, missingDiscovery, missingType, missingProvider}) {
+            assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
+            assertThrows(IllegalArgumentException.class, () -> discovery.listen(endpoint, hosts -> { }));
+        }
+    }
 
     @Test
     void doesNotValidateOnRuntimeQueries() {

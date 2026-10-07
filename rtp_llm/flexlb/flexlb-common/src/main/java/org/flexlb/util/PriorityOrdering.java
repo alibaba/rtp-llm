@@ -20,6 +20,9 @@ import java.util.Comparator;
  */
 public final class PriorityOrdering {
 
+    private static final Comparator<String> REQUEST_ID_ORDER =
+            Comparator.nullsFirst(Comparator.naturalOrder());
+
     /**
      * Strict priority-then-FIFO comparator for any {@link Prioritized} item.
      *
@@ -56,7 +59,7 @@ public final class PriorityOrdering {
         int strictOrder = compare(leftPriority, leftEnqueueSeq,
                 rightPriority, rightEnqueueSeq);
         return strictOrder != 0
-                ? strictOrder : leftRequestId.compareTo(rightRequestId);
+                ? strictOrder : REQUEST_ID_ORDER.compare(leftRequestId, rightRequestId);
     }
 
     /**

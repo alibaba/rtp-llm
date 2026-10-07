@@ -303,12 +303,6 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportStatusCheckRemoteInfo(String role, Long startTime) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "role", role);
-        monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
-    }
-
     public void reportStatusCheckRemoteInfo(
             String engineIp, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
@@ -316,13 +310,6 @@ public class EngineHealthReporter {
                 "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags,
                 (double) System.nanoTime() / 1000 - startTime);
-    }
-
-    public void reportCacheStatusCheckRemoteInfo(String role, Long startTime) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "role", role);
-        monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
-        monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
     public void reportCacheStatusCheckRemoteInfo(
@@ -376,10 +363,11 @@ public class EngineHealthReporter {
 
     public void reportCacheStatusCheckerFail(WorkerStatus workerStatus,
                                              BalanceStatusEnum errorEnum) {
+        RoleType role = workerStatus.getRole();
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "engineIp", workerStatus.getMetricIpPort(),
                 "code", String.valueOf(errorEnum.getCode()),
-                "role", workerStatus.getRole().getCode());
+                "role", role == null ? "" : role.getCode());
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
@@ -741,8 +729,10 @@ public class EngineHealthReporter {
         CacheHitComparisonResult.CachePrediction sourcePrediction = kvcmPrediction != null
                 ? kvcmPrediction
                 : localSyncPrediction != null ? localSyncPrediction : localStandbyPrediction;
-        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
-                comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
+        if (sourcePrediction != null) {
+            monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
+                    comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
+        }
         if (kvcmPrediction != null && kvcmPrediction.localPredictionTokens() >= 0) {
             monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, tags,
                     comparison.actualHitTokens() - kvcmPrediction.localPredictionTokens());

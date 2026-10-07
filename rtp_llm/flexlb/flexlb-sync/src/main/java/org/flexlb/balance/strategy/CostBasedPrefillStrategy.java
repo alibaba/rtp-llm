@@ -91,6 +91,7 @@ public class CostBasedPrefillStrategy {
                         + " rejections={}",
                     requestId,
                     rejections);
+            balanceContext.recordSelectionReason(roleType, "NO_AVAILABLE_CANDIDATES");
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                     -1, "NO_AVAILABLE_CANDIDATES", rejections);
             RoleType poolWideBlocker = provenPoolWideBlocker(
@@ -153,7 +154,7 @@ public class CostBasedPrefillStrategy {
             balanceContext.recordSelectionReason(roleType, "COST_BASED");
         }
         cacheAwareService.trackRoutingPrediction(
-                String.valueOf(requestId), roleType, group, best.getStatus(),
+                requestId, roleType, group, best.getStatus(),
                 seqLen, bestCacheHit, cacheMatchResult);
         HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
         if (cacheMatchResult.source() == CacheMatchSource.KVCM && cacheMatchResult.querySucceeded()) {
@@ -569,7 +570,7 @@ public class CostBasedPrefillStrategy {
                 : request.getCacheKeyBlockSize();
         CacheMatchResult result = cacheAwareService.findMatchingEngines(
                 new CacheMatchQuery(
-                        String.valueOf(balanceContext.getRequestId()),
+                        balanceContext.getRequestId(),
                         request.getBlockCacheKeys(),
                         blockSize,
                         roleType,

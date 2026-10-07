@@ -64,7 +64,7 @@ public final class DecodePreemptionCoordinator {
             victims = List.copyOf(victims);
             if (incomingRequestId == null || incomingRequestId.isBlank()) {
                 throw new IllegalArgumentException(
-                        "incoming request id must be positive");
+                        "incoming request id must not be blank");
             }
             if (capacity == null) {
                 throw new IllegalArgumentException("capacity policy is required");
@@ -74,7 +74,7 @@ public final class DecodePreemptionCoordinator {
                 if (victim.requestId() == null || victim.requestId().isBlank()
                         || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
-                            "victim requestId and reservation token must be positive");
+                            "victim requestId must not be blank and reservation token must be positive");
                 }
                 if (victim.phase() == null
                         || !victim.phase().requiresEngineCancel()) {

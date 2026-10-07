@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -12,6 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ServerStatusTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void deserializesNullPreemptionIdsAsEmptyListAndCopiesThem() throws Exception {
+        ServerStatus status = objectMapper.readValue(
+                "{\"preempt_request_ids\":null}", ServerStatus.class);
+
+        assertEquals(List.of(), status.getPreemptRequestIds());
+        assertEquals(List.of(), ServerStatus.copyOf(status).getPreemptRequestIds());
+        assertEquals(0, objectMapper.valueToTree(status).get("preempt_request_ids").size());
+    }
 
     @Test
     void serializesSelectedEngineIndexWithoutChangingPhysicalAddress() {

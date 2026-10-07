@@ -330,7 +330,7 @@ class DecodePreemptionCoordinatorTest {
 
     private static DecodeRequestView victim(long requestId, long reservationToken) {
         return new DecodeRequestView(
-                requestId, 30, 64L, 64L,
+                Long.toString(requestId), 30, 64L, 64L,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                 true, reservationToken, false, false);
     }

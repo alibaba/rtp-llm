@@ -114,13 +114,15 @@ class LocalStandbyCacheMatchProviderTest {
     }
 
     @Test
-    void missingClientKeysDoNotPopulateIndex() {
+    void missingClientKeysOrSelectedWorkersDoNotPopulateIndex() {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
                 kvcm(modelMetaConfig()), cacheManager, reporter);
         Request request = request();
         request.setBlockCacheKeys(null);
         try {
+            provider.updateFromRoutedRequest(request(), null);
+            provider.updateFromRoutedRequest(request(), List.of());
             provider.updateFromRoutedRequest(request, List.of(worker(RoleType.PREFILL)));
             verifyNoInteractions(cacheManager);
         } finally {

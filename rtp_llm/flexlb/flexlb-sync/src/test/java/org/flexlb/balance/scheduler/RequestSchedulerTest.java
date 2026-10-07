@@ -834,7 +834,7 @@ class RequestSchedulerTest {
     private static BalanceContext context(FlexlbConfig config, long requestId, int priority) {
         BalanceContext context = new BalanceContext(config);
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setPriority(priority);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(

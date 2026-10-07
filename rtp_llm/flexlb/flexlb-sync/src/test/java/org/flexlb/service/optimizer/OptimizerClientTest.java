@@ -19,6 +19,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -37,6 +39,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -44,6 +47,20 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class OptimizerClientTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void metricFailureDoesNotEscapeSkippedOrFailedQueries(boolean stopped) {
+        doThrow(new IllegalStateException("metrics unavailable"))
+                .when(monitor).report(anyString(), any(), eq(1.0));
+        if (stopped) {
+            client.shutdown();
+        }
+
+        assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of()), selectedWorker()));
+        assertDoesNotThrow(() -> client.handleTraceQueryResponse(null));
+        verify(httpService, never()).request(any(), any(URI.class), any(), any());
+    }
 
     @Mock
     private GeneralHttpNettyService httpService;

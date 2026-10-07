@@ -569,7 +569,7 @@ public final class PrefillState {
         }
 
         private TerminalObservation merge(TerminalObservation other) {
-            if (requestId != other.requestId) {
+            if (!Objects.equals(requestId, other.requestId)) {
                 throw new IllegalArgumentException(
                         "cannot merge different terminal requests");
             }
@@ -1619,7 +1619,7 @@ public final class PrefillState {
                     new IdentityHashMap<>());
             for (Map.Entry<String, RequestEntry> canonical : requests.entrySet()) {
                 RequestEntry entry = canonical.getValue();
-                if (canonical.getKey() != entry.requestId) {
+                if (!Objects.equals(canonical.getKey(), entry.requestId)) {
                     invariantFailure = appendRetirementInvariant(
                             invariantFailure,
                             "request table key does not match request entry");

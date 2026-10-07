@@ -88,12 +88,12 @@ public class RequestRegistry {
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
     }
 
-    void attachGlobalQueue(GlobalQueueCoordinator queue) {
+    synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
         if (globalQueue != null) { throw new IllegalStateException("global queue already attached"); }
         globalQueue = Objects.requireNonNull(queue, "queue");
     }
 
-    void attachEncoderQueue(EncoderQueueCoordinator queue) {
+    synchronized void attachEncoderQueue(EncoderQueueCoordinator queue) {
         if (encoderQueue != null) { throw new IllegalStateException("Encoder queue already attached"); }
         encoderQueue = Objects.requireNonNull(queue, "queue");
     }
@@ -220,10 +220,6 @@ public class RequestRegistry {
 
     RequestSlot requestSlot(String requestId, RequestPhase phase) {
         return slots(phase).get(requestId);
-    }
-
-    RequestSlot requestSlot(long requestId) {
-        return requestSlot(Long.toString(requestId));
     }
 
     /**
@@ -435,10 +431,6 @@ public class RequestRegistry {
         }
     }
 
-    public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
-        return isAdmissionOpen(Long.toString(requestId), future);
-    }
-
     public AdmissionHandle claimAdmissionHandle(
             String requestId, CompletableFuture<?> future) {
         if (!enterAdmissionHandleGate()) {
@@ -463,11 +455,6 @@ public class RequestRegistry {
                 exitAdmissionHandleGate();
             }
         }
-    }
-
-    public AdmissionHandle claimAdmissionHandle(
-            long requestId, CompletableFuture<?> future) {
-        return claimAdmissionHandle(Long.toString(requestId), future);
     }
 
     private boolean enterAdmissionHandleGate() {
@@ -567,10 +554,6 @@ public class RequestRegistry {
         Objects.requireNonNull(reason, "reason");
         RequestSlot slot = requestSlot(requestId, phase);
         return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
-    }
-
-    public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
-        return cancelRequest(Long.toString(requestId), expectedBatchId, reason);
     }
 
     private static CancelTarget cancelTarget(
@@ -679,10 +662,6 @@ public class RequestRegistry {
             RequestState snapshot = entry.snapshot();
             return snapshot != null && snapshot.matchesBatch(expectedBatchId) ? snapshot : null;
         }
-    }
-
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
-        return getRequestState(Long.toString(requestId), expectedBatchId);
     }
 
     /**

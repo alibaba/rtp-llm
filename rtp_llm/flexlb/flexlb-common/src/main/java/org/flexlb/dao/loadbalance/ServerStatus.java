@@ -33,6 +33,10 @@ public class ServerStatus {
     @JsonProperty("preempt_request_ids")
     private List<String> preemptRequestIds = List.of();
 
+    public void setPreemptRequestIds(List<String> preemptRequestIds) {
+        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
+    }
+
     @JsonProperty("dp_rank")
     private long dpRank;
 

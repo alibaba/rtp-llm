@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.HashMap;
 import java.util.List;
@@ -1160,6 +1161,27 @@ class PrefillEndpointTest {
         verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 0, 0);
     }
 
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void reportsQueueAndInflightMetricsWithTheWorkerRole(RoleType role) {
+        WorkerStatus status = EndpointTestSupport.workerStatus(role, "127.0.0.1", 8080, 8090);
+        PrefillEndpoint metricsEndpoint = new PrefillEndpoint(
+                status, config, EndpointTestSupport.routeStrategy(requestRuntime),
+                requestRuntime.events(), endpointReporter);
+        try {
+            BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+            metricsEndpoint.reportBatchMetrics(reporter);
+
+            verify(reporter).reportBatcherQueueSize(role.name(), "127.0.0.1:8080", 0);
+            verify(reporter).reportBatcherQueueDepthByPriority(role.name(), "127.0.0.1:8080", 0, 0);
+            verify(reporter).reportInflightBatchCount(role.name(), "127.0.0.1:8080", 0);
+            verify(reporter).reportInflightRequestCount(role.name(), "127.0.0.1:8080", 0);
+            verify(reporter).reportInflightMaxAgeMs(role.name(), "127.0.0.1:8080", 0L);
+        } finally {
+            metricsEndpoint.close();
+        }
+    }
+
     // ---- WorkerEndpoint inherited behavior ----
 
     @Test
@@ -1526,7 +1548,7 @@ class PrefillEndpointTest {
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(500);
         request.setPriority(priority);
 
@@ -1636,7 +1658,7 @@ class PrefillEndpointTest {
             DecodeEndpoint decode,
             DecodeEndpoint.ReservationHandle decodeReservation) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext(requestConfig);
@@ -1682,7 +1704,7 @@ class PrefillEndpointTest {
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(batchId);
         task.setErrorCode(8429);
         task.setErrorMessage("priority preempted");
@@ -1696,7 +1718,7 @@ class PrefillEndpointTest {
                                      int errorCode,
                                      long executionTimeMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(batchId);
         task.setPhase(phase);
         task.setErrorCode(errorCode);

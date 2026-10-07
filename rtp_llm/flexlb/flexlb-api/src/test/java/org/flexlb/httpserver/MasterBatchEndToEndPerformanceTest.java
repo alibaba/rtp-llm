@@ -360,7 +360,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         RouteService routeService = new RouteService(
                 scheduler,
-                new TheoryCacheHitReporter());
+                mock(TheoryCacheHitReporter.class, withSettings().stubOnly()));
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
@@ -1091,7 +1091,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         assertTrue(endpoint != null,
                                 "completed route must retain its actual worker endpoint: " + address);
                         TaskInfo task = new TaskInfo();
-                        task.setRequestId(route.requestId());
+                        task.setRequestId(Long.toString(route.requestId()));
                         task.setInputLength(route.accepted().inputLength());
                         task.setBatchId(route.accepted().batchId());
                         task.setDpRank(endpoint.getStatus().getDpRank());

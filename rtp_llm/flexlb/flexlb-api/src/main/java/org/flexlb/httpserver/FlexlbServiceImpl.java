@@ -415,7 +415,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
-        String requestId = RequestId.parse(request);
+        String requestId;
+        try {
+            requestId = RequestId.parse(request);
+        } catch (IllegalArgumentException error) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+                    .withDescription(error.getMessage()).withCause(error).asRuntimeException());
+            return;
+        }
         FlexlbTrace.setRequestAttributes(Span.fromContext(entryTraceContext()), requestId);
         RequestPhase phase = requestPhase(request.getPhase());
         RequestState snapshot = getRequestStateForPhase(requestId, request.getBatchId(), phase);
@@ -454,11 +461,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        String requestId = RequestId.parse(request);
+        String requestId;
+        try {
+            requestId = RequestId.parse(request);
+        } catch (IllegalArgumentException error) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+                    .withDescription(error.getMessage()).withCause(error).asRuntimeException());
+            return;
+        }
         FlexlbTrace.setRequestAttributes(Span.fromContext(entryTraceContext()), requestId);
         FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse;
         try {
-            localResponse = cancelLocally(request);
+            localResponse = cancelLocally(request, requestId);
         } catch (Exception error) {
             Logger.error("FlexlbService.cancel error, request_id={}",
                     request.getRequestId(), error);
@@ -565,9 +579,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request, String requestId) {
         RequestState snapshot = cancelRequestForPhase(
-                RequestId.parse(request), request.getBatchId(),
+                requestId, request.getBatchId(),
                 toCancelReason(request.getReason()), requestPhase(request.getPhase()));
         FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
                 FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
@@ -654,7 +668,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // RouteService's side-effect callback may run after this dependent stage.
             // Publish the result before response completion reports balancing metrics.
             ctx.setResponse(response);
-            if (response.isSuccess() && cacheAwareService != null) {
+            if (response != null && response.isSuccess() && cacheAwareService != null) {
                 try {
                     cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());
                 } catch (RuntimeException error) {
@@ -718,9 +732,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             throw deliveryError;
         } finally {
             try {
-                serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
                 if (ctx != null) {
-                    engineHealthReporter.reportRequestPayload(ctx);
+                    serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
+                    if (origin != ScheduleOrigin.FORWARDED_TO_MASTER) {
+                        engineHealthReporter.reportRequestPayload(ctx);
+                    }
                 }
             } finally {
                 if (ctx != null) {
@@ -1130,7 +1146,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private enum ScheduleOrigin {
         FORWARDED_TO_MASTER,
         FORWARD_FAILED,
-        CONFIGURED_FALLBACK,
         LOCAL_MASTER,
         LOCAL_FALLBACK,
         LOCAL_STANDALONE,

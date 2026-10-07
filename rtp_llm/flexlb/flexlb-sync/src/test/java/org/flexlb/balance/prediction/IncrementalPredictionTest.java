@@ -104,7 +104,7 @@ class IncrementalPredictionTest {
             var queue = new QueueSnapshot(1000, true, order,
                     new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700), items, null);
             var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
-            var probe = new RouteProjection.Probe(999, trial % 5, 1000, 100_000,
+            var probe = new RouteProjection.Probe("999", trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
             assertEquals(RouteProjection.project(inputs, probe, full, policy),
                     RouteProjection.project(inputs, probe, model, policy));
@@ -243,6 +243,6 @@ class IncrementalPredictionTest {
     }
 
     private static GroupPlanner.Item item(long id, long input, int priority, long expires) {
-        return new GroupPlanner.Item(id, priority, id, 1000, expires, input, input / 3);
+        return new GroupPlanner.Item(Long.toString(id), priority, id, 1000, expires, input, input / 3);
     }
 }

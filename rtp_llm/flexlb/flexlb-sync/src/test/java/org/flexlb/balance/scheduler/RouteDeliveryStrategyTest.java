@@ -32,7 +32,7 @@ class RouteDeliveryStrategyTest {
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest cancelled = fixture.item(2L);
         ScheduledRequest last = fixture.item(3L);
-        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
+        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork("99", WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
         fixture.slots.commitLostFor(cancelled);
 
         fixture.context.deliver(fixture.strategy, List.of(first, cancelled, last),
@@ -82,8 +82,8 @@ class RouteDeliveryStrategyTest {
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
         fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(
-                        new WorkSnapshot.RequestWork(3L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
-                        new WorkSnapshot.RequestWork(4L, WorkSnapshot.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
+                        new WorkSnapshot.RequestWork("3", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
+                        new WorkSnapshot.RequestWork("4", WorkSnapshot.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
         AtomicInteger published = new AtomicInteger();
         AtomicLong deliveryClock = new AtomicLong(1_000L);
         fixture.slots.beforeCompletion(() -> {
