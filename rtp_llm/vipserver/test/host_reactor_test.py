@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -18,12 +19,14 @@ class HostReactorTest(unittest.TestCase):
             cls.module = importlib.import_module("rtp_llm.vipserver.host_reactor")
 
     def setUp(self):
-        self.http = self.enterContext(patch.object(requests, "get"))
-        self.enterContext(
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        self.http = patches.enter_context(patch.object(requests, "get"))
+        patches.enter_context(
             patch.object(self.module.NetUtils, "get_ip_addr", return_value="127.0.0.1")
         )
-        self.enterContext(patch.object(self.module.logging, "warning"))
-        self.enterContext(patch.object(self.module.logging, "error"))
+        patches.enter_context(patch.object(self.module.logging, "warning"))
+        patches.enter_context(patch.object(self.module.logging, "error"))
         proxy = self.module.VIPServerProxy()
         proxy.srv_hosts = ["192.0.2.1"]
         self.reactor = self.module.HostReactor(proxy)

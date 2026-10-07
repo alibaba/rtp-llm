@@ -45,6 +45,7 @@ class _FakeStub:
         self._error = error
         self.received_metadata = None
         self.cancel_reasons = []
+        self.cancel_request_ids = []
         self.cancel_metadata = None
 
     async def Schedule(self, request_pb, timeout=None, metadata=None):
@@ -57,6 +58,7 @@ class _FakeStub:
         # Present so the deadline and cancellation paths exercise their real
         # best-effort cancel instead of dying on a missing attribute.
         self.cancel_reasons.append(request_pb.reason)
+        self.cancel_request_ids.append(request_pb.request_id)
         self.cancel_metadata = metadata
 
 
@@ -137,6 +139,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.span.finish_calls))
         self.assertEqual("RpcError", self.span.finish_calls[0]["error_type"])
         self.assertTrue(stub.cancel_metadata)
+        self.assertEqual(["3540218608800727041"], stub.cancel_request_ids)
         self.assertEqual(stub.received_metadata, stub.cancel_metadata)
 
     async def test_cancellation_is_distinguished_from_an_rpc_error(self):
@@ -202,6 +205,33 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(1, len(stub.cancel_reasons))
         self.assertIsNone(stub.cancel_metadata)
+
+    async def test_numeric_request_id_is_sent_as_a_string_to_flexlb(self):
+        request_id = 3540218608800727041
+        self.client.host_service = mock.Mock()
+        self.client.host_service.get_master_addr.return_value = "127.0.0.1:7001"
+        self.client.host_service.get_slave_addr.return_value = None
+        request = mock.Mock(
+            headers={},
+            prompt_length=16,
+            generate_config=mock.Mock(
+                ttft_timeout_ms=1000,
+                max_new_tokens=100,
+                num_beams=1,
+                force_disable_sp_run=False,
+                qos_priority=None,
+            ),
+        )
+        response = mock.Mock(
+            code=SUCCESS_CODE, queue_length=0, server_status=[], enqueued_by_master=False
+        )
+        with mock.patch.object(
+            self.client, "_send_schedule_request", return_value=response
+        ) as send:
+            result = await self.client.get_backend_role_addrs([], 0, request, request_id)
+
+        self.assertTrue(result.is_ok)
+        self.assertEqual(str(request_id), send.call_args.args[1].request_id)
 
 
 if __name__ == "__main__":
