@@ -35,6 +35,22 @@ public final class InternalRuntimeSettings {
     private final int batchDispatchCompletionThreads = 8;
     private final long masterForwardRpcTimeoutMs = 5000;
 
+    /**
+     * Upper bound on the total wire-size (bytes) of concurrently in-flight
+     * EnqueueBatch payloads. The admission semaphore bounds in-flight batch
+     * COUNT; this bounds the serialized direct-buffer footprint those RPCs
+     * pin while awaiting the engine ACK. Default 4 GiB, override via
+     * -Dflexlb.dispatch.max-inflight-bytes.
+     */
+    private final long batchDispatchMaxInflightBytes =
+            resolveBatchDispatchMaxInflightBytes();
+
+    private static long resolveBatchDispatchMaxInflightBytes() {
+        long configured = Long.getLong(
+                "flexlb.dispatch.max-inflight-bytes", 0L);
+        return configured > 0L ? configured : 4L * 1024 * 1024 * 1024;
+    }
+
     private static int resolveQueuePlannerThreads() {
         int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
         return Math.max(1, Integer.getInteger(

@@ -40,6 +40,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -72,6 +73,16 @@ public class DefaultBatchDispatcher {
     private final ThreadPoolExecutor completionExecutor;
     private final int admissionCapacity;
     private final Semaphore admissionPermits;
+    /**
+     * Byte-based in-flight payload budget. The count semaphore bounds batch
+     * COUNT; with 512MiB-max messages a count bound alone permits up to
+     * 320 x 512MiB of serialized direct buffers pinned by grpc-netty
+     * ChannelOutboundBuffer/WriteQueue until the engine ACK or the 5s
+     * deadline. This budget bounds the total wire-size actually in flight
+     * (case55: observed 8.58GB pinned = 320 permits x ~27MB avg).
+     */
+    private final long maxInflightBytes;
+    private final AtomicLong inflightPayloadBytes;
     // Admission ends at RPC handoff; this separate count keeps the callback
     // executor alive while accepted RPCs are still awaiting completion.
     private final AtomicInteger pendingCompletions = new AtomicInteger();
@@ -115,16 +126,36 @@ public class DefaultBatchDispatcher {
                         .getBatchDispatchQueueCapacity());
     }
 
-    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
+    /**
+     * Package-visible sizing injection keeps integration fixtures bounded and deterministic.
+     * Byte budget defaults from config unless explicitly injected (tests).
+     */
     DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
                            MeterRegistry meterRegistry, int poolSize, int queueSize) {
+        this(grpcClient, configService, meterRegistry, poolSize, queueSize,
+                configService.loadBalanceConfig().getInternalRuntime()
+                        .getBatchDispatchMaxInflightBytes());
+    }
+
+    /**
+     * Full injection: count-based admission permits plus the byte-based
+     * in-flight payload budget. Both are held until the EnqueueBatch RPC
+     * completes; the byte budget is charged at dispatch-task construction
+     * (items frozen) and is what actually bounds the serialized
+     * direct-buffer footprint the RPCs pin while awaiting the engine ACK.
+     */
+    DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
+                           MeterRegistry meterRegistry, int poolSize, int queueSize,
+                           long maxInflightBytes) {
         this.grpcClient = grpcClient;
         this.configService = configService;
         this.meterRegistry = meterRegistry;
         this.admissionCapacity = Math.addExact(poolSize, queueSize);
         this.admissionPermits = new Semaphore(admissionCapacity);
-        Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
-                poolSize, admissionCapacity);
+        this.maxInflightBytes = Math.max(1L, maxInflightBytes);
+        this.inflightPayloadBytes = new AtomicLong(0L);
+        Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, maxInflightBytes={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                poolSize, admissionCapacity, this.maxInflightBytes);
         // Permits bound accepted reservations through their RPC handoff. The
         // physical queue stays unbounded so an accepted batch cannot be
         // rejected after commit.
@@ -237,6 +268,19 @@ public class DefaultBatchDispatcher {
         tryShutdownExecutor();
     }
 
+    /**
+     * O(1) wire-size upper bound for one dispatch batch: the same accounting
+     * the batch grouping uses (per-item envelope bound) plus outer framing.
+     * Never parses or copies GenerateInput payloads.
+     */
+    private static long wireSizeUpperBound(List<ScheduledRequest> items) {
+        long total = 16L; // batch_id + outer framing
+        for (ScheduledRequest item : items) {
+            total += item.batchPayloadSizeUpperBound();
+        }
+        return total;
+    }
+
     private void finishCompletion() {
         pendingCompletions.decrementAndGet();
         tryShutdownExecutor();
@@ -269,11 +313,18 @@ public class DefaultBatchDispatcher {
         private enum PermitPhase {
             PREPARED,
             SUBMITTED,
+            /** doDispatch registered the RPC completion observer: only that
+             *  observer may release the permit (when the RPC completes). */
+            AWAITING_RPC,
             RELEASED
         }
 
         private final AtomicReference<PermitPhase> phase =
                 new AtomicReference<>(PermitPhase.PREPARED);
+
+        /** Wire-size charged against the in-flight byte budget. 0 until the
+         *  dispatch task freezes its items; never negative. */
+        private final AtomicLong chargedBytes = new AtomicLong(0L);
 
         @Override
         public void submit(BatchDeliveryStrategy.Delivery delivery) {
@@ -287,24 +338,51 @@ public class DefaultBatchDispatcher {
             try {
                 dispatchExecutor.execute(() -> {
                     try {
-                        delivery.run((items, batchId, predictedMs, reason, observer) ->
-                                doDispatch(dispatchTask(items, batchId, predictedMs,
-                                        reason, observer, PermitReservation.this)));
+                        // Completion ownership: doDispatch settles the permit
+                        // on EVERY terminal path — either by transferring to
+                        // AWAITING_RPC (the registered completion observer
+                        // releases when the EnqueueBatch RPC completes), or by
+                        // releasing it directly when no RPC completion will
+                        // ever arrive (build failure, oversize, pre-send
+                        // throw, null future, registration failure). A
+                        // Delivery that returns WITHOUT ever calling the
+                        // sender (all requests expired/cancelled before
+                        // handoff) also leaves no completion behind, so the
+                        // permit must be settled after delivery.run returns.
+                        delivery.run((items, batchId, predictedMs, reason, observer) -> {
+                            // Byte-budget admission: charge the frozen
+                            // wire-size before any serialization. A rejection
+                            // here is pre-send by construction: nothing was
+                            // serialized, so NOT_SENT is the honest outcome.
+                            long bytes = wireSizeUpperBound(items);
+                            if (!tryChargeBytes(bytes)) {
+                                Logger.warn(
+                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
+                                        batchId, bytes, maxInflightBytes,
+                                        inflightPayloadBytes.get());
+                                failItems(items, batchId,
+                                        "in-flight payload byte budget exhausted",
+                                        observer);
+                                // No RPC, no observer: settle count and bytes.
+                                settleIfNoRpcRegistered();
+                                return;
+                            }
+                            doDispatch(dispatchTask(items, batchId, predictedMs,
+                                    reason, observer, PermitReservation.this));
+                        });
                     } catch (Throwable deliveryFailure) {
                         // Delivery owns admission cleanup; do not infer a
                         // second per-request outcome from task failure.
                         Logger.error("Batch delivery task failed", deliveryFailure);
-                        // The dispatch pipeline never ran, so no completion
-                        // observer will release the permit: release here.
-                        finishSubmitted();
+                    } finally {
+                        // Exactly-once settle: if doDispatch transferred to
+                        // AWAITING_RPC this is a NO-OP (only the completion
+                        // observer releases). Otherwise this returns the
+                        // permit — without it, a sender-less delivery would
+                        // leak admission permanently and shutdown could
+                        // never complete.
+                        settleIfNoRpcRegistered();
                     }
-                    // On the success path the permit is intentionally NOT
-                    // released when the dispatch call returns: it stays held
-                    // until the EnqueueBatch RPC completes (released by the
-                    // completion observer / doDispatch error paths), so
-                    // admission bounds IN-FLIGHT payload, not just dispatch
-                    // calls. This is the direct-buffer retention root-cause
-                    // fix (re-validation 92674).
                 });
             } catch (RuntimeException | Error submissionFailure) {
                 finishSubmitted();
@@ -328,18 +406,92 @@ public class DefaultBatchDispatcher {
         }
 
         /**
+         * Charges this batch's wire-size upper bound against the in-flight
+         * byte budget. Called once at dispatch-task construction (items
+         * frozen). Rejecting here means the batch was NOT serialized: the
+         * items are failed NOT_SENT and the permit settles, so admission
+         * count and byte budget return together.
+         */
+        boolean tryChargeBytes(long bytes) {
+            long budget = maxInflightBytes;
+            long current;
+            long next;
+            do {
+                current = inflightPayloadBytes.get();
+                next = current + bytes;
+                if (next > budget) {
+                    return false;
+                }
+            } while (!inflightPayloadBytes.compareAndSet(current, next));
+            chargedBytes.set(bytes);
+            return true;
+        }
+
+        private void releaseChargedBytes() {
+            long bytes = chargedBytes.getAndSet(0L);
+            if (bytes > 0L) {
+                inflightPayloadBytes.addAndGet(-bytes);
+                signalCapacityAvailable();
+            }
+        }
+
+        /**
+         * Transfers completion ownership to the registered RPC completion
+         * observer. Called by doDispatch after the observer is installed.
+         * If the task-level settle already ran (task raced ahead), the
+         * permit was already returned and the observer's later release is a
+         * no-op — safe because the RPC future is already complete in that
+         * interleaving or the release is simply idempotent.
+         */
+        void transferToRpcCompletion() {
+            phase.compareAndSet(
+                    PermitPhase.SUBMITTED, PermitPhase.AWAITING_RPC);
+        }
+
+        /**
          * Releases the admission permit when the dispatched EnqueueBatch RPC
-         * has completed (success, failure, or uncertain). Idempotent via the
-         * phase CAS; also covers the case where the dispatch task failed
-         * before invocation (PREPARED -> RELEASED).
+         * has completed (success, failure, or uncertain), or when the task
+         * wrapper settled because no RPC completion was registered.
+         * Idempotent via the phase CAS.
          */
         void releaseOnRpcCompletion() {
+            PermitPhase current = phase.get();
+            if (current == PermitPhase.RELEASED) {
+                return;
+            }
             if (phase.compareAndSet(
+                    PermitPhase.AWAITING_RPC, PermitPhase.RELEASED)
+                    || phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
+                releasePermit();
+            }
+        }
+
+        /**
+         * Task-wrapper settle: releases the permit only when no RPC
+         * completion observer took ownership. AWAITING_RPC (observer
+         * registered) and RELEASED are left untouched; SUBMITTED (and
+         * PREPARED, if the delivery threw before submit advanced the phase)
+         * release now because nothing else ever will.
+         */
+        void settleIfNoRpcRegistered() {
+            PermitPhase current = phase.get();
+            if (current == PermitPhase.AWAITING_RPC
+                    || current == PermitPhase.RELEASED) {
+                return;
+            }
+            if (phase.compareAndSet(
+                    PermitPhase.SUBMITTED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
                 releasePermit();
                 return;
             }
-            finishSubmitted();
+            if (phase.compareAndSet(
+                    PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
+                releasePermit();
+            }
         }
     }
 
@@ -358,15 +510,11 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException(
                     "batchId must be positive and predictedMs non-negative");
         }
-        // Permit release is idempotent (PermitReservation phase CAS). It is
-        // invoked exactly once when the EnqueueBatch RPC completes, so the
-        // admission semaphore bounds IN-FLIGHT batches, not merely dispatched
-        // ones. This is the direct-buffer retention root-cause fix (the
-        // ~23min 8GiB direct OOM under ramp: permits returned while RPC
-        // futures still held serialized payloads).
-        Runnable permitRelease = permitReservation == null
-                ? () -> { }
-                : permitReservation::releaseOnRpcCompletion;
+        Objects.requireNonNull(permitReservation, "permitReservation");
+        // Permit release is idempotent (PermitReservation phase CAS). The
+        // registered completion observer releases when the EnqueueBatch RPC
+        // completes, so the admission semaphore bounds IN-FLIGHT batches,
+        // not merely dispatched ones.
         return new DispatchTask(
                 frozenItems,
                 frozenItems.getFirst().prefillEp(),
@@ -374,7 +522,7 @@ public class DefaultBatchDispatcher {
                 predictedMs,
                 Objects.requireNonNull(decisionReason, "decisionReason"),
                 Objects.requireNonNull(observer, "observer"),
-                permitRelease);
+                permitReservation);
     }
 
     private record DispatchTask(List<ScheduledRequest> items,
@@ -384,7 +532,7 @@ public class DefaultBatchDispatcher {
                                 String reason,
                                 BiConsumer<ScheduledRequest,
                                         DeliveryResult> observer,
-                                Runnable rpcCompletionPermitRelease) {
+                                PermitReservation permitReservation) {
     }
 
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
@@ -406,8 +554,8 @@ public class DefaultBatchDispatcher {
                         unexpectedFailure, task.observer());
             }
             // The RPC will never complete through the observer on this path;
-            // release the in-flight permit (idempotent).
-            task.rpcCompletionPermitRelease().run();
+            // settle the in-flight permit (idempotent).
+            task.permitReservation().settleIfNoRpcRegistered();
         }
     }
 
@@ -434,6 +582,10 @@ public class DefaultBatchDispatcher {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
             failItems(items, batchId,
                     "Batch request build failed: " + e.getMessage(), observer);
+            // No RPC was invoked; no completion observer will ever run. The
+            // task wrapper's settle also covers this, but settling here makes
+            // the ownership explicit (exactly-once via phase CAS).
+            task.permitReservation().settleIfNoRpcRegistered();
             return;
         }
 
@@ -467,14 +619,20 @@ public class DefaultBatchDispatcher {
                     prefillIp, prefillGrpcPort, request);
         } catch (Throwable invocationFailure) {
             // Once client invocation starts, a synchronous exception does not
-            // prove that no bytes were written. Treat it as ambiguous.
+            // prove that no bytes were written. Treat it as ambiguous. The
+            // delivery state is uncertain post-invocation; do NOT relabel it
+            // as NOT_SENT.
             markUncertain(items, batchId, invocationFailure, observer);
+            // No observer was registered; settle the permit now (idempotent
+            // with the task wrapper's finally).
+            task.permitReservation().settleIfNoRpcRegistered();
             return;
         }
         if (rpcFuture == null) {
             RuntimeException missingFuture = new RuntimeException(
                     "EnqueueBatch client returned null future after invocation");
             markUncertain(items, batchId, missingFuture, observer);
+            task.permitReservation().settleIfNoRpcRegistered();
             return;
         }
         // Increment while this dispatch still owns its admission permit. That
@@ -484,6 +642,13 @@ public class DefaultBatchDispatcher {
         try {
             CompletableFuture<Void> completionObserver = rpcFuture.handleAsync(
                     (response, ex) -> {
+                        // Release the in-flight admission permit FIRST: by
+                        // the time request callbacks observe completion, the
+                        // permit must already be back (otherwise a caller
+                        // reacting to the callback could spuriously fail to
+                        // re-admit). Exactly-once via phase CAS.
+                        finishCompletion();
+                        task.permitReservation().releaseOnRpcCompletion();
                         try {
                             if (ex != null) {
                                 Throwable cause = unwrapCompletionFailure(ex);
@@ -508,26 +673,18 @@ public class DefaultBatchDispatcher {
                         }
                         return null;
                     }, completionExecutor);
-            completionObserver.whenComplete((ignored, observerFailure) -> {
-                try {
-                    if (observerFailure != null) {
-                        markUncertain(items, batchId,
-                                unwrapCompletionFailure(observerFailure), observer);
-                    }
-                } finally {
-                    finishCompletion();
-                    // Release the in-flight admission permit now that the
-                    // EnqueueBatch RPC has completed (retention root-cause fix).
-                    task.rpcCompletionPermitRelease().run();
-                }
-            });
+            // Ownership transfer: from here the registered completion
+            // observer is the ONLY permit releaser (when the RPC completes).
+            // The task wrapper's finally settle becomes a no-op.
+            task.permitReservation().transferToRpcCompletion();
         } catch (Throwable registrationFailure) {
             finishCompletion();
             // Callback registration is post-invocation. The RPC may already
-            // be in flight even though no completion observer was installed.
-            // The permit release is idempotent: the (unlikely) registered
-            // observer may also run, but only one release takes effect.
-            task.rpcCompletionPermitRelease().run();
+            // be in flight even though no completion observer was installed
+            // (the delivery outcome stays UNCERTAIN, not NOT_SENT). No
+            // observer owns the permit now, so settle it here (idempotent
+            // with the task wrapper's finally).
+            task.permitReservation().settleIfNoRpcRegistered();
             markUncertain(items, batchId, registrationFailure, observer);
         }
     }
