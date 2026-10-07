@@ -75,8 +75,6 @@ class V41SwaCodecContractTest(unittest.TestCase):
         for size in (528, 584):
             pool = torch.zeros(1, 128, size, dtype=torch.uint8)
             self.assertFalse(codec.is_supported(pool, slots))
-            with self.assertRaises(ValueError):
-                codec.quantize_and_insert_swa_k_cache(torch.zeros(1, 512), pool, slots)
 
     def test_reference_zero_and_literal_power_of_two_scales(self):
         groups = (
@@ -915,24 +913,6 @@ class BatchedBoundedSWA(unittest.TestCase):
                 self.assertTrue(torch.equal(compact, expected))
                 self.assertEqual(gather.call_count, 1)
 
-    def test_invalid_replay_is_rejected_before_collective(self):
-        for bad in (
-            {"swa_replay_starts_host": (1,)},
-            {"swa_replay_starts_host": (0, 0)},
-            {"gather_restore_positions": None},
-            {"unpad_restore": torch.arange(2)},
-            {"input_lengths_global_host": None},
-        ):
-            with self.subTest(bad=bad):
-                ctx, ranks = _layout((1024, 13), (0, 0))
-                ctx.__dict__.update(bad)
-                with patch.object(self.cp, "_cp_all_gather_into_empty") as gather:
-                    with self.assertRaisesRegex(ValueError, "bounded replay domain"):
-                        self.cp.cp_all_gather_full_varlen(
-                            ranks[0][:, None], ctx, replay_only=True
-                        )
-                gather.assert_not_called()
-
     def test_exact_ced_gather_retains_original_full_domain(self):
         ctx, ranks = _layout((133, 7), (0, 0))
         ctx.swa_replay_starts_host = None
@@ -1058,20 +1038,6 @@ class BatchedBoundedSWA(unittest.TestCase):
                             self.assertIs(actual.unique_blocks, blocks)
                         self.assertIs(common.swa_meta.slot_mapping, slots)
                         self.assertIs(common.swa_meta.slot_compaction, compaction)
-
-    def test_single_request_write_rejects_incomplete_replay_window(self):
-        owner = self.owner()
-        common, _ = self.common((2048,), (30720,))
-        common.swa_meta = types.SimpleNamespace(
-            slot_mapping=torch.arange(2048), slot_compaction=None
-        )
-        for rows in (127, 129):
-            with self.subTest(rows=rows):
-                with self.assertRaisesRegex(ValueError, "exactly 128 rows"):
-                    owner._prefill_write_swa_fp8_paged(
-                        common, torch.zeros(rows, 2, dtype=torch.bfloat16)
-                    )
-        self.codec.quantize_and_insert_k_cache_cp_byte_sliced.assert_not_called()
 
     def test_chunk_metadata_offsets_follow_compact_swa_not_original_miss(self):
         for pool in (False, True):

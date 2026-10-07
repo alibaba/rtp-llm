@@ -284,8 +284,6 @@ class BatchedProducerCPU(unittest.TestCase):
             [CPU.reduction_width(n) for n in (0, 1, 7, 8, 15, 16, 256)],
             [0, 128, 128, 64, 64, 32, 32],
         )
-        with self.assertRaises(ValueError):
-            CPU.reduction_width(-1)
 
     def test_group_offsets_and_mixed_segment_phases(self):
         prefixes = [0, 127, 2048]

@@ -3,7 +3,7 @@
 Public API (preserved across the moe.py → moe/ refactor):
   - MoE: nn.Module instantiated by ``dsv4/block.py``
   - Gate: nn.Module used standalone in some unit tests
-  - _has_fp8_fp4_grouped_kernel: probe used by ``test/grouped_moe_equivalence_test.py``
+  - _has_fp8_fp4_grouped_kernel: grouped FP4 backend capability probe
 
 Internal layout (Phase 1 complete):
   - moe_layer.py: thin MoE orchestrator (gate + shared + strategy dispatch)

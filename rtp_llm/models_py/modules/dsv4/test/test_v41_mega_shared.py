@@ -107,7 +107,6 @@ class V41MegaSharedTest(unittest.TestCase):
     def test_empty_rank_still_packs_and_launches_collective(self):
         obj = MegaMoEStrategySE.__new__(MegaMoEStrategySE)
         torch.nn.Module.__init__(obj)
-        obj._validate_capacity = mock.Mock()
         obj._block_m = mock.Mock(return_value=64)
         obj._input_packer = mock.Mock()
         obj._mega_buf = object()

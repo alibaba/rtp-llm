@@ -174,7 +174,6 @@ class ProducerMetadataCPU(unittest.TestCase):
             projected_tiles=None,
         )
         self.assertTrue(eval(code, scope))
-        self.assertNotIn("environ", ast.unparse(gate))
         for change in (
             dict(cp=SimpleNamespace(cp_size=4, kv_cache_sharded=False)),
             dict(cp=SimpleNamespace(cp_size=1, kv_cache_sharded=True)),

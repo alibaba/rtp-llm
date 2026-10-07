@@ -8,8 +8,6 @@ follow-up phases.
 
 Loads ``cp.py`` via importlib with a stubbed ``rtp_llm`` package chain so
 the test stays runnable on machines without a built ``libth_transformer_config.so``
-(matches the standalone pattern used by ``test_cp_topk_idxs_align`` /
-``test_cp_via_concat_meta`` / ``test_cp_indexer_seq_total``).
 """
 
 import importlib.util

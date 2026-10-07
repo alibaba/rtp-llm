@@ -156,9 +156,7 @@ class TestUpdateInPlace(unittest.TestCase):
             self.assertEqual(before[k], after[k], f"buffer {k} reallocated")
 
     def test_tail_kept_at_sentinel_after_smaller_bs(self):
-        """If we update with bs<max_bs, the tail rows must NOT contain
-        leftover data from a previous larger-bs update — they should
-        stay at -1 sentinel from the original allocation."""
+        """The first update with bs<max_bs preserves the unwritten tail."""
         meta = _alloc(max_bs=4)
         # Tail before any update
         self.assertTrue((meta.slot_mapping_swa == -1).all())

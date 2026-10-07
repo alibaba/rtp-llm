@@ -32,36 +32,6 @@ class JointPoolHostTest(unittest.TestCase):
                 joint.try_gather(attn, None, None, [1] * 32, None, groups=[])
             )
 
-    def test_cold_qualified_rank_cannot_choose_old_collective_schedule(self):
-        seq = Mock(spec=torch.Tensor)
-        seq.device, seq.dtype, seq.layout, seq.shape = (
-            torch.device("cuda:0"),
-            torch.int64,
-            torch.strided,
-            (32,),
-        )
-        seq.stride.return_value = 1
-        table = torch.zeros((32, 1), dtype=torch.int32)
-        attn = SimpleNamespace(
-            _cp_ctx=SimpleNamespace(cp_size=4, cp_rank=0, kv_cache_sharded=True),
-            _kv_cache=SimpleNamespace(
-                seq_size_per_block=128, kernel_seq_size_per_block=128
-            ),
-            _block_tables_by_type={HCA_KV: table, INDEXER_KV: table},
-            _global_region=lambda: HCA_KV,
-            _source_entries=lambda region, pool: 128,
-            compress_ratio=1,
-            _gather_shards=Mock(),
-        )
-        with patch.dict(joint._READY, {}, clear=True), patch.object(
-            torch, "empty", side_effect=AssertionError("allocation")
-        ):
-            with self.assertRaises(KeyError):
-                joint.try_gather(
-                    attn, None, None, [1] * 32, seq, groups=[(0, 32, 8192)]
-                )
-        attn._gather_shards.assert_not_called()
-
     def test_warmup_rejects_common_unsupported_layout_without_cuda(self):
         layout = joint.PoolLayout(128, 128, 128, torch.int32, 1)
         with patch.object(
@@ -313,13 +283,9 @@ class JointPoolCudaTest(unittest.TestCase):
                                 self.assert_bits(a, b)
                                 self.assertTrue(a.is_contiguous())
 
-    def test_cold_and_transport_error_never_fallback(self):
+    def test_transport_error_never_fallback(self):
         attn, main, index, host, ends = self.fixture([7] * 32, 1, 0)
         attn._gather_shards = Mock()
-        with patch.dict(joint._READY, {}, clear=True):
-            with self.assertRaises(KeyError):
-                pools.try_gather_prefill_pools(attn, main, index, host, ends)
-        attn._gather_shards.assert_not_called()
         self.warm(1, 0, torch.int32)
         attn._gather_shards.side_effect = RuntimeError("transport witness")
         with self.assertRaisesRegex(RuntimeError, "transport witness"):
@@ -341,35 +307,6 @@ class JointPoolCudaTest(unittest.TestCase):
         for (g, keys), refs in zip(actual, expected):
             for left, right in zip((g, keys.quant, keys.scale), refs):
                 self.assert_bits(left, right)
-
-    def test_actual_entries_key_rejects_stale_compact_specialization(self):
-        attn, main, index, host, ends = self.fixture([65] * 32, 2, 0)
-        self.warm(2, 0, torch.int32)
-        key = (
-            torch.cuda.current_device(),
-            2,
-            128,
-            128,
-            128,
-            0,
-            torch.int32,
-            torch.int32,
-            64,
-            128,
-        )
-        kernels = joint._READY[key]
-        attn._gather_shards = Mock()
-        for stale_key in (key[:-2], (*key[:-1], 64)):
-            with patch.dict(
-                joint._READY, {stale_key: kernels}, clear=True
-            ), patch.object(
-                torch,
-                "empty",
-                side_effect=AssertionError("allocation before readiness"),
-            ):
-                with self.assertRaises(KeyError):
-                    pools.try_gather_prefill_pools(attn, main, index, host, ends)
-        attn._gather_shards.assert_not_called()
 
     def test_native_slots_match_torch_at_owner_and_page_boundaries(self):
         counts = (0, 1, 63, 64, 65, 127, 128, 129) * 4

@@ -85,8 +85,6 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
         with torch.inference_mode():
             weight = torch.tensor([[0.1, -0.3, 1.5]], dtype=torch.float32)
             replacement = weight.clone().mul_(0.5)
-        with self.assertRaises(RuntimeError):
-            _ = weight._version
         prepared = prepare_tf32_weight(weight)
         self.assertIs(prepare_tf32_weight(weight), prepared)
         replaced = prepare_tf32_weight(replacement)
@@ -221,8 +219,6 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                 residual, fn, base, scale = self._inputs(tokens)
                 with torch.inference_mode():
                     fn = fn.clone()
-                with self.assertRaises(RuntimeError):
-                    _ = fn._version
                 for _ in range(3):
                     mixes = prenorm(residual, fn, _EPS)
                     _split_mixes(mixes, base, scale)

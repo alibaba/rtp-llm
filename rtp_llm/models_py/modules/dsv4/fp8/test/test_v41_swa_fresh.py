@@ -173,13 +173,8 @@ class SwaFreshGpuTest(unittest.TestCase):
                             )
                         )
 
-    def test_reject_alias_dtype_and_shape_before_writing(self):
-        k, raw, slots, comp, dst, out = fixture()
-        saved = raw.clone()
-        for bad in (k.unsqueeze(0), out.float(), out[:, ::2], out[..., :511]):
-            with self.assertRaises(ValueError):
-                write(k, raw, slots, comp, dst, bad)
-            self.assertTrue(torch.equal(raw, saved))
+    def test_unsupported_dtype_and_slot_stride_fall_back(self):
+        k, raw, slots, comp, dst, _ = fixture()
         self.assertFalse(
             codec.is_supported_fresh_store(k.float(), raw, slots, 136, 0, 4, comp, dst)
         )

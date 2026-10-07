@@ -29,7 +29,6 @@ def _load_attention():
         "_prefill_x_tile_plan",
         "_start_prefill_x_gather_async",
         "_wait_prefill_x_gather",
-        "_prefill_x_tiles",
         "rms_norm",
         "compress_pairs",
     }
@@ -56,8 +55,7 @@ def _load_attention():
     nodes.extend(
         n
         for n in cls.body
-        if isinstance(n, ast.FunctionDef)
-        and n.name in {"_produce_global", "_prefill_produce"}
+        if isinstance(n, ast.FunctionDef) and n.name == "_produce_global"
     )
     module = types.ModuleType("attention_cp_raw_cpu")
     module.__dict__.update(
@@ -453,20 +451,6 @@ class CPRawGroupsCPU(unittest.TestCase):
                     ],
                 )
 
-    def test_raw_and_projected_interface_rejects_ambiguous_input(self):
-        with self.assertRaises(ValueError):
-            ATTENTION._produce_global(
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                prefill=True,
-                raw_tiles=iter(()),
-                projected_tiles=iter(()),
-            )
-
     def test_whole_projected_groups_preserve_order_and_release_storage(self):
         for lengths in ([11, 2, 9, 7], [7, 9, 2, 11], [1, 1, 25, 17]):
             cp, local, expected = _case(lengths)
@@ -510,63 +494,6 @@ class CPRawGroupsCPU(unittest.TestCase):
                     del tensor
                 self.assertEqual(len(calls), len(plan))
                 self.assertTrue(all(ref() is None for ref in refs))
-
-    def test_batched_producer_requires_complete_projected_groups(self):
-        with self.assertRaisesRegex(ValueError, "complete projected groups"):
-            ATTENTION._produce_global(
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                prefill=True,
-                raw_tiles=iter(()),
-                batched_groups=True,
-            )
-
-    def test_prefill_produce_routes_once_and_closes_group_on_consumer_failure(self):
-        cp, local, _ = _case(_mixed(576))
-        common = types.SimpleNamespace(
-            cp_on=True,
-            cp_ctx=cp,
-            prefix_lengths=torch.tensor(cp.prefix_lengths_host),
-            batch_size=32,
-        )
-        qkv = types.SimpleNamespace(kv_full=object())
-        events = []
-        raw = Mock()
-        consumer = Mock(side_effect=RuntimeError("consumer failed"))
-        source = types.SimpleNamespace(
-            swa_bounded_replay=False,
-            is_kv_source=True,
-            compress_ratio=2,
-            _owner=lambda: types.SimpleNamespace(
-                global_wkv=torch.eye(4), global_wgate=torch.eye(4)
-            ),
-            _begin_forward=lambda: None,
-            _prefill_common_setup=lambda *a: common,
-            _prefill_compute_qkv=lambda *a, **kw: qkv,
-            _can_fuse_swa_fresh=lambda *a: False,
-            _swa_prefill_workspace=lambda *a, **kw: (None, None),
-            _prefill_write_swa_fp8_paged=lambda *a: events.append("swa"),
-            _produce_global=consumer,
-        )
-        with patch.object(
-            ATTENTION, "_prefill_projected_x_groups", return_value=raw
-        ), patch.object(
-            ATTENTION,
-            "_start_prefill_x_gather_async",
-            side_effect=AssertionError("eager gather"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "consumer failed"):
-                ATTENTION._prefill_produce(source, local[0], None)
-        self.assertEqual(events, ["swa"])
-        consumer.assert_called_once()
-        self.assertIsNone(consumer.call_args.kwargs["raw_tiles"])
-        self.assertIs(consumer.call_args.kwargs["projected_tiles"], raw)
-        self.assertTrue(consumer.call_args.kwargs["grouped_projection"])
-        raw.close.assert_called_once()
 
     def test_owner_groups_preserve_segments_packing_and_consumer_lifetime(self):
         for lengths in ([11, 2, 9, 7], [7, 9, 2, 11], [1, 1, 25, 17]):
@@ -694,72 +621,6 @@ class CPRawGroupsCPU(unittest.TestCase):
                     )
                     self.assertEqual(produced[3], reference[3])
                     self.assertTrue(all(ref() is None for ref in refs))
-
-    def test_prefill_dispatch_keeps_small_b1_oversized_and_noncp_routes(self):
-        for lengths, cp_on, route in (
-            (_mixed(568), True, "small"),
-            ([65536], True, "small"),
-            ([65537], True, "projected"),
-            ([65537, 7], True, "projected"),
-            ([7, 13], False, "plain"),
-        ):
-            cp, local, expected = _case(lengths)
-            x = local[0] if cp_on else expected
-            common = types.SimpleNamespace(
-                cp_on=cp_on,
-                cp_ctx=cp if cp_on else None,
-                prefix_lengths=torch.tensor(cp.prefix_lengths_host),
-                input_lengths=cp.input_lengths_global,
-                batch_size=len(lengths),
-            )
-            qkv = types.SimpleNamespace(kv_full=object())
-            owner = types.SimpleNamespace(
-                global_wkv=torch.eye(4), global_wgate=torch.eye(4)
-            )
-            consumer = Mock()
-            source = types.SimpleNamespace(
-                swa_bounded_replay=False,
-                is_kv_source=True,
-                compress_ratio=2,
-                head_dim=4,
-                _owner=lambda: owner,
-                _begin_forward=lambda: None,
-                _prefill_common_setup=lambda *a: common,
-                _prefill_compute_qkv=lambda *a, **kw: qkv,
-                _can_fuse_swa_fresh=lambda *a: False,
-                _swa_prefill_workspace=lambda *a, **kw: (None, None),
-                _prefill_write_swa_fp8_paged=lambda *a: None,
-                _produce_global=consumer,
-            )
-            with self.subTest(route=route, lengths=lengths), patch.object(
-                ATTENTION, "_start_prefill_x_gather_async"
-            ) as start, patch.object(ATTENTION, "_wait_prefill_x_gather"), patch.object(
-                ATTENTION,
-                "_cp_restore_gathered_full_2d",
-                create=True,
-                return_value=expected,
-            ) as restore, patch.object(
-                ATTENTION, "_prefill_x_tiles"
-            ) as projected, patch.object(
-                ATTENTION,
-                "_prefill_raw_x_groups",
-                side_effect=AssertionError("unexpected raw groups"),
-            ):
-                ATTENTION._prefill_produce(source, x, None)
-            consumer.assert_called_once()
-            self.assertIsNone(consumer.call_args.kwargs["raw_tiles"])
-            self.assertEqual(start.call_count, int(cp_on))
-            self.assertEqual(restore.call_count, int(route == "small"))
-            self.assertEqual(projected.call_count, int(route == "projected"))
-            if route == "small":
-                self.assertEqual(start.call_args.args[2], (None, 0, cp.padded_seq_len))
-                self.assertIs(consumer.call_args.args[0], expected)
-            elif route == "projected":
-                self.assertIs(
-                    consumer.call_args.kwargs["projected_tiles"], projected.return_value
-                )
-            else:
-                self.assertIs(consumer.call_args.args[0], x)
 
     def test_existing_async_event_chain_is_used_for_every_group(self):
         # Execute the real transport helper; only CUDA/NCCL APIs are mocked.

@@ -185,12 +185,6 @@ py_test(
 )
 
 py_test(
-    name = "test_cp_topk_idxs_align",
-    srcs = ["test_cp_topk_idxs_align.py"],
-    deps = _DSV4_TEST_DEPS,
-)
-
-py_test(
     name = "test_cp_pool_block_gather",
     srcs = ["test_cp_pool_block_gather.py"],
     deps = _DSV4_TEST_DEPS,
@@ -223,18 +217,6 @@ py_test(
 py_test(
     name = "test_indexer_cp_assembler",
     srcs = ["test_indexer_cp_assembler.py"],
-    deps = _DSV4_TEST_DEPS,
-)
-
-py_test(
-    name = "test_cp_via_concat_meta",
-    srcs = ["test_cp_via_concat_meta.py"],
-    deps = _DSV4_TEST_DEPS,
-)
-
-py_test(
-    name = "test_cp_indexer_seq_total",
-    srcs = ["test_cp_indexer_seq_total.py"],
     deps = _DSV4_TEST_DEPS,
 )
 

@@ -9,8 +9,7 @@ list when the kernel's ``pos = start_pos + token_idx_in_query`` formula
 
 Standalone-loadable: stubs the ``rtp_llm`` package chain so the test
 runs without ``libth_transformer_config.so`` being built (matches
-``test_cp_context_build`` / ``test_cp_via_concat_meta`` /
-``test_cp_indexer_seq_total`` / ``test_cp_topk_idxs_align``).
+``test_cp_context_build``).
 """
 
 import contextlib

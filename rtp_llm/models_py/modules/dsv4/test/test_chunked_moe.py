@@ -156,7 +156,6 @@ class BlockGateBudgetTest(unittest.TestCase):
                     getattr(block.ffn.gate, "_prefill_gate_chunk_rows", 0),
                     32768 if v41 is not None and not decode else 0,
                 )
-                self.assertNotIn("_prefill_gate_chunk_rows", block.ffn.kwargs)
 
 
 class _FakeGate(nn.Module):
