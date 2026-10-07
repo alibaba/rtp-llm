@@ -294,16 +294,17 @@ public class DefaultBatchDispatcher {
                         // Delivery owns admission cleanup; do not infer a
                         // second per-request outcome from task failure.
                         Logger.error("Batch delivery task failed", deliveryFailure);
-                    } finally {
-                        // The permit is intentionally NOT released here: it is
-                        // held until the EnqueueBatch RPC completes
-                        // (released in the completion observer) so admission
-                        // bounds IN-FLIGHT payload, not just dispatch calls.
-                        // If delivery failed before dispatching, release now.
-                        if (phase.get() == PermitPhase.SUBMITTED) {
-                            finishSubmitted();
-                        }
+                        // The dispatch pipeline never ran, so no completion
+                        // observer will release the permit: release here.
+                        finishSubmitted();
                     }
+                    // On the success path the permit is intentionally NOT
+                    // released when the dispatch call returns: it stays held
+                    // until the EnqueueBatch RPC completes (released by the
+                    // completion observer / doDispatch error paths), so
+                    // admission bounds IN-FLIGHT payload, not just dispatch
+                    // calls. This is the direct-buffer retention root-cause
+                    // fix (re-validation 92674).
                 });
             } catch (RuntimeException | Error submissionFailure) {
                 finishSubmitted();
