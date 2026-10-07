@@ -47,12 +47,25 @@ class RequestIdTest {
 
     @Test
     void readsOldIntegerEncodingForScheduleCancelAndState() throws Exception {
-        for (long id : new long[]{123, Long.MAX_VALUE, Long.MIN_VALUE, 0}) {
+        for (long id : new long[]{123, Long.MAX_VALUE, Long.MIN_VALUE}) {
             byte[] wire = oldIntegerId(id);
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire)));
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(wire)));
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(wire)));
         }
+    }
+
+    @Test
+    void oldProto3DefaultZeroCannotBeDistinguishedFromMissingStringId() throws Exception {
+        byte[] wire = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(0).build().toByteArray();
+        assertEquals(0, wire.length);
+        assertThrows(IllegalArgumentException.class,
+                () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire)));
+        assertThrows(IllegalArgumentException.class,
+                () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(wire)));
+        assertThrows(IllegalArgumentException.class,
+                () -> RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(wire)));
+        assertEquals("0", RequestId.parse(EngineRpcService.GenerateInputPB.parseFrom(wire)));
     }
 
     @Test

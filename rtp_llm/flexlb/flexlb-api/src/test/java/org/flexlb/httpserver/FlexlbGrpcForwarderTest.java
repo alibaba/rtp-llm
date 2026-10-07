@@ -110,7 +110,9 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
         String description = "stream reset\nfrom peer";
-        description += "x".repeat(511 - description.length()) + "\uD83D\uDE00tail";
+        int expectedDescriptionLimit = 512;
+        description += "x".repeat(expectedDescriptionLimit - 1 - description.length()) + "\uD83D\uDE00tail";
+        String expectedDescription = description.replace('\n', ' ').substring(0, expectedDescriptionLimit - 1);
         StatusRuntimeException failure = Status.UNKNOWN
                 .withDescription(description)
                 .withCause(new IllegalStateException("transport closed"))
@@ -141,7 +143,8 @@ class FlexlbGrpcForwarderTest {
             assertTrue(failures.get(1).getFormattedMessage().contains("operation=cancel"));
             for (ILoggingEvent event : failures) {
                 assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
-                assertTrue(event.getFormattedMessage().contains("description=stream reset from peer"));
+                assertEquals(expectedDescription,
+                        event.getFormattedMessage().split(" description=", 2)[1]);
                 assertFalse(event.getFormattedMessage().contains("\n"));
                 assertFalse(event.getFormattedMessage().contains("\r"));
                 assertFalse(event.getFormattedMessage().contains("\uD83D"));

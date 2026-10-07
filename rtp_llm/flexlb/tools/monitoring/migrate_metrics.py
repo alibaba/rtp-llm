@@ -15,14 +15,29 @@ from pathlib import Path
 SELECTOR = re.compile(r'\{(?:[^{}"]|"(?:\\.|[^"\\])*")*\}')
 MATCHER = re.compile(r'\s*(\w+)\s*(=~|!~|!=|=)\s*("(?:\\.|[^"\\])*")\s*')
 LABELS = re.compile(r'(?:[^,"]|"(?:\\.|[^"\\])*")+')
+METRIC_BEFORE_SELECTOR = re.compile(r'(?<![\w.:-])([a-zA-Z_:][a-zA-Z0-9_.:-]*)\s*$')
+
+
+def exact_metric_names(query):
+    names = set()
+    for match in SELECTOR.finditer(query):
+        named_selector = METRIC_BEFORE_SELECTOR.search(query[:match.start()])
+        if named_selector:
+            names.add(named_selector[1])
+        selector = match[0]
+        for text in LABELS.findall(selector[1:-1]):
+            label = MATCHER.fullmatch(text.strip())
+            if label and label[1] == '__name__' and label[2] == '=':
+                names.add(json.loads(label[3]))
+    return names
 
 
 def migrate_query(query, config, convert_counters=True):
     prefix = config['metricPrefix']
     rules = {prefix + name: rule for rule in config['rules']
              for name in [rule['oldName'], *rule.get('aliases', [])]}
-    retired = [prefix + rule['name'] for rule in config['retiredMetrics']]
-    if any(name in query for name in retired):
+    retired = {prefix + rule['name'] for rule in config['retiredMetrics']}
+    if retired.intersection(exact_metric_names(query)):
         raise ValueError('Retire the old settle-miss alert separately; lifecycle failures are not an equivalent signal')
     changes = []
     counter_selectors = []
@@ -77,8 +92,12 @@ def migrate_query(query, config, convert_counters=True):
 
     migrated = SELECTOR.sub(update_selector, query)
     if convert_counters and counter_selectors and not re.search(r'\b(?:increase|i?rate)\s*\(', migrated):
-        if len(counter_selectors) != 1:
-            raise ValueError('A legacy multi-counter expression needs an explicit weighted-ratio query')
+        single_counter = len(counter_selectors) == 1 and (
+            re.fullmatch(r'\s*' + re.escape(counter_selectors[0]) + r'\s*', migrated)
+            or re.fullmatch(r'\s*(?:avg|sum|max)\s*\(\s*' + re.escape(counter_selectors[0]) + r'\s*\)\s*', migrated)
+        )
+        if not single_counter:
+            raise ValueError('A legacy counter formula needs an explicit weighted-ratio query')
         migrated = 'sum by (${group_by:csv}) (increase(' + counter_selectors[0] + '[1m]))'
         changes.extend(counter_names)
     return migrated, changes
@@ -111,24 +130,31 @@ def migrate_dashboard(export, config):
     panels = list(panels_in(dashboard['panels']))
     def describe_panel(panel):
         expressions = '\n'.join(target.get('expr', '') for target in panel.get('targets', []))
+        metric_names = exact_metric_names(expressions)
         for rule in config['rules']:
-            if config['metricPrefix'] + rule['newName'] in expressions:
+            if config['metricPrefix'] + rule['newName'] in metric_names:
                 note = rule.get('note', '')
                 description = panel.get('description', '')
                 if note and note not in description:
                     panel['description'] = (description + '\n' + note).strip()
-        if config['metricPrefix'] + 'grpc.server.executor.caller.runs' in expressions:
+        if config['metricPrefix'] + 'grpc.server.executor.caller.runs' in metric_names:
             panel['title'] = 'gRPC 任务拒绝数（最近 1 分钟）'
-        if 'app.flexlb.decode.inflight.' in expressions and 'kv.reserved.tokens' in expressions:
+        input_and_output = config['metricPrefix'] + 'app.flexlb.decode.inflight.kv.reserved.tokens' in metric_names
+        input_only = config['metricPrefix'] + 'app.flexlb.decode.inflight.hard.kv.reserved.tokens' in metric_names
+        if input_and_output and input_only:
+            panel['title'] = 'Decode KV 预留 Tokens（输入+最大输出／仅输入，含排队）'
+        elif input_only:
+            panel['title'] = 'Decode 输入 KV 预留 Tokens（含排队）'
+        elif input_and_output:
             panel['title'] = 'Decode KV 预留 Tokens（含排队）'
-        if config['metricPrefix'] + 'app.engine.worker.info.running.query.len.var' in expressions:
+        if config['metricPrefix'] + 'app.engine.worker.info.running.query.len.var' in metric_names:
             if 'role="PREFILL"' in expressions:
                 panel['title'] = 'Prefill 负载方差（work-ms²）'
                 panel.setdefault('fieldConfig', {}).setdefault('defaults', {})['unit'] = 'suffix:work-ms²'
             elif 'role="DECODE"' in expressions:
                 panel['title'] = 'Decode 活动任务数方差（count²）'
                 panel.setdefault('fieldConfig', {}).setdefault('defaults', {})['unit'] = 'suffix:count²'
-        if config['metricPrefix'] + 'app.engine.worker.info.step.latency.var' in expressions:
+        if config['metricPrefix'] + 'app.engine.worker.info.step.latency.var' in metric_names:
             panel['title'] = 'Step 延迟方差（ms²）'
             panel.setdefault('fieldConfig', {}).setdefault('defaults', {})['unit'] = 'suffix:ms²'
 

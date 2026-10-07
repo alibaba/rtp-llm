@@ -1,5 +1,8 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.google.protobuf.UnknownFieldSet;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -14,6 +17,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -25,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -129,6 +134,36 @@ class FlexlbServiceCancelTest {
         verify(observer).onCompleted();
         assertFalse(response.getValue().getFound());
         assertFalse(response.getValue().hasLifecycle());
+    }
+
+    @Test
+    void cancelErrorsLogTheParsedLegacyRequestId() {
+        when(routeService.cancelRequest("7003", 0L, CancelReason.CLIENT_CANCELLED))
+                .thenThrow(new IllegalStateException("cancel failed"));
+        FlexlbScheduleProtocol.FlexlbCancelRequestPB request =
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setUnknownFields(UnknownFieldSet.newBuilder()
+                                .addField(FlexlbScheduleProtocol.FlexlbCancelRequestPB.REQUEST_ID_FIELD_NUMBER,
+                                        UnknownFieldSet.Field.newBuilder().addVarint(7003).build())
+                                .build())
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
+        doThrow(new IllegalStateException("completion failed")).when(observer).onError(any());
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            service.cancel(request, observer);
+            assertEquals(2, appender.list.stream()
+                    .filter(event -> event.getFormattedMessage().startsWith("FlexlbService.cancel error"))
+                    .filter(event -> event.getFormattedMessage().contains("request_id=7003"))
+                    .count());
+            verify(observer).onError(any());
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test

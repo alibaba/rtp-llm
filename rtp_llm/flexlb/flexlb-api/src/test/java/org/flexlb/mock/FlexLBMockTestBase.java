@@ -25,6 +25,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
@@ -531,8 +532,13 @@ public abstract class FlexLBMockTestBase {
 
         BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
-        ctx.setGenerateInputPb(ByteString.copyFrom(
-                generateInputBytes(Long.parseLong(requestId))));
+        ctx.setGenerateInputPb(ByteString.EMPTY);
+        try {
+            ctx.setGenerateInputPb(ByteString.copyFrom(
+                    generateInputBytes(RequestId.toEngineRequestId(requestId))));
+        } catch (IllegalArgumentException ignored) {
+            // Non-numeric routing IDs have no representation in the Engine's int64 input field.
+        }
         return ctx;
     }
 

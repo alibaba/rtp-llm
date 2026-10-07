@@ -59,6 +59,22 @@ class CacheAwareServiceTest {
     }
 
     @Test
+    void reportsFailedCacheQueryResultAsFailure() {
+        CacheMatchQuery query = new CacheMatchQuery(
+                "failed-request", List.of(11L), 2192L,
+                RoleType.PREFILL, "default");
+        CacheMatchResult failed = CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, 10);
+        when(queryOrchestrator.findMatchingEngines(query)).thenReturn(failed);
+
+        assertSame(failed, service.findMatchingEngines(query));
+
+        verify(metricsReporter).reportFindMatchingEnginesRT(
+                org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.eq("1"));
+    }
+
+    @Test
     void delegatesWorkerStatusUpdates() {
         WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
         WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder()

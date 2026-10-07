@@ -5,16 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigSchemaVersion;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.OptionalInt;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class ConfigDocumentParserResolver {
 
     static final String CONFIG_SCHEMA_VERSION_ENV = "FLEXLB_CONFIG_SCHEMA_VERSION";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Map<Integer, ConfigDocumentParser> PARSERS = new HashMap<>();
+    private static final Map<Integer, ConfigDocumentParser> PARSERS = new ConcurrentHashMap<>();
 
     private ConfigDocumentParserResolver() {}
 

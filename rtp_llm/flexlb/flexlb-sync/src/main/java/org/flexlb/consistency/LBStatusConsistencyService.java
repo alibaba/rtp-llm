@@ -12,6 +12,7 @@ import org.flexlb.util.JsonUtils;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
@@ -85,6 +86,7 @@ public class LBStatusConsistencyService implements MasterElectService {
     }
 
     @Override
+    @PreDestroy
     public void destroy() {
         if (!isNeedConsistency()) {
             log.warn("destroy: lbConsistencyConfig is closed.");

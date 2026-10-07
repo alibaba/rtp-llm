@@ -93,7 +93,6 @@ public class JsonUtils {
         MAPPER_WITH_INDENT.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         MAPPER_WITH_INDENT.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         MAPPER_WITH_INDENT.enable(SerializationFeature.INDENT_OUTPUT);
-        MAPPER_WITH_INDENT.disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
         WRITER_WITH_INDENT = MAPPER_WITH_INDENT.writer();
     }
 

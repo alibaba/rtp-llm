@@ -1,5 +1,6 @@
 package org.flexlb.consistency;
 
+import org.apache.curator.framework.CuratorFramework;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.config.FlexlbConfig;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -101,6 +103,24 @@ class DeploymentIdentityConsistencyTest {
                 configService(false), identity);
 
         verifyNoInteractions(identity);
+    }
+
+    @Test
+    void closingSpringContextDestroysZookeeperElection() {
+        CuratorFramework curatorClient = mock(CuratorFramework.class);
+        ZookeeperMasterElectService electionService = new ZookeeperMasterElectService(
+                mock(GeneralHttpNettyService.class), mock(EngineHealthReporter.class),
+                mock(Environment.class), configService(false), mock(DeploymentIdentity.class));
+        ReflectionTestUtils.setField(electionService, "client", curatorClient);
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(LBStatusConsistencyService.class,
+                    () -> new LBStatusConsistencyService(electionService, mock(Environment.class),
+                            configService(true), mock(DeploymentIdentity.class)));
+            context.refresh();
+            verifyNoInteractions(curatorClient);
+        }
+
+        verify(curatorClient).close();
     }
 
     private ConfigService configService(boolean consistencyEnabled) {

@@ -17,8 +17,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
-import org.springframework.scheduling.support.ScheduledMethodRunnable;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -68,8 +68,11 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
+    @Timeout(15)
     void registersAndRunsExecutorMetricsThroughSpringScheduling() throws Exception {
         assertTrue(Application.class.isAnnotationPresent(EnableScheduling.class));
+        assertEquals(2_000L, FlexlbGrpcServer.class.getDeclaredMethod("reportExecutorMetrics")
+                .getAnnotation(Scheduled.class).fixedRate());
         try (Fixture fixture = new Fixture();
              AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
             FlexlbGrpcServer scheduledServer = spy(fixture.server);
@@ -78,18 +81,20 @@ class FlexlbGrpcExecutorMetricsTest {
             context.registerBean(FlexlbGrpcServer.class, () -> scheduledServer);
             context.refresh();
 
-            Runnable task = context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks().stream()
-                    .map(scheduled -> scheduled.getTask().getRunnable())
-                    .filter(runnable -> runnable instanceof ScheduledMethodRunnable method
-                            && method.getTarget() == scheduledServer
-                            && method.getMethod().getName().equals("reportExecutorMetrics"))
-                    .findFirst().orElseThrow();
-            task.run();
-
-            for (String metric : METRICS) {
-                fixture.assertValue(metric,
-                        metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE) ? 1 : 0);
+            fixture.blockFirstTaskAndQueueSecond();
+            long timeoutAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+            while (!(fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, 1)
+                    && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 1)
+                    && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1))
+                    && System.nanoTime() < timeoutAt) {
+                Thread.sleep(10);
             }
+
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, 1);
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 1);
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1);
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, 1);
+            fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0);
         }
     }
 
@@ -98,7 +103,10 @@ class FlexlbGrpcExecutorMetricsTest {
     static class SchedulingConfiguration {
         @Bean
         TaskScheduler taskScheduler() {
-            return mock(TaskScheduler.class);
+            ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+            scheduler.setPoolSize(1);
+            scheduler.setDaemon(true);
+            return scheduler;
         }
     }
 
@@ -215,6 +223,11 @@ class FlexlbGrpcExecutorMetricsTest {
 
         void report() {
             ReflectionTestUtils.invokeMethod(server, "reportExecutorMetrics");
+        }
+
+        boolean hasValue(String metric, double expected) {
+            var gauge = registry.find("flexlb." + metric).gauge();
+            return gauge != null && gauge.value() == expected;
         }
 
         void assertValue(String metric, double expected) {

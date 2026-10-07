@@ -41,10 +41,28 @@ class MetricMigrationTest(unittest.TestCase):
         migrated, _ = migrate_query(query, CONFIG)
         self.assertIn('engineIp=~' + json.dumps(r'10\.0\.0\.1:[0-9]+(@[0-9]+)?'), migrated)
         self.assertIn('role=~"PREFILL|PDFUSION"', migrated)
+        pattern = re.search(r'engineIp=~("(?:\\.|[^"\\])*")', migrated)
+        self.assertIsNotNone(pattern)
+        self.assertIsNotNone(re.fullmatch(json.loads(pattern[1]), '10.0.0.1:8000@2'))
+        self.assertIsNone(re.fullmatch(json.loads(pattern[1]), '10x0x0x1:8000@2'))
 
     def test_rejects_non_equivalent_settle_miss_alert_migration(self):
         with self.assertRaisesRegex(ValueError, 'not an equivalent signal'):
             migrate_query('{__name__="whale-lb.auto_tpm.inflight_settle_miss.count",kind="yielded"}', CONFIG)
+
+    def test_rejects_retired_metric_with_bare_name_and_label_selector(self):
+        with self.assertRaisesRegex(ValueError, 'not an equivalent signal'):
+            migrate_query('whale-lb.auto_tpm.inflight_settle_miss.count{kind="yielded"}', CONFIG)
+
+    def test_retired_metric_check_ignores_suffixes_and_other_labels(self):
+        queries = [
+            '{__name__="whale-lb.auto_tpm.inflight_settle_miss.count.debug"}',
+            '{ __name__ = "whale-lb.auto_tpm.inflight_settle_miss.count_total" }',
+            '{__name__="whale-lb.other.metric",note="whale-lb.auto_tpm.inflight_settle_miss.count"}',
+        ]
+        for query in queries:
+            with self.subTest(query=query):
+                self.assertEqual((query, []), migrate_query(query, CONFIG))
 
     def test_refuses_to_guess_an_old_multi_counter_formula(self):
         query = ('avg({__name__="whale-lb.app.cache.theory.hit.count"}) / '
@@ -52,9 +70,23 @@ class MetricMigrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'weighted-ratio'):
             migrate_query(query, CONFIG)
 
+    def test_refuses_to_drop_gauge_denominator_from_single_counter_ratio(self):
+        query = ('{__name__="whale-lb.app.cache.hit.count"} / '
+                 '{__name__="whale-lb.app.cache.total.kv.cache.tokens"}')
+        with self.assertRaisesRegex(ValueError, 'weighted-ratio'):
+            migrate_query(query, CONFIG)
+
     def test_does_not_rewrite_unrelated_metric_name_suffixes(self):
         query = '{__name__="whale-lb.app.cache.hit.count.debug",model="keep"}'
         self.assertEqual((query, []), migrate_query(query, CONFIG))
+
+    def test_panel_notes_and_titles_only_match_exact_metric_names(self):
+        dashboard = {'panels': [{'id': 1, 'title': 'original',
+                                 'targets': [{'expr': '{__name__="whale-lb.app.cache.hit.count.debug"} + '
+                                                      '{__name__="whale-lb.grpc.server.executor.caller.runs.debug"}'}]}]}
+        migrated, _ = migrate_dashboard(dashboard, CONFIG)
+        self.assertEqual('original', migrated['panels'][0]['title'])
+        self.assertNotIn('description', migrated['panels'][0])
 
     def test_preserves_original_export_and_migration_is_idempotent(self):
         dashboard = {
@@ -110,6 +142,22 @@ class MetricMigrationTest(unittest.TestCase):
         self.assertEqual('Decode KV 预留 Tokens（含排队）', panels[0]['title'])
         self.assertEqual(['suffix:work-ms²', 'suffix:count²', 'suffix:ms²'],
                          [p['fieldConfig']['defaults']['unit'] for p in panels[1:]])
+
+    def test_decode_reservation_panel_titles_distinguish_input_from_total(self):
+        total = '{__name__="whale-lb.app.flexlb.decode.inflight.kv.reserved.tokens"}'
+        input_only = '{ __name__ = "whale-lb.app.flexlb.decode.inflight.hard.kv.reserved.tokens" }'
+        dashboard = {'panels': [
+            {'id': 1, 'title': 'old', 'targets': [{'expr': total}]},
+            {'id': 2, 'title': 'old', 'targets': [{'expr': input_only}]},
+            {'id': 3, 'title': 'old', 'targets': [{'expr': total}, {'expr': input_only}]},
+        ]}
+        migrated, _ = migrate_dashboard(dashboard, CONFIG)
+        self.assertEqual([
+            'Decode KV 预留 Tokens（含排队）',
+            'Decode 输入 KV 预留 Tokens（含排队）',
+            'Decode KV 预留 Tokens（输入+最大输出／仅输入，含排队）',
+        ], [panel['title'] for panel in migrated['panels'][:3]])
+        self.assertEqual(migrated, migrate_dashboard(migrated, CONFIG)[0])
 
     def test_all_retained_metric_names_exist_in_the_production_contract(self):
         root = Path(__file__).resolve().parents[2]

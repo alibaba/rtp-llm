@@ -24,6 +24,7 @@ public class CacheMatchFailoverManager {
     private final KvcmGrpcClient kvcmGrpcClient;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final AtomicBoolean manualFallbackActive = new AtomicBoolean();
+    private final AtomicBoolean manualFallbackWarningLogged = new AtomicBoolean();
     private final AtomicReference<CacheMatchSource> activeSource;
     private final AtomicLong lastFailoverTimeMs = new AtomicLong();
     private final AtomicReference<String> lastFailoverReason = new AtomicReference<>("initial");
@@ -68,6 +69,7 @@ public class CacheMatchFailoverManager {
 
         // Healthy snapshots converge the cache source back to KVCM.
         if (health.isHealthy()) {
+            manualFallbackWarningLogged.set(false);
             updateActiveSource(CacheMatchSource.KVCM, "KVCM heartbeat recovered");
             cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
             return;
@@ -82,11 +84,13 @@ public class CacheMatchFailoverManager {
 
         // Keep the current source unchanged and wait for an explicit manual fallback.
         cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
-        log.warn("KVCM is unavailable but automatic failover is disabled; manual failover is required, reason={}, "
-                        + "consecutiveQueryFailures={}, consecutiveHeartbeatFailures={}",
-                health.lastStateChangeReason(),
-                health.consecutiveQueryFailures(),
-                health.consecutiveHeartbeatFailures());
+        if (manualFallbackWarningLogged.compareAndSet(false, true)) {
+            log.warn("KVCM is unavailable but automatic failover is disabled; manual failover is required, reason={}, "
+                            + "consecutiveQueryFailures={}, consecutiveHeartbeatFailures={}",
+                    health.lastStateChangeReason(),
+                    health.consecutiveQueryFailures(),
+                    health.consecutiveHeartbeatFailures());
+        }
     }
 
     public void activateFallbackManually() {
