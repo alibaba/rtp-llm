@@ -1960,6 +1960,7 @@ class MSAAttention(nn.Module):
     _cp_side_event: Dict[torch.device, torch.cuda.Event] = {}
     _cp_prefetch_stream: Dict[torch.device, torch.cuda.Stream] = {}
     _cp_prefetch_entries: Dict[int, Dict[str, Any]] = {}
+    _cp_native_prefetch_buffers: Dict[tuple, Dict[str, Any]] = {}
     _cp_prefetch_disabled: bool = False
 
     def _maybe_build_mxfp8_fused_qkv_idx_proj(self) -> None:
@@ -2922,18 +2923,31 @@ class MSAAttention(nn.Module):
         )
 
         if prefix_cpu_list and any(prefix_cpu_list):
-            prefix_values = self._gather_cp_compact_prefix_pool(
-                kv_cache.kv_cache_base,
-                attn_inputs,
-                prefix_cpu_list,
-                prefix_gather_plan,
+            prefetched = (
+                self._take_prefetched_cp_prefix(
+                    kv_cache,
+                    attn_inputs,
+                    self._physical_block_table(attn_inputs),
+                    prefix_gather_plan,
+                )
+                if _CP_PREFIX_PREFETCH and self._kv_sharded
+                else None
             )
-            prefix_side = self._gather_cp_compact_prefix_pool(
-                kv_cache.kv_scale_base,
-                attn_inputs,
-                prefix_cpu_list,
-                prefix_gather_plan,
-            )
+            if prefetched is not None:
+                prefix_values, prefix_side, _ = prefetched
+            else:
+                prefix_values = self._gather_cp_compact_prefix_pool(
+                    kv_cache.kv_cache_base,
+                    attn_inputs,
+                    prefix_cpu_list,
+                    prefix_gather_plan,
+                )
+                prefix_side = self._gather_cp_compact_prefix_pool(
+                    kv_cache.kv_scale_base,
+                    attn_inputs,
+                    prefix_cpu_list,
+                    prefix_gather_plan,
+                )
             restore = (
                 prefix_gather_plan.restore_indices
                 if prefix_gather_plan is not None and self._kv_sharded
@@ -3306,7 +3320,8 @@ class MSAAttention(nn.Module):
     @classmethod
     def _drop_all_prefetch(cls) -> None:
         while cls._cp_prefetch_entries:
-            cls._cp_prefetch_entries.popitem()[1]["event"].synchronize()
+            entry = cls._cp_prefetch_entries.popitem()[1]
+            entry["event"].synchronize()
 
     @classmethod
     def _drop_stale_prefetch(cls, owner: PyAttentionInputs) -> None:
@@ -3316,10 +3331,12 @@ class MSAAttention(nn.Module):
             if entry["owner"] is not owner
         ]
         for layer_idx in stale:
-            cls._cp_prefetch_entries.pop(layer_idx)["event"].synchronize()
+            entry = cls._cp_prefetch_entries.pop(layer_idx)
+            entry["event"].synchronize()
         while len(cls._cp_prefetch_entries) > _MAX_LIVE_PREFETCH:
             oldest = next(iter(cls._cp_prefetch_entries))
-            cls._cp_prefetch_entries.pop(oldest)["event"].synchronize()
+            entry = cls._cp_prefetch_entries.pop(oldest)
+            entry["event"].synchronize()
 
     @classmethod
     def join_cp_side_comms(cls) -> None:
@@ -3335,15 +3352,22 @@ class MSAAttention(nn.Module):
     def maybe_prefetch_cp_prefix(
         self, kv_cache: Optional[LayerKVCache], attn_inputs: PyAttentionInputs
     ) -> None:
-        if (
-            not _CP_PREFIX_PREFETCH
-            or MSAAttention._cp_prefetch_disabled
-            or kv_cache is None
-        ):
+        if not _CP_PREFIX_PREFETCH or kv_cache is None:
+            return
+        if MSAAttention._cp_prefetch_disabled:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError(
+                    "MSA CP FP4 prefetch cannot inherit a disabled schedule"
+                )
             return
         try:
             self._issue_cp_prefix_prefetch(kv_cache, attn_inputs)
         except Exception:
+            # A rank-local fallback can leave peers inside TP_PREFETCH while
+            # this rank enters an inline TP collective. Native CP must fail
+            # closed rather than silently change its collective schedule.
+            if self.nvfp4_kv_cache:
+                raise
             MSAAttention._cp_prefetch_disabled = True
             MSAAttention._drop_all_prefetch()
             logging.warning(
@@ -3369,27 +3393,68 @@ class MSAAttention(nn.Module):
             return
         addr = meta.get("addr")
         if addr is None:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError(
+                    "MSA CP FP4 prefetch metadata has no addressing plan"
+                )
             return
 
         block_table = self._physical_block_table(attn_inputs)
-        plan = addr["prefix_gather_plans"].get(
-            (
-                block_table.device,
-                int(block_table.data_ptr()),
-                tuple(block_table.shape),
-            )
+        plan_key = (
+            block_table.device,
+            int(block_table.data_ptr()),
+            tuple(block_table.shape),
         )
+        plans = addr["prefix_gather_plans"]
+        plan = plans.get(plan_key)
+        if plan is None and self.nvfp4_kv_cache:
+            # A new cache-group table may appear on only one rank. A local
+            # cache miss must rebuild addressing, not change collective order.
+            plan = build_cp_sharded_prefix_gather_plan(
+                block_table,
+                torch.tensor(meta["prefix_cpu_list"], dtype=torch.int64),
+                page_size=self.page_size,
+                cp_size=cp_size,
+                cp_rank=self._cp_rank,
+            )
+            plans[plan_key] = plan
         if plan is None or plan.total_logical_blocks == 0:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError(
+                    "MSA CP FP4 prefetch has an empty nonzero-prefix plan"
+                )
             return
 
         main_pool = self._paged_kv_base_view(kv_cache)
-        if main_pool is None or main_pool.dim() != 5 or not main_pool.is_cuda:
+        if main_pool is None or not main_pool.is_cuda:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError("MSA CP FP4 prefetch requires a CUDA cache pool")
             return
-        idx_pool, idx_scale_pool = self._idx_k_paged_storage(kv_cache)
+        if self.nvfp4_kv_cache:
+            # Native KV4 has two opaque page blocks. The second contains main
+            # scales and packed index-K/scales; do not reinterpret it as BF16.
+            idx_pool, idx_scale_pool = kv_cache.kv_scale_base, None
+            if (
+                main_pool.dim() != 2
+                or main_pool.dtype != torch.uint8
+                or idx_pool is None
+                or idx_pool.dim() != 2
+                or idx_pool.dtype != torch.uint8
+                or idx_pool.shape[0] != main_pool.shape[0]
+            ):
+                raise RuntimeError("MSA CP FP4 prefetch requires two uint8 page pools")
+        else:
+            if main_pool.dim() != 5:
+                return
+            idx_pool, idx_scale_pool = self._idx_k_paged_storage(kv_cache)
         device = main_pool.device
         if idx_pool.dim() < 2 or idx_pool.device != device:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError("MSA CP FP4 prefetch side pool device mismatch")
             return
         if plan.packed_block_ids.device != device:
+            if self.nvfp4_kv_cache:
+                raise RuntimeError("MSA CP FP4 prefetch plan device mismatch")
             return
 
         stream = MSAAttention._cp_prefetch_stream.get(device)
@@ -3398,12 +3463,56 @@ class MSAAttention(nn.Module):
             MSAAttention._cp_prefetch_stream[device] = stream
 
         main_rows = int(plan.packed_block_ids.numel()) * cp_size
-        main_gathered = torch.empty(
-            (main_rows, *main_pool.shape[1:]), dtype=main_pool.dtype, device=device
-        )
-        idx_gathered = torch.empty(
-            (main_rows, *idx_pool.shape[1:]), dtype=idx_pool.dtype, device=device
-        )
+        main_stream = torch.cuda.current_stream(device)
+        workspace = None
+        if self.nvfp4_kv_cache:
+            # Layer L is issued before L-1, after the L-2 consumer has been
+            # queued. The existing side.wait_stream(main) below orders a
+            # two-slot reuse after that consumer. Keep storage alive instead
+            # of accumulating per-layer cross-stream allocator reservations.
+            slot_key = (device, self.layer_idx % 2)
+            if any(
+                entry.get("workspace_key") == slot_key
+                for entry in MSAAttention._cp_prefetch_entries.values()
+            ):
+                raise RuntimeError("MSA CP FP4 prefetch slot is still unconsumed")
+            layout = (cp_size, main_pool.shape[1], idx_pool.shape[1])
+            workspace = MSAAttention._cp_native_prefetch_buffers.get(slot_key)
+            if workspace is not None and (
+                workspace["stream"] != main_stream.cuda_stream
+                or workspace["layout"] != layout
+            ):
+                raise RuntimeError(
+                    "MSA CP FP4 prefetch workspace stream/layout changed"
+                )
+            if workspace is None:
+                workspace = dict(
+                    stream=main_stream.cuda_stream,
+                    layout=layout,
+                    rows=0,
+                    generation=0,
+                )
+                MSAAttention._cp_native_prefetch_buffers[slot_key] = workspace
+            if workspace["rows"] < main_rows:
+                # Replaced buffers retain the record_stream protection below;
+                # never drop an in-flight buffer without allocator tracking.
+                workspace["main"] = torch.empty(
+                    (main_rows, main_pool.shape[1]), dtype=torch.uint8, device=device
+                )
+                workspace["idx"] = torch.empty(
+                    (main_rows, idx_pool.shape[1]), dtype=torch.uint8, device=device
+                )
+                workspace["rows"] = main_rows
+            workspace["generation"] += 1
+            main_gathered = workspace["main"][:main_rows]
+            idx_gathered = workspace["idx"][:main_rows]
+        else:
+            main_gathered = torch.empty(
+                (main_rows, *main_pool.shape[1:]), dtype=main_pool.dtype, device=device
+            )
+            idx_gathered = torch.empty(
+                (main_rows, *idx_pool.shape[1:]), dtype=idx_pool.dtype, device=device
+            )
         idx_scale_gathered = (
             None
             if idx_scale_pool is None
@@ -3413,8 +3522,12 @@ class MSAAttention(nn.Module):
                 device=device,
             )
         )
-        main_stream = torch.cuda.current_stream(device)
         stream.wait_stream(main_stream)
+        plan.packed_block_ids.record_stream(stream)
+        main_pool.record_stream(stream)
+        idx_pool.record_stream(stream)
+        if idx_scale_pool is not None:
+            idx_scale_pool.record_stream(stream)
         main_gathered.record_stream(stream)
         idx_gathered.record_stream(stream)
         if idx_scale_gathered is not None:
@@ -3439,10 +3552,19 @@ class MSAAttention(nn.Module):
         event = torch.cuda.Event()
         event.record(stream)
         MSAAttention._cp_prefetch_entries[self.layer_idx] = {
+            "workspace_key": slot_key if workspace is not None else None,
+            "workspace_generation": (
+                workspace["generation"] if workspace is not None else None
+            ),
             "owner": attn_inputs,
             "plan": plan,
             "block_table_ptr": int(block_table.data_ptr()),
             "main_pool_ptr": int(main_pool.data_ptr()),
+            "source_pools": (main_pool, idx_pool, idx_scale_pool),
+            "nvfp4": self.nvfp4_kv_cache,
+            "side_pool_ptr": (
+                int(idx_pool.data_ptr()) if self.nvfp4_kv_cache else None
+            ),
             "main": main_gathered,
             "idx": idx_gathered,
             "idx_scale": idx_scale_gathered,
@@ -3462,18 +3584,59 @@ class MSAAttention(nn.Module):
             return None
         entry = MSAAttention._cp_prefetch_entries.pop(layer_idx, None)
         if entry is None:
+            if self.nvfp4_kv_cache and _CP_PREFIX_PREFETCH and self._kv_sharded:
+                meta = MSAAttention._cp_shared_meta
+                if meta is None or meta.get("owner") is not attn_inputs:
+                    raise RuntimeError(
+                        "MSA CP FP4 prefetch has no current owner metadata"
+                    )
+                # Layer zero establishes CP metadata after its next-layer hook.
+                # It and the immediately following layer bootstrap inline on
+                # every rank. All subsequent layers must consume a prefetch;
+                # a missing entry cannot silently choose another collective.
+                first_layer = int(meta["layer_idx"])
+                if int(meta.get("prefix_sum", 0)) > 0 and layer_idx > first_layer + 1:
+                    raise RuntimeError("MSA CP FP4 prefix prefetch entry is missing")
             return None
         main_pool = self._paged_kv_base_view(kv_cache)
+        workspace_key = entry.get("workspace_key")
+        if workspace_key is not None:
+            workspace = MSAAttention._cp_native_prefetch_buffers[workspace_key]
+            if (
+                workspace["generation"] != entry["workspace_generation"]
+                or workspace["stream"]
+                != torch.cuda.current_stream(entry["device"]).cuda_stream
+            ):
+                raise RuntimeError("MSA CP FP4 prefetch workspace consumer changed")
         if (
             entry["owner"] is not attn_inputs
             or entry["plan"] is not gather_plan
             or entry["block_table_ptr"] != int(block_table.data_ptr())
             or main_pool is None
             or entry["main_pool_ptr"] != int(main_pool.data_ptr())
+            or entry["nvfp4"] != self.nvfp4_kv_cache
+            or (
+                self.nvfp4_kv_cache
+                and (
+                    kv_cache.kv_scale_base is None
+                    or entry["side_pool_ptr"] != int(kv_cache.kv_scale_base.data_ptr())
+                )
+            )
         ):
             entry["event"].synchronize()
+            if self.nvfp4_kv_cache:
+                raise RuntimeError(
+                    "MSA CP FP4 prefix prefetch identity changed; "
+                    "cannot safely switch a single rank to inline gather"
+                )
             return None
-        torch.cuda.current_stream(entry["device"]).wait_event(entry["event"])
+        current_stream = torch.cuda.current_stream(entry["device"])
+        current_stream.wait_event(entry["event"])
+        # Allocation/production happened on another stream. Keep the allocator
+        # from recycling these pages before the consuming restore completes.
+        for pages in (entry["main"], entry["idx"], entry["idx_scale"]):
+            if pages is not None:
+                pages.record_stream(current_stream)
         return entry["main"], entry["idx"], entry["idx_scale"]
 
     def _cp_all_gather_packed_kv(
@@ -4252,6 +4415,9 @@ class MSAAttention(nn.Module):
         # new request rebuilds metadata, the entry-local ``cache`` still points
         # at the previous request, so its addr must be ignored.
         addr_cache = None if need_build_new_meta else cache.get("addr")
+        # The old forward's metadata is no longer consumed below. In particular,
+        # do not retain its native index workspace during this forward's score.
+        del cache
         if (
             addr_cache is not None
             and addr_cache.get("scratch_seq_len") == int(self._scratch_seq_len)

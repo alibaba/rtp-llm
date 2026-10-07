@@ -16,8 +16,14 @@ RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, std::shared
 RequestBlockBuffer::~RequestBlockBuffer() {}
 
 void RequestBlockBuffer::notifyRequestDone() {
+    markRequestEnded();
     // request block buffer 关联的request已经结束，触发所有回调
     triggerWatchFunc(false, {});
+}
+
+void RequestBlockBuffer::markRequestEnded() {
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    request_ended_ = true;
 }
 
 const std::string& RequestBlockBuffer::getRequestId() const {
@@ -86,6 +92,21 @@ void RequestBlockBuffer::addBlocks(const std::vector<std::shared_ptr<BlockBuffer
     }
 
     triggerWatchFunc(true, blocks);
+}
+
+bool RequestBlockBuffer::tryAddBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+    {
+        std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+        if (request_ended_) {
+            return false;
+        }
+        for (const auto& block : blocks) {
+            blocks_[block->key] = block;
+            blocks_size_ += block->len;
+        }
+    }
+    triggerWatchFunc(true, blocks);
+    return true;
 }
 
 bool RequestBlockBuffer::isValid() const {

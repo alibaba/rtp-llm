@@ -329,8 +329,13 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         int  canonical_reuse_block_num = prefix_len / canonical_seq_size_per_block;
         int  canonical_block_num       = (input_len + canonical_seq_size_per_block - 1) / canonical_seq_size_per_block;
         auto request_id                = *(param.request_id.data_ptr<int64_t>() + batch_id);
-        auto event                     = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
-        auto request_blocks            = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        // The shared producer event was synchronized above before reading
+        // metadata or publishing any KV slice. Forwarding that completed event
+        // to every request makes NormalCacheStore query/synchronize it again
+        // O(batch * layers) times, contending with model CUDA submissions.
+        // Legacy callers without that barrier still need their recorded event.
+        auto event          = param.pre_created_event ? nullptr : runtimeCreateEvent();
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
@@ -543,7 +548,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
         auto storeCallback =
             [layer_id = param.layer_id, request_id, store_waiter, async_writer](bool success, CacheStoreErrorCode ec) {
-                if (!success) {
+                // RemoteFinish can cancel a request while this batch is still
+                // executing. The typed late-publication result must still drain
+                // its external task, but must not abort healthy batch peers or
+                // cause one CP rank to skip the remaining collectives.
+                const bool publication_failed = !success && ec != CacheStoreErrorCode::RequestEnded;
+                if (publication_failed) {
                     RTP_LLM_LOG_WARNING(
                         "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
                         request_id,
@@ -553,7 +563,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 }
                 if (async_writer != nullptr) {
                     std::exception_ptr exception = nullptr;
-                    if (!success) {
+                    if (publication_failed) {
                         try {
                             throw std::runtime_error("store kv cache callback failed");
                         } catch (...) {
@@ -565,7 +575,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 }
                 {
                     std::lock_guard<std::mutex> lock(store_waiter->mutex);
-                    if (!success && !store_waiter->failed) {
+                    if (publication_failed && !store_waiter->failed) {
                         store_waiter->failed   = true;
                         store_waiter->first_ec = ec;
                     }

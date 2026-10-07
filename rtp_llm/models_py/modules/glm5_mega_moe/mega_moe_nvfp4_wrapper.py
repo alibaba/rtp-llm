@@ -54,6 +54,9 @@ class MegaMoeNvfp4Wrapper(MegaMoeWrapper):
             topk_ids,
             lambda h, w, i: super(MegaMoeNvfp4Wrapper, self).forward(h, w, i, **kwargs),
             plan,
+            forward_into_fn=lambda h, w, i, out: self.mega_moe(
+                h, w, i, activation=activation, extra_expert_args=extra, out=out
+            ),
         )
 
     def clone_for_cuda_graph(self) -> "MegaMoeNvfp4Wrapper":

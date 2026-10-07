@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <utility>
+#include <chrono>
 
 namespace rtp_llm {
 
@@ -20,11 +21,18 @@ void RequestBlockBufferStore::stop() {
 }
 
 bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
-    auto store_request_block_buffer = getOrInsertRequestBlockBuffer(request_block_buffer->getRequestId());
+    return setRequestBlockBufferResult(request_block_buffer) == StoreResult::Stored;
+}
+
+RequestBlockBufferStore::StoreResult
+RequestBlockBufferStore::setRequestBlockBufferResult(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
+    StoreResult lookup_result = StoreResult::Failed;
+    auto        store_request_block_buffer =
+        getOrInsertRequestBlockBuffer(request_block_buffer->getRequestId(), &lookup_result);
     if (store_request_block_buffer == nullptr) {
         RTP_LLM_LOG_WARNING("set request block buffer failed to get block buffer, request id %s",
                             request_block_buffer->getRequestId().c_str());
-        return false;
+        return lookup_result;
     }
 
     auto                                      blocks = request_block_buffer->getBlocks();
@@ -40,15 +48,16 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         if (!valid_block) {
             RTP_LLM_LOG_WARNING("set request block buffer failed to make valid block, request id %s",
                                 request_block_buffer->getRequestId().c_str());
-            return false;
+            // A real conversion/MR/copy failure remains a failure even if
+            // request end races afterward. Do not reclassify by a state recheck.
+            return StoreResult::Failed;
         }
         valid_blocks.push_back(valid_block);
         RTP_LLM_LOG_DEBUG("set request block buffer success to make valid block, request id %s, block id is %s",
                           request_block_buffer->getRequestId().c_str(),
                           block->key.c_str());
     }
-    store_request_block_buffer->addBlocks(valid_blocks);
-    return true;
+    return store_request_block_buffer->tryAddBlocks(valid_blocks) ? StoreResult::Stored : StoreResult::RequestEnded;
 }
 
 bool RequestBlockBufferStore::setRequestBlockBufferWatchFunc(const std::string&              requestid,
@@ -117,15 +126,23 @@ std::shared_ptr<RequestBlockBuffer> RequestBlockBufferStore::getRequestBlockBuff
     return nullptr;
 }
 
-std::shared_ptr<RequestBlockBuffer>
-RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& requestid) {
+std::shared_ptr<RequestBlockBuffer> RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& requestid,
+                                                                                           StoreResult*       result) {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    if (result) {
+        *result = StoreResult::Failed;
+    }
 
     auto iter = request_cache_map_.find(requestid);
     if (iter != request_cache_map_.end()) {
         if (iter->second == nullptr) {
+            if (result) {
+                *result = StoreResult::RequestEnded;
+            }
             RTP_LLM_LOG_WARNING("request block buffer store try get expired request block buffer, request id %s",
                                 requestid.c_str());
+        } else if (result) {
+            *result = StoreResult::Stored;
         }
         return iter->second;
     }
@@ -137,6 +154,9 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
         return nullptr;
     }
 
+    if (result) {
+        *result = StoreResult::Stored;
+    }
     return ret.first->second;
 }
 
@@ -202,31 +222,46 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
     return true;
 }
 
-void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
+void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid, bool retain_tombstone) {
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        auto                                iter = request_cache_map_.find(requestid);
+        constexpr int64_t                   retention_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::hours(1)).count();
+        const auto now_us = currentTimeUs();
+        // FIFO cleanup must precede this end transition: an expired tombstone
+        // may be removed and recreated by a new definitive terminal call.
+        while (!expired_request_caches_.empty() && now_us - expired_request_caches_.front().second > retention_us) {
+            auto expired = request_cache_map_.find(expired_request_caches_.front().first);
+            if (expired != request_cache_map_.end() && expired->second == nullptr) {
+                request_cache_map_.erase(expired);
+            }
+            expired_request_caches_.pop_front();
+        }
+
+        bool new_tombstone = false;
+        auto iter          = request_cache_map_.find(requestid);
         if (iter != request_cache_map_.end()) {
-            request_block_buffer          = iter->second;
+            request_block_buffer = iter->second;
+            if (request_block_buffer) {
+                // Mark the held object before publishing the map tombstone.
+                // No user callbacks run while either map or block lock is held.
+                request_block_buffer->markRequestEnded();
+                new_tombstone = true;
+            }
             request_cache_map_[requestid] = nullptr;
+        } else if (retain_tombstone) {
+            request_cache_map_.emplace(requestid, nullptr);
+            new_tombstone = true;
+        }
+        if (new_tombstone) {
+            // The first terminal transition defines retention; repeats do not
+            // extend it or create duplicate expiry records.
+            expired_request_caches_.emplace_back(requestid, now_us);
         }
     }
     if (request_block_buffer) {
         request_block_buffer->notifyRequestDone();
-    }
-
-    {
-        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        for (int i = expired_request_caches_.size() - 1; i >= 0; i--) {
-            if (currentTimeUs() - expired_request_caches_[i].second > 1000 * 60 * 60) {
-                request_cache_map_.erase(expired_request_caches_[i].first);
-                expired_request_caches_.pop_back();
-            } else {
-                break;
-            }
-        }
-        expired_request_caches_.push_back({requestid, currentTimeUs()});
     }
 }
 

@@ -64,6 +64,11 @@ public:
     void addBlock(const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted);
     void addBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
 
+    // Publication and request end serialize on blocks_mutex_. Callbacks run
+    // after unlocking, as in addBlocks(); false means nothing was appended.
+    bool tryAddBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
+    void markRequestEnded();
+
     bool isValid() const;
 
     // change with true callback, dtor with false callback
@@ -90,7 +95,8 @@ private:
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;
-    size_t                                                        blocks_size_ = 0;
+    size_t                                                        blocks_size_   = 0;
+    bool                                                          request_ended_ = false;
 
     mutable std::shared_mutex watch_func_mutex_;
     std::vector<Watcher>      watch_funcs_;

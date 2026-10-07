@@ -65,6 +65,10 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+
+    // Optional owned target response payloads; separate from draft recurrent state.
+    torch::Tensor target_logits;
+    torch::Tensor target_hidden_states;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -559,6 +563,12 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        // DSpark batch publication already selects these values after final
+        // accept-length caps and failure masking. Reuse request-owned views
+        // next round instead of launching scalar gather/cast ops per stream.
+        // Optional: legacy MTP, sync and newly admitted streams use fallback.
+        torch::Tensor dspark_anchor_gpu;
+        torch::Tensor dspark_committed_end_gpu;
         // True host seqLength observed when this state is published. MTP async
         // uses it as the base for the next KV allocation upper bound.
         // -1 = unset (first iter / cleared).

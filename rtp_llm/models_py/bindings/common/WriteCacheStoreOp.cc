@@ -31,7 +31,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     auto run = [captured_input_lengths,
                 captured_prefix_lengths,
                 captured_kv_cache_block_id_host,
-                captured_cache_store,
+                captured_cache_store = std::move(captured_cache_store),
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
         auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
@@ -95,7 +95,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.decoder_batch_size,
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
-                                captured_cache_store.cache_keys,
+                                std::move(captured_cache_store.cache_keys),
                                 layer_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,

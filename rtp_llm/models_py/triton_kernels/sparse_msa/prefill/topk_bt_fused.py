@@ -1307,15 +1307,15 @@ def flash_prefill_topk_to_block_tables_fp4(
     """Run training-compatible Q8K4 IndexScore and RTP's production TopK.
 
     BF16 Q is cast to scale-one E4M3; pre-cast E4M3 Q is consumed directly.
-    The score kernel reads packed NVFP4 index-K
-    and its MMA-ordered block scales directly from the page table; it does not
-    materialize historical keys in BF16 or FP8 working pages.
+    Supported long-query geometry stages index-K alone to scale-one E4M3
+    scratch and uses native OnlyScore. Other shapes retain the direct packed
+    Q8K4 reader. Neither path expands main KV or creates BF16 working pages.
     """
     from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.nvfp4_q8_index_score import (
         q8kv4_prefill_index_score,
     )
 
-    from .score_chunk import prepare_fp4_prefill_score_chunks
+    from .score_chunk import PrefillScoreHostMetadata, prepare_fp4_prefill_score_chunks
 
     if block_size_k != 128:
         raise ValueError("FP4 prefill index score requires 128-token pages")
@@ -1400,7 +1400,45 @@ def flash_prefill_topk_to_block_tables_fp4(
         )
         index_score_plan["_q8_index_score_buffer"] = score_buffer
 
-    for chunk, cu_page_offsets in zip(chunks, chunk_page_offsets):
+    from .native_q8_index_score import (
+        NativeIndexWorkspace,
+        supported_native_index_workspace,
+    )
+
+    native_workspace = None
+    if isinstance(
+        host_metadata, PrefillScoreHostMetadata
+    ) and supported_native_index_workspace(
+        chunks, idx_k_fp4.shape[0], num_heads, total_q, max_chunk_q, max_pages
+    ):
+        previous = index_score_plan.get("_native_q8_index_workspace")
+        # Chunk identity includes the producer epoch, not merely its shape.
+        if (
+            previous is None
+            or previous.pages != idx_k_fp4.shape[0]
+            or previous.device != idx_q.device
+            or previous.heads != num_heads
+            or len(previous.chunks) != len(chunks)
+            or any(a is not b for a, b in zip(previous.chunks, chunks))
+        ):
+            # Drop the previous epoch before allocating its replacement. Tensor
+            # storage remains protected by PyTorch's CUDA stream lifetime rules.
+            index_score_plan.pop("_native_q8_index_workspace", None)
+            previous = None
+            previous = NativeIndexWorkspace(
+                chunks, idx_k_fp4.shape[0], num_heads, idx_q.device
+            )
+            index_score_plan["_native_q8_index_workspace"] = previous
+        native_workspace = previous
+        # The current layer's writer precedes this on the current stream.
+        # Never reuse staged K values from an earlier layer or forward.
+        native_workspace.stage(idx_k_fp4, idx_k_scale_mma)
+    else:
+        index_score_plan.pop("_native_q8_index_workspace", None)
+
+    for chunk_index, (chunk, cu_page_offsets) in enumerate(
+        zip(chunks, chunk_page_offsets)
+    ):
         q_start, q_end = chunk.q_start, chunk.q_end
         chunk_q = q_end - q_start
         if idx_q.dtype == torch.float8_e4m3fn:
@@ -1411,18 +1449,21 @@ def flash_prefill_topk_to_block_tables_fp4(
 
         chunk_max_pages = triton.cdiv(chunk.max_seqlen_k, block_size_k)
         score = score_buffer[:, :chunk_q, :chunk_max_pages]
-        q8kv4_prefill_index_score(
-            q8_chunk,
-            idx_k_fp4,
-            idx_k_scale_mma,
-            chunk.cu_seqlens,
-            chunk.seq_lens.to(torch.int32),
-            chunk.prefix_lens.to(torch.int32),
-            cu_page_offsets,
-            chunk.kv_indices,
-            score,
-            max_seqlen_q=chunk.max_seqlen_q,
-        )
+        if native_workspace is not None:
+            native_workspace.score(chunk_index, q8_chunk, cu_page_offsets, score)
+        else:
+            q8kv4_prefill_index_score(
+                q8_chunk,
+                idx_k_fp4,
+                idx_k_scale_mma,
+                chunk.cu_seqlens,
+                chunk.seq_lens.to(torch.int32),
+                chunk.prefix_lens.to(torch.int32),
+                cu_page_offsets,
+                chunk.kv_indices,
+                score,
+                max_seqlen_q=chunk.max_seqlen_q,
+            )
         max_seqblock_k = chunk_max_pages
         if emit_block_table:
             bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]

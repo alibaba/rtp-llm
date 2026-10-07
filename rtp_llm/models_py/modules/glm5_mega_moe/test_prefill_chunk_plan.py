@@ -17,6 +17,40 @@ PrefillChunkPlan = module.PrefillChunkPlan
 
 
 class ChunkPlanTest(unittest.TestCase):
+    def test_direct_output_preserves_calls_and_strided_input(self):
+        for rows in (0, 1, 8, 9, 16, 17):
+            with self.subTest(rows=rows):
+                hidden = (
+                    torch.arange(rows * 2, dtype=torch.float32).reshape(2, rows).t()
+                )
+                weights = torch.ones(rows, 4)
+                indices = torch.arange(4).expand(rows, 4)
+                plan = PrefillChunkPlan(8, 4)
+                calls = []
+                scratch = torch.empty(8, 2)
+
+                def forward(h, w, ids):
+                    calls.append(("scratch", len(h)))
+                    scratch.fill_(-777)
+                    scratch[: len(h)].copy_(h * 3)
+                    return scratch[: len(h)]
+
+                def into(h, w, ids, out):
+                    calls.append(("direct", len(h)))
+                    self.assertTrue(out.is_contiguous())
+                    out.copy_(h * 3)
+
+                output = module.run_prefill_chunks(
+                    hidden, weights, indices, forward, plan, forward_into_fn=into
+                )
+                self.assertTrue(output.is_contiguous())
+                torch.testing.assert_close(output, hidden * 3, rtol=0, atol=0)
+                real_chunks = (rows + 7) // 8
+                self.assertEqual(len(calls), plan.chunks)
+                self.assertEqual(
+                    sum(mode == "direct" for mode, _ in calls), real_chunks
+                )
+
     def run_rank(self, rows, plan):
         hidden = torch.arange(rows * 2, dtype=torch.float32).reshape(rows, 2) + 1
         weights = torch.ones((rows, 4), dtype=torch.float32)

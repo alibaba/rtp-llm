@@ -30,13 +30,23 @@ def local_chunk_count(rows: int, capacity: int) -> int:
     return max(1, (rows + capacity - 1) // capacity)
 
 
-def run_prefill_chunks(hidden, weights, indices, forward_fn, plan: PrefillChunkPlan):
+def run_prefill_chunks(
+    hidden,
+    weights,
+    indices,
+    forward_fn,
+    plan: PrefillChunkPlan,
+    *,
+    forward_into_fn=None
+):
     """Run exactly the agreed count; preserve real rows before buffer reuse.
 
     ``forward_fn`` may return a view of a reusable output buffer. Even a rank
     with only one real chunk must copy that result before its dummy calls.
     Dummy routes are valid distinct IDs with zero weights, not masked -1 IDs.
     They execute routed MoE only and never escape into real hidden states.
+    An optional native callback writes real chunks into the final allocation;
+    dummy calls still use the reusable scratch through ``forward_fn``.
     """
     rows = hidden.shape[0]
     plan.validate_rows(rows)
@@ -51,15 +61,29 @@ def run_prefill_chunks(hidden, weights, indices, forward_fn, plan: PrefillChunkP
     if plan.chunks == 1 and rows:
         return forward_fn(hidden, weights, indices)
 
-    output = torch.empty_like(hidden)
+    output = (
+        torch.empty_like(hidden)
+        if forward_into_fn is None
+        else torch.empty(hidden.shape, dtype=hidden.dtype, device=hidden.device)
+    )
     dummy = None
     for chunk in range(plan.chunks):
         start = chunk * plan.capacity
         end = min(start + plan.capacity, rows)
         if start < rows:
-            output[start:end].copy_(
-                forward_fn(hidden[start:end], weights[start:end], indices[start:end])
-            )
+            if forward_into_fn is None:
+                output[start:end].copy_(
+                    forward_fn(
+                        hidden[start:end], weights[start:end], indices[start:end]
+                    )
+                )
+            else:
+                forward_into_fn(
+                    hidden[start:end],
+                    weights[start:end],
+                    indices[start:end],
+                    output[start:end],
+                )
         else:
             if dummy is None:
                 dummy = (

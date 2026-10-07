@@ -1358,6 +1358,12 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // Verify: cache store received correct request key for all 3 layers.
     EXPECT_EQ(cache_store->store_request_keys_.size(), 3u);
+    ASSERT_EQ(cache_store->store_buffer_requests_.size(), 3u);
+    for (const auto& request : cache_store->store_buffer_requests_) {
+        // Producer completion is consumed once by runtimeWriteCacheStore,
+        // before publishing pinned metadata and KV. No downstream re-poll.
+        EXPECT_EQ(request->getEvent(), nullptr);
+    }
     // MHA (non-opaque, non-mla) splits each block into k + v → 2 entries per block.
     EXPECT_EQ(cache_store->stored_blocks_.size(), 3u * block_num * 2u);
 
@@ -1399,6 +1405,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     EXPECT_EQ(it->second[0], static_cast<uint8_t>(123));
 
     ASSERT_EQ(cache_store->store_buffer_requests_.size(), 1u);
+    // Without a pre-created producer barrier, preserve the legacy event.
+    EXPECT_NE(cache_store->store_buffer_requests_.front()->getEvent(), nullptr);
     auto blocks   = cache_store->store_buffer_requests_.front()->getBlocks();
     auto block_it = blocks.find(key);
     ASSERT_NE(block_it, blocks.end());

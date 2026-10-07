@@ -247,6 +247,79 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkInitializedPerfPrefillPreservesAnc
     EXPECT_EQ(toVec<int32_t>(round.committed_ends), (std::vector<int32_t>{2}));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPublishedRoundViewsFollowRequestAndEpoch) {
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 32;
+    model.num_layers  = 1;
+    CacheConfig cache;
+    cache.group_types = {CacheGroupType::FULL};
+    SpeculativeExecutionConfig spec;
+    spec.type              = SP_TYPE_DSPARK;
+    spec.gen_num_per_cycle = 7;
+    RuntimeConfig           runtime;
+    ResourceContext         resources;
+    MtpBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, spec, false);
+    const auto              gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto                    a   = createContextStream(model, runtime, resources, {1, 2, 3}, 1);
+    auto                    b   = createContextStream(model, runtime, resources, {1, 2, 4}, 1);
+    a->setIsContextStream(false);
+    b->setIsContextStream(false);
+    GptModelInputs input;
+    input.sequence_lengths = torch::tensor({2, 2}, gpu);
+    TensorHolder holder;
+    for (int accepted : {1, 4, 8}) {
+        auto                                tokens = torch::arange(8, gpu).add(10).reshape({1, 8});
+        GenerateStream::MtpAsyncDeviceState cached;
+        cached.accept_tokens_gpu        = tokens;
+        cached.accept_len_gpu           = torch::tensor({accepted}, gpu);
+        cached.next_seq_len_gpu         = torch::tensor({3 + accepted}, gpu);
+        cached.dspark_anchor_gpu        = tokens.reshape({8}).narrow(0, accepted - 1, 1);
+        cached.dspark_committed_end_gpu = cached.next_seq_len_gpu - 1;
+        const auto anchor_ptr           = cached.dspark_anchor_gpu.data_ptr<int32_t>();
+        const auto epoch                = a->setMtpAsyncDeviceState(std::move(cached));
+        EXPECT_EQ(a->getMtpAsyncDeviceState().dspark_anchor_gpu.data_ptr<int32_t>(), anchor_ptr);
+        GenerateStream::MtpAsyncDeviceState legacy;
+        legacy.accept_tokens_gpu = tokens.add(8);
+        legacy.accept_len_gpu    = torch::tensor({accepted}, gpu);
+        legacy.next_seq_len_gpu  = torch::tensor({13 + accepted}, gpu);
+        b->setMtpAsyncDeviceState(std::move(legacy));
+        for (bool reversed : {false, true}) {
+            StreamGroups  group(reversed ? std::list<GenerateStreamPtr>{b, a} : std::list<GenerateStreamPtr>{a, b});
+            const auto    round = processor.buildDSparkRoundState(group, input, holder);
+            const int32_t av = 9 + accepted, bv = av + 8;
+            EXPECT_EQ(toVec<int32_t>(round.anchors),
+                      reversed ? (std::vector<int32_t>{bv, av}) : (std::vector<int32_t>{av, bv}));
+            EXPECT_EQ(toVec<int32_t>(round.committed_ends),
+                      reversed ? (std::vector<int32_t>{12 + accepted, 2 + accepted}) :
+                                 (std::vector<int32_t>{2 + accepted, 12 + accepted}));
+        }
+        ASSERT_TRUE(a->clearMtpAsyncDeviceState(epoch));
+        const auto cleared = processor.buildDSparkRoundState(StreamGroups({a, b}), input, holder);
+        EXPECT_EQ(toVec<int32_t>(cleared.anchors).front(), 3);
+        EXPECT_EQ(toVec<int32_t>(cleared.committed_ends).front(), 2);
+    }
+    // Production assertions abort by default. This negative-input test needs
+    // the exception variant, restored even if the test exits unexpectedly.
+    struct AssertionExceptionGuard {
+        bool saved = StaticConfig::user_ft_core_dump_on_exception;
+        AssertionExceptionGuard() {
+            StaticConfig::user_ft_core_dump_on_exception = false;
+        }
+        ~AssertionExceptionGuard() {
+            StaticConfig::user_ft_core_dump_on_exception = saved;
+        }
+    } assertion_guard;
+    GenerateStream::MtpAsyncDeviceState malformed;
+    malformed.dspark_anchor_gpu = torch::ones({1}, gpu.dtype(torch::kInt64));
+    a->setMtpAsyncDeviceState(std::move(malformed));
+    EXPECT_THROW(processor.buildDSparkRoundState(StreamGroups({a, b}), input, holder), std::runtime_error);
+    malformed                          = GenerateStream::MtpAsyncDeviceState{};
+    malformed.dspark_committed_end_gpu = torch::ones({2}, gpu);
+    a->setMtpAsyncDeviceState(std::move(malformed));
+    EXPECT_THROW(processor.buildDSparkRoundState(StreamGroups({a, b}), input, holder), std::runtime_error);
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkBuildsFixedWidthProposalAndVerifyInputs) {
     ModelConfig                 model_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1225,6 +1298,139 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
         EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkRequestedPrefillTargetRowsAreOwnedAndNotDraftFeatures) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 7;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, sp_config, false);
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < 4; ++i) {
+        streams.push_back(
+            createContextStream(model_config, runtime_config, resource_context, std::vector<int>(i + 1, 2), i + 1));
+    }
+    auto it                                             = streams.begin();
+    auto none                                           = *it++;
+    auto logits_only                                    = *it++;
+    auto hidden_only                                    = *it++;
+    auto both                                           = *it;
+    logits_only->generateConfig()->return_logits        = true;
+    hidden_only->generateConfig()->return_hidden_states = true;
+    both->generateConfig()->return_logits               = true;
+    both->generateConfig()->return_hidden_states        = true;
+    // allStreams must use decode-first LM row order, not caller input order.
+    both->setIsContextStream(false);
+    StreamGroups    groups(streams);
+    GptModelOutputs target;
+    target.logits            = torch::arange(16, torch::kFloat32).reshape({4, 4});
+    target.hidden_states     = torch::arange(12, torch::kFloat32).reshape({4, 3});
+    target.all_hidden_states = torch::full({10, 5}, 99.0f, torch::kFloat32);
+    auto result              = processor.capturePrefillTargetOutputs(groups, target, false, {});
+    ASSERT_TRUE(result.ok());
+    auto rows = std::move(result.value());
+    ASSERT_EQ(rows.size(), 4);
+    EXPECT_EQ(toVec<float>(rows[0].logits), (std::vector<float>{0, 1, 2, 3}));
+    EXPECT_EQ(toVec<float>(rows[0].hidden_states), (std::vector<float>{0, 1, 2}));
+    EXPECT_FALSE(rows[1].logits.defined());
+    EXPECT_FALSE(rows[1].hidden_states.defined());
+    EXPECT_EQ(toVec<float>(rows[2].logits), (std::vector<float>{8, 9, 10, 11}));
+    EXPECT_FALSE(rows[2].hidden_states.defined());
+    EXPECT_FALSE(rows[3].logits.defined());
+    EXPECT_EQ(toVec<float>(rows[3].hidden_states), (std::vector<float>{9, 10, 11}));
+    // Emulate sampler mutation and later target-buffer reuse before dispatch.
+    target.logits.fill_(-777);
+    target.hidden_states.fill_(-777);
+    EXPECT_EQ(toVec<float>(rows[0].logits), (std::vector<float>{0, 1, 2, 3}));
+    EXPECT_EQ(toVec<float>(rows[3].hidden_states), (std::vector<float>{9, 10, 11}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkFullPrefillHiddenUsesOriginalIndicesEvenWithEqualRowCount) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len     = 2048;
+    model_config.vocab_size      = 4;
+    model_config.num_layers      = 1;
+    auto                       a = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+    auto                       b = createContextStream(model_config, runtime_config, resource_context, {2, 2}, 2);
+    StreamGroups               groups(std::list<GenerateStreamPtr>{a, b});
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 7;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, sp_config, false);
+    EXPECT_FALSE(processor.needsPrefillTargetOutputs(groups));
+    auto empty = processor.capturePrefillTargetOutputs(groups, GptModelOutputs{}, true, {});
+    ASSERT_TRUE(empty.ok());
+    EXPECT_TRUE(empty.value().empty());
+    a->generateConfig()->return_hidden_states = true;
+    b->generateConfig()->return_hidden_states = true;
+    GptModelOutputs target;
+    target.hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2});
+    auto indices         = torch::tensor({1, 0}, torch::kInt32);
+    auto result          = processor.capturePrefillTargetOutputs(groups, target, true, indices);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(toVec<float>(result.value()[0].hidden_states), (std::vector<float>{3, 4}));
+    EXPECT_EQ(toVec<float>(result.value()[1].hidden_states), (std::vector<float>{1, 2}));
+    EXPECT_FALSE(processor.capturePrefillTargetOutputs(groups, target, true, {}).ok());
+    target.hidden_states = torch::ones({3, 2});
+    EXPECT_FALSE(processor.capturePrefillTargetOutputs(groups, target, false, {}).ok());
+    a->generateConfig()->num_return_sequences = 2;
+    EXPECT_FALSE(processor.capturePrefillTargetOutputs(groups, target, true, indices).ok());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillDispatchPublishesRequestedTargetRows) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 32;
+    model_config.num_layers  = 1;
+    RuntimeConfig              runtime_config;
+    ResourceContext            resource_context;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 7;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, sp_config, false);
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 1);
+    stream->generateConfig()->return_logits        = true;
+    stream->generateConfig()->return_hidden_states = true;
+    stream->generateConfig()->is_streaming         = true;
+    StreamGroups groups({stream});
+    MergedOutput target;
+    target.model_output.logits        = torch::arange(32, torch::kFloat32).reshape({1, 32});
+    target.model_output.hidden_states = torch::tensor({10.0f, 20.0f, 30.0f}).reshape({1, 3});
+    target.sampler_output.token_ids   = torch::tensor({7}, torch::kInt32).reshape({1, 1});
+    auto captured                     = processor.capturePrefillTargetOutputs(groups, target.model_output, false, {});
+    ASSERT_TRUE(captured.ok());
+    auto draft_hidden = torch::tensor({1.0f, 2.0f}).reshape({1, 2});
+    ASSERT_TRUE(processor.dispatchPrefill(groups, target, MergedOutput{}, draft_hidden, captured.value()).ok());
+    ASSERT_TRUE(stream->hasOutput());
+    auto response = stream->nextOutput();
+    ASSERT_TRUE(response.ok());
+    ASSERT_EQ(response.value().generate_outputs.size(), 1);
+    const auto& output = response.value().generate_outputs.front();
+    ASSERT_TRUE(output.logits.has_value());
+    ASSERT_TRUE(output.hidden_states.has_value());
+    EXPECT_TRUE(torch::equal(output.logits.value(), captured.value()[0].logits));
+    EXPECT_TRUE(torch::equal(output.hidden_states.value(), captured.value()[0].hidden_states));
+    // DSpark commits feature KV instead of retaining MTP recurrent hidden state.
+    // Public target diagnostics must not populate that recurrent buffer either.
+    EXPECT_FALSE(stream->getSPOutputBuffer()->hidden_states.defined());
+    EXPECT_EQ(stream->outputTokenLen(), 1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {

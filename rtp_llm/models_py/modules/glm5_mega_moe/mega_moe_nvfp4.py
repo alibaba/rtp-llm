@@ -233,6 +233,8 @@ class GLM5MegaMoENVFP4(GLM5MegaMoE):
         indices: torch.Tensor,
         activation: Optional[str] = None,
         extra_expert_args: Optional[Dict[str, Any]] = None,
+        *,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -264,12 +266,46 @@ class GLM5MegaMoENVFP4(GLM5MegaMoE):
                 f"than input tokens={tokens}"
             )
 
+        if out is not None:
+            # DeepGEMM writes only y.size(0) rows, including a partial tail.
+            # Its binding does not validate destination stride/device/aliases.
+            if (
+                out.shape != (tokens, self.cfg.dim)
+                or out.dtype != torch.bfloat16
+                or not out.is_cuda
+                or out.device != x.device
+                or not out.is_contiguous()
+                or out.data_ptr() % 16
+            ):
+                raise ValueError("invalid NVFP4 MegaMoE direct-output layout")
+            protected = [x, weights, indices, self._mega_y, buf.buffer]
+            protected.extend(
+                getattr(self, name)
+                for name in (
+                    "_mega_l1_w",
+                    "_mega_l1_sf",
+                    "_mega_l1_gsf",
+                    "_mega_l2_w",
+                    "_mega_l2_sf",
+                    "_mega_l2_gsf",
+                )
+            )
+            storage = out.untyped_storage().data_ptr()
+            if any(
+                tensor.device == out.device
+                and tensor.untyped_storage().data_ptr() == storage
+                for tensor in protected
+            ):
+                raise ValueError(
+                    "NVFP4 MegaMoE direct output aliases protected storage"
+                )
+
         self._input_packer.pack(x, weights, indices, buf, tokens)
         self._maybe_pre_kernel_barrier(tokens)
         _sync_cuda_graph_warmup_ranks(
             f"mega_moe_nvfp4.layer{self.cfg.layer_id}.before_deepgemm", x.device
         )
-        y = self._mega_y[:tokens]
+        y = self._mega_y[:tokens] if out is None else out
         with torch.cuda.device(x.device):
             deep_gemm.nvfp4_nvfp4_mega_moe(
                 y,

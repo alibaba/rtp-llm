@@ -17,14 +17,23 @@ from rtp_llm.ops.compute_ops import PyModelInputs
 
 class MiniMaxM31MoeLayer(GenericMoeLayer):
     def prepare_prefill_router(self):
-        """Expand FP32 gates; BF16 gates retain their ordinary linear path."""
+        """Prepare model-owned fixed-row routing for native-KV4 Prefill."""
         if not isinstance(self.gate, CudaF16Linear) or self.gate.bias is not None:
             raise ValueError("M3.1 Prefill router requires a bias-free linear gate")
         part_names = ("_prefill_gate_high", "_prefill_gate_middle", "_prefill_gate_low")
+        self._prefill_bf16_router_ready = False
         if self.gate.weight.dtype == torch.bfloat16:
+            if self.gate.weight.shape != (
+                128,
+                6144,
+            ) or self.gate.weight.stride() not in ((6144, 1), (1, 128)):
+                raise ValueError(
+                    "M3.1 Prefill router requires dense BF16 [128,6144] gate"
+                )
             # Do not retain FP32 expansion buffers across a gate reload.
             for name in part_names:
                 self._buffers.pop(name, None)
+            self._prefill_bf16_router_ready = True
             return
         from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
             expand_fp32_router_weight,
@@ -38,9 +47,23 @@ class MiniMaxM31MoeLayer(GenericMoeLayer):
         clone = super().clone_for_cuda_graph()
         # Decode/verify clones share the raw FP32 gate, not Prefill-only parts.
         clone._prefill_router_active = False
+        clone._prefill_bf16_router_ready = False
         return clone
 
     def _compute_router_logits(self, hidden_states):
+        if (
+            getattr(self, "_prefill_router_active", False)
+            and getattr(self, "_prefill_bf16_router_ready", False)
+            and hidden_states.dtype == torch.bfloat16
+            and self.gate.weight.dtype == torch.bfloat16
+        ):
+            from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
+                minimax_m31_prefill_bf16_router_logits,
+            )
+
+            return minimax_m31_prefill_bf16_router_logits(
+                hidden_states.contiguous(), self.gate.weight
+            )
         if (
             getattr(self, "_prefill_router_active", False)
             and hasattr(self, "_prefill_gate_high")

@@ -27,6 +27,9 @@ enum class CacheStoreErrorCode {
 
     // store failed
     StoreFailed = 10,
+
+    // Local publication arrived after this request ended. Not a storage fault.
+    RequestEnded = 11,
 };
 
 inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
@@ -53,6 +56,8 @@ inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
             return "LoadErrorUnknown";
         case CacheStoreErrorCode::StoreFailed:
             return "StoreFailed";
+        case CacheStoreErrorCode::RequestEnded:
+            return "RequestEnded";
         default:
             return "Error: Unrecognized ErrorCode";
     }

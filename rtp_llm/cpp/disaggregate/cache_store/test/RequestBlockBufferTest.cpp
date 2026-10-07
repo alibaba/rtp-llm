@@ -6,6 +6,37 @@ namespace rtp_llm {
 
 class RequestBlockBufferTest: public ::testing::Test {};
 
+TEST_F(RequestBlockBufferTest, PublicationRejectsHeldBufferAfterRequestEnd) {
+    auto buffer                = std::make_shared<RequestBlockBuffer>("ended");
+    auto held                  = buffer;
+    int  terminal_callbacks    = 0;
+    int  publication_callbacks = 0;
+    ASSERT_TRUE(buffer->setWatchFunc([&](bool ok, const auto&) {
+        // Callbacks must be able to re-enter block access without a lock cycle.
+        EXPECT_EQ(held->getBlocksCount(), 0);
+        ok ? ++publication_callbacks : ++terminal_callbacks;
+    }));
+    buffer->notifyRequestDone();
+    EXPECT_FALSE(held->tryAddBlocks({}));
+    EXPECT_EQ(terminal_callbacks, 1);
+    EXPECT_EQ(publication_callbacks, 0);
+    EXPECT_EQ(held->getBlocksCount(), 0);
+}
+
+TEST_F(RequestBlockBufferTest, PublicationAcceptsActiveBufferAndCallbacksCanEndRequest) {
+    RequestBlockBuffer buffer("active");
+    int                publication_callbacks = 0;
+    ASSERT_TRUE(buffer.setWatchFunc([&](bool ok, const auto&) {
+        if (ok) {
+            ++publication_callbacks;
+            buffer.markRequestEnded();
+        }
+    }));
+    EXPECT_TRUE(buffer.tryAddBlocks({}));
+    EXPECT_EQ(publication_callbacks, 1);
+    EXPECT_FALSE(buffer.tryAddBlocks({}));
+}
+
 TEST_F(RequestBlockBufferTest, testBlockOps) {
 
     RequestBlockBuffer buffer("test-request-id");
@@ -102,11 +133,12 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_SetWatchFunc) {
             watched_blocks.insert(watched_blocks.end(), blocks.begin(), blocks.end());
         };
         ASSERT_TRUE(request_block_buffer->setWatchFunc(std::move(watch_func2)));
-        ASSERT_TRUE(watched_called1);
-        ASSERT_TRUE(watched_success1);
+        // Registration replays current blocks only to the new watcher.
+        ASSERT_FALSE(watched_called1);
+        ASSERT_FALSE(watched_success1);
         ASSERT_TRUE(watched_called2);
         ASSERT_TRUE(watched_success2);
-        ASSERT_EQ(4, watched_blocks.size());
+        ASSERT_EQ(2, watched_blocks.size());
 
         request_block_buffer.reset();
     }
@@ -144,7 +176,11 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_AddBlock) {
         watched_blocks.insert(watched_blocks.end(), blocks.begin(), blocks.end());
     };
     ASSERT_TRUE(request_block_buffer->setWatchFunc(std::move(watch_func2)));
-    ASSERT_EQ(2, watched_blocks.size());
+    ASSERT_FALSE(watched_called1);
+    ASSERT_TRUE(watched_called2);
+    ASSERT_TRUE(watched_success2);
+    ASSERT_EQ(1, watched_blocks.size());
+    ASSERT_EQ("b1", watched_blocks[0]->key);
     watched_called1 = false;
     watched_called2 = false;
     watched_blocks.clear();

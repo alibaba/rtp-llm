@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <deque>
 #include <shared_mutex>
 #include <atomic>
 #include <mutex>
@@ -22,16 +23,25 @@ public:
     ~RequestBlockBufferStore() = default;
 
 public:
-    void stop();
-    bool setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& layer_cache);
-    bool setRequestBlockBufferWatchFunc(const std::string& requestid, RequestBlockBuffer::WatchFunc&& func);
-    bool setRequestBlockBufferWatchFunc(const std::string&                                     requestid,
-                                        RequestBlockBuffer::WatchFunc&&                        func,
-                                        std::shared_ptr<const std::unordered_set<std::string>> filter_keys);
+    enum class StoreResult {
+        Stored,
+        RequestEnded,
+        Failed
+    };
+
+    void        stop();
+    bool        setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& layer_cache);
+    StoreResult setRequestBlockBufferResult(const std::shared_ptr<RequestBlockBuffer>& layer_cache);
+    bool        setRequestBlockBufferWatchFunc(const std::string& requestid, RequestBlockBuffer::WatchFunc&& func);
+    bool        setRequestBlockBufferWatchFunc(const std::string&                                     requestid,
+                                               RequestBlockBuffer::WatchFunc&&                        func,
+                                               std::shared_ptr<const std::unordered_set<std::string>> filter_keys);
 
     std::shared_ptr<BlockBuffer> getBlockBuffer(const std::string& requestid, const std::string& blockid) const;
 
-    void delRequestBlockBuffer(const std::string& requestid);
+    // Definitive terminal callers may retain a tombstone before the first
+    // store/watch. Generic delete keeps its legacy unknown-ID behavior.
+    void delRequestBlockBuffer(const std::string& requestid, bool retain_tombstone = false);
 
     std::string debugInfoOnRequest(const std::string& requestid) const;
     void        debugInfo();
@@ -41,7 +51,8 @@ public:
 
 private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
-    std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
+    std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid,
+                                                                      StoreResult*       result = nullptr);
     bool                                isValidBlock(const std::shared_ptr<BlockBuffer>& block);
     std::shared_ptr<BlockBuffer>        makeValidBlock(const std::shared_ptr<BlockBuffer>& block);
     bool copyBlock(const std::shared_ptr<BlockBuffer>& dst, const std::shared_ptr<BlockBuffer>& src);
@@ -51,7 +62,7 @@ private:
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;
-    std::vector<std::pair<std::string, int64_t>>                         expired_request_caches_;
+    std::deque<std::pair<std::string, int64_t>>                          expired_request_caches_;
 
     std::shared_mutex                                             buffer_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffer_map_;

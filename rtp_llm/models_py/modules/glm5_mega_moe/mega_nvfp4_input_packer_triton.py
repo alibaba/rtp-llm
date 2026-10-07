@@ -146,6 +146,90 @@ if triton is not None:
                 mask=router_mask,
             )
 
+    @triton.jit(do_not_specialize=["M"])
+    def _pack_nvfp4_inputs_vector_kernel(
+        x_ptr,
+        weights_ptr,
+        indices_ptr,
+        out_fp4_ptr,
+        out_sf_ptr,
+        out_gsf_ptr,
+        out_indices_ptr,
+        out_weights_ptr,
+        M,
+        D: tl.constexpr,
+        TOPK: tl.constexpr,
+        x_stride_m: tl.constexpr,
+        weights_stride_m: tl.constexpr,
+        indices_stride_m: tl.constexpr,
+        out_fp4_stride_m: tl.constexpr,
+        out_sf_stride_m: tl.constexpr,
+        out_indices_stride_m: tl.constexpr,
+        out_weights_stride_m: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_TOPK: tl.constexpr,
+    ):
+        # Decode four independent block scales together, preserving div_rn,
+        # E4M3 rounding and the E2M1 ladder of the original packer.
+        rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M).to(
+            tl.int64
+        )
+        dim_block = tl.program_id(1)
+        cols = dim_block * 64 + tl.arange(0, 64)
+        row_mask = rows < M
+        values = tl.load(
+            x_ptr + rows[:, None] * x_stride_m + cols[None, :],
+            mask=row_mask[:, None],
+            other=0.0,
+        ).to(tl.float32)
+        groups = tl.reshape(values, (BLOCK_M, 4, 16))
+        gsf = tl.load(out_gsf_ptr + rows, mask=row_mask, other=1.0)
+        group_amax = tl.max(tl.abs(groups), axis=2)
+        sf_code, sf_value = _cast_ue4m3_nearest(
+            tl.div_rn(group_amax / 6.0, gsf[:, None])
+        )
+        scale_inv = tl.div_rn(tl.div_rn(1.0, gsf[:, None]), sf_value)
+        codes = _e2m1_code(
+            tl.maximum(tl.minimum(groups * scale_inv[:, :, None], 6.0), -6.0)
+        )
+        code0, code1 = tl.split(tl.reshape(codes, (BLOCK_M, 32, 2)))
+        tl.store(
+            out_fp4_ptr
+            + rows[:, None] * out_fp4_stride_m
+            + dim_block * 32
+            + tl.arange(0, 32)[None, :],
+            code0 | (code1 << 4),
+            mask=row_mask[:, None],
+        )
+        # Positive finite E4M3 codes are <=126; four disjoint bytes fit int32.
+        packed_sf = tl.sum(sf_code << (tl.arange(0, 4)[None, :] * 8), axis=1)
+        tl.store(
+            out_sf_ptr + rows * out_sf_stride_m + dim_block, packed_sf, mask=row_mask
+        )
+        if dim_block == 0:
+            route = tl.arange(0, BLOCK_TOPK)
+            route_mask = row_mask[:, None] & (route[None, :] < TOPK)
+            weights = tl.load(
+                weights_ptr + rows[:, None] * weights_stride_m + route[None, :],
+                mask=route_mask,
+                other=0.0,
+            ).to(tl.float32)
+            indices = tl.load(
+                indices_ptr + rows[:, None] * indices_stride_m + route[None, :],
+                mask=route_mask,
+                other=-1,
+            ).to(tl.int64)
+            tl.store(
+                out_weights_ptr + rows[:, None] * out_weights_stride_m + route[None, :],
+                weights,
+                mask=route_mask,
+            )
+            tl.store(
+                out_indices_ptr + rows[:, None] * out_indices_stride_m + route[None, :],
+                indices,
+                mask=route_mask,
+            )
+
 
 def _validate_inputs(
     x: torch.Tensor,
@@ -204,6 +288,18 @@ def fused_pack_mega_nvfp4_inputs(
     )
     if block_m not in (1, 2, 4, 8, 16):
         raise ValueError("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M must be one of 1,2,4,8,16")
+    # Small decode tiles were measured separately from the large Prefill tile.
+    # Keep other small shapes and explicit overrides on their existing path.
+    # Both variants write the same buffers; there is no additional workspace.
+    small_vector_tile = {25: 8, 40: 16, 80: 16}.get(tokens)
+    vector_pack = (
+        block_m_env is None
+        and hidden == 6144
+        and topk == 4
+        and (tokens >= 4096 or small_vector_tile is not None)
+    )
+    if vector_pack:
+        block_m = 64 if tokens >= 4096 else small_vector_tile
     block_topk = triton.next_power_of_2(topk)
     _row_gsf_kernel[(tokens,)](
         x,
@@ -215,7 +311,10 @@ def fused_pack_mega_nvfp4_inputs(
         num_warps=8,
     )
     grid = (triton.cdiv(tokens, block_m), triton.cdiv(hidden, 64))
-    _pack_nvfp4_inputs_kernel[grid](
+    kernel = (
+        _pack_nvfp4_inputs_vector_kernel if vector_pack else _pack_nvfp4_inputs_kernel
+    )
+    kernel[grid](
         x,
         weights,
         indices,

@@ -6,10 +6,174 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <chrono>
 
 namespace rtp_llm {
 
 class RequestBlockBufferStoreTest: public CacheStoreTestBase {};
+
+namespace {
+class RdmaMockMemoryUtil: public MockMemoryUtil {
+public:
+    explicit RdmaMockMemoryUtil(std::shared_ptr<MemoryUtil> impl): MockMemoryUtil(std::move(impl)) {}
+    bool isRdmaMode() override {
+        return true;
+    }
+};
+constexpr int64_t kTombstoneRetentionUs =
+    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::hours(1)).count();
+}  // namespace
+
+TEST_F(RequestBlockBufferStoreTest, TypedPublicationDistinguishesActiveAndEndedRequests) {
+    auto store   = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto request = std::make_shared<RequestBlockBuffer>("typed");
+    EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::Stored);
+    store->delRequestBlockBuffer("typed");
+    EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::RequestEnded);
+    EXPECT_FALSE(store->setRequestBlockBuffer(request));
+
+    // Generic delete preserves the legacy unknown-ID contract; definitive
+    // finish-before-first-store uses the explicit retain_tombstone overload.
+    store->delRequestBlockBuffer("not-registered");
+    auto unknown = std::make_shared<RequestBlockBuffer>("not-registered");
+    EXPECT_EQ(store->setRequestBlockBufferResult(unknown), RequestBlockBufferStore::StoreResult::Stored);
+}
+
+TEST_F(RequestBlockBufferStoreTest, TypedPublicationRejectsHeldBufferEndedDuringValidation) {
+    // Use host memory and a mock MR check to end the request after lookup,
+    // before the final append. No GPU allocation or copy is needed.
+    auto memory  = std::make_shared<RdmaMockMemoryUtil>(memory_util_);
+    auto store   = std::make_shared<RequestBlockBufferStore>(memory);
+    auto request = std::make_shared<RequestBlockBuffer>("validation-race");
+    auto data    = std::make_shared<char>('x');
+    request->addBlock(std::make_shared<BlockBuffer>("host", data, 1, false, false));
+    EXPECT_CALL(*memory, isMemoryMr(::testing::_, 1, false, false))
+        .WillOnce(::testing::Invoke([&](void*, uint64_t, bool, bool) {
+            store->delRequestBlockBuffer("validation-race");
+            return true;
+        }));
+    EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::RequestEnded);
+    EXPECT_EQ(store->getBlockBuffer("validation-race", "host"), nullptr);
+}
+
+TEST_F(RequestBlockBufferStoreTest, ExplicitTerminalEndBeforeFirstPublicationRetainsTombstone) {
+    auto store   = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto request = std::make_shared<RequestBlockBuffer>("end-before-store");
+    store->delRequestBlockBuffer("end-before-store", true);
+    store->delRequestBlockBuffer("end-before-store", true);
+    EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::RequestEnded);
+    EXPECT_FALSE(store->setRequestBlockBuffer(request));
+    bool watch_called = false;
+    EXPECT_FALSE(
+        store->setRequestBlockBufferWatchFunc("end-before-store", [&](bool, const auto&) { watch_called = true; }));
+    EXPECT_FALSE(watch_called);
+    EXPECT_EQ(store->getBlockBuffer("end-before-store", "missing"), nullptr);
+
+    // The default generic delete deliberately permits future first publication.
+    store->delRequestBlockBuffer("legacy-unknown");
+    auto legacy = std::make_shared<RequestBlockBuffer>("legacy-unknown");
+    EXPECT_EQ(store->setRequestBlockBufferResult(legacy), RequestBlockBufferStore::StoreResult::Stored);
+}
+
+TEST_F(RequestBlockBufferStoreTest, TombstoneRepeatDoesNotExtendRetentionOrGrowQueue) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store->delRequestBlockBuffer("repeat", true);
+    ASSERT_EQ(store->expired_request_caches_.size(), 1);
+    const auto first_end = store->expired_request_caches_.front().second;
+    for (int i = 0; i < 20; ++i) {
+        store->delRequestBlockBuffer("repeat", true);
+    }
+    EXPECT_EQ(store->expired_request_caches_.size(), 1);
+    EXPECT_EQ(store->expired_request_caches_.front().second, first_end);
+    auto active = std::make_shared<RequestBlockBuffer>("active-end");
+    ASSERT_EQ(store->setRequestBlockBufferResult(active), RequestBlockBufferStore::StoreResult::Stored);
+    store->delRequestBlockBuffer("active-end");
+    EXPECT_EQ(store->expired_request_caches_.size(), 2);
+    store->delRequestBlockBuffer("active-end");
+    EXPECT_EQ(store->expired_request_caches_.size(), 2);
+}
+
+TEST_F(RequestBlockBufferStoreTest, TombstoneRemainsAfterTenSecondsForLatePublication) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store->delRequestBlockBuffer("long-prefill", true);
+    store->expired_request_caches_.front().second = currentTimeUs() - 10 * 1000 * 1000;
+    store->delRequestBlockBuffer("cleanup-trigger");
+    ASSERT_EQ(store->expired_request_caches_.size(), 1);
+    auto late = std::make_shared<RequestBlockBuffer>("long-prefill");
+    EXPECT_EQ(store->setRequestBlockBufferResult(late), RequestBlockBufferStore::StoreResult::RequestEnded);
+}
+
+TEST_F(RequestBlockBufferStoreTest, TombstoneCleanupExpiresOldestFirstAndPreservesRecentEntry) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store->delRequestBlockBuffer("old-1", true);
+    store->delRequestBlockBuffer("old-2", true);
+    store->delRequestBlockBuffer("recent", true);
+    const auto now                           = currentTimeUs();
+    store->expired_request_caches_[0].second = now - kTombstoneRetentionUs - 2 * 1000 * 1000;
+    store->expired_request_caches_[1].second = now - kTombstoneRetentionUs - 1000 * 1000;
+    store->delRequestBlockBuffer("cleanup-trigger");
+    ASSERT_EQ(store->expired_request_caches_.size(), 1);
+    EXPECT_EQ(store->expired_request_caches_.front().first, "recent");
+    EXPECT_EQ(store->request_cache_map_.count("old-1"), 0);
+    EXPECT_EQ(store->request_cache_map_.count("old-2"), 0);
+    EXPECT_EQ(store->request_cache_map_.count("recent"), 1);
+    auto late = std::make_shared<RequestBlockBuffer>("recent");
+    EXPECT_EQ(store->setRequestBlockBufferResult(late), RequestBlockBufferStore::StoreResult::RequestEnded);
+}
+
+TEST_F(RequestBlockBufferStoreTest, LegacyUnknownDeleteAndStaleExpiryCannotEraseActivePublication) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store->delRequestBlockBuffer("legacy");
+    EXPECT_TRUE(store->expired_request_caches_.empty());
+    auto active = std::make_shared<RequestBlockBuffer>("legacy");
+    ASSERT_EQ(store->setRequestBlockBufferResult(active), RequestBlockBufferStore::StoreResult::Stored);
+    // Model a stale record left by the old unknown-ID delete implementation.
+    store->expired_request_caches_.emplace_back("legacy", currentTimeUs() - kTombstoneRetentionUs - 1000 * 1000);
+    store->delRequestBlockBuffer("cleanup-trigger");
+    EXPECT_TRUE(store->expired_request_caches_.empty());
+    EXPECT_EQ(store->request_cache_map_.count("legacy"), 1);
+    EXPECT_NE(store->request_cache_map_.at("legacy"), nullptr);
+    EXPECT_EQ(store->setRequestBlockBufferResult(active), RequestBlockBufferStore::StoreResult::Stored);
+}
+
+TEST_F(RequestBlockBufferStoreTest, ExplicitTerminalEndRecreatesExpiredTombstoneAfterCleanup) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store->delRequestBlockBuffer("expired-end", true);
+    const auto old_end                            = currentTimeUs() - kTombstoneRetentionUs - 1000 * 1000;
+    store->expired_request_caches_.front().second = old_end;
+    store->delRequestBlockBuffer("expired-end", true);
+    ASSERT_EQ(store->expired_request_caches_.size(), 1);
+    EXPECT_GT(store->expired_request_caches_.front().second, old_end);
+    auto late = std::make_shared<RequestBlockBuffer>("expired-end");
+    EXPECT_EQ(store->setRequestBlockBufferResult(late), RequestBlockBufferStore::StoreResult::RequestEnded);
+}
+
+TEST_F(RequestBlockBufferStoreTest, TypedPublicationDoesNotHideMrConversionFailure) {
+    for (const bool end_during_validation : {false, true}) {
+        auto memory  = std::make_shared<RdmaMockMemoryUtil>(memory_util_);
+        auto store   = std::make_shared<RequestBlockBufferStore>(memory);
+        auto request = std::make_shared<RequestBlockBuffer>("mr-failure");
+        auto data    = std::make_shared<char>('x');
+        request->addBlock(std::make_shared<BlockBuffer>("host", data, 1, false, false));
+        EXPECT_CALL(*memory, isMemoryMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+            .WillOnce(::testing::Invoke([&](void*, uint64_t, bool, bool) {
+                if (end_during_validation) {
+                    store->delRequestBlockBuffer("mr-failure");
+                }
+                return false;
+            }))
+            .WillRepeatedly(::testing::Return(false));
+        EXPECT_CALL(*memory, regUserMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+            .Times(::testing::AnyNumber())
+            .WillRepeatedly(::testing::Return(false));
+        // Without initialized runtime conversion already fails; with runtime
+        // it reaches the failing MR registration. A concurrent end cannot hide it.
+        EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::Failed);
+        store->delRequestBlockBuffer("mr-failure");
+        EXPECT_EQ(store->setRequestBlockBufferResult(request), RequestBlockBufferStore::StoreResult::RequestEnded);
+    }
+}
 
 TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");

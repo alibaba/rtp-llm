@@ -332,7 +332,15 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
                          event_wait_ms,
                          summarizeBlocks(request_block_buffer).c_str());
     }
-    auto ret = request_block_buffer_store_->setRequestBlockBuffer(request_block_buffer);
+    const auto result = request_block_buffer_store_->setRequestBlockBufferResult(request_block_buffer);
+    if (result == RequestBlockBufferStore::StoreResult::RequestEnded) {
+        // The producer event has already completed. Drain this late publication
+        // without resurrecting the request or disguising a real storage error.
+        collector->markEnd(true);
+        callback(false, CacheStoreErrorCode::RequestEnded);
+        return;
+    }
+    const bool ret = result == RequestBlockBufferStore::StoreResult::Stored;
     collector->markEnd(ret);
 
     if (!ret) {
@@ -544,7 +552,9 @@ void NormalCacheStore::markRequestEnd(const std::string& requestid) {
                          requestid.c_str(),
                          request_block_buffer_store_->debugInfoOnRequest(requestid).c_str());
     }
-    request_block_buffer_store_->delRequestBlockBuffer(requestid);
+    // Finish can precede the first queued layer publication. Retain the
+    // terminal ID so that a late producer cannot resurrect this request.
+    request_block_buffer_store_->delRequestBlockBuffer(requestid, true);
 }
 
 bool NormalCacheStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {

@@ -84,6 +84,115 @@ def cpu_oracle(q, packed, scales, cu, lengths, prefixes, offsets, table, blocks)
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestQ8KV4PrefillIndexScore(unittest.TestCase):
+    def test_shared_heads_dispatch_and_explicit_tile_compatibility(self):
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
+            nvfp4_q8_index_score as score_op,
+        )
+
+        torch.manual_seed(202610072)
+        packed = torch.randint(
+            0, 256, (3, 1, 128, 64), device="cuda", dtype=torch.uint8
+        )
+        # Include zero, subnormal, and maximum finite block scales.
+        raw_scale = torch.tensor([0, 1, 126], device="cuda", dtype=torch.uint8)
+        scales = raw_scale.repeat(1024).reshape(3, 1, 2, 32, 4, 4)
+        lengths = torch.tensor([383], device="cuda", dtype=torch.int32)
+        prefixes = torch.tensor([200], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([0, 3], device="cuda", dtype=torch.int32)
+        table = torch.tensor([2, 0, 1], device="cuda", dtype=torch.int32)
+        original = score_op._prefill_shared_heads_score_kernel
+
+        for heads in (1, 2, 4, 8):
+            for rows in (31, 32, 127, 128, 129):
+                q = torch.randint(-4, 5, (rows, heads, 128), device="cuda").to(
+                    torch.float8_e4m3fn
+                )
+                cu = torch.tensor([0, rows], device="cuda", dtype=torch.int32)
+                expected = torch.empty(heads, rows, 3, device="cuda")
+                actual = torch.empty_like(expected)
+                launches = []
+
+                class KernelSpy:
+                    def __getitem__(self, grid):
+                        launches.append(grid)
+                        return original[grid]
+
+                q8kv4_prefill_index_score(
+                    q,
+                    packed,
+                    scales,
+                    cu,
+                    lengths,
+                    prefixes,
+                    offsets,
+                    table,
+                    expected,
+                    max_seqlen_q=rows,
+                    tile_q=128,
+                )
+                with patch.object(
+                    score_op, "_prefill_shared_heads_score_kernel", KernelSpy()
+                ):
+                    q8kv4_prefill_index_score(
+                        q,
+                        packed,
+                        scales,
+                        cu,
+                        lengths,
+                        prefixes,
+                        offsets,
+                        table,
+                        actual,
+                        max_seqlen_q=rows,
+                    )
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                self.assertEqual(bool(launches), heads == 4 and rows >= 128)
+
+    def test_future_pages_are_overwritten_on_graph_replay(self):
+        q = torch.ones(129, 4, 128, device="cuda").to(torch.float8_e4m3fn)
+        packed = torch.full((8, 1, 128, 64), 0x22, device="cuda", dtype=torch.uint8)
+        scales = torch.ones(8, 1, 2, 32, 4, 4, device="cuda").to(torch.float8_e4m3fn)
+        cu = torch.tensor([0, 129], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([1024], device="cuda", dtype=torch.int32)
+        prefixes = torch.tensor([0], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([0, 8], device="cuda", dtype=torch.int32)
+        table = torch.arange(8, device="cuda", dtype=torch.int32)
+        backing = torch.full((4, 131, 10), 12345.0, device="cuda")
+        out = backing[:, :129, :8]
+
+        def run():
+            q8kv4_prefill_index_score(
+                q,
+                packed,
+                scales,
+                cu,
+                lengths,
+                prefixes,
+                offsets,
+                table,
+                out,
+                max_seqlen_q=129,
+            )
+
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for prefix, length in ((640, 1024), (0, 1024), (511, 640), (0, 1), (0, 0)):
+            prefixes.fill_(prefix)
+            lengths.fill_(length)
+            out.fill_(99.0)
+            graph.replay()
+            expected = torch.full_like(out, float("-inf"))
+            positions = prefix + torch.arange(129, device="cuda")
+            blocks = torch.arange(8, device="cuda") * 128
+            expected.masked_fill_(
+                (positions[None, :, None] >= blocks) & (blocks < length), 128.0
+            )
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+            self.assertTrue(bool(torch.all(backing[:, 129:, :] == 12345.0)))
+            self.assertTrue(bool(torch.all(backing[:, :, 8:] == 12345.0)))
+
     def test_query_address_crosses_int32_element_boundary(self):
         q = torch.empty_strided(
             (129, 4, 128),
@@ -100,7 +209,7 @@ class TestQ8KV4PrefillIndexScore(unittest.TestCase):
         offsets = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
         pages = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
         out = torch.empty(4, 129, 2, device="cuda")
-        for tile in (32, 128):
+        for tile in (None, 32, 128):
 
             def run():
                 q8kv4_prefill_index_score(
@@ -146,7 +255,7 @@ class TestQ8KV4PrefillIndexScore(unittest.TestCase):
             "OSTRIDE_H",
             "OSTRIDE_Q",
         }
-        kernel = score_op._prefill_two_page_score_kernel
+        kernel = score_op._prefill_shared_heads_score_kernel
         params = {param.name: param for param in kernel.params}
         self.assertEqual(set(kernel.do_not_specialize), dynamic)
         for name in dynamic:
@@ -226,6 +335,7 @@ class TestQ8KV4PrefillIndexScore(unittest.TestCase):
                 self.assertTrue(torch.all(buffer[:, total:, :] == 123.0))
                 self.assertTrue(torch.all(buffer[:, :total, blocks:] == 123.0))
             variants = len(kernel.device_caches[torch.cuda.current_device()][0])
+            self.assertGreater(variants, 0)
             if previous is not None:
                 self.assertEqual(variants, previous)
             previous = variants
@@ -337,7 +447,7 @@ class TestQ8KV4PrefillIndexScore(unittest.TestCase):
         # 129-row chunks exercise both the new long-segment dispatch and the
         # short-segment tail after a chunk crosses the request boundary.
         launches = []
-        original_kernel = score_op._prefill_two_page_score_kernel
+        original_kernel = score_op._prefill_shared_heads_score_kernel
 
         class KernelSpy:
             def __getitem__(self, grid):
@@ -349,7 +459,9 @@ class TestQ8KV4PrefillIndexScore(unittest.TestCase):
                 score_op, "q8kv4_prefill_index_score", side_effect=old_score
             ):
                 expected = run()
-            with patch.object(score_op, "_prefill_two_page_score_kernel", KernelSpy()):
+            with patch.object(
+                score_op, "_prefill_shared_heads_score_kernel", KernelSpy()
+            ):
                 actual = run()
                 self.assertTrue(launches)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

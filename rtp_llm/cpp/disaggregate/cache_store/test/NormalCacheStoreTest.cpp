@@ -29,8 +29,9 @@ protected:
         LEGACY_UNDEFINED
     };
     void verifyDSparkMixedCacheTransport(bool               asynchronous,
-                                         int64_t            draft_window = 0,
-                                         DraftTransferBatch batch        = DraftTransferBatch::SINGLE);
+                                         int64_t            draft_window      = 0,
+                                         DraftTransferBatch batch             = DraftTransferBatch::SINGLE,
+                                         bool               cancelled_request = false);
 
     void verifyBlock(
         const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
@@ -98,7 +99,8 @@ void NormalCacheStoreTest::verifyBlock(
 // Both model formats and addresses come from the mixed production cache allocator.
 void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool               asynchronous,
                                                            int64_t            draft_window,
-                                                           DraftTransferBatch batch) {
+                                                           DraftTransferBatch batch,
+                                                           bool               cancelled_request) {
     ASSERT_TRUE(initCacheStores());
     ModelConfig target;
     target.num_layers                         = 60;
@@ -173,6 +175,12 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool               as
                 torch::tensor({3, 1, 2}, torch::kInt32).reshape({1, 3}).repeat({batch_size, 1});
             inputs.request_id = torch::arange(31000 + rank * 10, 31000 + rank * 10 + batch_size, torch::kInt64);
             inputs.request_pd_separation = torch::ones({batch_size}, torch::kBool);
+            if (cancelled_request && layer == 0) {
+                const auto ended_id = std::to_string(inputs.request_id.data_ptr<int64_t>()[0]);
+                ASSERT_TRUE(cache_store2_->getRequestBlockBufferStore()->setRequestBlockBuffer(
+                    std::make_shared<RequestBlockBuffer>(ended_id)));
+                cache_store2_->markRequestEnd(ended_id);
+            }
             // Also set the target's metadata to prove model_id0 is never cropped.
             if (batch != DraftTransferBatch::LEGACY_UNDEFINED) {
                 inputs.pd_draft_cache_window_tokens = torch::full({batch_size}, draft_window, torch::kInt64);
@@ -230,6 +238,14 @@ void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool               as
                 for (int page = 0; page < 9; ++page) {
                     const auto key =
                         makeCacheKey(inputs.model_id, inputs.cache_keys[request_index * 9 + page], inputs.layer_id);
+                    if (cancelled_request && request_index == 0) {
+                        checks.emplace_back([this, request_id, opaque, key]() {
+                            EXPECT_EQ(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(
+                                          std::to_string(request_id), (opaque ? "kv_" : "k_") + key),
+                                      nullptr);
+                        });
+                        continue;
+                    }
                     const size_t first_page = !opaque && context_tokens > request_window && request_window > 0 ?
                                                   (context_tokens - request_window) / 128 :
                                                   0;
@@ -319,6 +335,14 @@ TEST_F(NormalCacheStoreTest, DSparkMixedWindowBatchCP4AsyncPublicationAndTcpLoad
 
 TEST_F(NormalCacheStoreTest, DSparkUndefinedWindowCP4PublicationAndTcpLoad) {
     verifyDSparkMixedCacheTransport(false, 0, DraftTransferBatch::LEGACY_UNDEFINED);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkCancelledPeerCP4PublicationDrainsAndHealthyPeersLoad) {
+    verifyDSparkMixedCacheTransport(false, 256, DraftTransferBatch::MIXED, true);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkCancelledPeerCP4AsyncPublicationDrainsAndHealthyPeersLoad) {
+    verifyDSparkMixedCacheTransport(true, 256, DraftTransferBatch::MIXED, true);
 }
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {
@@ -436,6 +460,46 @@ TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
     cache_store1_->store(store_cache, store_callback);
     mutex.lock();
     mutex.unlock();
+}
+
+TEST_F(NormalCacheStoreTest, testStoreAfterRequestEndIsNotStorageFailure) {
+    ASSERT_TRUE(initCacheStores());
+    for (const bool registered_before_finish : {false, true}) {
+        const std::string request_id = registered_before_finish ? "ended-publication" : "ended-before-publication";
+        auto              request    = std::make_shared<RequestBlockBuffer>(request_id);
+        if (registered_before_finish) {
+            ASSERT_TRUE(cache_store1_->request_block_buffer_store_->setRequestBlockBuffer(request));
+        }
+        cache_store1_->markRequestEnd(request_id);
+        // Empty publications are intentional no-ops in store(); use a real block
+        // to exercise the queued publication and terminal-ID check.
+        request->addBlock(block_buffer_util_->makeBlockBuffer("late-block", 16, 'x', false));
+
+        auto completion = std::make_shared<std::promise<std::pair<bool, CacheStoreErrorCode>>>();
+        auto future     = completion->get_future();
+        cache_store1_->store(request,
+                             [completion](bool ok, CacheStoreErrorCode ec) { completion->set_value({ok, ec}); });
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        const auto result = future.get();
+        EXPECT_FALSE(result.first);
+        EXPECT_EQ(result.second, CacheStoreErrorCode::RequestEnded);
+        EXPECT_EQ(cache_store1_->request_block_buffer_store_->getRequestBlockBuffer(request_id), nullptr);
+    }
+
+    // A healthy peer request must still publish on the same store afterward.
+    auto healthy = std::make_shared<RequestBlockBuffer>("healthy-after-ended-publication");
+    healthy->addBlock(block_buffer_util_->makeBlockBuffer("healthy-block", 16, 'y', false));
+    auto next_completion = std::make_shared<std::promise<std::pair<bool, CacheStoreErrorCode>>>();
+    auto next_future     = next_completion->get_future();
+    cache_store1_->store(healthy,
+                         [next_completion](bool ok, CacheStoreErrorCode ec) { next_completion->set_value({ok, ec}); });
+    ASSERT_EQ(next_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto next_result = next_future.get();
+    EXPECT_TRUE(next_result.first);
+    EXPECT_EQ(next_result.second, CacheStoreErrorCode::None);
+    EXPECT_NE(
+        cache_store1_->request_block_buffer_store_->getBlockBuffer("healthy-after-ended-publication", "healthy-block"),
+        nullptr);
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_Success) {

@@ -1035,13 +1035,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
 
-    StreamGroups    stream_groups(streams);
-    GptModelInputs  model_input;
-    GptModelOutputs model_output;
-    SamplerOutput   sampler_output;
-    GptModelOutputs draft_model_output;
-    SamplerOutput   draft_sampler_output;
-    torch::Tensor   draft_last_hidden_states;
+    StreamGroups                                              stream_groups(streams);
+    GptModelInputs                                            model_input;
+    GptModelOutputs                                           model_output;
+    SamplerOutput                                             sampler_output;
+    GptModelOutputs                                           draft_model_output;
+    SamplerOutput                                             draft_sampler_output;
+    torch::Tensor                                             draft_last_hidden_states;
+    std::vector<MtpBatchStreamProcessor::PrefillTargetOutput> target_outputs;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -1136,6 +1137,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
     const bool use_cp_local_mtp_hidden = cp_enabled && !model_input.need_all_logits && !saved_need_all_hidden_states
                                          && model_->supportsMtpTargetHiddenStates();
+    const bool capture_target_outputs = isTpRank0() && is_dspark_ && !model_input.is_fake_stream
+                                        && batch_stream_processor_->needsPrefillTargetOutputs(stream_groups);
+    const bool target_need_all_logits = model_input.need_all_logits;
+    // CP can replace target input metadata. Only requested full-output payloads
+    // need a private copy of the original row indices; the default path is empty.
+    torch::Tensor original_lm_output_indexes;
+    if (capture_target_outputs && target_need_all_logits) {
+        original_lm_output_indexes = model_input.lm_output_indexes.clone();
+    }
 
     // target model prefill
     {
@@ -1148,6 +1158,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
     model_input.need_all_hidden_states = saved_need_all_hidden_states;
     restoreCpGlobalModelInput();
+
+    if (capture_target_outputs) {
+        auto captured = batch_stream_processor_->capturePrefillTargetOutputs(
+            stream_groups, model_output, target_need_all_logits, original_lm_output_indexes);
+        RETURN_IF_STATUS_OR_ERROR(captured);
+        target_outputs = std::move(captured.value());
+    }
 
     // eplb
     if (expert_balancer_) {
@@ -1277,7 +1294,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)},
-                                                     draft_last_hidden_states);
+                                                     draft_last_hidden_states,
+                                                     target_outputs);
         RTP_LLM_LOG_DEBUG("dispatch done");
         return result;
     }
@@ -3116,6 +3134,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
     }
 
+    // One batch subtraction replaces the next round's per-request launches.
+    // Only publish with the DSpark success-masked anchor selected above.
+    const auto dspark_committed_ends_all = batch_dspark_publication ? published_next_seq_len_all - 1 : torch::Tensor();
+
     // 3. One clone for all probs
     torch::Tensor draft_probs_all;
     if (draft_all_probs_full.defined()) {
@@ -3133,6 +3155,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu       = published_next_seq_len_all.narrow(0, idx, 1);
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+
+        if (batch_dspark_publication) {
+            state.dspark_anchor_gpu        = target_tokens_all.narrow(0, idx, 1);
+            state.dspark_committed_end_gpu = dspark_committed_ends_all.narrow(0, idx, 1);
+        }
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

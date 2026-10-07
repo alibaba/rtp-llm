@@ -20,6 +20,7 @@ from rtp_llm.models_py.model_desc.minimax_m31 import (
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router import (
     expand_fp32_router_weight,
+    minimax_m31_prefill_bf16_router_logits,
     minimax_m31_prefill_router_logits,
 )
 from rtp_llm.ops import RoleType
@@ -33,7 +34,7 @@ def bare_mlp():
 
 
 class PrefillRouterOwnershipTest(unittest.TestCase):
-    def test_bf16_gate_skips_expansion_and_uses_linear(self):
+    def test_prepared_bf16_gate_dispatches_only_prefill(self):
         for expanded_first in (False, True):
             with self.subTest(expanded_first=expanded_first):
                 mlp = bare_mlp()
@@ -44,13 +45,33 @@ class PrefillRouterOwnershipTest(unittest.TestCase):
                 )
                 mlp.prepare_prefill_router()
                 self.assertFalse(any("_prefill_gate" in name for name in mlp._buffers))
+                self.assertTrue(mlp._prefill_bf16_router_ready)
                 x = torch.randn(17, 6144, dtype=torch.bfloat16)
                 for prefill, invariant in ((True, False), (False, True)):
                     mlp._prefill_router_active = prefill
                     mlp._batch_invariant_router = invariant
-                    torch.testing.assert_close(
-                        mlp._compute_router_logits(x), mlp.gate(x), rtol=0, atol=0
-                    )
+                    expected = mlp.gate(x)
+                    with patch(
+                        "rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router.minimax_m31_prefill_bf16_router_logits",
+                        return_value=expected,
+                    ) as kernel:
+                        torch.testing.assert_close(
+                            mlp._compute_router_logits(x), expected, rtol=0, atol=0
+                        )
+                        self.assertEqual(kernel.call_count, int(prefill))
+
+    def test_unprepared_bf16_gate_keeps_legacy_linear(self):
+        mlp = bare_mlp()
+        mlp.gate = CudaF16Linear(torch.randn(6144, 128, dtype=torch.bfloat16))
+        mlp._prefill_router_active = True
+        x = torch.randn(3, 6144, dtype=torch.bfloat16)
+        with patch(
+            "rtp_llm.models_py.triton_kernels.minimax_m31_prefill_router.minimax_m31_prefill_bf16_router_logits"
+        ) as kernel:
+            torch.testing.assert_close(
+                mlp._compute_router_logits(x), mlp.gate(x), rtol=0, atol=0
+            )
+            kernel.assert_not_called()
 
     def test_exact_expansion_and_layout(self):
         for weight in (
@@ -190,12 +211,76 @@ class PrefillRouterOwnershipTest(unittest.TestCase):
         clone = mlp.clone_for_cuda_graph()
         self.assertIs(clone.gate, mlp.gate)
         self.assertFalse(clone._prefill_router_active)
+        self.assertFalse(clone._prefill_bf16_router_ready)
         self.assertFalse(hasattr(clone, "_prefill_gate_high"))
         self.assertEqual(list(clone.named_buffers()), [])
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillRouterCudaTest(unittest.TestCase):
+    def test_bf16_graph_replay_updates_padded_rows(self):
+        torch.manual_seed(1017)
+        weight = torch.randn(128, 6144, device="cuda", dtype=torch.bfloat16) * 0.01
+        x = torch.randn(129, 6144, device="cuda", dtype=torch.bfloat16)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                minimax_m31_prefill_bf16_router_logits(x, weight)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = minimax_m31_prefill_bf16_router_logits(x, weight)
+        address = output.data_ptr()
+        for live_rows in (129, 17, 1, 128):
+            x.zero_()
+            x[:live_rows].normal_()
+            expected = minimax_m31_prefill_bf16_router_logits(x, weight)
+            graph.replay()
+            self.assertEqual(output.data_ptr(), address)
+            self.assertTrue(torch.equal(output, expected))
+            if live_rows < x.shape[0]:
+                self.assertEqual(torch.count_nonzero(output[live_rows:]).item(), 0)
+
+    def test_bf16_rows_layouts_and_padding(self):
+        torch.manual_seed(1015)
+        for weight in (
+            (torch.randn(6144, 128, device="cuda", dtype=torch.bfloat16) * 0.01).T,
+            torch.randn(128, 6144, device="cuda", dtype=torch.bfloat16) * 0.01,
+        ):
+            row = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16)
+            expected = minimax_m31_prefill_bf16_router_logits(row, weight)
+            for count in (0, 1, 15, 16, 17, 127, 129, 1934):
+                x = torch.randn(count, 6144, device="cuda", dtype=torch.bfloat16)
+                if count:
+                    x[-1].copy_(row[0])
+                output = minimax_m31_prefill_bf16_router_logits(x, weight)
+                self.assertEqual(output.dtype, torch.bfloat16)
+                self.assertEqual(tuple(output.shape), (count, 128))
+                if count:
+                    self.assertTrue(torch.equal(output[-1], expected[0]))
+                    torch.testing.assert_close(
+                        output.float(),
+                        (x.double() @ weight.double().T).float(),
+                        rtol=2**-7,
+                        atol=2**-14,
+                    )
+
+    def test_bf16_int32_boundary_and_one_million_rows(self):
+        torch.manual_seed(1016)
+        row = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16)
+        weight = torch.randn(128, 6144, device="cuda", dtype=torch.bfloat16) * 0.01
+        expected = minimax_m31_prefill_bf16_router_logits(row, weight)
+        for count in (349525, 349526, 1048576):
+            with self.subTest(rows=count):
+                x = torch.zeros(count, 6144, device="cuda", dtype=torch.bfloat16)
+                x[-1].copy_(row[0])
+                output = minimax_m31_prefill_bf16_router_logits(x, weight)
+                self.assertTrue(torch.equal(output[-1], expected[0]))
+                self.assertTrue(torch.isfinite(output).all().item())
+                self.assertTrue(torch.equal(output[0], torch.zeros_like(output[0])))
+                del x, output
+
     def test_int32_boundary_and_one_million_rows(self):
         torch.manual_seed(1014)
         row = torch.randn(1, 6144, device="cuda", dtype=torch.bfloat16)

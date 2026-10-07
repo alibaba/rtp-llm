@@ -1,8 +1,9 @@
-"""M3.1 Prefill router: exact FP32-weight expansion, FP32 accumulation/output.
+"""Fixed-row M3.1 Prefill routers with FP32 accumulation.
 
-This is not BF16 weight quantization. Three BF16 components must reconstruct
-the raw FP32 gate exactly. The dot/reduction order is fixed across row counts,
-but is not claimed to be bit-exact with a vendor FP32 GEMM.
+FP32 gates use three BF16 components reconstructing the raw weight exactly.
+BF16 gates keep their BF16 input, weight and output without expansion. Both
+paths fix the reduction order across row counts; neither claims vendor GEMM
+bit equivalence.
 """
 
 import torch
@@ -25,6 +26,60 @@ def expand_fp32_router_weight(weight: torch.Tensor):
     if not torch.equal((high.float() + middle.float()) + low.float(), weight):
         raise ValueError("Three BF16 parts do not reconstruct the FP32 gate exactly")
     return high, middle, low
+
+
+@triton.jit
+def _prefill_bf16_router(
+    X, W, OUTPUT, ROWS: tl.constexpr, WS0: tl.constexpr, WS1: tl.constexpr
+):
+    rows = (tl.program_id(0) * 16 + tl.arange(0, 16)).to(tl.int64)
+    experts = tl.program_id(1) * 64 + tl.arange(0, 64)
+    inner = tl.arange(0, 128)
+    acc = tl.zeros((16, 64), tl.float32)
+    # Fixed K reduction, even when a request moves within a different M tile.
+    for step in range(48):
+        columns = step * 128 + inner
+        x = tl.load(
+            X + rows[:, None] * 6144 + columns[None, :],
+            rows[:, None] < ROWS,
+            other=0,
+        )
+        w = tl.load(W + columns[:, None] * WS1 + experts[None, :] * WS0)
+        acc = tl.dot(x, w, acc)
+    # Store to BF16, preserving the configured gate's output precision.
+    tl.store(
+        OUTPUT + rows[:, None] * 128 + experts[None, :],
+        acc,
+        rows[:, None] < ROWS,
+    )
+
+
+def minimax_m31_prefill_bf16_router_logits(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """BF16 gate with shape-invariant row math and no partial workspace."""
+    if (
+        x.ndim != 2
+        or x.shape[1] != 6144
+        or not x.is_cuda
+        or x.dtype != torch.bfloat16
+        or not x.is_contiguous()
+        or weight.shape != (128, 6144)
+        or weight.dtype != torch.bfloat16
+        or weight.device != x.device
+        or weight.stride() not in ((6144, 1), (1, 128))
+    ):
+        raise ValueError(
+            "M3.1 Prefill BF16 router requires contiguous CUDA [M,6144] rows "
+            "and dense CUDA BF16 [128,6144] gate"
+        )
+    rows = x.shape[0]
+    output = torch.empty((rows, 128), device=x.device, dtype=torch.bfloat16)
+    if rows:
+        _prefill_bf16_router[(triton.cdiv(rows, 16), 2)](
+            x, weight, output, rows, *weight.stride(), num_warps=4, num_stages=2
+        )
+    return output
 
 
 @triton.jit

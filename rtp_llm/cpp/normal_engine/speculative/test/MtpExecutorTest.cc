@@ -880,6 +880,8 @@ TEST_F(MtpExecutorTest, DSparkAsyncFailureRetainsGpuStateAndCommitsHealthyPeer) 
     EXPECT_TRUE(torch::equal(failed->getAcceptLenGpu(), old_length));
     EXPECT_TRUE(torch::equal(failed->getNextSeqLenGpu(), old_seq));
     EXPECT_EQ(failed->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), 3);
+    EXPECT_EQ(failed->getMtpAsyncDeviceState().dspark_anchor_gpu.cpu().item<int>(), 3);
+    EXPECT_EQ(failed->getMtpAsyncDeviceState().dspark_committed_end_gpu.cpu().item<int>(), 1);
     EXPECT_FALSE(healthy->hasError());
     EXPECT_EQ(healthy->seqLength(), 3);
 }
@@ -946,10 +948,24 @@ TEST_F(MtpExecutorTest, DSparkAsyncMixedPriorWidthAndMissingStateRetainAnchors) 
         EXPECT_TRUE(torch::equal(stream->getAcceptLenGpu().cpu(), torch::ones({1}, torch::kInt32)));
         EXPECT_EQ(stream->getNextSeqLenGpu().cpu().item<int>(), 2);
         EXPECT_EQ(stream->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), pair.second);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().dspark_anchor_gpu.cpu().item<int>(), pair.second);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().dspark_committed_end_gpu.cpu().item<int>(), 1);
     }
     EXPECT_FALSE(healthy->hasError());
     EXPECT_EQ(healthy->seqLength(), 5);
     EXPECT_EQ(healthy->getSPOutputBuffer()->target_token_gpu.cpu().item<int>(), 3);
+    EXPECT_EQ(healthy->getMtpAsyncDeviceState().dspark_anchor_gpu.cpu().item<int>(), 3);
+    EXPECT_EQ(healthy->getMtpAsyncDeviceState().dspark_committed_end_gpu.cpu().item<int>(), 4);
+
+    // Consume the published views through the real next-round builder after
+    // caller tensors/events were destroyed and scheduler order changed.
+    GptModelInputs next_input;
+    next_input.sequence_lengths = torch::tensor({99, 99, 99}, gpu);
+    TensorHolder holder;
+    const auto   round = executor.batch_stream_processor_->buildDSparkRoundState(
+        StreamGroups({healthy, changed, missing}), next_input, holder);
+    EXPECT_TRUE(torch::equal(round.anchors.cpu(), torch::tensor({3, 7, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(round.committed_ends.cpu(), torch::tensor({4, 1, 1}, torch::kInt32)));
 }
 
 TEST_F(MtpExecutorTest, DSparkVerifyBudgetDoesNotChangeProposalWidthOrLegacyMtp) {

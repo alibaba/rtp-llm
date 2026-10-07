@@ -32,7 +32,7 @@ class NVFP4PackTileSelectionTest(unittest.TestCase):
             SimpleNamespace(stride=lambda axis, stride=stride: stride)
             for stride in strides
         ]
-        gsf, packed = LaunchRecorder(), LaunchRecorder()
+        gsf, scalar, vector = LaunchRecorder(), LaunchRecorder(), LaunchRecorder()
         triton = SimpleNamespace(
             cdiv=lambda value, divisor: (value + divisor - 1) // divisor,
             next_power_of_2=lambda value: 1 << (value - 1).bit_length(),
@@ -46,15 +46,27 @@ class NVFP4PackTileSelectionTest(unittest.TestCase):
                     packer, "_validate_inputs", return_value=(tokens, hidden, topk)
                 ),
                 patch.object(packer, "_row_gsf_kernel", gsf, create=True),
-                patch.object(packer, "_pack_nvfp4_inputs_kernel", packed, create=True),
+                patch.object(packer, "_pack_nvfp4_inputs_kernel", scalar, create=True),
+                patch.object(
+                    packer, "_pack_nvfp4_inputs_vector_kernel", vector, create=True
+                ),
                 patch.object(packer, "triton", triton),
             ):
                 packer.fused_pack_mega_nvfp4_inputs(*tensors)
         if tokens == 0:
             self.assertEqual(gsf.calls, [])
-            self.assertEqual(packed.calls, [])
+            self.assertEqual(scalar.calls, [])
+            self.assertEqual(vector.calls, [])
             return None
         self.assertEqual(len(gsf.calls), 1)
+        use_vector = (
+            override is None
+            and hidden == 6144
+            and topk == 4
+            and (tokens in (25, 40, 80) or tokens >= 4096)
+        )
+        packed, unused = (vector, scalar) if use_vector else (scalar, vector)
+        self.assertEqual(unused.calls, [])
         self.assertEqual(len(packed.calls), 1)
         grid, args, kwargs = packed.calls[0]
         self.assertEqual(args[:8], tuple(tensors))
@@ -80,6 +92,12 @@ class NVFP4PackTileSelectionTest(unittest.TestCase):
             with self.subTest(tokens=tokens):
                 self.assertEqual(self.dispatch(tokens), 16)
 
+    def test_measured_small_vector_tiles(self):
+        self.assertEqual(self.dispatch(25), 8)
+        self.assertEqual(self.dispatch(40), 16)
+        self.assertEqual(self.dispatch(25, hidden=4096), 4)
+        self.assertEqual(self.dispatch(40, topk=8), 4)
+
     def test_other_small_shapes_unchanged(self):
         for tokens in (1, 3, 5, 16, 64, 79, 81, 95, 97, 111, 113, 127, 129, 1023):
             with self.subTest(tokens=tokens):
@@ -93,9 +111,16 @@ class NVFP4PackTileSelectionTest(unittest.TestCase):
                 self.assertEqual(self.dispatch(tokens, hidden=hidden), expected)
 
     def test_override_precedence(self):
-        for tokens in (1, 80, 96, 112, 128, 1024):
+        for tokens in (1, 25, 40, 80, 96, 112, 128, 1024, 8192):
             for tile in (1, 2, 4, 8, 16):
                 self.assertEqual(self.dispatch(tokens, override=str(tile)), tile)
+
+    def test_vector_prefill_dispatch_is_narrow(self):
+        self.assertEqual(self.dispatch(4095), 16)
+        for tokens in (4096, 4097, 4512, 7456, 8192):
+            self.assertEqual(self.dispatch(tokens), 64)
+            self.assertEqual(self.dispatch(tokens, hidden=4096), 16)
+            self.assertEqual(self.dispatch(tokens, topk=8), 16)
 
     def test_invalid_override_and_empty_input(self):
         for value in ("0", "32", "invalid"):

@@ -106,8 +106,9 @@ class PrefillPlanIntegrationTest(unittest.TestCase):
             def forward(self, h, w, ids, **kwargs):
                 self.calls.append((len(h), w.clone(), kwargs))
                 self.scratch.fill_(-777)
-                self.scratch[: len(h)].copy_(h * 3)
-                return self.scratch[: len(h)]
+                out = kwargs.get("out", self.scratch[: len(h)])
+                out.copy_(h * 3)
+                return out
 
         self.wrapper.mega_moe = ReusingMoE()
         self.wrapper.expert_num = 4
@@ -118,6 +119,9 @@ class PrefillPlanIntegrationTest(unittest.TestCase):
         )
         torch.testing.assert_close(output, h * 3, rtol=0, atol=0)
         self.assertEqual(len(self.wrapper.mega_moe.calls), 3)
+        self.assertIn("out", self.wrapper.mega_moe.calls[0][2])
+        for _, _, kw in self.wrapper.mega_moe.calls[1:]:
+            self.assertNotIn("out", kw)  # dummy writes must not clobber final rows
         self.assertIn("prefill_chunk_plan", extra)  # caller-owned dict is untouched
         for _, _, kw in self.wrapper.mega_moe.calls:
             self.assertEqual(kw["extra_expert_args"], {"swiglu_alpha": 1.7})

@@ -157,24 +157,114 @@ def _prefill_two_page_score_kernel(
             other=-1,
         ).to(tl.int64)
         page_ok = logical_ok & (physical >= 0) & (physical < PHYSICAL_PAGES)
-        key = _load_index_page_fp8(
-            K,
-            S,
-            tl.where(page_ok, physical, 0),
-            page_ok,
-            KSTRIDE,
-            SSTRIDE,
-            True,
+        # A page beyond the last live query is invisible to this entire tile.
+        # Avoid packed-K decoding and MMA, but still overwrite its score rows
+        # so reused chunk/graph buffers cannot inherit a previous launch.
+        last_query = prefix + tl.minimum((tile + 1) * TILE_Q, stop - start) - 1
+        if page_ok & (block * 128 <= last_query):
+            key = _load_index_page_fp8(
+                K,
+                S,
+                physical,
+                page_ok,
+                KSTRIDE,
+                SSTRIDE,
+                True,
+            )
+            dot = tl.dot(query, tl.trans(key), out_dtype=tl.float32)
+            position = block * 128 + tl.arange(0, 128)
+            visible = (
+                row_ok[:, None]
+                & (position[None, :] < length)
+                & (position[None, :] <= prefix + local_row[:, None])
+            )
+            score = tl.max(tl.where(visible, dot, float("-inf")), axis=1)
+        else:
+            score = tl.full((TILE_Q,), float("-inf"), tl.float32)
+        tl.store(
+            OUT + head.to(tl.int64) * OSTRIDE_H + row.to(tl.int64) * OSTRIDE_Q + block,
+            score,
+            mask=row_ok & (block < MAX_PAGES),
         )
-        dot = tl.dot(query, tl.trans(key), out_dtype=tl.float32)
-        position = block * 128 + tl.arange(0, 128)
-        visible = (
-            page_ok
-            & row_ok[:, None]
-            & (position[None, :] < length)
-            & (position[None, :] <= prefix + local_row[:, None])
+
+
+@triton.jit(do_not_specialize=_DYNAMIC_GEOMETRY_PARAMETERS)
+def _prefill_shared_heads_score_kernel(
+    Q,
+    K,
+    S,
+    CUQ,
+    KLENS,
+    PREFIX,
+    CUPAGES,
+    PAGES,
+    OUT,
+    TOTAL_Q,
+    HEADS: tl.constexpr,
+    MAX_PAGES,
+    PHYSICAL_PAGES,
+    TABLE_SIZE,
+    QSTRIDE: tl.constexpr,
+    HSTRIDE: tl.constexpr,
+    KSTRIDE: tl.constexpr,
+    SSTRIDE: tl.constexpr,
+    OSTRIDE_H,
+    OSTRIDE_Q,
+    TILE_Q: tl.constexpr,
+):
+    # Put the four independent index heads in the MMA row dimension. Each
+    # page still has its original 128-token reduction and Q8K8 dot semantics.
+    # No scores are reduced across heads, and no extra workspace is required.
+    tile = tl.program_id(0)
+    segment = tl.program_id(1)
+    first_block = tl.program_id(2) * 2
+    start = tl.load(CUQ + segment)
+    stop = tl.load(CUQ + segment + 1)
+    lane = tl.arange(0, TILE_Q * HEADS)
+    local_row = tile * TILE_Q + lane // HEADS
+    head = lane % HEADS
+    row = start + local_row
+    row_ok = (row < stop) & (row >= 0) & (row < TOTAL_Q)
+    if tile * TILE_Q >= stop - start:
+        return
+    length = tl.load(KLENS + segment)
+    prefix = tl.load(PREFIX + segment)
+    page_start = tl.load(CUPAGES + segment)
+    page_end = tl.load(CUPAGES + segment + 1)
+    d = tl.arange(0, 128)
+    query = tl.load(
+        Q
+        + row[:, None].to(tl.int64) * QSTRIDE
+        + head[:, None].to(tl.int64) * HSTRIDE
+        + d[None, :],
+        mask=row_ok[:, None],
+        other=0.0,
+    )
+    last_query = prefix + tl.minimum((tile + 1) * TILE_Q, stop - start) - 1
+    for page in tl.static_range(2):
+        block = first_block + page
+        page_offset = page_start + block
+        logical_ok = (
+            (block * 128 < length) & (page_offset < page_end) & (block < MAX_PAGES)
         )
-        score = tl.max(tl.where(visible, dot, float("-inf")), axis=1)
+        physical = tl.load(
+            PAGES + page_offset,
+            mask=logical_ok & (page_offset >= 0) & (page_offset < TABLE_SIZE),
+            other=-1,
+        ).to(tl.int64)
+        page_ok = logical_ok & (physical >= 0) & (physical < PHYSICAL_PAGES)
+        if page_ok & (block * 128 <= last_query):
+            key = _load_index_page_fp8(K, S, physical, page_ok, KSTRIDE, SSTRIDE, True)
+            dot = tl.dot(query, tl.trans(key), out_dtype=tl.float32)
+            position = block * 128 + tl.arange(0, 128)
+            visible = (
+                row_ok[:, None]
+                & (position[None, :] < length)
+                & (position[None, :] <= prefix + local_row[:, None])
+            )
+            score = tl.max(tl.where(visible, dot, float("-inf")), axis=1)
+        else:
+            score = tl.full((TILE_Q * HEADS,), float("-inf"), tl.float32)
         tl.store(
             OUT + head.to(tl.int64) * OSTRIDE_H + row.to(tl.int64) * OSTRIDE_Q + block,
             score,
@@ -258,7 +348,8 @@ def q8kv4_prefill_index_score(
         x.device != q.device for x in (packed, scales, out, *metadata)
     ):
         raise ValueError("all tensors must reside on the same CUDA device")
-    if tile_q is None:
+    automatic_tile = tile_q is None
+    if automatic_tile:
         tile_q = 128 if max_seqlen_q >= 128 else 32
     if tile_q not in (16, 32, 64, 128) or max_seqlen_q < 0:
         raise ValueError("tile_q must be 16/32/64/128 and max_seqlen_q nonnegative")
@@ -268,8 +359,16 @@ def q8kv4_prefill_index_score(
         return out
     two_pages = tile_q == 128 and max_seqlen_q >= 128 and out.shape[2] >= 2
     kernel = _prefill_two_page_score_kernel if two_pages else _prefill_score_kernel
+    shared_heads = automatic_tile and two_pages and q.shape[1] == 4
+    if shared_heads:
+        kernel = _prefill_shared_heads_score_kernel
+        tile_q = 32
     page_tiles = triton.cdiv(out.shape[2], 2) if two_pages else out.shape[2]
-    kernel[(triton.cdiv(max_seqlen_q, tile_q), segments * q.shape[1], page_tiles)](
+    segment_tiles = segments if shared_heads else segments * q.shape[1]
+    # Bound registers only for the validated H4/M128 shared-head variant.
+    # Other head counts and short/explicit tiles retain their existing launch.
+    launch_options = {"maxnreg": 96} if shared_heads else {}
+    kernel[(triton.cdiv(max_seqlen_q, tile_q), segment_tiles, page_tiles)](
         q,
         packed,
         scales.view(torch.uint8),
@@ -292,5 +391,6 @@ def q8kv4_prefill_index_score(
         out.stride(1),
         tile_q,
         num_warps=4,
+        **launch_options,
     )
     return out

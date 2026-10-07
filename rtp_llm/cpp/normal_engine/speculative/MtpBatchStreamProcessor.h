@@ -9,6 +9,19 @@ namespace rtp_llm {
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
+    struct PrefillTargetOutput {
+        torch::Tensor logits;
+        torch::Tensor hidden_states;
+    };
+
+    bool needsPrefillTargetOutputs(const StreamGroups& stream_groups) const;
+
+    absl::StatusOr<std::vector<PrefillTargetOutput>>
+    capturePrefillTargetOutputs(const StreamGroups&    stream_groups,
+                                const GptModelOutputs& target,
+                                bool                   target_need_all_logits,
+                                const torch::Tensor&   original_lm_output_indexes) const;
+
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
@@ -26,10 +39,11 @@ public:
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;
 
-    absl::Status dispatchPrefill(const StreamGroups&  stream_groups,
-                                 const MergedOutput&  prefill_output,
-                                 const MergedOutput&  propose_output,
-                                 const torch::Tensor& draft_last_hidden_states) const;
+    absl::Status dispatchPrefill(const StreamGroups&                     stream_groups,
+                                 const MergedOutput&                     prefill_output,
+                                 const MergedOutput&                     propose_output,
+                                 const torch::Tensor&                    draft_last_hidden_states,
+                                 const std::vector<PrefillTargetOutput>& target_outputs = {}) const;
 
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,

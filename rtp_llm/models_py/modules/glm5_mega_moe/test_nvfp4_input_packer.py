@@ -85,8 +85,9 @@ class NVFP4InputPackerTest(unittest.TestCase):
     def test_tiny_groups_match_reference_and_graph_updates(self):
         """A tiny group beside a large row maximum must keep subnormal scales."""
         hidden, topk = 6144, 4
-        # 17 exercises a partial tile; 128 also covers the widened decode tile.
-        for tokens in (17, 128):
+        # Include the measured small vector decode tiles, partial tiles, and
+        # the separate large Prefill path under changed-input Graph replay.
+        for tokens in (17, 25, 40, 80, 128, 4097):
             with self.subTest(tokens=tokens):
                 x = torch.zeros(tokens, hidden, dtype=torch.bfloat16, device="cuda")
                 x[1].fill_(-0.0)

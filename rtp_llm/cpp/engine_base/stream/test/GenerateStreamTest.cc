@@ -112,6 +112,114 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+TEST(GenerateStreamUpdateInfoTest, LegacySpecAggregateDefaultsTargetPayloads) {
+    StreamSpecUpdateInfo defaults{torch::Tensor(), 0, -1, {}, {}};
+    EXPECT_TRUE(defaults.update_remote_generate);
+    EXPECT_FALSE(defaults.force_update_info);
+    EXPECT_FALSE(defaults.target_logits.defined());
+    EXPECT_FALSE(defaults.target_hidden_states.defined());
+
+    StreamSpecUpdateInfo explicit_flags{torch::Tensor(), 0, -1, {}, {}, {}, {}, false, true};
+    EXPECT_FALSE(explicit_flags.update_remote_generate);
+    EXPECT_TRUE(explicit_flags.force_update_info);
+    EXPECT_FALSE(explicit_flags.target_logits.defined());
+    EXPECT_FALSE(explicit_flags.target_hidden_states.defined());
+}
+
+TEST_F(GenerateStreamTest, SpecUpdatePublishesTargetPayloadsAndPreservesDraftHidden) {
+    for (bool return_logits : {false, true}) {
+        for (bool return_hidden : {false, true}) {
+            auto stream                  = GenerateStreamBuilder().createContextStream({1, 2, 3});
+            auto config                  = stream->generate_input_->generate_config;
+            config->is_streaming         = true;
+            config->return_logits        = return_logits;
+            config->return_hidden_states = return_hidden;
+            config->max_new_tokens       = 8;
+            stream->vocab_size_          = 100;
+            auto sp                      = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp->tokens                   = torch::zeros({2}, torch::kInt32);
+            stream->setSPOutputBuffer(sp);
+
+            auto                 draft_hidden  = torch::tensor({{1.0f, 2.0f}});
+            auto                 target_hidden = torch::tensor({{10.0f, 20.0f, 30.0f}});
+            auto                 target_logits = torch::tensor({{40.0f, 50.0f, 60.0f, 70.0f}});
+            StreamSpecUpdateInfo update{torch::tensor({{7}}, torch::kInt32), 1, -1, draft_hidden, {}};
+            if (return_logits) {
+                update.target_logits = target_logits;
+            }
+            if (return_hidden) {
+                update.target_hidden_states = target_hidden;
+            }
+            stream->specUpdate(update);
+
+            ASSERT_TRUE(stream->hasOutput());
+            auto output = stream->nextOutput();
+            ASSERT_TRUE(output.ok());
+            ASSERT_EQ(output.value().generate_outputs.size(), 1);
+            const auto& result = output.value().generate_outputs.front();
+            EXPECT_EQ(result.logits.has_value(), return_logits);
+            EXPECT_EQ(result.hidden_states.has_value(), return_hidden);
+            if (return_logits) {
+                EXPECT_TRUE(torch::equal(result.logits.value(), target_logits));
+            }
+            if (return_hidden) {
+                EXPECT_TRUE(torch::equal(result.hidden_states.value(), target_hidden));
+            }
+            EXPECT_TRUE(sp->hidden_states.is_same(draft_hidden));
+            EXPECT_FALSE(stream->contain_propose_token_);
+            EXPECT_TRUE(stream->propose_token_.empty());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, SpecUpdateWithoutCommittedTokenDropsTargetPayloadsAndKeepsDraftState) {
+    class OutputRecordingStream: public NormalGenerateStream {
+    public:
+        using NormalGenerateStream::NormalGenerateStream;
+        void updateOutput(const StreamUpdateInfo& info) override {
+            ++output_calls;
+            num_new_tokens = info.num_new_tokens;
+            hidden_states  = info.hidden_states;
+            logits         = info.logits;
+        }
+        int           output_calls   = 0;
+        int           num_new_tokens = -1;
+        torch::Tensor hidden_states;
+        torch::Tensor logits;
+    };
+
+    for (bool exhausted_budget : {false, true}) {
+        auto input                             = std::make_shared<GenerateInput>();
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = exhausted_budget ? 0 : 8;
+        input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+        ModelConfig model;
+        model.max_seq_len = 2048;
+        model.vocab_size  = 100;
+        auto stream =
+            std::make_shared<OutputRecordingStream>(input, model, RuntimeConfig(), ResourceContext(), nullptr);
+        auto sp              = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp->tokens           = torch::tensor({9, 10}, torch::kInt32);
+        sp->hidden_states    = torch::tensor({{1.0f, 2.0f}});
+        auto original_hidden = sp->hidden_states;
+        stream->setSPOutputBuffer(sp);
+
+        StreamSpecUpdateInfo update{
+            torch::tensor({{7}}, torch::kInt32), exhausted_budget ? 1 : 0, -1, torch::tensor({{3.0f, 4.0f}}), {}};
+        update.target_logits        = torch::tensor({{10.0f, 20.0f}});
+        update.target_hidden_states = torch::tensor({{30.0f, 40.0f}});
+        stream->specUpdate(update);
+
+        EXPECT_EQ(stream->output_calls, 1);
+        EXPECT_EQ(stream->num_new_tokens, 0);
+        EXPECT_FALSE(stream->hidden_states.defined());
+        EXPECT_FALSE(stream->logits.defined());
+        EXPECT_EQ(stream->seqLength(), stream->inputLength());
+        EXPECT_TRUE(sp->hidden_states.is_same(original_hidden));
+        EXPECT_TRUE(torch::equal(sp->tokens, torch::tensor({9, 10}, torch::kInt32)));
+    }
+}
+
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
@@ -367,16 +475,20 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
 
     // Step 1: publish state, capture epoch_1.
     GenerateStream::MtpAsyncDeviceState s1;
-    s1.accept_len_gpu      = torch::ones({1}, torch::kInt32);
-    const uint64_t epoch_1 = stream->setMtpAsyncDeviceState(std::move(s1));
+    s1.accept_len_gpu           = torch::ones({1}, torch::kInt32);
+    s1.dspark_anchor_gpu        = torch::tensor({7}, torch::kInt32);
+    s1.dspark_committed_end_gpu = torch::tensor({10}, torch::kInt32);
+    const uint64_t epoch_1      = stream->setMtpAsyncDeviceState(std::move(s1));
     ASSERT_EQ(epoch_1, 1u);
     ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
 
     // Step 2: another publish before the worker for epoch_1 ran. Counter
     // bumps; old epoch should now be stale.
     GenerateStream::MtpAsyncDeviceState s2;
-    s2.accept_len_gpu      = torch::ones({1}, torch::kInt32) * 2;
-    const uint64_t epoch_2 = stream->setMtpAsyncDeviceState(std::move(s2));
+    s2.accept_len_gpu           = torch::ones({1}, torch::kInt32) * 2;
+    s2.dspark_anchor_gpu        = torch::tensor({9}, torch::kInt32);
+    s2.dspark_committed_end_gpu = torch::tensor({12}, torch::kInt32);
+    const uint64_t epoch_2      = stream->setMtpAsyncDeviceState(std::move(s2));
     ASSERT_EQ(epoch_2, 2u);
     ASSERT_NE(epoch_1, epoch_2);
 
@@ -385,10 +497,14 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
     ASSERT_FALSE(stream->clearMtpAsyncDeviceState(epoch_1));
     ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
     ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, epoch_2);
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().dspark_anchor_gpu.item<int>(), 9);
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().dspark_committed_end_gpu.item<int>(), 12);
 
     // Worker for epoch_2 clears successfully.
     ASSERT_TRUE(stream->clearMtpAsyncDeviceState(epoch_2));
     ASSERT_FALSE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
+    ASSERT_FALSE(stream->getMtpAsyncDeviceState().dspark_anchor_gpu.defined());
+    ASSERT_FALSE(stream->getMtpAsyncDeviceState().dspark_committed_end_gpu.defined());
     ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, 0u);
 
     // Repeated stale clear after the live state is gone is also a no-op

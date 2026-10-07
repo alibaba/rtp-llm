@@ -564,16 +564,90 @@ bool legacyGpuProposePathEnabled(size_t batch_size) {
 
 }  // namespace
 
+bool MtpBatchStreamProcessor::needsPrefillTargetOutputs(const StreamGroups& stream_groups) const {
+    if (!is_dspark_) {
+        return false;
+    }
+    const auto requested = [](const auto& streams) {
+        return std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream->returnLogits() || stream->generateConfig()->return_hidden_states;
+        });
+    };
+    return requested(stream_groups.decodeStreams()) || requested(stream_groups.contextStreams());
+}
+
+absl::StatusOr<std::vector<MtpBatchStreamProcessor::PrefillTargetOutput>>
+MtpBatchStreamProcessor::capturePrefillTargetOutputs(const StreamGroups&    stream_groups,
+                                                     const GptModelOutputs& target,
+                                                     bool                   target_need_all_logits,
+                                                     const torch::Tensor&   original_lm_output_indexes) const {
+    // No list/vector allocation or CUDA work for ordinary production requests.
+    if (!needsPrefillTargetOutputs(stream_groups)) {
+        return std::vector<PrefillTargetOutput>{};
+    }
+    const auto streams    = stream_groups.allStreams();
+    int64_t    total_rows = 0;
+    for (const auto& stream : streams) {
+        total_rows += stream->currentBatchSize();
+    }
+    std::vector<PrefillTargetOutput> outputs(streams.size());
+    int64_t                          row   = 0;
+    size_t                           index = 0;
+    for (const auto& stream : streams) {
+        auto&      output       = outputs[index++];
+        const bool wants_logits = stream->returnLogits();
+        const bool wants_hidden = stream->generateConfig()->return_hidden_states;
+        if (wants_logits || wants_hidden) {
+            if (stream->currentBatchSize() != 1 || stream->nextBatchSize() != 1 || stream->maxBatchSize() != 1
+                || stream->hasNumBeams()) {
+                return absl::InvalidArgumentError("DSpARK Prefill target outputs require one untiled row per stream");
+            }
+            if (wants_logits) {
+                if (!target.logits.defined() || target.logits.dim() != 2 || target.logits.size(0) != total_rows) {
+                    return absl::InvalidArgumentError("DSpARK Prefill target logits must be LM-selected rows");
+                }
+                output.logits = target.logits.narrow(0, row, 1).clone();
+            }
+            if (wants_hidden) {
+                if (!target.hidden_states.defined() || target.hidden_states.dim() != 2) {
+                    return absl::InvalidArgumentError("DSpARK Prefill target hidden states must be two-dimensional");
+                }
+                if (target_need_all_logits) {
+                    if (!original_lm_output_indexes.defined() || original_lm_output_indexes.dim() != 1
+                        || original_lm_output_indexes.numel() != total_rows
+                        || (original_lm_output_indexes.scalar_type() != torch::kInt32
+                            && original_lm_output_indexes.scalar_type() != torch::kInt64)) {
+                        return absl::InvalidArgumentError(
+                            "DSpARK full-output hidden states require original LM indices");
+                    }
+                    auto selected =
+                        original_lm_output_indexes.narrow(0, row, 1).to(target.hidden_states.device()).to(torch::kLong);
+                    output.hidden_states = target.hidden_states.index_select(0, selected);
+                } else {
+                    if (target.hidden_states.size(0) != total_rows) {
+                        return absl::InvalidArgumentError(
+                            "DSpARK compact Prefill hidden states must be LM-selected rows");
+                    }
+                    output.hidden_states = target.hidden_states.narrow(0, row, 1).clone();
+                }
+            }
+        }
+        row += stream->currentBatchSize();
+    }
+    return outputs;
+}
+
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
     return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor());
 }
 
-absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  stream_groups,
-                                                      const MergedOutput&  prefill_output,
-                                                      const MergedOutput&  propose_output,
-                                                      const torch::Tensor& draft_last_hidden_states) const {
+absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&                     stream_groups,
+                                                      const MergedOutput&                     prefill_output,
+                                                      const MergedOutput&                     propose_output,
+                                                      const torch::Tensor&                    draft_last_hidden_states,
+                                                      const std::vector<PrefillTargetOutput>& target_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
@@ -582,6 +656,16 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
 
     preparePrefillSpecUpdateInfo(
         stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
+
+    if (!target_outputs.empty()) {
+        if (!is_dspark_ || target_outputs.size() != spec_update_infos.size()) {
+            return absl::InvalidArgumentError("DSpARK Prefill target-output stream count mismatch");
+        }
+        for (size_t i = 0; i < target_outputs.size(); ++i) {
+            spec_update_infos[i].target_logits        = target_outputs[i].logits;
+            spec_update_infos[i].target_hidden_states = target_outputs[i].hidden_states;
+        }
+    }
 
     // we set propose token in extra loop to avoid cuda sync
     if (!is_dspark_) {
@@ -1138,8 +1222,14 @@ MtpBatchStreamProcessor::DSparkRoundState MtpBatchStreamProcessor::buildDSparkRo
     int64_t row           = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         const auto state = stream->getMtpAsyncDeviceState();
-        if (state.accept_tokens_gpu.defined() && state.accept_tokens_gpu.is_cuda() && state.accept_len_gpu.defined()
-            && state.accept_len_gpu.is_cuda()) {
+        if (state.dspark_anchor_gpu.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(state.dspark_anchor_gpu.is_cuda()
+                                        && state.dspark_anchor_gpu.scalar_type() == torch::kInt32
+                                        && state.dspark_anchor_gpu.numel() == 1,
+                                    "DSpARK published anchor must be one CUDA int32 value");
+            anchors.push_back(state.dspark_anchor_gpu.reshape({1}));
+        } else if (state.accept_tokens_gpu.defined() && state.accept_tokens_gpu.is_cuda()
+                   && state.accept_len_gpu.defined() && state.accept_len_gpu.is_cuda()) {
             auto last_index = (state.accept_len_gpu - 1).to(torch::kLong);
             anchors.push_back(state.accept_tokens_gpu.reshape({-1}).index_select(0, last_index).to(torch::kInt32));
         } else if (stream->isFakeStream()) {
@@ -1159,7 +1249,13 @@ MtpBatchStreamProcessor::DSparkRoundState MtpBatchStreamProcessor::buildDSparkRo
                                   .to(cudaInt32Options(), /*non_blocking=*/true));
         }
 
-        if (state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
+        if (state.dspark_committed_end_gpu.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(state.dspark_committed_end_gpu.is_cuda()
+                                        && state.dspark_committed_end_gpu.scalar_type() == torch::kInt32
+                                        && state.dspark_committed_end_gpu.numel() == 1,
+                                    "DSpARK published committed end must be one CUDA int32 value");
+            committed_ends.push_back(state.dspark_committed_end_gpu.reshape({1}));
+        } else if (state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
             committed_ends.push_back((state.next_seq_len_gpu.reshape({1}) - 1).to(torch::kInt32));
         } else {
             committed_ends.push_back(host_seq_lens.narrow(0, row, 1));

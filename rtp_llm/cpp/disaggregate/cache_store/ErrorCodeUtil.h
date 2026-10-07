@@ -18,6 +18,7 @@ inline ErrorCode transCacheStoreErrorCode(CacheStoreErrorCode error_code) {
         {CacheStoreErrorCode::LoadBufferTimeout, ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT},
         {CacheStoreErrorCode::LoadErrorUnknown, ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR},
         {CacheStoreErrorCode::StoreFailed, ErrorCode::CACHE_STORE_STORE_FAILED},
+        {CacheStoreErrorCode::RequestEnded, ErrorCode::FINISHED},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
