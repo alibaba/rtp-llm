@@ -230,13 +230,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    modelName, workerStatus.getMetricIpPort(), roleType.name(), startTime);
+                    workerStatus.getMetricIpPort(), roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
-                    modelName, workerStatus, successfulIntervalUs);
+                    workerStatus, successfulIntervalUs);
         } catch (Throwable e) {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
+                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 
@@ -287,7 +287,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         "Cache service returned no update result for {}#{}",
                         ipPort, generationId);
                 engineHealthReporter.reportCacheStatusCheckerFail(
-                        modelName, workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
+                        workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
                 return null;
             }
             if (!result.isSuccess()) {
@@ -297,7 +297,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         generationId,
                         result.getErrorMessage());
                 engineHealthReporter.reportCacheStatusCheckerFail(
-                        modelName,
                         workerStatus,
                         BalanceStatusEnum.CACHE_UPDATE_FAILED);
             }
@@ -306,7 +305,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             logger.debug("Exception to update worker cache for {}#{}: {}",
                     ipPort, generationId, e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
+                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
             return null;
         }
     }
@@ -337,10 +336,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, workerStatus, BalanceStatusEnum.CACHE_GRPC_TIMEOUT);
+                    workerStatus, BalanceStatusEnum.CACHE_GRPC_TIMEOUT);
         } else {
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
+                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 

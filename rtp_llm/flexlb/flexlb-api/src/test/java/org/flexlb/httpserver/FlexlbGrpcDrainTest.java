@@ -14,6 +14,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -83,7 +84,8 @@ class FlexlbGrpcDrainTest {
         };
         var server = NettyServerBuilder.forPort(0).addService(ServerInterceptors.intercept(
                 service, pauseBeforeSchedule, timing)).build().start();
-        var grpc = new FlexlbGrpcServer(service, config, new MockEnvironment(), null, null, timing, null);
+        var grpc = new FlexlbGrpcServer(service, config, new MockEnvironment(), null,
+                NoOpFlexMonitor.getInstance(), timing, null);
         ReflectionTestUtils.setField(grpc, "server", server);
         var channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
         var drainer = new Thread(grpc::drain);
@@ -181,7 +183,7 @@ class FlexlbGrpcDrainTest {
                      "grpcServer":{"shutdownQuietPeriodMs":%d}}
                     """.formatted(quietMs)));
             grpc = new FlexlbGrpcServer(null, configService, new MockEnvironment(),
-                    null, null, timing, null);
+                    null, NoOpFlexMonitor.getInstance(), timing, null);
             server = NettyServerBuilder.forPort(0).addService(ServerInterceptors.intercept(
                     new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                         @Override

@@ -306,10 +306,31 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - block hash、线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
+gRPC 服务端执行器与批次发送执行器通过 `FlexMonitor` 每 2 秒上报忙碌线程数、总线程数和
+排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
+provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
+`whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
+这些值全部使用 GAUGE，包括从拒绝处理器读取的累计拒绝数；周期上报不会再次累加，
+Master 重启后累计拒绝数重新开始。已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，
+总线程数仍包含空闲线程。拒绝数包含队列或线程饱和、线程池关闭后提交触发的拒绝，
+沿用 `grpc.server.executor.caller.runs` 上报名，面板显示“任务拒绝累计数”。
+本地 Block Hash 计算池按需创建，首次使用前不产生线程池状态样本。
+
+`JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
+通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
+`app.jvm.gc.pause.total.ms`。按 `gc`、`collector`、`pid` 区分进程与收集器：
+G1 的 `young` 包含 Mixed，`full` 对应 `G1 Old Generation`，`concurrent` 只统计
+并发周期中的暂停阶段，不表示整个并发标记周期。其它收集器标为 `other`。
+每秒上报零增量，保持未发生 GC 的序列可查询；关闭组件时移除 GC listener。
+面板展示统计窗口两端的计数差值，以及暂停毫秒数差值除以次数差值；
+例如窗口内两次暂停为 10 ms、30 ms，展示 2 次和平均 20 ms。
+没有 GC 的窗口次数为 0，平均耗时为空。底层计数器用于差分，不作为累计趋势展示；
+PID 隔离重启前后的计数器，缺少窗口边界样本时保留无数据。
+
 Encoder 的 worker 数由周期指标上报 `app.engine.health.check.engine.encoder.worker.number`；
 WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `app.flexlb.encoder.selection.load`、`app.flexlb.encoder.uncached.token.load`。
-三项按 `model`、`engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
+三项按 `engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
 看到的本地选点数、`running + waiting + pending` 并发数和在途编码工作量代理值。
 最后一项在首次 WorkerStatus 前采用 Client 的 MM token 预测值，之后采用活动任务的合成输入
 `input_length`；两者口径可能略有差异，finished 中的长度不参与该指标。
@@ -327,6 +348,14 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 监控上报名保留现有协议，中文图例使用上述计算口径。
 周期统计复用 Prefill 快照，调度器一次遍历计算数量和最大年龄；Decode admission
 上报仅收集数值，不构造请求明细。
+
+`auto_tpm.preemption.target_invalid.count` 统计 Decode 抢占目标校验失败的尝试次数，
+使用 QPS + NORMAL（20 秒聚合）上报。一次计划即使包含多个目标也只计一次，标签仅有
+`mode=return/rpc` 和固定的 `reason`：`victim_state_changed`（预留或派发状态变化）、
+`victim_already_claimed`（目标已被其他抢占占用）、`priority_not_preemptible`（目标优先级不允许抢占）、
+`cancel_target_unavailable`（RPC 取消地址无法取得）、`request_claim_rejected`（RPC 无法锁定该请求进行抢占）。
+这类失败会结束本次高优先级请求的调度；容量不足、取消 RPC 返回 NOT_FOUND、超时不计入此指标。
+未发生事件时可能没有时间序列，不能据此断言上报链路正常。
 
 上报器分布在 common、grpc、cache、sync 模块。新增指标应复用现有 reporter ownership，
 不要恢复已删除的旧监控层。
@@ -363,10 +392,24 @@ WorkerStatus 的 `last_step_metrics` 表示最近完成的非空 scheduler step�
 总调度 Token 数、Prefill 请求数、Prefill Token 数、Token 预算及预算填充率。
 字段缺失表示引擎尚无可用 step 观测；纯 Decode step 的 Prefill 请求数和 Token 数为 0。
 FlexLB 按逻辑 Worker 和 step ID 去重后，通过 `app.engine.worker.step.*` 上报五项数值。
-`phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；模型、角色、组和
+`phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；角色、组和
 `engineIp` 标签沿用 Worker 身份。预算填充率为总调度 Token 数 / Token 预算，包含 Decode Token。
 
 这些指标是 WorkerStatus 轮询采样，轮询之间完成的中间 step 不会全部保留。KMonitor 使用
 GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上报值，不提供逐 step 分布。
 指标标签不包含 step ID 或完成时间。凑批比较应筛选 `phase=prefill`，避免纯 Decode step
 稀释 Prefill 预算填充率。Turbo 转发后的指标前缀为 `dashscope_turbo_backend_flexlb_app_engine_worker_step_`。
+
+### Prefill 非末块 Token 数
+
+完成 Prefill 请求后，`app.engine.worker.status.prefill.nonfinal.chunk.min.tokens` 和
+`app.engine.worker.status.prefill.nonfinal.chunk.max.tokens` 分别上报该请求内非末块 Chunk 的
+最小、最大 Token 数。末块可能不足一个完整 Chunk，不参与统计；没有非末块样本的请求不向
+这两个指标报告 0，仍正常报告 `app.engine.worker.status.prefill.step.count`。
+例如分为 8192、8192、616 Tokens 的请求，Step 数为 3，非末块最小和最大值均为 8192。
+
+两个指标保留请求内统计口径，以 GAUGE + TRIVIAL 注册，KMonitor 每 60 秒发送一次聚合结果，
+不生成额外的 SUMMARY 分位指标；显式配置的 `FLEXLB_MONITOR_PRIORITY` 可覆盖此周期。
+曲线均值分别是有非末块样本请求的最小值均值、最大值均值，不是所有 Chunk 的均值或窗口极值。
+业务调用只更新本地统计，不逐请求发送网络数据，也不额外抽样。指标名以单位 `tokens` 结尾，
+请求内最小、最大值由 `min` / `max` 中间段区分。

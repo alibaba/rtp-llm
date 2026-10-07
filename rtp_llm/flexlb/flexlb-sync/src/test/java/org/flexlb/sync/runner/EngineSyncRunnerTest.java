@@ -364,9 +364,9 @@ class EngineSyncRunnerTest {
         runner.run();
 
         verify(engineHealthReporter).reportStepLatencyVariance(
-                modelName, RoleType.PREFILL.toString(), 50.0);
+                RoleType.PREFILL.toString(), 50.0);
         verify(engineHealthReporter, never()).reportRunningLoadVariance(
-                any(), any(), Mockito.anyDouble());
+                any(), Mockito.anyDouble());
     }
 
     @Test
@@ -395,7 +395,7 @@ class EngineSyncRunnerTest {
         runner.run();
 
         verify(engineHealthReporter).reportRunningLoadVariance(
-                modelName, RoleType.PREFILL.toString(), 200.0);
+                RoleType.PREFILL.toString(), 200.0);
     }
 
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {

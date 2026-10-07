@@ -7,6 +7,8 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -92,14 +94,17 @@ public final class DecodePreemptionCoordinator {
 
     private final EngineCancelChannel cancelChannel;
     private final RequestRegistry requests;
+    private final RequestSchedulerReporter reporter;
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
     public DecodePreemptionCoordinator(
             EngineCancelChannel cancelChannel,
-            RequestRegistry requests) {
+            RequestRegistry requests,
+            RequestSchedulerReporter reporter) {
         this.cancelChannel = Objects.requireNonNull(
                 cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
+        this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
     CompletableFuture<PreemptionResult> prepareReturnedPreemption(
@@ -119,6 +124,7 @@ public final class DecodePreemptionCoordinator {
                         command.incomingKvBudgetTokens(),
                         command.incomingPriority(),
                         command.capacity());
+        reportTargetValidationResult("return", begin);
         return CompletableFuture.completedFuture(new PreemptionResult(
                 begin == DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
@@ -138,6 +144,7 @@ public final class DecodePreemptionCoordinator {
             Optional<CancelTarget> target = requests.findCancelTarget(
                     victim.requestId(), victim.reservationToken());
             if (target.isEmpty()) {
+                reportTargetValidationFailure("rpc", "cancel_target_unavailable");
                 return CompletableFuture.completedFuture(new PreemptionResult(
                         false, true,
                         "cancel_owner_missing:" + victim.requestId()));
@@ -158,6 +165,7 @@ public final class DecodePreemptionCoordinator {
                         victim.requestId(), victim.reservationToken(),
                         token, command.detail());
                 if (claimAttempt.isEmpty()) {
+                    reportTargetValidationFailure("rpc", "request_claim_rejected");
                     return CompletableFuture.completedFuture(capability.abort(
                             false, "victim_inflight_gone"));
                 }
@@ -182,6 +190,7 @@ public final class DecodePreemptionCoordinator {
                             command.incomingPriority(),
                             command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
+                reportTargetValidationResult("rpc", begin);
                 return CompletableFuture.completedFuture(capability.abort(
                         begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
                         "begin_" + begin.name().toLowerCase()));
@@ -250,6 +259,28 @@ public final class DecodePreemptionCoordinator {
             return CompletableFuture.completedFuture(capability.abort(
                     true,
                     "coordinator_setup_failed:" + failureDetail(failure)));
+        }
+    }
+
+    private void reportTargetValidationResult(
+            String mode, DecodeEndpoint.PreemptionBeginResult result) {
+        String reason = switch (result) {
+            case VICTIM_GONE -> "victim_state_changed";
+            case VICTIM_ALREADY_CLAIMED -> "victim_already_claimed";
+            case INVALID_PRIORITY -> "priority_not_preemptible";
+            default -> null;
+        };
+        if (reason != null) {
+            reportTargetValidationFailure(mode, reason);
+        }
+    }
+
+    private void reportTargetValidationFailure(String mode, String reason) {
+        try {
+            reporter.reportPreemptionTargetInvalid(mode, reason);
+        } catch (RuntimeException metricFailure) {
+            Logger.warn("Failed to report preemption target validation: mode={} reason={}",
+                    mode, reason, metricFailure);
         }
     }
 

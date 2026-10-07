@@ -71,7 +71,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.evictionManager = new EvictionManager(
                 requestReporter,
                 cancelChannel,
-                new DecodePreemptionCoordinator(cancelChannel, lifecycle),
+                new DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter),
                 lifecycle,
                 batchReporter);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);

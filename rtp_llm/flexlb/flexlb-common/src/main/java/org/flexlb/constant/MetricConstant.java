@@ -6,6 +6,16 @@ package org.flexlb.constant;
  */
 public class MetricConstant {
 
+    /**
+     * One increment per GC notification, tagged by gc, collector and pid.
+     */
+    public static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
+
+    /**
+     * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
+     */
+    public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
     /* ------------------------ Engine Status Metrics -------------------------- */
 
     /**
@@ -260,9 +270,9 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT =
             "app.engine.worker.status.prefill.step.count";
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN =
-            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.min";
+            "app.engine.worker.status.prefill.nonfinal.chunk.min.tokens";
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
-            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
+            "app.engine.worker.status.prefill.nonfinal.chunk.max.tokens";
 
     public static final String ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS =
             "app.engine.worker.step.total.scheduled.tokens";
@@ -671,15 +681,10 @@ public class MetricConstant {
     public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE = "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor completed task count (counter — monotonically increasing)
+     * gRPC server executor rejected task total since startup (cumulative gauge).
+     * The wire name is retained for existing dashboards; rejection uses AbortPolicy.
      */
-    public static final String GRPC_SERVER_EXECUTOR_COMPLETED_TASKS = "grpc.server.executor.completed.tasks";
-
-    /**
-     * gRPC server executor CallerRunsPolicy rejection count (counter — monotonically increasing)
-     * <p>Note: name kept for backward compat after switching to AbortPolicy.
-     */
-    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS = "grpc.server.executor.caller.runs";
+    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS = "grpc.server.executor.caller.runs";
 
     /* ------------------------ Dispatch Executor Monitoring ---------------------------- */
 
@@ -697,11 +702,6 @@ public class MetricConstant {
      * Dispatch executor current pool size (gauge)
      */
     public static final String DISPATCH_EXECUTOR_POOL_SIZE = "dispatch.executor.pool.size";
-
-    /**
-     * Dispatch executor completed task count (counter — monotonically increasing)
-     */
-    public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
 
     /* ------------------------ Auto-TPM Request Scheduler ----------------------------- */
 
@@ -836,10 +836,9 @@ public class MetricConstant {
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
 
     /**
-     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry, tags: kind (yielded/preempted).
-     * Harmless in isolation, but a burst points at a registration/cleanup
-     * race — alert-worthy where a warn log is not.
+     * Decode preemption attempts rejected during target validation (QPS).
+     * Count once per failed attempt, with mode (return/rpc) and a bounded
+     * reason describing the target check that failed.
      */
-    public static final String AUTO_TPM_INFLIGHT_SETTLE_MISS = "auto_tpm.inflight_settle_miss.count";
+    public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT = "auto_tpm.preemption.target_invalid.count";
 }

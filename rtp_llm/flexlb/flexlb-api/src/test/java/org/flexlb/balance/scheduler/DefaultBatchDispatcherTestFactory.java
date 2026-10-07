@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.metric.NoOpFlexMonitor;
 
 /** Test-source bridge to the package-visible dispatcher sizing injection. */
 public final class DefaultBatchDispatcherTestFactory {
@@ -14,6 +15,6 @@ public final class DefaultBatchDispatcherTestFactory {
                                                 int poolSize,
                                                 int queueSize) {
         return new DefaultBatchDispatcher(
-                grpcClient, configService, null, poolSize, queueSize);
+                grpcClient, configService, NoOpFlexMonitor.getInstance(), poolSize, queueSize);
     }
 }

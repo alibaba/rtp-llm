@@ -93,7 +93,7 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         assertEquals(hosts, refresh());
         verify(engineHealthReporter).reportStatusCheckerFail(
-                "model", BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+                BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
     }
 
     @Test
@@ -120,7 +120,7 @@ class WorkerAddressServiceTest {
             assertEquals(oldHosts, refresh());
             assertTrue(interrupted.await(5, TimeUnit.SECONDS));
             verify(engineHealthReporter).reportStatusCheckerFail(
-                    "model", BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+                    BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
             doReturn(recoveredHosts).when(serviceDiscovery).getHosts(endpoint);
             assertEquals(recoveredHosts, refresh());
         } finally {
@@ -160,7 +160,7 @@ class WorkerAddressServiceTest {
             assertEquals(hosts, refresh());
             verify(serviceDiscovery).getHosts(endpoint);
             verify(engineHealthReporter).reportStatusCheckerFail(
-                    "model", BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         } finally {
             executor.getQueue().clear();
             release.countDown();

@@ -386,7 +386,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 environment,
                 masterServerEventLoopGroup,
-                null,
+                NoOpFlexMonitor.getInstance(),
                 new GrpcServerTimingInterceptor(),
                 new GrpcQosHeaderInterceptor());
         masterServer.start();

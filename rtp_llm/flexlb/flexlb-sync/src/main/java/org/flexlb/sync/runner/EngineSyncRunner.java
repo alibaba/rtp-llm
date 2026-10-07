@@ -241,7 +241,7 @@ public class EngineSyncRunner implements Runnable {
 
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
             Map<String, WorkerStatus> currentStatuses =
@@ -303,12 +303,11 @@ public class EngineSyncRunner implements Runnable {
                 double variance = sumStepLatencyOfSquaredDiffs
                         / (observedStatusCount - 1); // Sample variance
                 engineHealthReporter.reportStepLatencyVariance(
-                        modelName, this.roleType.toString(), variance);
+                        this.roleType.toString(), variance);
                 if (observedRunningLoads.size() >= 2) {
                     double runningLoadVariance = sumRunningLoadOfSquaredDiffs
                             / (observedRunningLoads.size() - 1);
                     engineHealthReporter.reportRunningLoadVariance(
-                            modelName,
                             this.roleType.toString(),
                             runningLoadVariance);
                 }

@@ -14,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -79,7 +80,7 @@ class QueuedBatchDeliveryTest {
             sent.add(call.getArgument(2));
             return reply;
         });
-        dispatcher = new DefaultBatchDispatcher(grpc, service, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpc, service, NoOpFlexMonitor.getInstance(), 1, 1);
         strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L,
                 registry, new DeliveryMetrics(reporter));
         prefill = mock(PrefillEndpoint.class);
