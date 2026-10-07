@@ -292,10 +292,12 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         self.assertIsNone(groups[4][2].get("admission_wave_size"))
         self.assertEqual(groups[4][2].get("admission_gap_s", 0), 0)
         self.assertEqual(groups[4][1][0].max_tokens, 512)
+        self.assertTrue(all(group[2]["grouped_pd"] for group in groups[1:]))
         smoke.args.suite = "main-text-64k-capped"
         groups.clear()
         smoke._orthogonal_decode_batches()
         self.assertTrue(groups[4][2]["grouped_pd"])
+        self.assertEqual(groups[3][1][0].max_tokens, 2560)
         self.assertEqual(groups[4][1][0].max_tokens, 1280)
         self.assertFalse(groups[2][2]["grouped_pd"])
 
