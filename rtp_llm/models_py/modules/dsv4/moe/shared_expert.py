@@ -22,12 +22,12 @@ from .warmup_sync import cuda_graph_warmup_forward_enabled
 
 try:
     from ..utils import V41MXFP8Linear
-    from ._silu_mul_bf16_triton import silu_mul_split_bf16
+    from ._silu_mul_bf16_triton import silu_mul_fp8_g32_quant
 
     _MXFP8_FUSED_SILU_OK = True
 except Exception:  # pragma: no cover — keep V4 importable without Triton
     V41MXFP8Linear = ()  # sentinel: never matches isinstance
-    silu_mul_split_bf16 = None
+    silu_mul_fp8_g32_quant = None
     _MXFP8_FUSED_SILU_OK = False
 
 
@@ -203,9 +203,11 @@ class W13SharedExpert(nn.Module):
         with record_function_range("dsv4.shared_expert.w13"):
             gate_up = self.w13(x)
         with record_function_range("dsv4.shared_expert.silu_mul"):
-            hidden = silu_mul_split_bf16(gate_up, clamp_limit=self.swiglu_limit)
+            hidden_q, hidden_s = silu_mul_fp8_g32_quant(
+                gate_up, clamp_limit=self.swiglu_limit
+            )
         with record_function_range("dsv4.shared_expert.w2"):
-            return self.w2(hidden)
+            return self.w2.forward_quantized(hidden_q, hidden_s)
 
 
 class FusedSharedExpertFastPath:

@@ -522,7 +522,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         base = "rtp_llm.models_py.modules.dsv4"
         modules = {
             f"{base}.moe._silu_mul_bf16_triton": fake_module(
-                "silu", silu_mul_split_bf16=silu
+                "silu", silu_mul_fp8_g32_quant=silu
             ),
             f"{base}.moe._shared_expert_triton": fake_module(
                 "combine", fused_moe_epilogue=combine

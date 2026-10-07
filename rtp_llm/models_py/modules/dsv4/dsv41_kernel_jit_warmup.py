@@ -187,11 +187,11 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
         fused_moe_epilogue,
     )
     from rtp_llm.models_py.modules.dsv4.moe._silu_mul_bf16_triton import (
-        silu_mul_split_bf16,
+        silu_mul_fp8_g32_quant,
     )
 
-    # The fused BF16 kernel does not specialize M. One row warms every token
-    # count; width/clamp still come from the real shared-expert projections.
+    # Rows, scale stride and quantization policy do not specialize the kernel.
+    # One row warms both policies for the actual projection width and clamp.
     rows_grid = (1,)
     fused_add = os.environ.get("DSV4_SHARED_EXPERT_BF16_ADD", "0") != "1"
     key = (str(device), frozenset(signatures), rows_grid, fused_add)
@@ -205,7 +205,7 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
                 f"{name} silu M={rows} D={inter} clamp={clamp}",
-                partial(silu_mul_split_bf16, gate_up, clamp_limit=clamp),
+                partial(silu_mul_fp8_g32_quant, gate_up, clamp_limit=clamp),
                 device=device,
             )
         if fused_add:
