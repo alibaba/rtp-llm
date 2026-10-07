@@ -455,6 +455,12 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         torch::Tensor kv_cache_layer_region_to_group = layerRegionToGroupTensor(kv_cache_layer_layout_);
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
+        // Stringify the key list once per forward and share it as immutable data;
+        // downstream copies of PyCacheStoreInputs (params assignment, attention-inputs
+        // copies and each WriteCacheStoreOp owned snapshot) then move/copy a pointer
+        // instead of deep-copying every key string.
+        std::shared_ptr<std::vector<std::string>> cache_keys_shared =
+            std::make_shared<std::vector<std::string>>(transVectorToString(cache_keys_vec));
         PyCacheStoreInputs cache_store_inputs{
             context_batch_size,
             decoder_batch_size,
@@ -463,7 +469,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             kv_cache_layer_to_group,
             kv_cache_layer_region_to_group,
             kv_cache_group_types,
-            transVectorToString(cache_keys_vec),
+            std::move(cache_keys_shared),
             input_lengths_host,
             prefix_lengths_host,
             inputs.seq_size_per_block,

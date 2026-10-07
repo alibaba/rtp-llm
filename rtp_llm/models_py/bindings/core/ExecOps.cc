@@ -242,7 +242,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     // of `max_blocks_per_batch` (which is per-group offset stride and may be smaller
     // for CP-sharded FULL groups whose offset is rank-local-compact).
     const size_t cache_keys_per_batch =
-        param.context_batch_size > 0 ? (param.cache_keys.size() / param.context_batch_size) : 0;
+        param.context_batch_size > 0 ? (param.cache_keys->size() / param.context_batch_size) : 0;
 
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
         if (*(param.request_pd_separation.data_ptr<bool>() + batch_id) == false) {
@@ -303,7 +303,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 return;
             }
             std::string cache_key = makeCacheKey(param.model_id,
-                                                 param.cache_keys[batch_id * cache_keys_per_batch + key_index],
+                                                 (*param.cache_keys)[batch_id * cache_keys_per_batch + key_index],
                                                  param.layer_id,
                                                  param.region_name);
 

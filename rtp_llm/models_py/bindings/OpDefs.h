@@ -251,7 +251,12 @@ struct PyCacheStoreInputs {
     torch::Tensor            kv_cache_layer_to_group;
     torch::Tensor            kv_cache_layer_region_to_group;
     torch::Tensor            kv_cache_group_types;
-    std::vector<std::string> cache_keys;  // [context_batch_size]
+    // Immutable cache-key list built once per forward and shared across all
+    // WriteCacheStoreOp calls, so per-call owned snapshots copy a pointer
+    // instead of deep-copying thousands of strings on the launching thread.
+    // The non-null default preserves the historical empty-list semantics.
+    std::shared_ptr<const std::vector<std::string>> cache_keys =
+        std::make_shared<const std::vector<std::string>>();  // [context_batch_size]
     // Pinned-host mirrors of device length tensors for cache store consumption.
     // Populated via non-blocking D2H in prepareWriteCacheParams so that
     // background cache-store threads never issue a synchronous .cpu() copy.

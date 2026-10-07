@@ -21,6 +21,7 @@ import rtp_llm.models_py.modules.dsv4.prefill.forward as prefill_forward
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
 )
+from rtp_llm.ops.compute_ops import LayerKVCache, PyCacheStoreInputs, rtp_llm_ops
 
 
 class _FakeMeta(NamedTuple):
@@ -511,6 +512,31 @@ class CacheStoreCPMetadataTest(unittest.TestCase):
         self.assertIs(writer.prefix_lengths, prefix_host)
         self.assertIs(writer.kv_cache_block_id_host, block_ids)
         self.assertIs(writer.cache_store_inputs, cache_store_inputs)
+
+
+class WriteCacheStoreNativeBindingTest(unittest.TestCase):
+    def _assert_noop(
+        self,
+        cache_store_inputs: Optional[PyCacheStoreInputs],
+        kv_cache: Optional[LayerKVCache],
+    ) -> None:
+        # These native early returns precede CUDA event creation and metadata reads.
+        lengths = torch.zeros(1, dtype=torch.int32, device="cpu")
+        block_ids = torch.empty((1, 0), dtype=torch.int32, device="cpu")
+        self.assertIsNone(
+            rtp_llm_ops.write_cache_store(
+                lengths, lengths, block_ids, cache_store_inputs, kv_cache
+            )
+        )
+
+    def test_none_cache_store_and_none_kv_cache(self) -> None:
+        self._assert_noop(None, None)
+
+    def test_none_cache_store_with_layer_kv_cache(self) -> None:
+        self._assert_noop(None, LayerKVCache())
+
+    def test_cache_store_inputs_with_none_kv_cache(self) -> None:
+        self._assert_noop(PyCacheStoreInputs(), None)
 
 
 if __name__ == "__main__":
