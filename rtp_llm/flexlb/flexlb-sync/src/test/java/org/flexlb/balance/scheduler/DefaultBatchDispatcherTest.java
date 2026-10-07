@@ -83,7 +83,10 @@ class DefaultBatchDispatcherTest {
         ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
                 ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
         verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
-        assertEquals(3000, request.getValue().getFetchAttachTimeoutMs());
+        // Default raised from 3s to 60s by d1dcb3de38 (V4.1 multimodal
+        // delivery stabilization); the explicit-config case below covers the
+        // configured value.
+        assertEquals(60_000, request.getValue().getFetchAttachTimeoutMs());
     }
 
     @Test
