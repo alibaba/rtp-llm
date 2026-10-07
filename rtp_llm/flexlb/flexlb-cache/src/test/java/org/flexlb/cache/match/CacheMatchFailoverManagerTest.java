@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -49,23 +50,59 @@ class CacheMatchFailoverManagerTest {
     }
 
     @Test
+    void manualRecoveryKeepsStandbyWhenHealthChangesAfterValidation() {
+        for (boolean autoSwitch : new boolean[]{true, false}) {
+            KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+            when(client.healthSnapshot()).thenReturn(
+                    health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"),
+                    health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"),
+                    health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+            CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
+            CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
+                    configuration(autoSwitch), client, reporter);
+            manager.activateFallbackManually();
+
+            manager.recoverPrimaryManually();
+
+            assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+            verify(reporter, never()).reportCacheMatchSourceChange(
+                    CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
+        }
+    }
+
+    @Test
+    void lateHealthCallbackDoesNotOverrideNewerClientState() {
+        KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+        when(client.healthSnapshot()).thenReturn(
+                health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
+        CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
+                configuration(true), client, mock(CacheMetricsReporter.class));
+
+        healthSnapshotListener(client).accept(
+                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "outdated heartbeat"));
+
+        assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+    }
+
+    @Test
     void automaticallyFollowsKvcmClientHealth() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
-        when(client.healthSnapshot()).thenReturn(
+        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
                 health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
+        when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(
                         configuration(true), client, metricsReporter);
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
-        healthSnapshotListener.accept(
-                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        currentHealth.set(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        healthSnapshotListener.accept(currentHealth.get());
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
         assertEquals("heartbeat failure", manager.lastFailoverReason());
 
-        healthSnapshotListener.accept(
-                health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        currentHealth.set(health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        healthSnapshotListener.accept(currentHealth.get());
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
         assertEquals("KVCM health recovered", manager.lastFailoverReason());
         verify(metricsReporter).reportCacheMatchSourceChange(
@@ -105,8 +142,9 @@ class CacheMatchFailoverManagerTest {
     @Test
     void warnsOncePerUnhealthyPeriodWhenManualFailoverIsRequired() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        when(client.healthSnapshot()).thenReturn(
+        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
                 health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
+        when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CacheMatchFailoverManager.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -116,13 +154,17 @@ class CacheMatchFailoverManagerTest {
                     configuration(false), client, mock(CacheMetricsReporter.class));
             Consumer<KvcmHealthSnapshot> listener = healthSnapshotListener(client);
 
-            listener.accept(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "first failure"));
-            listener.accept(health(KvcmHealthState.UNHEALTHY, 4, 0, 2, "continued failure"));
+            currentHealth.set(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "first failure"));
+            listener.accept(currentHealth.get());
+            currentHealth.set(health(KvcmHealthState.UNHEALTHY, 4, 0, 2, "continued failure"));
+            listener.accept(currentHealth.get());
             assertEquals(1, manualFailoverWarnings(appender));
             assertEquals(CacheMatchSource.KVCM, manager.activeSource());
 
-            listener.accept(health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
-            listener.accept(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "new failure"));
+            currentHealth.set(health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
+            listener.accept(currentHealth.get());
+            currentHealth.set(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "new failure"));
+            listener.accept(currentHealth.get());
             assertEquals(2, manualFailoverWarnings(appender));
             assertEquals(CacheMatchSource.KVCM, manager.activeSource());
         } finally {

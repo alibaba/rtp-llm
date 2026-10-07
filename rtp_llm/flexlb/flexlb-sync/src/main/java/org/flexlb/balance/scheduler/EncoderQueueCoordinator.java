@@ -197,8 +197,10 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     }
 
     private void fail(GlobalQueueEntry entry, Response response) {
-        requests.publishDecisionResponseAsync(entry.context.getRequestId(), entry.future,
-                response, RequestPhase.ENCODER);
+        if (!requests.publishDecisionResponseAsync(entry.context.getRequestId(), entry.future,
+                response, RequestPhase.ENCODER)) {
+            remove(entry);
+        }
     }
 
     private void remove(GlobalQueueEntry entry) {
