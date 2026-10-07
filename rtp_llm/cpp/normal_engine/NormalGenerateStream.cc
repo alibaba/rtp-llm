@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 namespace rtp_llm {
 
@@ -282,5 +284,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     last_output_pos_ = seqLength();
+    static const bool measure_completion =
+        std::getenv("RTP_STEP_MEASUREMENT") != nullptr && std::strcmp(std::getenv("RTP_STEP_MEASUREMENT"), "1") == 0;
+    if (measure_completion && finished_ && !isFakeStream()) {
+        RTP_LLM_LOG_INFO("MEASURE_STREAM request_id=%ld done_step_us=%ld output_tokens=%d",
+                         streamId(),
+                         autil::TimeUtility::currentTimeInMicroSeconds(),
+                         seqLength() - inputLength());
+    }
 }
 };  // namespace rtp_llm

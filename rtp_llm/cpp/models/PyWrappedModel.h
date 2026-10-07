@@ -8,6 +8,9 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <tuple>
+#include <cstdlib>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -61,10 +64,10 @@ public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode  = false,
-                   bool                      use_spec_decoding           = false,
-                   DSparkModelRole           dspark_model_role           = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph            = true,
+                   bool                      is_prefill_cuda_graph_mode   = false,
+                   bool                      use_spec_decoding            = false,
+                   DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
+                   bool                      allow_cuda_graph             = true,
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
@@ -143,12 +146,17 @@ private:
     // release decode-side workspaces while their CUDA kernels may still be in
     // flight.
     std::vector<py::object> held_attn_pyobjs_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       has_mtp_hidden_buffer_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    // Optional sampled execution evidence, outside capture and outside the GPU stream.
+    void logExecution(bool graph, bool prefill, int batch, int graph_bs);
+    int  execution_log_rank_{0};
+    bool execution_log_enabled_{false};
+    std::map<std::tuple<bool, bool, int, int>, uint64_t> execution_counts_;
+    bool                                                 enable_cuda_graph_{false};
+    bool                                                 is_prefill_cuda_graph_mode_{false};
+    bool                                                 use_spec_decoding_{false};
+    bool                                                 has_mtp_hidden_buffer_{false};
+    bool                                                 enable_device_perf_{false};
+    bool                                                 check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -197,9 +205,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     c10::InferenceMode inference_guard(true);
 
-    weights_               = params.weights;
-    model_id_              = params.model_id;
-    kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    execution_log_rank_           = static_cast<int>(params.parallelism_config.world_rank);
+    const char* execution_log_env = std::getenv("RTP_CUDA_GRAPH_EXECUTION_LOG");
+    execution_log_enabled_        = execution_log_env && std::string(execution_log_env) == "1";
+    weights_                      = params.weights;
+    model_id_                     = params.model_id;
+    kv_cache_layer_layout_        = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA
@@ -382,6 +393,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             // rank enters graph-held collectives in the same order.
             syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
             graph_runner_->initCapture();
+            if (execution_log_enabled_) {
+                RTP_LLM_LOG_INFO("GRAPH_CAPTURE_READY rank=%d", execution_log_rank_);
+            }
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;

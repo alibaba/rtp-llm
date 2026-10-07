@@ -16,6 +16,7 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.frontend import frontend_measurement
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -288,6 +289,8 @@ class FrontendServer(object):
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
     ):
+        measurement = request.get("_measurement")
+        measurement_status = "interrupted"
         # HTTP SERVER span owner for streaming requests: the four exits below
         # (success / cancel / error / finally) all funnel into the idempotent
         # finish() (manual instrumentation, no ASGI middleware).
@@ -296,14 +299,22 @@ class FrontendServer(object):
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
             async for res in response:
+                cpu_start = time.thread_time() if measurement is not None else 0
+                wall_start = time.time() if measurement is not None else 0
                 data_str = res.model_dump_json(exclude_none=True)
+                frontend_measurement.serialized(
+                    measurement, cpu_start, wall_start, data_str
+                )
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
             if not is_openai_response:
                 yield f"data:[done]\r\n\r\n"
+            if measurement is not None:
+                measurement["stream_done_wall"] = time.time()
             await self._collect_complete_response_and_record_access_log(
                 request, response
             )
+            measurement_status = "ok"
             if trace_state is not None:
                 _record_http_status(trace_state, 200)
                 trace_state.finish()
@@ -354,6 +365,7 @@ class FrontendServer(object):
                 format_e, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
+            frontend_measurement.finish(measurement, measurement_status)
             if trace_state is not None:
                 # safety net for exits not covered above; idempotent
                 trace_state.finish()
@@ -481,6 +493,14 @@ class FrontendServer(object):
                 request.stream = False
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
+            measurement = frontend_measurement.begin(
+                raw_request.headers.get("X-Request-ID", ""),
+                request_id,
+                self.rank_id,
+                self.server_id,
+            )
+            if measurement is not None:
+                request_dict["_measurement"] = measurement
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
         except BaseException as e:
             if trace_state is not None:

@@ -392,6 +392,8 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "enable_mixed_continuous_batching: " << enable_mixed_continuous_batching << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
+        << "pdfusion_schedule_trace: " << pdfusion_schedule_trace << "\n"
+        << "pdfusion_trace_run_id: " << pdfusion_trace_run_id << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;

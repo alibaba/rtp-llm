@@ -395,8 +395,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -483,7 +483,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -508,7 +508,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -613,6 +613,8 @@ absl::Status NormalEngine::step() try {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    const bool              schedule_trace       = runtime_config.fifo_scheduler_config.pdfusion_schedule_trace;
+    const int64_t           control_epoch        = schedule_trace ? ++trace_control_epoch_ : 0;
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
@@ -633,8 +635,75 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    absl::Status status             = absl::OkStatus();
+    static const bool measure_steps =
+        std::getenv("RTP_STEP_MEASUREMENT") != nullptr && std::string(std::getenv("RTP_STEP_MEASUREMENT")) == "1";
+    std::vector<std::pair<GenerateStreamPtr, int>> measurement_lengths;
+    int     measurement_prefill = 0, measurement_decode = 0, measurement_fake = 0;
+    int64_t measurement_input_tokens = 0;
+    int     measurement_seq_min = 0, measurement_seq_max = 0;
+    int64_t measurement_seq_sum = 0;
+    if (measure_steps || schedule_trace) {
+        for (const auto& stream : streams) {
+            if (stream->isFakeStream()) {
+                ++measurement_fake;
+                continue;
+            }
+            measurement_lengths.emplace_back(stream, stream->seqLength());
+            if (stream->isContextStream()) {
+                ++measurement_prefill;
+                measurement_input_tokens += stream->inputLength();
+            } else {
+                const int length = stream->seqLength();
+                if (measurement_decode == 0) {
+                    measurement_seq_min = length;
+                }
+                measurement_seq_min = std::min(measurement_seq_min, length);
+                measurement_seq_max = std::max(measurement_seq_max, length);
+                measurement_seq_sum += length;
+                ++measurement_decode;
+            }
+        }
+    }
+    int64_t       step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    absl::Status  status             = absl::OkStatus();
+    const int64_t model_step_id      = schedule_trace ? ++trace_model_step_id_ : 0;
+    if (schedule_trace) {
+        const auto observation = scheduler_->lastScheduleObservation();
+        RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=begin run=%s rank=%d control_epoch=%ld model_step_id=%ld "
+                         "epoch_scope=local_model_order global_plan=local start_us=%ld execute_start_us=%ld "
+                         "snapshot_valid=%d intent=%s waiting=%ld loading=%ld running=%ld pending=%ld "
+                         "kv_available=%ld kv_reserved=%ld reject_batch=%ld reject_tokens=%ld reject_kv=%ld "
+                         "committed_prefill=%ld committed_decode=%ld committed_input_tokens=%ld "
+                         "waiting_after=%ld loading_after=%ld oldest_waiting_us=%ld "
+                         "prefill=%d decode=%d fake=%d input_tokens=%ld graph_batch=-1",
+                         runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
+                         parallelism_config.dp_rank,
+                         control_epoch,
+                         model_step_id,
+                         tps_schedule_time_us,
+                         step_begin_time_us,
+                         static_cast<int>(observation.valid),
+                         observation.valid ? (observation.intent_prefill ? "prefill" : "decode") : "unknown",
+                         observation.waiting,
+                         observation.loading,
+                         observation.running,
+                         observation.pending,
+                         observation.kv_available,
+                         observation.kv_reserved,
+                         observation.rejected_batch,
+                         observation.rejected_tokens,
+                         observation.rejected_kv,
+                         observation.committed_prefill,
+                         observation.committed_decode,
+                         observation.committed_input_tokens,
+                         observation.waiting_after,
+                         observation.loading_after,
+                         observation.oldest_waiting_us,
+                         measurement_prefill,
+                         measurement_decode,
+                         measurement_fake,
+                         measurement_input_tokens);
+    }
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -666,6 +735,42 @@ absl::Status NormalEngine::step() try {
         }
         if (propose_params_) {
             step_profiler_.finishStep();
+        }
+    }
+
+    if (measure_steps || schedule_trace) {
+        int64_t emitted = 0;
+        for (const auto& item : measurement_lengths) {
+            emitted += std::max(0, item.first->seqLength() - item.second);
+        }
+        const auto completed_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (schedule_trace) {
+            RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=end run=%s rank=%d control_epoch=%ld model_step_id=%ld "
+                             "end_us=%ld output_tokens=%ld ok=%d timing=host_executor_wall",
+                             runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
+                             parallelism_config.dp_rank,
+                             control_epoch,
+                             model_step_id,
+                             completed_us,
+                             emitted,
+                             static_cast<int>(status.ok()));
+        }
+        if (measure_steps) {
+            RTP_LLM_LOG_INFO(
+                "MEASURE_STEP rank=%d start_us=%ld execute_start_us=%ld end_us=%ld prefill=%d decode=%d fake=%d input_tokens=%ld output_tokens=%ld ok=%d seq_min=%d seq_max=%d seq_sum=%ld",
+                parallelism_config.local_rank,
+                tps_schedule_time_us,
+                step_begin_time_us,
+                completed_us,
+                measurement_prefill,
+                measurement_decode,
+                measurement_fake,
+                measurement_input_tokens,
+                emitted,
+                static_cast<int>(status.ok()),
+                measurement_seq_min,
+                measurement_seq_max,
+                measurement_seq_sum);
         }
     }
 

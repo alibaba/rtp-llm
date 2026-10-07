@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import weakref
@@ -41,6 +42,26 @@ _g_trt_workspace_pool: list[torch.Tensor] = []
 _g_trt_pool_lock = threading.Lock()
 _g_trt_graph_workspaces = weakref.WeakValueDictionary()
 _g_trt_graph_workspace_lock = threading.Lock()
+
+
+_FP8_EXECUTION_LOGGED = set()
+
+
+def _log_fp8_execution(phase, native, q, kv, out):
+    if (
+        not native
+        or phase in _FP8_EXECUTION_LOGGED
+        or os.getenv("RTP_FP8_ATTN_EXECUTION_LOG", "0") != "1"
+    ):
+        return
+    _FP8_EXECUTION_LOGGED.add(phase)
+    logging.info(
+        "FP8_ATTN_EXECUTION phase=%s native=1 q=%s kv=%s out=%s",
+        phase,
+        q.dtype,
+        kv.dtype,
+        out.dtype,
+    )
 
 
 def use_native_fp8_attention(attn_configs: AttentionConfigs) -> bool:
@@ -622,6 +643,8 @@ class FlashInferTRTLLMPrefillOp(object):
             out_dtype=o_type,  # model_runner.dtype
         )
 
+        if self.native_fp8:
+            _log_fp8_execution("prefill", self.native_fp8, q, kv_cache.kv_cache_base, o)
         return o.view(-1, self.local_head_num * self.head_dim).to(o_type)
 
 
@@ -759,6 +782,8 @@ class FlashInferTRTLLMDecodeOp(object):
             out_dtype=o_type,  # model_runner.dtype
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
         )
+        if self.native_fp8:
+            _log_fp8_execution("decode", self.native_fp8, q, kv_cache.kv_cache_base, o)
         return o.view(-1, self.local_head_num * self.head_dim).to(o_type)
 
 

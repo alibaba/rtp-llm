@@ -316,12 +316,12 @@ static CacheConfig makeMixedBatchingPoolConfig(uint32_t linear_blocks, uint32_t 
     auto config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     config.use_independent_block_pools = true;
-    auto policies = config.groupPoliciesSnapshot();
-    policies[0].explicit_block_num = linear_blocks;
-    policies[1].explicit_block_num = full_blocks;
+    auto policies                      = config.groupPoliciesSnapshot();
+    policies[0].explicit_block_num     = linear_blocks;
+    policies[1].explicit_block_num     = full_blocks;
     config.setGroupPolicies(policies);
-    config.setGroupBlockLayout({linear_blocks, full_blocks},
-                               {config.kv_block_stride_bytes, config.kv_block_stride_bytes}, {0, 0});
+    config.setGroupBlockLayout(
+        {linear_blocks, full_blocks}, {config.kv_block_stride_bytes, config.kv_block_stride_bytes}, {0, 0});
     return config;
 }
 
@@ -333,7 +333,7 @@ TEST_F(FIFOSchedulerTest, testMixedContinuousBatchingChecksEachHybridPool) {
     for (const auto& capacity : capacities) {
         const bool expect_admission = capacity.first == 5;
         SCOPED_TRACE(::testing::Message() << "linear=" << capacity.first << " full=" << capacity.second);
-        auto cache_config = makeMixedBatchingPoolConfig(capacity.first, capacity.second);
+        auto cache_config  = makeMixedBatchingPoolConfig(capacity.first, capacity.second);
         auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
         ASSERT_TRUE(cache_manager->init());
         const auto pools = cache_manager->poolMetricsSnapshots();
@@ -346,26 +346,27 @@ TEST_F(FIFOSchedulerTest, testMixedContinuousBatchingChecksEachHybridPool) {
         ASSERT_EQ(pools[1].available_blocks, pools[1].total_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
-        resource_context.reuse_cache = false;
+        resource_context.reuse_cache   = false;
         ModelConfig model_config;
-        model_config.max_seq_len = 8192;
-        model_config.model_type = "qwen35_moe";
+        model_config.max_seq_len                   = 8192;
+        model_config.model_type                    = "qwen35_moe";
         model_config.mm_model_config.is_multimodal = true;
-        model_config.attn_config.tokens_per_block = 4;
+        model_config.attn_config.tokens_per_block  = 4;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size = 8;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.max_generate_batch_size                                = 8;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size            = 8192;
         runtime_config.fifo_scheduler_config.enable_mixed_continuous_batching = true;
-        PDSepConfig pd_sep_config = makePDFusionPDSepConfig();
-        ParallelismConfig parallelism_config;
+        PDSepConfig         pd_sep_config                                     = makePDFusionPDSepConfig();
+        ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
-        FIFOScheduler scheduler(
+        FIFOScheduler       scheduler(
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
         auto make_stream = [&]() {
-            auto query = std::make_shared<GenerateInput>();
-            query->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+            auto query             = std::make_shared<GenerateInput>();
+            query->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
             query->generate_config = makeTestGenerateConfig(/*max_new_tokens=*/4);
-            return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            return std::make_shared<NormalGenerateStream>(
+                query, model_config, runtime_config, resource_context, nullptr);
         };
         auto decode = make_stream();
         ASSERT_TRUE(scheduler.enqueue(decode).ok());
@@ -394,30 +395,31 @@ TEST_F(FIFOSchedulerTest, testMixedContinuousBatchingChecksEachHybridPool) {
 
 TEST_F(FIFOSchedulerTest, testMixedContinuousBatchingSeparatesBeamRequests) {
     for (bool running_has_beams : {false, true}) {
-        auto cache_config = makeMhaCacheConfig(1, 128, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
+        auto cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
         auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
         ASSERT_TRUE(cache_manager->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         ModelConfig model_config;
-        model_config.max_seq_len = 8192;
-        model_config.model_type = "qwen35_moe";
+        model_config.max_seq_len                   = 8192;
+        model_config.model_type                    = "qwen35_moe";
         model_config.mm_model_config.is_multimodal = true;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size = 8;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.max_generate_batch_size                                = 8;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size            = 8192;
         runtime_config.fifo_scheduler_config.enable_mixed_continuous_batching = true;
-        PDSepConfig pd_sep_config = makePDFusionPDSepConfig();
-        ParallelismConfig parallelism_config;
+        PDSepConfig         pd_sep_config                                     = makePDFusionPDSepConfig();
+        ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
-        FIFOScheduler scheduler(
+        FIFOScheduler       scheduler(
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
         auto make_stream = [&](bool beams) {
-            auto query = std::make_shared<GenerateInput>();
-            query->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
-            query->generate_config = makeTestGenerateConfig(/*max_new_tokens=*/4);
+            auto query                        = std::make_shared<GenerateInput>();
+            query->input_ids                  = torch::tensor({1, 2, 3}, torch::kInt32);
+            query->generate_config            = makeTestGenerateConfig(/*max_new_tokens=*/4);
             query->generate_config->num_beams = beams ? 2 : 1;
-            return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            return std::make_shared<NormalGenerateStream>(
+                query, model_config, runtime_config, resource_context, nullptr);
         };
         auto decode = make_stream(running_has_beams);
         ASSERT_TRUE(scheduler.enqueue(decode).ok());
@@ -1196,6 +1198,69 @@ TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
     auto r_after = scheduler.schedule();  // reaps s1 (running empty), then seed PREFILL s2
     ASSERT_TRUE(r_after.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);  // s2 finally admitted
+}
+
+TEST_F(FIFOSchedulerTest, testObservationPreservesPrefillAndCapacityFallback) {
+    for (bool trace : {false, true}) {
+        CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+        auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        ASSERT_TRUE(cache_manager->init());
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager;
+        ModelConfig model_config;
+        model_config.max_seq_len = 8192;
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size                       = 1;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime_config.fifo_scheduler_config.decode_prefill_ratio    = "0";
+        runtime_config.fifo_scheduler_config.pdfusion_schedule_trace = trace;
+        PDSepConfig            pd_sep_config                         = makePDFusionPDSepConfig();
+        ParallelismConfig      parallelism_config;
+        ModelSpecificConfig    model_specific_config;
+        PDFusionRatioScheduler scheduler(
+            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+        auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+        auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+        ASSERT_TRUE(scheduler.enqueue(s1).ok());
+        ASSERT_TRUE(scheduler.enqueue(s2).ok());
+        auto first = scheduler.schedule();
+        ASSERT_TRUE(first.ok());
+        ASSERT_EQ(first->size(), 1);
+        ASSERT_EQ(first->front(), s1);
+        auto obs = scheduler.lastScheduleObservation();
+        ASSERT_EQ(obs.valid, trace);
+        if (trace) {
+            EXPECT_TRUE(obs.intent_prefill);
+            EXPECT_EQ(obs.waiting, 2);
+            EXPECT_EQ(obs.committed_prefill, 1);
+            EXPECT_EQ(obs.committed_input_tokens, 2);
+            EXPECT_EQ(obs.rejected_batch, 1);
+            EXPECT_EQ(obs.waiting_after, 1);
+        }
+        s1->setSeqLength(s1->seqLength() + 1);
+        auto second = scheduler.schedule();
+        ASSERT_TRUE(second.ok());
+        ASSERT_EQ(second->size(), 1);
+        ASSERT_EQ(second->front(), s1);
+        obs = scheduler.lastScheduleObservation();
+        if (trace) {
+            EXPECT_TRUE(obs.intent_prefill);
+            EXPECT_EQ(obs.pending, 1);
+            EXPECT_EQ(obs.committed_prefill, 0);
+            EXPECT_EQ(obs.committed_decode, 1);
+            EXPECT_EQ(obs.rejected_batch, 1);
+        }
+        s1->reportEvent(StreamEvents::GenerateDone);
+        auto third = scheduler.schedule();
+        ASSERT_TRUE(third.ok());
+        ASSERT_EQ(third->size(), 1);
+        ASSERT_EQ(third->front(), s2);
+        if (trace) {
+            obs = scheduler.lastScheduleObservation();
+            EXPECT_EQ(obs.rejected_batch, 0);
+            EXPECT_EQ(obs.committed_prefill, 1);
+        }
+    }
 }
 
 TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {

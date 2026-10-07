@@ -29,3 +29,14 @@ py_test(
     },
     tags = ["frontend"],
 )
+
+py_test(
+    name = "frontend_measurement_test",
+    srcs = ["frontend_measurement_test.py"],
+    data = [
+        "//rtp_llm:frontend/frontend_measurement.py",
+        "//rtp_llm:frontend/frontend_server.py",
+    ],
+    legacy_create_init = 0,
+    tags = ["frontend"],
+)

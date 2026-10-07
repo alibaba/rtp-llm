@@ -58,10 +58,8 @@ private:
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
-    static size_t                   warmUpReservedBlockCount(size_t seq_len,
-                                                            size_t reserve_tokens,
-                                                            size_t tokens_per_block);
-    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
+    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -88,6 +86,10 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    // Engine-loop local IDs, starting after warmup/capture. Cross-rank equality must
+    // be validated; these counters do not claim a synchronized global control plan.
+    int64_t trace_control_epoch_ = 0;
+    int64_t trace_model_step_id_ = 0;
 };
 
 }  // namespace rtp_llm

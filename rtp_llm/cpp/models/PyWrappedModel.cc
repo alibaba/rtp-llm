@@ -774,6 +774,24 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 }
 
+void PyWrappedModel::logExecution(bool graph, bool prefill, int batch, int graph_bs) {
+    if (!execution_log_enabled_) {
+        return;
+    }
+    auto& count = execution_counts_[std::make_tuple(graph, prefill, batch, graph_bs)];
+    ++count;
+    if ((count & (count - 1)) == 0
+        || (std::getenv("RTP_STEP_MEASUREMENT") && std::string(std::getenv("RTP_STEP_MEASUREMENT")) == "1")) {
+        RTP_LLM_LOG_INFO("MODEL_EXECUTION rank=%d mode=%s prefill=%d batch=%d graph_bs=%d count=%llu real=1",
+                         execution_log_rank_,
+                         graph ? "graph" : "eager",
+                         static_cast<int>(prefill),
+                         batch,
+                         graph_bs,
+                         static_cast<unsigned long long>(count));
+    }
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
@@ -876,6 +894,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
+            if (!inputs.is_fake_stream && !inputs.warmup) {
+                logExecution(true,
+                             py_model_inputs.attention_inputs.is_prefill,
+                             static_cast<int>(total_batch_size),
+                             graph_state_.current_real_graph_bs);
+            }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
@@ -886,9 +910,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
             held_attn_pyobjs_.emplace_back(py_model_.attr("prepare_fmha_impl")(py_model_inputs, false));
-            auto outputs = py_forward_method_(py_model_inputs, held_attn_pyobjs_.back());
+            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobjs_.back());
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
+            if (!inputs.is_fake_stream && !inputs.warmup) {
+                logExecution(false, py_model_inputs.attention_inputs.is_prefill, static_cast<int>(total_batch_size), 0);
+            }
         }
 
         cache_store_write_cycle.finish();
@@ -1023,9 +1050,8 @@ torch::Tensor concatOutputTensors(const torch::Tensor& decode, const torch::Tens
     if (!decode.defined() && !context.defined()) {
         return torch::Tensor();
     }
-    RTP_LLM_CHECK_WITH_INFO(decode.defined() && context.defined(),
-                            "mixed model output %s must be defined by both passes or neither",
-                            name);
+    RTP_LLM_CHECK_WITH_INFO(
+        decode.defined() && context.defined(), "mixed model output %s must be defined by both passes or neither", name);
     RTP_LLM_CHECK_WITH_INFO(decode.dim() > 0 && context.dim() == decode.dim(),
                             "mixed model output %s rank mismatch: decode=%ld context=%ld",
                             name,
@@ -1047,9 +1073,8 @@ torch::Tensor concatOutputTensors(const torch::Tensor& decode, const torch::Tens
     return torch::cat({decode, context}, 0);
 }
 
-GptModelOutputs mergeMixedOutputs(const GptModelOutputs& decode,
-                                  const GptModelOutputs& context,
-                                  bool                   need_all_hidden_states) {
+GptModelOutputs
+mergeMixedOutputs(const GptModelOutputs& decode, const GptModelOutputs& context, bool need_all_hidden_states) {
     GptModelOutputs merged;
     merged.logits        = concatOutputTensors(decode.logits, context.logits, "logits");
     merged.hidden_states = concatOutputTensors(decode.hidden_states, context.hidden_states, "hidden_states");
@@ -1066,21 +1091,18 @@ GptModelOutputs mergeMixedOutputs(const GptModelOutputs& decode,
                             context.moe_gating.size());
     merged.moe_gating.reserve(decode.moe_gating.size());
     for (size_t i = 0; i < decode.moe_gating.size(); ++i) {
-        merged.moe_gating.emplace_back(
-            concatOutputTensors(decode.moe_gating[i], context.moe_gating[i], "moe_gating"));
+        merged.moe_gating.emplace_back(concatOutputTensors(decode.moe_gating[i], context.moe_gating[i], "moe_gating"));
     }
     return merged;
 }
 
-torch::Tensor selectMixedLastHiddenRows(const torch::Tensor& hidden_states,
-                                        const GptModelInputs& inputs,
-                                        const char*           name) {
+torch::Tensor
+selectMixedLastHiddenRows(const torch::Tensor& hidden_states, const GptModelInputs& inputs, const char* name) {
     if (!hidden_states.defined()) {
         return torch::Tensor();
     }
-    RTP_LLM_CHECK_WITH_INFO(inputs.lm_output_indexes.defined(),
-                            "mixed %s is defined but lm_output_indexes is missing",
-                            name);
+    RTP_LLM_CHECK_WITH_INFO(
+        inputs.lm_output_indexes.defined(), "mixed %s is defined but lm_output_indexes is missing", name);
     RTP_LLM_CHECK_WITH_INFO(inputs.lm_output_indexes.numel() == inputs.input_lengths.numel(),
                             "mixed %s lm_output_indexes count must match batch size: indexes=%ld batch=%ld",
                             name,
@@ -1217,7 +1239,7 @@ std::pair<GptModelInputs, GptModelInputs> PyWrappedModel::splitMixedInputs(const
 
 GptModelOutputs PyWrappedModel::forwardMixedBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMixedBatched");
-    DevicePerfWrapper wrapper(enable_device_perf_, "py model mixed forward");
+    DevicePerfWrapper            wrapper(enable_device_perf_, "py model mixed forward");
     static std::atomic<uint64_t> mixed_batch_count{0};
     const auto                   mixed_count = mixed_batch_count.fetch_add(1, std::memory_order_relaxed) + 1;
     if ((mixed_count & (mixed_count - 1)) == 0) {

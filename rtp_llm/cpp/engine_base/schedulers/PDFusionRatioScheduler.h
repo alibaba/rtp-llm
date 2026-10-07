@@ -28,6 +28,8 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
 
+    ScheduleObservation lastScheduleObservation() override;
+
     // for test
     using FIFOSchedulerBase::runningStreamsSize;
     using FIFOSchedulerBase::waitingStreamsSize;
@@ -55,6 +57,10 @@ private:
     size_t    promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+
+    void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
+    const bool          trace_enabled_;
+    ScheduleObservation observation_;
 
     struct AdmissionPeakState;
     void buildAdmissionPeakState();

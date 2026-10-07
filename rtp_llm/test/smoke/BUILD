@@ -94,3 +94,9 @@ test_suite(
 )
 
 qwen35_e2p4d2_repro_suite()
+
+py_test(
+    name = "pdfusion_schedule_trace_test",
+    srcs = ["pdfusion_schedule_trace.py", "pdfusion_schedule_trace_test.py"],
+    main = "pdfusion_schedule_trace_test.py",
+)

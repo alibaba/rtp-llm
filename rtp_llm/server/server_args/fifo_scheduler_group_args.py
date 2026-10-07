@@ -67,6 +67,22 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         "'1/X' = X 轮 prefill 后 1 轮 decode。非法值回退为 '1'。",
     )
     fifo_scheduler_group.add_argument(
+        "--pdfusion_schedule_trace",
+        env_name="PDFUSION_SCHEDULE_TRACE",
+        bind_to=[(fifo_scheduler_config, "pdfusion_schedule_trace")],
+        type=str2bool,
+        default=False,
+        help="Emit scheduling decisions and explicit engine step IDs without changing policy.",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_trace_run_id",
+        env_name="PDFUSION_TRACE_RUN_ID",
+        bind_to=[(fifo_scheduler_config, "pdfusion_trace_run_id")],
+        type=str,
+        default="unset",
+        help="Shared run identity for cross-rank trace validation.",
+    )
+    fifo_scheduler_group.add_argument(
         "--cp_force_single_prefill",
         env_name="CP_FORCE_SINGLE_PREFILL",
         bind_to=[(fifo_scheduler_config, "cp_force_single_prefill")],
