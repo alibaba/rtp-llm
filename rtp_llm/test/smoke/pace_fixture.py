@@ -40,13 +40,6 @@ def require_ok(response):
     return response
 
 
-def require_binary_path(path):
-    try:
-        Path(path).resolve().relative_to("/User/gray/tmp")
-    except ValueError as error:
-        raise RuntimeError("Use a Bazel output_user_root under /User/gray/tmp before running compiled helpers") from error
-
-
 class PaceFixture:
     def __init__(self, path, backend):
         with open(path, encoding="utf-8") as stream:

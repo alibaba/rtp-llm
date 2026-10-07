@@ -75,7 +75,7 @@ KVCMReportFeedback parseKVCMReportFeedback(const std::string& response) {
     feedback.valid = true;
     feedback.ok = jsonCodeIsOk(status["code"]);
     const auto& code = status["code"];
-    if (code.IsInt() || code.IsString()) {
+    if (code.IsInt() || code.IsString() || code.IsObject()) {
         feedback.registration_required = jsonCodeRequiresRegistration(code);
         feedback.snapshot_required = jsonCodeMatches(code, 14, "SNAPSHOT_REQUIRED");
     }

@@ -101,6 +101,13 @@ py_library(
 
 load("@rtp_deps//:kvcm.bzl", "KVCM_SOURCE_ID")
 
+py_test(
+    name = "pace_contract_smoke_test",
+    srcs = ["pace_contract_smoke.py", "pace_contract_smoke_test.py"],
+    deps = [":pace_smoke_fixture"],
+    legacy_create_init = 0,
+)
+
 _PACE_SMOKE_DATA = [
     ":pace_sdk_smoke",
     ":pace_publisher_smoke",

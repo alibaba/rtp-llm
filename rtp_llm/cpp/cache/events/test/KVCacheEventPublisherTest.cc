@@ -294,6 +294,29 @@ TEST(KVCacheEventPublisherTest, ParsesSnapshotAndRetryFeedbackOnSuccessAndFailur
         R"({"header":{"status":{"code":1}},"retry_after_ms":"-1"})").valid);
 }
 
+TEST(KVCacheEventPublisherTest, NestedReportStatusPreservesRegistrationAndSnapshotSignals) {
+    const auto success = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":{"code":"OK"}}}})");
+    EXPECT_TRUE(success.valid);
+    EXPECT_TRUE(success.ok);
+    EXPECT_FALSE(success.registration_required);
+    EXPECT_FALSE(success.snapshot_required);
+
+    const auto snapshot = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":{"status":{"code":"SNAPSHOT_REQUIRED"}}}}})");
+    EXPECT_TRUE(snapshot.valid);
+    EXPECT_FALSE(snapshot.ok);
+    EXPECT_FALSE(snapshot.registration_required);
+    EXPECT_TRUE(snapshot.snapshot_required);
+
+    const auto unregistered = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":{"code":10}}}})");
+    EXPECT_TRUE(unregistered.valid);
+    EXPECT_FALSE(unregistered.ok);
+    EXPECT_TRUE(unregistered.registration_required);
+    EXPECT_FALSE(unregistered.snapshot_required);
+}
+
 TEST(KVCacheEventPublisherTest, SnapshotBackoffIsCappedAndKeepsHeartbeatsRunning) {
     KVCacheEventPublisherConfig config;
     config.retry_interval_ms = 1;

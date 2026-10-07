@@ -13,7 +13,7 @@ import requests
 
 from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.utils.util import str_to_bool
-from rtp_llm.test.smoke.pace_fixture import PaceFixture, require_binary_path, require_ok
+from rtp_llm.test.smoke.pace_fixture import PaceFixture, require_ok
 
 
 class RemoteKVCMServer:
@@ -67,7 +67,6 @@ class RemoteKVCMServer:
 
     def start_server(self, timeout: int = 120) -> bool:
         if self.pace_fixture is not None:
-            require_binary_path(self._bin_path)
             self.pace_fixture.check_services()
         os.environ["RECO_SERVER_ADDRESS"] = f"127.0.0.1:{self._rpc_port}"
         self._enable_debug_service = str_to_bool(

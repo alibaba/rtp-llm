@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from rtp_llm.test.smoke.pace_fixture import require_binary_path, require_ok, runfile
+from rtp_llm.test.smoke.pace_fixture import require_ok, runfile
 from rtp_llm.test.smoke.remote_kvcm_server import RemoteKVCMServer
 
 
@@ -38,10 +38,11 @@ def event_contract(server, instance_id, keys):
     if not first.get("committed_snapshot_version"):
         raise AssertionError("Snapshot did not commit a reconciliation generation")
     throttled = report(6, {"blocks": [block]}, check=False)
-    if int(throttled.get("retry_after_ms", 0)) <= 0:
-        raise AssertionError("Repeated snapshot must return retry_after_ms")
+    retry_after_ms = int(throttled.get("retry_after_ms", 0))
+    if not 0 < retry_after_ms <= 10_000:
+        raise AssertionError(f"Repeated snapshot retry_after_ms must be within 1..10000, got {retry_after_ms}")
     # Respect the server's retry hint before resending a complete snapshot.
-    time.sleep(int(throttled["retry_after_ms"]) / 1000.0 + 0.05)
+    time.sleep(retry_after_ms / 1000.0 + 0.05)
     require_ok(report(6, {"blocks": [block]}))
     request = {
         "instance_id": instance_id, "query_type": 2,
@@ -117,8 +118,6 @@ def main():
     parser.add_argument("--publisher", required=True)
     parser.add_argument("--backend", choices=("pace", "pace_ssd"), default="pace")
     args = parser.parse_args()
-    require_binary_path(args.sdk)
-    require_binary_path(args.publisher)
     server_path = runfile("remote_kv_cache_manager_server", "bin/kv_cache_manager_bin").parent.parent
     output = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()))
     with tempfile.TemporaryDirectory(prefix="pace-smoke-", dir=os.environ.get("TEST_TMPDIR")) as directory:
