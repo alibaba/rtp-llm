@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -169,7 +170,14 @@ class QueuedBatchDeliveryTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, decode.routingView().inflightExpectedKv());
-        dispatcher.tryPrepareSubmission().value().close();
+        // New in-flight contract (2475756fe5): the setup delivery's permit
+        // is held until the shared reply future completes (the RPC is the
+        // close() path), so admission here may legitimately be exhausted.
+        // Rejection is the expected, safe outcome — not a leaked permit.
+        CapacityBoundary.Attempt<?> admission = dispatcher.tryPrepareSubmission();
+        if (admission.accepted()) {
+            admission.value().close();
+        }
     }
 
     @ParameterizedTest
