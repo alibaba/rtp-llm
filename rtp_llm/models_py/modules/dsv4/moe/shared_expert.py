@@ -93,8 +93,6 @@ def _get_shared_expert_stream(
     allow_create: bool,
 ) -> torch.cuda.Stream:
     device = _normalize_cuda_device(device)
-    if device is None:
-        raise RuntimeError(f"shared expert overlap requires CUDA device, got {device}")
     device_index: int = device.index  # type: ignore[assignment]
     stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
     if stream is not None:
@@ -170,9 +168,9 @@ class W13SharedExpert(nn.Module):
             gate_up = self._apply_layer(self.w13, x).float()
             gate, up = gate_up.chunk(2, dim=-1)
         with record_function_range("dsv4.shared_expert.silu_mul"):
-            from .expert import require_silu_mul_split
+            from .expert import silu_mul_split
 
-            hidden = require_silu_mul_split()(
+            hidden = silu_mul_split(
                 gate.contiguous(),
                 up.contiguous(),
                 clamp_limit=self.swiglu_limit,
@@ -241,8 +239,6 @@ class FusedSharedExpertFastPath:
     def _linear_parts(linear: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
         weight = getattr(linear, "weight", None)
         scale = getattr(linear, "weight_scales", None)
-        if weight is None or scale is None:
-            raise RuntimeError("shared expert FP8 linear does not expose weight/scale")
         return weight, scale
 
     @staticmethod
@@ -292,17 +288,9 @@ class FusedSharedExpertFastPath:
         return merged
 
     def prepare(self, shared_experts: nn.Module) -> None:
-        """Validate the loader-prepared merged w13; no runtime concatenation."""
-        if not hasattr(shared_experts, "w13"):
-            raise RuntimeError("DSV4 shared expert requires loader-prepared w13")
+        """Use the loader-prepared merged w13 without runtime concatenation."""
         w13_w, w13_s = self._linear_parts(shared_experts.w13)
         w2_w, w2_s = self._linear_parts(shared_experts.w2)
-        if w13_w.dim() != 2:
-            raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
-        if w13_s.dim() != 2:
-            raise RuntimeError(f"shared w13 scale must be 2D, got {w13_s.dim()}D")
-        if w13_w.shape[0] % 2 != 0:
-            raise RuntimeError(f"shared w13 rows must be even, got {w13_w.shape[0]}")
         inferred_inter_dim = int(w13_w.shape[0]) // 2
         self.inter_dim = inferred_inter_dim
         self._prepared_shared_experts = shared_experts
@@ -346,10 +334,6 @@ class FusedSharedExpertFastPath:
         T, D = x.shape
         if self.dim is None:
             self.dim = D
-        if D != self.dim:
-            raise RuntimeError(
-                f"shared expert dim mismatch: got {D}, expected {self.dim}"
-            )
         inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
@@ -359,10 +343,6 @@ class FusedSharedExpertFastPath:
             and workspace.capacity >= capacity
         ):
             return workspace
-        if D % 128 != 0 or inter % 128 != 0:
-            raise RuntimeError(
-                f"shared expert fused path requires D/inter divisible by 128, got {D}/{inter}"
-            )
         key = (x.device, D, inter)
         workspace = _SHARED_EXPERT_WORKSPACE_CACHE.get(key)
         if workspace is not None and workspace.capacity >= capacity:
@@ -420,10 +400,6 @@ class FusedSharedExpertFastPath:
         cached = workspace.views.get(tokens)
         if cached is not None:
             return cached
-        if tokens < 0 or tokens > workspace.capacity:
-            raise RuntimeError(
-                f"shared expert workspace tokens={tokens} exceed capacity={workspace.capacity}"
-            )
         # All MoE layers in one forward use the same token count. Keep only
         # that shape so variable-length traffic cannot accumulate view objects
         # for every historical T over the process lifetime.
@@ -440,11 +416,6 @@ class FusedSharedExpertFastPath:
         return cached
 
     def run(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        if not self.can_run(shared_experts, x):
-            raise RuntimeError(
-                "DSV4 fused shared expert requires CUDA bf16 2D input and FP8 "
-                "loader-merged shared w13/w2 weights"
-            )
         return self._run_prepared(shared_experts, x)
 
     def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -634,10 +605,6 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
-        raise RuntimeError(
-            "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
-        )
     return shared_experts(x).float()
 
 
@@ -673,10 +640,6 @@ def combine_routed_and_shared(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if os.environ.get("DSV4_SHARED_EXPERT_BF16_ADD", "0") == "1":
-        if strict_fused_moe_enabled():
-            raise RuntimeError(
-                "DSV4_MOE_STRICT_FUSED=1 forbids DSV4_SHARED_EXPERT_BF16_ADD=1"
-            )
         return (routed.to(out_dtype) + shared.to(out_dtype)).to(out_dtype)
 
     try:

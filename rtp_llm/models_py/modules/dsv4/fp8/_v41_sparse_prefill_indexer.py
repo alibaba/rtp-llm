@@ -895,18 +895,11 @@ def try_batched_sparse(
                 request_stop=pieces[-1][0] + 1,
                 positions_ratio=ratio,
             )
-            if plan is None:
-                raise RuntimeError("batched sparse plan rejected after preflight")
             if cache[2] + plan.nbytes <= limit:
                 cache[1][key] = plan
                 cache[2] += plan.nbytes
         logits = score(q_rows, sf_rows, slab, weight_rows, plan)
-        if logits is None:
-            raise RuntimeError("batched sparse scorer rejected after preflight")
         columns = deepselect.try_select_sparse_tokens(logits, plan.end)
-        if columns is None or remap(columns, plan, logits=logits, out=target) is None:
-            raise RuntimeError(
-                "batched sparse selection/remap rejected after preflight"
-            )
+        remap(columns, plan, logits=logits, out=target)
         del logits, columns, plan
     return True

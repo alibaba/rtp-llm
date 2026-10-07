@@ -24,9 +24,7 @@ def swa_region_for_layer(kv_cache: Any, layer_id: int) -> int:
     row = mapping[layer_id]
     if len(row) > DECODER_SWA_KV and row[DECODER_SWA_KV] >= 0:
         return DECODER_SWA_KV
-    if len(row) > SWA_KV and row[SWA_KV] >= 0:
-        return SWA_KV
-    raise RuntimeError(f"Layer {layer_id} has no native SWA pool")
+    return SWA_KV
 
 
 def cached_swa_region(owner: Any, kv_cache: Any, layer_id: int) -> int:
@@ -46,18 +44,13 @@ def cached_swa_region(owner: Any, kv_cache: Any, layer_id: int) -> int:
                     resolved.append(None)
         binding = (kv_cache, resolved)
         owner._swa_region_binding = binding
-    region = SWA_KV if binding[1] is None else binding[1][layer_id]
-    if region is None:
-        raise RuntimeError(f"Layer {layer_id} has no native SWA pool")
-    return region
+    return SWA_KV if binding[1] is None else binding[1][layer_id]
 
 
 def bind_swa_table(block_tables: Any, region: int) -> Any:
     """Give logical SWA consumers the table of their actual physical pool."""
     if block_tables is None or region == SWA_KV:
         return block_tables
-    if region not in block_tables:
-        raise RuntimeError(f"Missing physical SWA block table for region {region}")
     return {**block_tables, SWA_KV: block_tables[region]}
 
 

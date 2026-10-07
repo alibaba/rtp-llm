@@ -7,7 +7,6 @@ The packed int32 scales are suitable for V41MXFP8Linear's (1, 1, 32) recipe.
 
 from __future__ import annotations
 
-import math
 import os
 
 import torch
@@ -155,8 +154,6 @@ def rmsnorm_group32_quant(
     """
     if not is_supported(x, weight):
         return None
-    if not math.isfinite(eps) or not 2.0**-126 <= eps <= torch.finfo(torch.float32).max:
-        raise ValueError("eps must be positive, normal, finite FP32")
     mode = (
         (
             os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto")
@@ -166,33 +163,8 @@ def rmsnorm_group32_quant(
         .strip()
         .lower()
     )
-    if mode not in ("auto", "legacy", "v2"):
-        raise ValueError("quant_kernel must be auto, legacy or v2")
     if out_norm is None:
         out_norm = torch.empty_like(x)
-    else:
-        if (
-            out_norm.shape != x.shape
-            or out_norm.dtype != x.dtype
-            or out_norm.device != x.device
-            or not out_norm.is_contiguous()
-            or out_norm.data_ptr() % 16 != 0
-            or out_norm.requires_grad
-        ):
-            raise ValueError(
-                "out_norm must be aligned contiguous BF16 with x's shape and device"
-            )
-        if out_norm.numel():
-            start = out_norm.data_ptr()
-            end = start + out_norm.numel() * 2
-            for source in (x, weight):
-                left = source.data_ptr()
-                right = left + source.numel() * 2
-                if start < right and left < end:
-                    if source is not x or start != left:
-                        raise ValueError(
-                            "out_norm may alias x exactly, but must not overlap weight or part of x"
-                        )
     m = x.shape[0]
     quant = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     scales = torch.empty(

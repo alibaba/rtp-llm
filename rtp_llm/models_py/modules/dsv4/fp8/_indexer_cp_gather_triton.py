@@ -31,7 +31,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
-    validate_slot_mapping,
 )
 
 
@@ -297,14 +296,6 @@ def gather_indexer_k_for_prefill(
 
     cache_block_size = kv_cache_packed.shape[1]
     cache_stride_b = cache_block_size * INDEXER_ENTRY_BYTES
-    validate_slot_mapping(
-        "indexer.cp_gather_k.slot_mapping",
-        slot_mapping,
-        block_size=int(cache_block_size),
-        num_blocks=int(kv_cache_packed.shape[0]),
-        negative_mode="skip_any",
-    )
-
     _cp_gather_indexer_k_kernel[(N,)](
         kv_cache_packed,
         slot_mapping,

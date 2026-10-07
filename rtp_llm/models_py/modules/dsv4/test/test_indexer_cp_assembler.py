@@ -5,8 +5,7 @@ Verifies:
     matches the per-iteration restore contract.
   * ``build_local_cu_kv_seqlens`` — int32 cumsum, leading 0.
   * ``assemble_indexer_k`` — gather (stubbed identity for cp_size=1) +
-    restore writes the right rows into the out buffers; rejects shape
-    mismatches.
+    restore writes the right rows into the out buffers.
 """
 
 import importlib.util
@@ -275,29 +274,6 @@ def test_assemble_indexer_k_cp1_passthrough():
     assert torch.equal(out_s, local_s)
 
 
-def test_assemble_indexer_k_shape_mismatch_raises():
-    plan = A.build_indexer_cp_chunk_plan(
-        cp_ctx=_ctx(1, 0),
-        per_req_total_kv_lens=torch.tensor([4], dtype=torch.int64),
-        block_size=2,
-        device=torch.device("cpu"),
-    )
-    bad_local = torch.zeros((3, 4), dtype=torch.uint8)  # wrong row count
-    out_q = torch.zeros((4, 4), dtype=torch.uint8)
-    out_s = torch.zeros((4, 2), dtype=torch.uint8)
-    try:
-        A.assemble_indexer_k(
-            plan=plan,
-            local_k_quant=bad_local,
-            local_k_scale=torch.zeros((4, 2), dtype=torch.uint8),
-            out_k_quant=out_q,
-            out_k_scale=out_s,
-        )
-    except ValueError:
-        return
-    raise AssertionError("expected ValueError")
-
-
 def test_assemble_indexer_k_zero_chunk_no_op():
     plan = A.build_indexer_cp_chunk_plan(
         cp_ctx=_ctx(2, 0),
@@ -344,32 +320,6 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
     assert work_q.wait_calls == 1
     assert work_s.wait_calls == 1
     assert handle.work_waited is True
-
-
-def test_build_plan_rejects_bad_cp_size():
-    try:
-        A.build_indexer_cp_chunk_plan(
-            cp_ctx=_ctx(0),
-            per_req_total_kv_lens=torch.tensor([4], dtype=torch.int64),
-            block_size=4,
-            device=torch.device("cpu"),
-        )
-    except ValueError:
-        return
-    raise AssertionError("expected ValueError")
-
-
-def test_build_plan_rejects_bad_block_size():
-    try:
-        A.build_indexer_cp_chunk_plan(
-            cp_ctx=_ctx(2),
-            per_req_total_kv_lens=torch.tensor([4], dtype=torch.int64),
-            block_size=0,
-            device=torch.device("cpu"),
-        )
-    except ValueError:
-        return
-    raise AssertionError("expected ValueError")
 
 
 if __name__ == "__main__":

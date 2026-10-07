@@ -91,13 +91,7 @@ def build_indexer_cp_chunk_plan(
     total_kv_len: Optional[int] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
-    if cp_ctx.cp_size <= 0:
-        raise ValueError(f"cp_size must be > 0, got {cp_ctx.cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be > 0, got {block_size}")
     owner_bs = int(owner_block_size or block_size)
-    if owner_bs <= 0:
-        raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
     if int(per_req.numel()) == 1 and total_kv_len is not None:
         total_local = cp_padded_local_kv_len(
@@ -190,26 +184,6 @@ def copy_actual_indexer_k_to_padded(
     all_gather restore expects each request to start at the padded local base.
     This helper inserts the per-request gaps and leaves those tails zero.
     """
-    if actual_k_quant.shape[0] != plan.total_actual_local_T:
-        raise ValueError(
-            f"actual_k_quant rows {actual_k_quant.shape[0]} != "
-            f"total_actual_local_T {plan.total_actual_local_T}"
-        )
-    if actual_k_scale.shape[0] != plan.total_actual_local_T:
-        raise ValueError(
-            f"actual_k_scale rows {actual_k_scale.shape[0]} != "
-            f"total_actual_local_T {plan.total_actual_local_T}"
-        )
-    if padded_k_quant.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"padded_k_quant rows {padded_k_quant.shape[0]} != "
-            f"total_local_T {plan.total_local_T}"
-        )
-    if padded_k_scale.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"padded_k_scale rows {padded_k_scale.shape[0]} != "
-            f"total_local_T {plan.total_local_T}"
-        )
     total_actual = plan.total_actual_local_T
     if total_actual == 0:
         return
@@ -258,17 +232,11 @@ def assemble_indexer_k(
     with the rank-local ``cu_kv_seqlens`` (from ``build_local_cu_kv_seqlens``)
     and block_table to fill ``local_k_quant`` / ``local_k_scale`` first.
     """
-    chunk_T = _validate_assemble_args(
-        plan=plan,
-        local_k_quant=local_k_quant,
-        local_k_scale=local_k_scale,
-        out_k_quant=out_k_quant,
-        out_k_scale=out_k_scale,
-    )
+    chunk_T = int(plan.restore_indices.numel())
     if chunk_T == 0:
         return
     # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
-    # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
+    # uses cp_ctx.chunk_length — that's the prefill-token
     # space; here local_k_* lives in KV-pool-entry space sized by
     # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
     # restore_indices are built against this rank-major layout.
@@ -293,13 +261,7 @@ def start_assemble_indexer_k_async(
     out_k_scale: torch.Tensor,
     stream: torch.cuda.Stream,
 ) -> Optional[IndexerKCPGatherHandle]:
-    chunk_T = _validate_assemble_args(
-        plan=plan,
-        local_k_quant=local_k_quant,
-        local_k_scale=local_k_scale,
-        out_k_quant=out_k_quant,
-        out_k_scale=out_k_scale,
-    )
+    chunk_T = int(plan.restore_indices.numel())
     if chunk_T == 0:
         return None
     if (
@@ -314,10 +276,6 @@ def start_assemble_indexer_k_async(
 
     process_group = collective_torch._get_group(Group.TP)
     world_size = torch.distributed.get_world_size(process_group)
-    if world_size != plan.cp_ctx.cp_size:
-        raise RuntimeError(
-            f"indexer K gather world_size({world_size}) != cp_size({plan.cp_ctx.cp_size})"
-        )
 
     device = local_k_quant.device
     current_stream = torch.cuda.current_stream(device)
@@ -384,8 +342,6 @@ def prepare_assemble_indexer_k_async(
 ) -> None:
     if handle.done_event is not None:
         return
-    if stream is None:
-        raise ValueError("prepare_assemble_indexer_k_async requires an explicit stream")
     current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
     # The output buffers are caller-owned and may have just been initialized on
     # the current stream.  Preserve that ordering here instead of relying on
@@ -439,30 +395,3 @@ def restore_indexer_k(
     with record_function_range("dsv4.cp.all_gather.indexer_k.restore"):
         out_k_quant.copy_(gathered_q[plan.restore_indices])
         out_k_scale.copy_(gathered_s[plan.restore_indices])
-
-
-def _validate_assemble_args(
-    *,
-    plan: IndexerCPChunkPlan,
-    local_k_quant: torch.Tensor,
-    local_k_scale: torch.Tensor,
-    out_k_quant: torch.Tensor,
-    out_k_scale: torch.Tensor,
-) -> int:
-    if local_k_quant.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"local_k_quant rows {local_k_quant.shape[0]} != total_local_T "
-            f"{plan.total_local_T}"
-        )
-    if local_k_scale.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"local_k_scale rows {local_k_scale.shape[0]} != total_local_T "
-            f"{plan.total_local_T}"
-        )
-    chunk_T = int(plan.restore_indices.numel())
-    if out_k_quant.shape[0] != chunk_T or out_k_scale.shape[0] != chunk_T:
-        raise ValueError(
-            f"out shapes [{out_k_quant.shape[0]}, {out_k_scale.shape[0]}] != "
-            f"chunk_T {chunk_T}"
-        )
-    return chunk_T

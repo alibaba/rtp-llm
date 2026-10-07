@@ -8,8 +8,7 @@ to its layers' ``AttentionFP8._prefill_meta_shared``.
 Lives under ``dsv4/fp8/`` because the meta build hard-assumes
 FP8 KV-cache pools (``_build_shared_prefill_meta`` reads FP8-only
 descriptors). Caller (``prefill/forward.py``) must gate the call with
-``if v4.fp8_kv_cache:``; once we're inside, every ``layer.attn`` is
-asserted to be ``AttentionFP8``.
+``if v4.fp8_kv_cache:`` and supply ``AttentionFP8``-compatible layers.
 """
 
 from __future__ import annotations
@@ -76,10 +75,15 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
         ("topk", "index_source_layer_id", ("prefill_index_plan",)),
     ):
         values = shared.get(key, {})
-        live_sources = {getattr(attn, source_attr, None) for attn in remaining}
-        for source in tuple(values):
-            if source not in live_sources:
-                del values[source]
+        if values:
+            unused_sources = set(values)
+            for attn in remaining:
+                unused_sources.discard(getattr(attn, source_attr, None))
+                if not unused_sources:
+                    break
+            for source in tuple(values):
+                if source in unused_sources:
+                    del values[source]
         if not values:
             for dependent in dependent_keys:
                 shared.pop(dependent, None)
@@ -139,17 +143,17 @@ def build_and_propagate_prefill_meta_fp8(
     position_ids = _flat_optional(position_ids)
     req_id_per_token = _flat_optional(req_id_per_token)
 
-    def bucket(attn):
-        return (
-            int(attn.compress_ratio),
-            cached_swa_region(v4, kv_cache, attn.layer_id),
-        )
-
     representatives: Dict[tuple, Any] = {}
+    layer_buckets = []
     for layer in v4.layers[first_layer:]:
         attn = getattr(layer, "attn", None)
         if attn is not None:
-            representatives.setdefault(bucket(attn), attn)
+            key = (
+                int(attn.compress_ratio),
+                cached_swa_region(v4, kv_cache, attn.layer_id),
+            )
+            representatives.setdefault(key, attn)
+            layer_buckets.append((attn, key))
 
     # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),
     # so build it first whenever the model has one. Compressed-only models use
@@ -172,6 +176,11 @@ def build_and_propagate_prefill_meta_fp8(
     if isinstance(first_shared, dict):
         first_shared.pop("prefill_meta_common", None)
     try:
+        regions = (
+            tuple(int(region) for region in getattr(kv_cache, "group_region_names", ()))
+            if ordered_ratios
+            else ()
+        )
         with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
             for key in ordered_ratios:
                 r, swa_region = key
@@ -209,10 +218,6 @@ def build_and_propagate_prefill_meta_fp8(
                         {"reuse_swa_write_meta": reuse_write}
                         if reuse_write is not None
                         else {}
-                    )
-                    regions = tuple(
-                        int(region)
-                        for region in getattr(kv_cache, "group_region_names", ())
                     )
                     if (
                         hasattr(attn, "swa_bounded_replay")
@@ -261,15 +266,12 @@ def build_and_propagate_prefill_meta_fp8(
                 )
 
         with record_function_range("dsv4.fp8.prefill_meta.propagate"):
-            for layer in v4.layers[first_layer:]:
-                attn = getattr(layer, "attn", None)
-                if attn is None:
-                    continue
+            for attn, key in layer_buckets:
                 # Each layer owns its own compressor / indexer; freqs_cis must
                 # be bound per-layer (not just on the rep). Cheap idempotent
                 # is-None set.
                 attn._ensure_freqs_cis_bound()
-                attn._set_prefill_meta_shared(meta_by_ratio.get(bucket(attn)))
+                attn._set_prefill_meta_shared(meta_by_ratio.get(key))
         return write_by_region
     except BaseException:
         clear_prefill_meta_shared_fp8(v4)

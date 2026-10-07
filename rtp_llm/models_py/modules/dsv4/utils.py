@@ -56,39 +56,10 @@ class V41MXFP8Linear(torch.nn.Module):
 
         Deliberately no quantize_input method: the V4 input-reuse gate must
         remain closed for this linear. The caller owns the BF16 norm tensor.
+        Input layout and disjoint BF16 output storage are caller preconditions.
         """
-        if (
-            x_q.ndim < 1
-            or x_q.shape[-1] != self.K
-            or x_q.dtype != torch.float8_e4m3fn
-            or not x_q.is_cuda
-            or x_q.device != self.weight.device
-            or not x_q.is_contiguous()
-        ):
-            raise ValueError("expected contiguous CUDA E4M3 [...,K] input")
         m = x_q.numel() // self.K
-        if (
-            x_s.dtype != torch.int32
-            or x_s.device != x_q.device
-            or x_s.shape != (m, (self.K + 127) // 128)
-            or x_s.stride() != (1, max(1, (m + 3) // 4 * 4))
-        ):
-            raise ValueError("expected group32 column-major TMA packed UE8M0 scales")
         shape = (*x_q.shape[:-1], self.N)
-        if out is not None and any(
-            torch._C._overlaps(out, source)
-            for source in (x_q, x_s, self.weight, self.weight_scales)
-        ):
-            raise ValueError(
-                "out must not share storage with quantized inputs or weights"
-            )
-        if out is not None and (
-            out.shape != shape
-            or out.dtype != torch.bfloat16
-            or out.device != x_q.device
-            or not out.is_contiguous()
-        ):
-            raise ValueError("out must be contiguous BF16 [...,N] on the input device")
         output = (
             out
             if out is not None

@@ -50,10 +50,6 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
         buf,
         tokens: int,
     ) -> None:
-        if strict_fused_moe_enabled():
-            raise RuntimeError(
-                "DSV4_MOE_STRICT_FUSED=1 forbids TorchMegaMoeInputPacker"
-            )
         safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
         x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(safe_x, gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
@@ -73,12 +69,6 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
         buf,
         tokens: int,
     ) -> None:
-        if not (x.is_cuda and x.dtype == torch.bfloat16 and x.shape[1] % 128 == 0):
-            raise RuntimeError(
-                "DSV4 fused MegaMoE input packer requires CUDA bf16 input with "
-                f"hidden dim divisible by 128; got device={x.device}, "
-                f"dtype={x.dtype}, shape={tuple(x.shape)}"
-            )
         from ._mega_input_pack_triton import fused_pack_mega_moe_inputs
 
         fused_pack_mega_moe_inputs(

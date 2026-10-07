@@ -147,23 +147,6 @@ def _load():
     return _LIBRARY
 
 
-def _validate_output(out, x, weight):
-    if not (
-        isinstance(out, torch.Tensor)
-        and out.shape == (x.shape[0], 128)
-        and out.device == x.device
-        and out.dtype == torch.bfloat16
-        and out.is_contiguous()
-        and not out.requires_grad
-        and out.data_ptr() % 16 == 0
-    ):
-        raise ValueError(
-            "expected aligned contiguous CUDA BF16 output [sum(rows), 128]"
-        )
-    if torch._C._overlaps(out, x) or torch._C._overlaps(out, weight):
-        raise ValueError("grouped index output must not overlap input or weight")
-
-
 def _execute(lib, x, weight, rows, out):
     rows = tuple(m for m in rows if m)
     if not rows:
@@ -224,8 +207,6 @@ def try_grouped_index_gemm(x, weight, segment_rows, *, out=None):
             return None
         if out is None:
             out = torch.empty((x.shape[0], 128), dtype=torch.bfloat16, device=x.device)
-        else:
-            _validate_output(out, x, weight)
         return _execute(lib, x, weight, segment_rows, out)
 
 

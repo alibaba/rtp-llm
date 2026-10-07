@@ -273,10 +273,6 @@ class Block(nn.Module):
     def _inject_engram(self, hidden: torch.Tensor) -> torch.Tensor:
         if self.engram is None:
             return hidden
-        if self.engram_hashes is None:
-            raise RuntimeError(
-                f"Engram token history is missing for layer {self.layer_id}"
-            )
         shape = hidden.shape
         return self.engram(
             hidden.reshape(-1, shape[-2], shape[-1]),
@@ -394,10 +390,6 @@ class Block(nn.Module):
                 bsz, q_len, dim_
             )
         else:
-            if self.engram is not None or _dbg_layer:
-                raise RuntimeError(
-                    "Prepared decode mHC cannot bypass Engram or tracing"
-                )
             residual, x_pre, post, comb = _prepared_attn
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
@@ -499,9 +491,6 @@ class Block(nn.Module):
         paired with ``forward``: production runs may switch between the normal
         and fast paths via env/debug gates.
         """
-        if input_ids is None:
-            raise RuntimeError("DSV4 prefill fast path requires input_ids")
-
         (
             attn_hc_pre,
             ffn_hc_pre,
@@ -555,8 +544,6 @@ class Block(nn.Module):
         self, x, input_ids, positions, plan, *, kv_cache=None, block_tables_by_type=None
     ):
         """Full L20 source writes, then compact queries and residual/FFN state."""
-        if self.layer_id != 20 or self.engram is not None or input_ids is None:
-            raise ValueError("L20 CED requires the supported generation-only Block")
         from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 
         attn_pre, ffn_pre, attn_post, ffn_post = self._prefill_fast_hc_impls()

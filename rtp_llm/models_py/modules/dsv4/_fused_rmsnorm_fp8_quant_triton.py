@@ -95,35 +95,10 @@ def rmsnorm_fp8_quant_ue8m0(
     out_norm: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return ``(norm_bf16, fp8, packed_ue8m0_scale)`` for a 2D BF16 input."""
-    if x.dim() != 2:
-        raise ValueError(f"x must be [M,N], got {tuple(x.shape)}")
-    if x.dtype != torch.bfloat16:
-        raise ValueError(f"x must be bf16, got {x.dtype}")
-    if weight.dtype != torch.bfloat16:
-        raise ValueError(f"weight must be bf16, got {weight.dtype}")
-    if not x.is_cuda or not weight.is_cuda:
-        raise RuntimeError("rmsnorm_fp8_quant_ue8m0 requires CUDA tensors")
-    if not x.is_contiguous():
-        raise ValueError("x must be contiguous")
     m, n = x.shape
-    if weight.shape != (n,) or not weight.is_contiguous():
-        raise ValueError(f"weight must be contiguous [{n}], got {tuple(weight.shape)}")
-    if n % group_size != 0:
-        raise ValueError(f"N={n} must be divisible by group_size={group_size}")
 
     if out_norm is None:
         out_norm = torch.empty_like(x)
-    else:
-        if out_norm.shape != x.shape:
-            raise ValueError(
-                f"out_norm must have shape {tuple(x.shape)}, got {tuple(out_norm.shape)}"
-            )
-        if out_norm.dtype != torch.bfloat16:
-            raise ValueError(f"out_norm must be bf16, got {out_norm.dtype}")
-        if out_norm.device != x.device:
-            raise ValueError("out_norm must be on the same device as x")
-        if not out_norm.is_contiguous():
-            raise ValueError("out_norm must be contiguous")
 
     out_q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     out_scale = _make_ue8m0_scale_like(x.shape, device=x.device, group_size=group_size)

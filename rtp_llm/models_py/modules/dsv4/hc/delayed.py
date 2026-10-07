@@ -34,11 +34,6 @@ def _tile_ops():
 
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
-    if tuple(pre_mix.shape) != tuple(x.shape[:-1]):
-        raise ValueError(
-            f"Delayed mHC pre-mix {tuple(pre_mix.shape)} does not match "
-            f"residual {tuple(x.shape)}"
-        )
     if x.is_cuda and x.dtype == torch.bfloat16:
         ops = _tile_ops()
         shape = x.shape
@@ -116,8 +111,6 @@ class DelayedHCUnit(HCUnitBase):
             y = x[..., 0, :].contiguous()
         else:
             previous = self._previous_ref()
-            if previous is None or previous.pre_mix_out is None:
-                raise RuntimeError("Delayed mHC predecessor has not run")
             y = collapse_delayed(x, previous.pre_mix_out)
         return y, post, comb
 
@@ -137,8 +130,6 @@ class DelayedHCHead(nn.Module):
 
     def head(self, hidden: torch.Tensor) -> torch.Tensor:
         unit = self._last_ffn_ref()
-        if unit is None or unit.pre_mix_out is None:
-            raise RuntimeError("V4.1 final FFN pre-mix is unavailable")
         return collapse_delayed(hidden, unit.pre_mix_out)
 
 

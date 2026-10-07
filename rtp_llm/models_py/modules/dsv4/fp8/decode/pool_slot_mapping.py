@@ -64,13 +64,9 @@ def compute_kv_pool_slot_mapping(
     pool_entries_per_block = int(pool_entries_per_block)
     pool_tokens_per_block = int(pool_tokens_per_block)
     ring_entries = int(ring_entries)
-    assert pool_entries_per_block > 0
-    assert pool_tokens_per_block > 0
-    assert ring_entries > 0
 
     B = block_table.shape[0]
     T_total = abs_pos.shape[0]
-    assert T_total % B == 0, f"abs_pos ({T_total}) must be divisible by batch ({B})"
     q_len = T_total // B
 
     abs_pos_i64 = abs_pos.to(torch.long)

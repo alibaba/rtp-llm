@@ -5,10 +5,8 @@ Thin adapter over the vendored ``rtp_llm.models_py.3rdparty.tile_kernels``
 
 Two distinct failure modes, kept distinct on purpose:
 
-  * **Gate miss** — input doesn't satisfy ``_can_use_tk`` (wrong dtype/device,
-    non-contiguous, hc_mult != 4, ...). Wrapper returns ``None`` and the caller
-    raises a shape-specific "unavailable" error. This is "not applicable",
-    not "broken".
+  * **Gate miss** — pre/post/unfused head input doesn't satisfy
+    ``_can_use_tk``. Wrapper returns ``None``.
   * **Runtime failure** — import / JIT compile / kernel launch raised. Wrapper
     re-raises a ``RuntimeError`` chained (``from e``) to the original
     exception with shape context attached. Earlier versions swallowed these
@@ -133,29 +131,19 @@ def tk_mhc_head_fused(
 ) -> torch.Tensor | None:
     """Fused TK ``mhc_head`` wrapper.
 
-    Returns ``None`` only when the fused head is explicitly disabled. When the
-    fused path is enabled, incompatibility or JIT/import failure is fatal so the
-    caller cannot silently fall back to the older TileLang head composition.
+    Returns ``None`` only when the fused head is explicitly disabled. The
+    caller supplies the fused kernel's required layout; JIT/import failures
+    do not fall back to the older TileLang head composition.
     Runtime failures (import / JIT / kernel run) propagate as ``RuntimeError``
     chained via ``from e`` to the original exception.
     """
     if _head_fuse_disabled():
         return None
-    if not _can_use_tk(residual, hc_mult):
-        _raise_head_fused_unavailable(
-            residual,
-            hc_mult,
-            "input does not satisfy TileLang fused mHC head gates",
-        )
     if _tk_mhc_head_fused is None:
         try:
             _import_tk()
         except Exception as e:
             _raise_head_fused_unavailable(residual, hc_mult, "import failure", cause=e)
-    if _tk_mhc_head_fused is None:
-        _raise_head_fused_unavailable(
-            residual, hc_mult, "vendored TileKernels has no mhc_head_fuse"
-        )
     fused = _tk_mhc_head_fused
     try:
         out = fused(
@@ -189,7 +177,7 @@ def tk_mhc_pre(
 
     Returns (layer_input, post_mix [..., hc, 1], comb_mix [..., hc, hc])
     on success. Returns ``None`` only when the input fails ``_can_use_tk``
-    gates (caller raises a shape-specific "unavailable"). Runtime failures
+    gates. Runtime failures
     (import / JIT / kernel run) propagate as ``RuntimeError`` chained via
     ``from e`` to the original exception.
     """
@@ -229,25 +217,16 @@ def tk_mhc_post(
 ) -> torch.Tensor | None:
     """TK ``mhc_post`` wrapper.
 
-    Returns ``None`` only when ``residual`` fails ``_can_use_tk`` gates (caller
-    raises a shape-specific "unavailable"). A non-bfloat16 sublayer output ``x``
-    raises ``RuntimeError`` directly: that is an upstream dtype bug, not a
-    TileLang availability issue, and must not be disguised as one. Runtime
-    failures (import / JIT / kernel run) propagate as ``RuntimeError`` chained
-    via ``from e`` to the original exception.
+    Returns ``None`` only when ``residual`` fails ``_can_use_tk`` gates.
+    The caller supplies a bfloat16 sublayer output ``x``. Runtime failures
+    (import / JIT / kernel run) propagate as ``RuntimeError`` chained via
+    ``from e`` to the original exception.
 
     Pass ``out=residual`` to write in place and skip the kernel's
     ``torch.empty_like(residual)`` allocation (7.5 GB at T=128K, hc=4, dim=7168).
     """
     if not _can_use_tk(residual, hc_mult):
         return None
-    if x.dtype != torch.bfloat16:
-        raise RuntimeError(
-            "TileLang mhc_post requires a bfloat16 sublayer output x; got "
-            f"x.dtype={x.dtype}, x.shape={tuple(x.shape)}. This is an upstream "
-            "dtype bug — fix the producer rather than treating it as a "
-            f"TileLang fallback. {_shape_ctx(residual, hc_mult=hc_mult)}"
-        )
     try:
         if _tk_mhc_post is None:
             _import_tk()
@@ -272,8 +251,8 @@ def tk_mhc_head(
 ) -> torch.Tensor | None:
     """TK ``mhc_head`` wrapper.
 
-    Returns ``None`` only when the input fails ``_can_use_tk`` gates (caller
-    raises a shape-specific "unavailable"). Runtime failures (import / JIT /
+    Returns ``None`` only when the input fails ``_can_use_tk`` gates.
+    Runtime failures (import / JIT /
     kernel run) propagate as ``RuntimeError`` chained via ``from e`` to the
     original exception.
     """

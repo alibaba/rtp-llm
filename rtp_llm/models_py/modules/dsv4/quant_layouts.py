@@ -67,7 +67,6 @@ def _per_token_cast_to_fp8_packed_ue8m0(
     debug assertion. That assertion does a CUDA->CPU sync, which is illegal
     during ``cudaStreamCapture``.
     """
-    assert x.dim() == 2, f"expected 2D input, got {x.shape}"
     m, n = x.shape
     padded_n = ((n + gran_k - 1) // gran_k) * gran_k
     if padded_n != n:

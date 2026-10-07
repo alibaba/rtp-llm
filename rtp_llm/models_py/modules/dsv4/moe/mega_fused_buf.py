@@ -197,9 +197,6 @@ def _get_or_create_mega_fused_mid(
     """
     import deep_gemm
 
-    assert (
-        intermediate_hidden % 128 == 0
-    ), f"intermediate_hidden={intermediate_hidden} must be divisible by 128"
     capacity = max(int(capacity), 1)
     key = (device, intermediate_hidden)
     cached = _MEGA_FUSED_MID_CACHE.get(key)

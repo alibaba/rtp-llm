@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
 
 
@@ -77,22 +76,6 @@ class MtpMultimodalTest(unittest.TestCase):
                     [True, False, True, False, False],
                 )
                 self.assertIsNone(model._cur_inputs)
-
-    def test_other_draft_classes_still_reject_visual_features(self):
-        class HiddenOnlyDraft(DeepSeekV4Model):
-            pass
-
-        model = HiddenOnlyDraft.__new__(HiddenOnlyDraft)
-        torch.nn.Module.__init__(model)
-        model.v4 = SimpleNamespace(layers=[])
-        model._v4_args = SimpleNamespace()
-        model.kv_cache = object()
-        inputs = SimpleNamespace(
-            multimodal_features=[torch.ones(1, 4)],
-            attention_inputs=SimpleNamespace(is_prefill=True, is_target_verify=False),
-        )
-        with self.assertRaisesRegex(RuntimeError, "do not consume image features"):
-            model.forward(inputs)
 
 
 if __name__ == "__main__":

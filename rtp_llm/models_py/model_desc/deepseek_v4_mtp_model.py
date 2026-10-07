@@ -153,10 +153,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         chunk_tokens: int,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert self.enorm is not None
-        assert self.hnorm is not None
-        assert self.e_proj is not None
-        assert self.h_proj is not None
 
         T, hc, dim = pre_hc.shape
         # In-place reuse: pre_hc is either a fresh CP index_select tensor
@@ -210,10 +206,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
     ) -> torch.Tensor:
         """``e_proj(enorm(masked_embed)) + h_proj(hnorm(prev_hidden))``.
         Returns ``[T, hc, dim]``."""
-        assert self.enorm is not None
-        assert self.hnorm is not None
-        assert self.e_proj is not None
-        assert self.h_proj is not None
         T, hc, dim = pre_hc.shape
         chunk_tokens = self._mtp_fusion_chunk_tokens()
         if T > chunk_tokens and not torch.cuda.is_current_stream_capturing():
@@ -244,26 +236,12 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
 
     def _pre_hc_from_inputs(self, inputs, T: int) -> torch.Tensor:
         pre_hc_in = inputs.input_hiddens
-        if pre_hc_in is None or pre_hc_in.numel() == 0:
-            raise RuntimeError(
-                "DeepSeekV4MtpModel expected pre-hc hidden states in input_hiddens"
-            )
         hc = int(self._v4_args.hc_mult)
         dim = int(self._v4_args.dim)
         pre_hc = pre_hc_in.reshape(-1, pre_hc_in.size(-1))
-        if int(pre_hc.size(-1)) != hc * dim:
-            raise RuntimeError(
-                f"DeepSeekV4MtpModel expected hidden dim {hc * dim}, "
-                f"got {pre_hc.size(-1)}"
-            )
         # CP layout is handled before Python sees the tensors: C++
         # handleInputs splits input_hiddens with the same zigzag plan as
         # input_ids.  This method only trims CUDA graph capacity to real T.
-        if pre_hc.size(0) < T:
-            raise RuntimeError(
-                f"DeepSeekV4MtpModel: input_hiddens has {pre_hc.size(0)} rows "
-                f"but {T} tokens required"
-            )
         return pre_hc[:T].view(T, hc, dim).to(device=self.v4.embed.weight.device)
 
     def _prepare_decode_hidden(

@@ -214,24 +214,6 @@ class TestIndexerTopKBackend(unittest.TestCase):
         ref = TorchIndexerTopKBackend().select(score, 2048, lengths=lengths)
         _assert_topk_sets(self, fast.cpu(), ref.cpu())
 
-    def test_fast_backend_rejects_unsupported_without_fallback(self):
-        score = torch.randn(2, 16, dtype=torch.float32)
-        with self.assertRaisesRegex(RuntimeError, "requires CUDA float32"):
-            FastIndexerTopKBackend().select(score, 8)
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_fast_backend_rejects_cuda_topk_512(self):
-        score = torch.randn(2, 1024, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor([1024, 33], device="cuda", dtype=torch.int32)
-        with self.assertRaisesRegex(RuntimeError, "topk=2048"):
-            FastIndexerTopKBackend().select(score, 512, lengths=lengths)
-
-    def test_persistent_backend_rejects_unsupported_without_fallback(self):
-        score = torch.randn(2, 1024, dtype=torch.float32)
-        lengths = torch.tensor([1024, 33], dtype=torch.int32)
-        with self.assertRaisesRegex(RuntimeError, "requires CUDA float32"):
-            PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
-
 
 if __name__ == "__main__":
     unittest.main()

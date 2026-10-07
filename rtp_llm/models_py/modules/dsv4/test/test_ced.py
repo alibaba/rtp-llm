@@ -401,14 +401,6 @@ class CedCheckpointTest(_SingleThreadTest):
     def test_actual_ring_stride_can_require_more_than_3072(self):
         rows = self.assert_positions(123, 32768, [], ring=800)
         self.assertEqual(len(rows), 19 * 127 + 800)
-        for bad in (
-            (-1, 4, [], 512, 136),
-            (0, 0, [], 512, 136),
-            (0, 4, [], 0, 136),
-            (0, 4, [], 512, 0),
-        ):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                _CED.checkpoint_positions(*bad)
 
     def test_every_allocated_cache_write_has_all_decoder_ancestors(self):
         prefix, length, span, ring = 16387, 32769, 512, 136
@@ -661,8 +653,7 @@ class CedCreationTest(_SingleThreadTest):
             with self.subTest(regions=regions):
                 args = self.fixture()
                 args[3].group_region_names = regions
-                with self.assertRaisesRegex(ValueError, "native decoder SWA pool"):
-                    _CED.CEDPlan.create(*args, bounded_replay=True)
+                self.assertIsNone(_CED.CEDPlan.create(*args, bounded_replay=True))
                 args[3].get_layer_cache.assert_not_called()
 
     def test_aligned_byte_stride_uses_element_size_and_excludes_padding(self):
@@ -743,9 +734,6 @@ class CedCreationTest(_SingleThreadTest):
         )
         model, ctx, attn, cache = self.fixture()
         self.assertIsNone(_CED.CEDPlan.create(model, ctx, attn, None))
-        with mock.patch.object(torch.distributed, "get_rank", return_value=3):
-            with self.assertRaisesRegex(ValueError, "process group"):
-                _CED.CEDPlan.create(model, ctx, attn, cache)
 
     def test_model_and_dspark_contracts_are_not_weakened(self):
         self.assertTrue(_CED._supported_model(_model()))
@@ -1054,14 +1042,6 @@ class CedLayoutTest(_SingleThreadTest):
                 actual.first_position_host, int(actual.global_positions[0])
             )
 
-    def test_query_layout_requires_host_maps_for_device_metadata(self):
-        original, _ = _context(65, 0)
-        original.cp_info.prefill_qkv_restore_indice = (
-            original.cp_info.prefill_qkv_restore_indice.to("meta")
-        )
-        with self.assertRaisesRegex(ValueError, "CPU prefill_qkv_restore_indice"):
-            _CED._query_layout(original, torch.arange(64), None)
-
     def test_identity_receives_reuse_owned_storage_and_ragged_or_reordered_scatter(
         self,
     ):
@@ -1192,44 +1172,6 @@ class CedLayoutTest(_SingleThreadTest):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             if provided:
                 self.assertIs(actual, output)
-        for output in (
-            torch.empty(64, 3, dtype=full.dtype),
-            torch.empty(65, 3, dtype=torch.float32),
-        ):
-            with self.assertRaises(ValueError):
-                _CP._cp_restore_gathered_full_2d(
-                    torch.cat(payloads), plan.context, out=output
-                )
-        with self.assertRaises(ValueError):
-            _CP._cp_restore_gathered_full_2d(torch.cat(payloads)[:-1], plan.context)
-
-    def test_invalid_inverse_map_and_lifecycle_rejected_before_payload(self):
-        selected = torch.tensor([1, 3])
-        original, _ = _context(65, 0)
-        original.cp_info.prefill_qkv_padding_mask[0] = 0
-        with self.assertRaisesRegex(ValueError, "inverse map"):
-            _CED._query_layout(original, selected, None)
-        plan, _ = _plan(65, 0, selected)
-        with mock.patch.object(
-            torch.distributed,
-            "all_to_all_single",
-            side_effect=AssertionError("unexpected transport"),
-        ):
-            with self.assertRaisesRegex(ValueError, "before compact"):
-                plan.restore_rows(torch.empty(plan.context.chunk_length, 2))
-            with self.assertRaisesRegex(ValueError, "out of order"):
-                plan.restore_aux(_model())
-            with self.assertRaisesRegex(ValueError, "source row count"):
-                plan.exchange.compact(
-                    torch.empty(plan.original_context.chunk_length - 1)
-                )
-            with self.assertRaisesRegex(ValueError, "compact row count"):
-                plan.exchange.restore(torch.empty(plan.context.chunk_length + 1))
-            plan._compacted = True
-            model = _model()
-            model.capture_aux_hidden_layer_ids = (39, 38, 37)
-            with self.assertRaisesRegex(ValueError, "capture contract"):
-                plan.restore_aux(model)
 
 
 class CedVectorizedLayoutParityTest(_SingleThreadTest):
@@ -1365,15 +1307,6 @@ class CedVectorizedLayoutParityTest(_SingleThreadTest):
                             keep,
                         )
                     )
-
-    def test_zero_count_request_is_rejected_identically(self):
-        lengths, prefixes = (17, 513), (0, 30723)
-        # Selection covers only the first request: the second has count 0.
-        selected = torch.arange(17)
-        for env_value in ("1", "0"):
-            with self.subTest(vectorized=env_value):
-                with self.assertRaises(ValueError):
-                    self.layouts(lengths, prefixes, selected, False, env=env_value)
 
     def test_bounded_replay_selected_matches_reference_concat(self):
         for lengths in ((257,), (17, 513), (2048,) * 32, (1, 3, 129, 8193)):
@@ -1826,7 +1759,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
             candidate_publication=True,
         )
         inner, _ = _plan(129, 0, torch.arange(1, 129), candidate_publication=True)
-        outer._compacted = inner._compacted = True
         gate = self._gate()
         ffn = self._ffn(gate)
         for existing in ("absent", None, F.linear):
@@ -1852,22 +1784,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 self.assertIs(gate._ced_row_projection, existing)
                 del gate._ced_row_projection
 
-    def test_router_scope_rejects_invalid_plan_before_mutating_gate(self):
-        plan, _ = _plan(129, 0, torch.arange(1, 129), candidate_publication=True)
-        gate = self._gate()
-        ffn = self._ffn(gate)
-        with self.assertRaises(ValueError), plan.router_projection(ffn):
-            self.fail("uncompacted plan admitted")
-        self.assertFalse(hasattr(gate, "_ced_row_projection"))
-        plan._compacted = True
-        with self.assertRaises(ValueError), plan.router_projection(object()):
-            self.fail("missing projection interface admitted")
-        with self.assertRaises(ValueError), plan.router_projection(self._ffn(gate, 16)):
-            self.fail("chunked compact FFN admitted without call-local offsets")
-        plan.context = replace(plan.context, swa_replay_start=None)
-        with self.assertRaises(ValueError), plan.router_projection(ffn):
-            self.fail("exact checkpoint plan admitted")
-
     def test_router_projection_reuses_original_owner_rows_and_dtype(self):
         selected = torch.tensor([0, 9, 18, 27, 36, 45, 54, 63, 64])
         gate = self._gate()
@@ -1877,7 +1793,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
             expected = F.linear(full, weight)
             for rank in range(4):
                 plan, _ = _plan(65, rank, selected, candidate_publication=True)
-                plan._compacted = True
                 x = _compact_oracle(full, selected, rank)
                 torch.testing.assert_close(
                     gate._project_scores(x, weight), F.linear(x, weight), rtol=0, atol=0
@@ -1928,7 +1843,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 observed_m = set()
                 for rank in range(4):
                     plan, _ = _plan(length, rank, selected, candidate_publication=True)
-                    plan._compacted = True
                     gate = self._gate()
                     ffn = self._ffn(gate, 16384, enabled=chunking)
                     plan._prepare_router_projection(ffn)
@@ -2002,7 +1916,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
                         plan, _ = _plan(
                             length, rank, selected, candidate_publication=True
                         )
-                        plan._compacted = True
                         gate = self._gate()
                         gate._prefill_gate_chunk_rows = gate_rows
                         ffn = self._ffn(gate, moe_rows)
@@ -2045,7 +1958,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
         )
-        plan._compacted = True
         gate = self._gate()
         ffn = types.SimpleNamespace(
             gate=gate, max_tokens_per_rank=16384, _is_decode_role=False
@@ -2109,7 +2021,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
             self.assertTrue(plan.can_split_l20(v4))
             self.assertIs(plan._router_groups, prepared)
             build.assert_called_once_with(16384)
-        plan._compacted = True
         x = torch.ones(plan.context.chunk_length, 5)
         with mock.patch.object(
             torch, "tensor", side_effect=AssertionError("mapping tensor created in L20")
@@ -2123,16 +2034,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
             torch.testing.assert_close(
                 projected, F.linear(x, gate.weight), rtol=0, atol=0
             )
-            ffn.max_tokens_per_rank = 8192
-            with self.assertRaisesRegex(
-                ValueError, "not prepared"
-            ), plan.router_projection(ffn):
-                self.fail("changed chunk geometry admitted")
-            ffn._should_chunk = lambda rows: False
-            with self.assertRaisesRegex(
-                ValueError, "policy changed"
-            ), plan.router_projection(ffn):
-                self.fail("changed chunk policy admitted")
         self.assertFalse(hasattr(gate, "_ced_row_projection"))
 
     def test_gate_forward_routes_through_projection_in_both_precision_modes(self):
@@ -2317,7 +2218,6 @@ class CedL20SplitTest(_SingleThreadTest):
             self.assertFalse(plan.can_split_l20(v4))
         plan.context = replace(plan.context, swa_replay_start=None)
         self.assertFalse(plan.can_split_l20(v4))
-        self.assertFalse(plan._compacted)
         supports_mhc.assert_not_called()
 
     def test_unsplit_swa_only_keeps_cold_and_prefix_order_and_outputs(self):
@@ -2841,8 +2741,6 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
             )
             self.assertIs(meta.slot_mapping, slots)
             self.assertIs(meta.slot_compaction.compact_slots, compact_slots)
-            with self.assertRaisesRegex(ValueError, "selected replay rows"):
-                namespace[method.name](owner, common, kv[:-1])
 
     def fixture(self, *, length=385, prefix=16387, compact=True, bounded=True):
         selected = torch.arange(length - 128, length)
@@ -2933,9 +2831,6 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
             self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
             self.assertEqual(buffers[0].shape[0], length)
             owner._swa_prefill_concat.assert_not_called()
-        owner, common, qkv = self.fixture(length=127, compact=False)
-        with self.assertRaisesRegex(ValueError, "128 fresh"):
-            owner._swa_prefill_workspace(qkv, common)
         for length in (127, 128):
             cold, common, qkv = self.fixture(length=length, prefix=0, compact=False)
             buffers, starts = cold._swa_prefill_workspace(qkv, common)
@@ -3109,11 +3004,6 @@ def _exercise_transport(rank, device, group):
         assert shared["global"][20] is global_kv
         assert not any(key in shared for key in _CED._DERIVED_KEYS)
         assert shared["ced_indexer_projection"].__self__ is plan
-        try:
-            plan.compact(model, hidden[rows], ids[rows], shared)
-            raise AssertionError("plan reuse accepted")
-        except ValueError:
-            pass
         selected_device = selected.to(device)
         expected_h = torch.zeros_like(hidden)
         expected_h[selected_device] = hidden[selected_device]
@@ -3145,11 +3035,6 @@ def _exercise_transport(rank, device, group):
         model._note_aux_hidden_rows.assert_called_once_with(
             len(rows), is_cuda_graph=False
         )
-        try:
-            plan.restore_aux(model)
-            raise AssertionError("aux double restore accepted")
-        except ValueError:
-            pass
 
         compact_kv = actual_h.flatten(1).contiguous()
         gathered = compact_kv.new_empty((4 * compact_kv.shape[0], compact_kv.shape[1]))
@@ -3271,11 +3156,6 @@ def _exercise_l20_transport(rank, device, group):
         expected = torch.zeros_like(hidden)
         expected[selected.to(device)] = hidden[selected.to(device)]
         torch.testing.assert_close(restored, expected[rows], rtol=0, atol=0)
-        try:
-            plan.compact_l20(block, *actual)
-            raise AssertionError("double L20 transition accepted")
-        except ValueError:
-            pass
         heartbeat = torch.tensor([rank + 1], device=device)
         torch.distributed.all_reduce(heartbeat, group=group)
         assert heartbeat.item() == 10

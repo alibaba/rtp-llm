@@ -2,6 +2,7 @@ import os
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -49,16 +50,30 @@ class TestMegaMoeInputPacker(unittest.TestCase):
         with _env("DSV4_MEGA_MOE_INPUT_PACKER", "fused"):
             self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoeInputPacker)
 
-    def test_fused_rejects_unsupported_without_fallback(self):
+    def test_fused_passes_inputs_and_buffer_views(self):
         tokens = 2
         dim = 128
         topk = 8
         x = torch.randn(tokens, dim, dtype=torch.bfloat16)
         weights = torch.randn(tokens, topk, dtype=torch.float32)
         indices = torch.randint(0, 256, (tokens, topk), dtype=torch.int64)
-        buf = _make_buf(tokens, dim, topk, "cpu")
-        with self.assertRaisesRegex(RuntimeError, "requires CUDA bf16"):
+        buf = _make_buf(tokens + 1, dim, topk, "cpu")
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe._mega_input_pack_triton."
+            "fused_pack_mega_moe_inputs"
+        ) as pack:
             FusedMegaMoeInputPacker().pack(x, weights, indices, buf, tokens)
+        pack.assert_called_once()
+        args = pack.call_args.args
+        self.assertIs(args[0], x)
+        self.assertIs(args[1], weights)
+        self.assertIs(args[2], indices)
+        for view, storage in zip(
+            args[3:], (buf.x, buf.x_sf, buf.topk_idx, buf.topk_weights)
+        ):
+            self.assertEqual(view.shape, (tokens, storage.shape[1]))
+            self.assertEqual(view.data_ptr(), storage.data_ptr())
+            self.assertEqual(view.stride(), storage.stride())
 
     def test_strict_rejects_torch_packer(self):
         with _env("DSV4_MEGA_MOE_INPUT_PACKER", "torch"):

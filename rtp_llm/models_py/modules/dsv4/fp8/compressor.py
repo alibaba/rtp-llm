@@ -286,8 +286,6 @@ def _build_cp_full_state_read_cache(
         return state_cache, block_table
     if block_table is None or int(block_table.numel()) == 0:
         return state_cache, block_table
-    if not state_cache.is_cuda:
-        raise RuntimeError("CP-sliced DSV4 state-cache read requires CUDA state pools")
 
     local_eb = int(state_cache.shape[1])
     hidden = int(state_cache.shape[2])
@@ -705,10 +703,6 @@ class CompressorFP8(PoolBackedModule):
 
         from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
-        if not _fused_compressor_meta_triton._TRITON_AVAILABLE:
-            raise RuntimeError(
-                "DSV4 FP8 compressor requires fused Triton metadata preparation"
-            )
         pool_rows = 0
         if self._kv_pool_view is not None:
             pool_rows = int(
@@ -937,7 +931,6 @@ class CompressorFP8(PoolBackedModule):
             return
 
         cos_sin_cache = self._cos_sin_cache
-        assert cos_sin_cache is not None
 
         with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
             run_save_partial_states(

@@ -54,15 +54,6 @@ def cp_attention_comm_bytes(
     shard, then gather O/LSE for logsumexp merge before the existing output
     projection.
     """
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if compress_ratio <= 0:
-        raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
-    if prefix_len < 0 or input_len < 0:
-        raise ValueError(
-            f"prefix_len and input_len must be non-negative, got {prefix_len}, {input_len}"
-        )
-
     alpha_num = cp_size - 1
     total_compressed = (prefix_len + input_len) // compress_ratio
     # Path A — packed KV gather: total compressed K spans prefix + input,
@@ -167,34 +158,14 @@ def remap_topk_to_cp_local(
         ``[T, K]`` int32 topk where non-owned entries are ``-1`` and owned
         entries are remapped to this rank's compact local-K workspace ids.
     """
-    if topk_indices.dim() != 2:
-        raise ValueError(f"topk_indices must be [T,K], got {tuple(topk_indices.shape)}")
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if not (0 <= cp_rank < cp_size):
-        raise ValueError(f"cp_rank({cp_rank}) out of range [0,{cp_size})")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
-    if per_req_total_kv_lens.dim() != 1:
-        raise ValueError(
-            "per_req_total_kv_lens must be 1D, got "
-            f"{tuple(per_req_total_kv_lens.shape)}"
-        )
-
     device = topk_indices.device
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
     B = int(per_req.numel())
     T = int(topk_indices.shape[0])
     if req_id_per_token is None:
-        if B != 1:
-            raise ValueError("req_id_per_token is required when B > 1")
         req = torch.zeros((T,), dtype=torch.int64, device=device)
     else:
         req = req_id_per_token.to(device=device, dtype=torch.int64).reshape(-1)
-        if int(req.numel()) != T:
-            raise ValueError(
-                f"req_id_per_token length {int(req.numel())} != topk rows {T}"
-            )
 
     local_lens = cp_padded_local_kv_lens(per_req, cp_size, block_size)
     cu_local = torch.zeros(B + 1, dtype=torch.int64, device=device)
@@ -252,38 +223,12 @@ def build_swa_cp_local_indices(
         filled with compact rank-local SWA workspace indices or ``-1`` and
         ``lens`` is the valid prefix length per row.
     """
-    if global_positions.dim() != 1:
-        raise ValueError(
-            f"global_positions must be 1D, got {tuple(global_positions.shape)}"
-        )
-    if prefix_lengths.dim() != 1:
-        raise ValueError(
-            f"prefix_lengths must be 1D, got {tuple(prefix_lengths.shape)}"
-        )
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if not (0 <= cp_rank < cp_size):
-        raise ValueError(f"cp_rank({cp_rank}) out of range [0,{cp_size})")
-    if window_size <= 0:
-        raise ValueError(f"window_size must be positive, got {window_size}")
-    if M <= 0 or N < 0:
-        raise ValueError(f"M must be positive and N non-negative, got M={M}, N={N}")
-    if owner_chunk_size <= 0:
-        raise ValueError(f"owner_chunk_size must be positive, got {owner_chunk_size}")
-
     device = global_positions.device
     T = int(global_positions.numel())
-    B = int(prefix_lengths.numel())
     if req_id_per_token is None:
-        if B != 1:
-            raise ValueError("req_id_per_token is required when B > 1")
         req = torch.zeros((T,), dtype=torch.int64, device=device)
     else:
         req = req_id_per_token.to(device=device, dtype=torch.int64).reshape(-1)
-        if int(req.numel()) != T:
-            raise ValueError(
-                f"req_id_per_token length {int(req.numel())} != positions {T}"
-            )
 
     gp = global_positions.to(device=device, dtype=torch.int64).reshape(-1)
     prefix = prefix_lengths.to(device=device, dtype=torch.int64).reshape(-1)

@@ -1264,23 +1264,11 @@ class DeepSeekV4Model(GptModelBase):
         self, inputs: PyModelInputs, input_ids: torch.Tensor
     ) -> torch.Tensor:
         features = inputs.multimodal_features
-        if not bool(self.v4.fp8_kv_cache):
-            raise RuntimeError("DeepSeek-V4 vision currently requires FP8 KV cache")
         locations_tensor = inputs.mm_features_locs.reshape(-1)
-        if len(features) != locations_tensor.numel():
-            raise RuntimeError(
-                "DeepSeek-V4 multimodal feature/location mismatch: "
-                f"features={len(features)} locations={locations_tensor.numel()}"
-            )
         cp_info = getattr(inputs.attention_inputs, "context_parallel_info", None)
         text_tokens_mask = inputs.text_tokens_mask.reshape(-1).to(
             device=input_ids.device, dtype=torch.bool
         )
-        if text_tokens_mask.numel() != input_ids.numel():
-            raise RuntimeError(
-                "DeepSeek-V4 text token mask must match input ids: "
-                f"mask={text_tokens_mask.numel()} ids={input_ids.numel()}"
-            )
         valid_rows = torch.ones_like(text_tokens_mask)
         if cp_info is not None:
             valid_rows = (
@@ -1334,8 +1322,7 @@ class DeepSeekV4Model(GptModelBase):
         if is_target_verify and not self.fp8_kv_cache:
             # Per REFORMAT_FINAL.md A2: BF16 verify intentionally unsupported
             # in this scope (BF16 decode attention still has q_len==1
-            # assumptions). The eager path's assert is the load-bearing one;
-            # under cudagraph we just refuse the impl.
+            # assumptions). Do not create a CUDA-graph impl for that path.
             return None
 
         if self.fp8_kv_cache:
@@ -1378,11 +1365,6 @@ class DeepSeekV4Model(GptModelBase):
             else []
         )
 
-        if self.kv_cache is None:
-            raise RuntimeError(
-                "DSV4 prepare_decode_metadata: self.kv_cache is None; "
-                "C++ KVCacheManager must propagate KVCache before forward."
-            )
         cfg_kwargs = dict(
             max_batch_size=batch_size,
             q_len=q_len,
@@ -1413,8 +1395,6 @@ class DeepSeekV4Model(GptModelBase):
             for CP prefill, where the C++ global token count has been restored
             but the buffer intentionally stores rank-local rows.
         """
-        if self.v4 is None:
-            raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
         buf = self.v4._mtp_hidden_buffer
         if buf is None:
             return None
@@ -1429,8 +1409,6 @@ class DeepSeekV4Model(GptModelBase):
         return self.v4 is not None and self.v4._mtp_hidden_buffer is not None
 
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
-        if self.v4 is None:
-            raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
         buf = self.v4._mtp_last_hidden_buffer
         if buf is None:
             return None
@@ -1489,20 +1467,6 @@ class DeepSeekV4Model(GptModelBase):
             else None
         )
         if has_visual_tokens:
-            if not bool(attn.is_prefill) or bool(
-                getattr(attn, "is_target_verify", False)
-            ):
-                raise RuntimeError(
-                    "DeepSeek-V4 multimodal features are only valid on initial prefill"
-                )
-            if (
-                cls is not DeepSeekV4Model
-                and cls._prepare_multimodal_prefill_hidden
-                is DeepSeekV4Model._prepare_multimodal_prefill_hidden
-            ):
-                raise RuntimeError(
-                    "DeepSeek-V4 speculative draft models do not consume image features"
-                )
             prep_prefill = (
                 lambda input_ids, positions: self._prepare_multimodal_prefill_hidden(
                     inputs, input_ids, positions

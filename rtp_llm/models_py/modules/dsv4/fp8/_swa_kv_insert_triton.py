@@ -28,7 +28,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
-    validate_slot_mapping,
 )
 
 
@@ -181,14 +180,6 @@ def quantize_and_insert_k_cache(
 
     block_size = int(k_cache.shape[1])
     block_stride = int(k_cache.stride(0))  # bytes per block (TMA-padded)
-    validate_slot_mapping(
-        "swa.quantize_and_insert.slot_mapping",
-        slot_mapping,
-        block_size=block_size,
-        num_blocks=int(k_cache.shape[0]),
-        negative_mode="skip_minus_one",
-    )
-
     grid = (num_tokens,)
     _quantize_and_insert_k_kernel[grid](
         k,

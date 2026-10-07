@@ -103,8 +103,7 @@ class TestUpdateInPlace(unittest.TestCase):
                 )
 
     def test_no_realloc_across_calls(self):
-        """Multiple update_in_place calls must reuse storage. forbid_realloc=True
-        asserts this internally; we also double-check via data_ptr()."""
+        """Multiple update_in_place calls must reuse storage, checked by data_ptr()."""
         meta = _alloc(max_bs=4)
 
         # Snapshot pointers BEFORE first call (alloc-state)

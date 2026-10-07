@@ -276,23 +276,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             attention_inputs, "kv_cache_kernel_block_id_device_by_group", None
         )
         regions = getattr(self.kv_cache, "group_region_names", None)
-        if by_group is None or regions is None:
-            raise RuntimeError(
-                "DSpark requires per-group KV block tables and group region names"
-            )
         swa_region = cached_swa_region(self, self.kv_cache, 0)
         for group_id, region in enumerate(regions):
             if int(region) != swa_region or group_id >= len(by_group):
                 continue
             table = by_group[group_id]
             if table is not None and table.numel() > 0:
-                if int(table.shape[0]) < batch_size:
-                    raise RuntimeError(
-                        "DSpark SWA block table has fewer rows than the batch: "
-                        f"rows={table.shape[0]}, batch={batch_size}"
-                    )
                 return table[:batch_size]
-        raise RuntimeError("DSpark could not find the SWA KV block table")
 
     @staticmethod
     def _global_pool_slots(
@@ -314,11 +304,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         entries_per_block = int(entries_per_block)
         tokens_per_block = int(tokens_per_block)
-        if entries_per_block <= 0 or tokens_per_block <= 0:
-            raise ValueError(
-                "DSpark paged-pool geometry must be positive, got "
-                f"entries={entries_per_block}, tokens={tokens_per_block}"
-            )
 
         positions = absolute_positions.to(torch.long)
         req = req_ids.to(device=positions.device, dtype=torch.long)
@@ -473,14 +458,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         ``entries_per_block`` is the full ring-entry domain of one block
         (both CP slices together under a sharded prefill); ``pool`` is the
         packed 3-D FP8 view used by the regular writer. Byte-sliced commits
-        also require it for layout validation, then write through the raw
-        per-rank pool selected by ``attn._swa_cp_byte_sliced()``."""
+        write through the raw per-rank pool selected by
+        ``attn._swa_cp_byte_sliced()``."""
         attn = self.v4.layers[layer_idx].attn
-        if int(attn.compress_ratio) != 0:
-            raise RuntimeError(
-                f"DSpark layer {layer_idx} is not SWA-only: "
-                f"compress_ratio={attn.compress_ratio}"
-            )
         with bind_attn_cache(
             attn,
             self.kv_cache,
@@ -490,10 +470,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             attn._ensure_freqs_cis_bound()
             entries_per_block = int(attn._swa_entries_per_block())
             pool = attn._pool_view_3d_fp8(SWA_KV)
-            if entries_per_block <= 0 or pool is None:
-                raise RuntimeError(
-                    f"DSpark layer {layer_idx} has no FP8 SWA paged pool"
-                )
             yield attn, entries_per_block, pool
 
     def _commit_layer_features(
@@ -579,11 +555,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     validation_site=f"dspark.commit.layer_{layer_idx}",
                     negative_mode="skip_minus_one",
                 )
-                if compaction is None:
-                    raise RuntimeError(
-                        f"DSpark layer {layer_idx}: CP-sliced slot compaction "
-                        "is unavailable"
-                    )
                 insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
                     context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
                     attn._pool_raw_u8(SWA_KV),
@@ -644,12 +615,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
         positions = cp_ctx.global_positions
-        if int(positions.numel()) != int(row_count):
-            raise RuntimeError(
-                "DSpark CP commit row mismatch: buffer supplied "
-                f"{row_count} rank-local rows, CPContext maps "
-                f"{int(positions.numel())}"
-            )
         valid = cp_ctx.local_is_real.to(positions.device)
         req = cp_ctx.req_id_per_token
         if req is None:
@@ -733,8 +698,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         batch_size, gamma, _ = x.shape
         if batch_size == 0:
             return torch.empty_like(x)
-        if block_table is None:
-            raise RuntimeError("DSpark attention requires an SWA block table")
 
         with self._swa_cache_bound(layer_idx, block_table) as (
             attn,
@@ -888,23 +851,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return self.v4.norm(head_hidden)
 
     def _forward_device(self) -> torch.device:
-        if self.v4 is None:
-            raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         if getattr(self, "_commit_only_prefill", False):
-            if self.main_proj is None:
-                raise RuntimeError(
-                    "DSpARK commit-only model has no initialized main projection"
-                )
             # ``main_proj`` is a LinearFactory module with the actual bound
             # checkpoint tensor; commit-only transformers intentionally do not
             # materialize an embedding just to answer a device query.
             device = self.main_proj.weight.device
         else:
             device = self.v4.embed.weight.device
-        if getattr(self, "kv_cache", None) is not None and not bool(
-            getattr(self, "fp8_kv_cache", True)
-        ):
-            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
         return device
 
     @torch.inference_mode()
@@ -924,11 +877,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 batch_size,
             )
             return self.dspark_empty_outputs(batch_size, device)
-        if getattr(self, "_commit_only_prefill", False):
-            raise RuntimeError(
-                "DSpARK PREFILL commit-only model cannot execute forward_propose; "
-                "use the DECODE/PDFUSION role for proposal inference"
-            )
         return self.run_propose_step(inputs, fmha_impl, device)
 
     @torch.inference_mode()

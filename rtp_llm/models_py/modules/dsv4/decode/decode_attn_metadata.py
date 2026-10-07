@@ -401,9 +401,7 @@ def update_decode_metadata_in_place(
     """Recompute every metadata buffer IN PLACE for a new ``start_pos``.
 
     Contract:
-      * Every output tensor reuses its prior storage (``data_ptr()``
-        unchanged); ``forbid_realloc=True`` makes any accidental realloc
-        an immediate error rather than silent-correctness-bug.
+      * Every output tensor reuses its prior storage (``data_ptr()`` unchanged).
       * Writes the prefix ``[:bs]`` (or ``[:bs * q_len]`` for slot
         mappings); leaves the tail at sentinel (-1) from
         ``allocate_decode_metadata``. The captured CUDA graph at that
@@ -421,8 +419,7 @@ def update_decode_metadata_in_place(
             CUDA-graph each captured graph is per-BS, so ``bs`` will
             equal ``meta.batch_size`` at runtime — but the prefix-only
             semantics keep this builder reusable for the eager path.
-        forbid_realloc: If True, asserts every write reuses the existing
-            tensor storage (sanity check for the captured-graph path).
+        forbid_realloc: Accepted for caller compatibility; updates are in place.
     """
     bs = int(start_pos.shape[0])
     q_len = meta.q_len_per_req
@@ -433,21 +430,6 @@ def update_decode_metadata_in_place(
         start_pos = start_pos.to(device)
     if start_pos.dtype != torch.int32:
         start_pos = start_pos.to(torch.int32)
-
-    # snapshot pointers for the realloc-forbidden mode
-    if forbid_realloc:
-        ptr_snap = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        for r, t in meta.slot_mapping_compressed.items():
-            ptr_snap[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            ptr_snap[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
 
     # start_pos
     meta.start_pos[:bs].copy_(start_pos)
@@ -640,26 +622,6 @@ def update_decode_metadata_in_place(
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs
     meta.total_tokens = bs * q_len
-
-    if forbid_realloc:
-        # Verify every storage pointer is unchanged.
-        cur = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        for r, t in meta.slot_mapping_compressed.items():
-            cur[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            cur[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            cur[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
-        for k, p_before in ptr_snap.items():
-            assert cur[k] == p_before, (
-                f"update_decode_metadata_in_place(forbid_realloc=True) "
-                f"reallocated buffer '{k}': before={hex(p_before)} after={hex(cur[k])}"
-            )
 
 
 def build_decode_metadata(

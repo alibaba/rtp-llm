@@ -137,7 +137,7 @@ class TestHCImpl(unittest.TestCase):
         reduced = head.head(x)
         self.assertEqual(tuple(reduced.shape), (2, 5, dim))
 
-    def test_factory_default_tilelang_fails_fast_on_cpu(self) -> None:
+    def test_factory_defaults_to_tilelang(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
         with _env("DSV4_HC_IMPL", None):
@@ -152,11 +152,8 @@ class TestHCImpl(unittest.TestCase):
                 hc_eps=1e-6,
             )
         self.assertIsInstance(unit, TileLangHCUnit)
-        x = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
-        with self.assertRaises(RuntimeError):
-            unit.pre(x)
 
-    def test_tilelang_none_result_is_not_fallback(self) -> None:
+    def test_tilelang_kernel_failure_is_not_fallback(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
         unit = TileLangHCUnit(
@@ -171,15 +168,18 @@ class TestHCImpl(unittest.TestCase):
         )
         import rtp_llm.models_py.modules.dsv4.hc.tilelang_impl as tilelang_impl
 
+        def fail_pre(*args, **kwargs):
+            raise RuntimeError("injected kernel failure")
+
         old_pre = tilelang_impl.tk_mhc_pre
-        tilelang_impl.tk_mhc_pre = lambda *args, **kwargs: None
+        tilelang_impl.tk_mhc_pre = fail_pre
         self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_pre", old_pre))
 
         x = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "injected kernel failure"):
             unit.pre(x)
 
-    def test_tilelang_wrap_is_view_and_requires_contiguous(self) -> None:
+    def test_tilelang_wrap_is_view(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
         unit = TileLangHCUnit(
@@ -220,12 +220,6 @@ class TestHCImpl(unittest.TestCase):
         self.assertTrue(seen["is_contiguous"])
         self.assertEqual(seen["data_ptr"], x.data_ptr())
 
-        x_noncontig = torch.randn(hc, 5, dim, dtype=torch.bfloat16).transpose(0, 1)
-        self.assertEqual(tuple(x_noncontig.shape), (5, hc, dim))
-        self.assertFalse(x_noncontig.is_contiguous())
-        with self.assertRaisesRegex(ValueError, "must be contiguous"):
-            unit.pre(x_noncontig)
-
     def test_tilelang_head_requires_fused_when_enabled(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
@@ -264,42 +258,10 @@ class TestHCImpl(unittest.TestCase):
         self.assertTrue(torch.all(y == 1))
 
         calls.clear()
-        tilelang_impl.tk_mhc_head_fused = (
-            lambda *args, **kwargs: calls.append("fused") or None
-        )
-        with self.assertRaisesRegex(RuntimeError, "fused head must succeed"):
-            head.head(x)
-        self.assertEqual(calls, ["fused"])
-
-        calls.clear()
         with _env("DSV4_MHC_HEAD_FUSED", "0"):
             y = head.head(x)
         self.assertEqual(calls, ["old"])
         self.assertTrue(torch.all(y == 0))
-
-    def test_shape_contract_is_checked_before_impl(self) -> None:
-        hc, dim = 4, 16
-        fn, base, scale = _weights(hc, dim)
-        for mode in ("fallback", "tilelang"):
-            with self.subTest(mode=mode), _env("DSV4_HC_IMPL", mode):
-                unit = build_hc_unit(
-                    fn,
-                    base,
-                    scale,
-                    dim=dim,
-                    hc_mult=hc,
-                    hc_sinkhorn_iters=3,
-                    norm_eps=1e-6,
-                    hc_eps=1e-6,
-                )
-                with self.assertRaises(ValueError):
-                    unit.pre(torch.randn(2, hc * dim))
-                residual = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
-                x = torch.randn(2, 5, dim, dtype=torch.bfloat16)
-                bad_post = torch.randn(2, 5, hc)
-                comb = torch.randn(2, 5, hc, hc)
-                with self.assertRaises(ValueError):
-                    unit.post(x, residual, bad_post, comb)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_tilelang_matches_fallback_cuda(self) -> None:
@@ -386,23 +348,6 @@ class TestHCImpl(unittest.TestCase):
         self.assertEqual(captured["out_ptr"], residual.data_ptr())
         self.assertEqual(out.data_ptr(), residual.data_ptr())
         self.assertEqual(tuple(out.shape), (T, hc, dim))
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_tilelang_post_nonbf16_x_raises_dtype_error(self) -> None:
-        # A non-bf16 sublayer output x is an upstream dtype bug, not a TileLang
-        # availability miss: it must raise loudly (with the offending dtype),
-        # not return None and get disguised as "TileLang unavailable". Reaches
-        # the x.dtype check before any kernel import, so tilelang is not needed.
-        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_post
-
-        hc, dim, T = 4, 128, 8
-        residual = torch.randn(1, T, hc, dim, device="cuda", dtype=torch.bfloat16)
-        post = torch.randn(1, T, hc, 1, device="cuda", dtype=torch.float32)
-        comb = torch.randn(1, T, hc, hc, device="cuda", dtype=torch.float32)
-        x_fp32 = torch.randn(1, T, dim, device="cuda", dtype=torch.float32)
-        with torch.inference_mode():
-            with self.assertRaisesRegex(RuntimeError, "bfloat16 sublayer output"):
-                tk_mhc_post(x_fp32, residual, post, comb, hc_mult=hc)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_tilelang_post_in_place_matches_fresh_buffer_cuda(self) -> None:

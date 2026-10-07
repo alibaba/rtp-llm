@@ -44,25 +44,8 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import swa_region_for_layer
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """No-fallback accessor for KVCache.kernel_seq_size_per_block.
-
-    Mirrors the helper in dsv4/fp8/attention.py — surfaces the C++
-    propagation bug instead of silently writing ring buffer with the
-    wrong stride.
-    """
-    if kv_cache is None:
-        raise RuntimeError(
-            "DSV4 decode: kv_cache is None when sizing paged pool specs."
-        )
-    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
-    if ksb <= 0:
-        spb = int(getattr(kv_cache, "seq_size_per_block", 0))
-        grp = getattr(kv_cache, "group_region_names", None)
-        raise RuntimeError(
-            "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
-            "seq_size_per_block=%d, group_region_names=%r." % (ksb, spb, grp)
-        )
-    return ksb
+    """Read the framework's physical block geometry."""
+    return int(kv_cache.kernel_seq_size_per_block)
 
 
 def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:
@@ -107,11 +90,6 @@ def build_paged_pool_specs(
         max_seq_len = int(getattr(v4, "max_seq_len", 0)) or int(
             getattr(getattr(v4, "args", None), "max_seq_len", 0)
         )
-        if max_seq_len <= 0:
-            raise ValueError(
-                "build_paged_pool_specs: max_seq_len required to size paged "
-                "block tables to match the framework allocator."
-            )
     # Framework's block_table width per pool. Add +1 slack for the same
     # reason the C++ allocator does (last-token-of-prefill + first-decode
     # may bridge a block boundary mid-step).

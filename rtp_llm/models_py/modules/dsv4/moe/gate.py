@@ -29,11 +29,8 @@ try:
     from rtp_llm.models_py.modules.dsv4._gate_fused_triton import (
         fused_sqrtsoftplus_gate,
     )
-
-    _GATE_FUSED_OK = True
 except Exception:  # pragma: no cover
     fused_sqrtsoftplus_gate = None
-    _GATE_FUSED_OK = False
 
 
 def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
@@ -57,8 +54,6 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
         return False
     if x_size_0 == 0:
         return False
-    if not _GATE_FUSED_OK or fused_sqrtsoftplus_gate is None:
-        raise RuntimeError("DSV4 fused gate is enabled by default but unavailable")
     return True
 
 
@@ -269,7 +264,6 @@ class Gate(nn.Module):
             _rt.record_if_level(2, f"{_dbg}_biased_scores", scores)
 
         if self.hash:
-            assert input_ids is not None
             flat_ids = input_ids.reshape(-1)
             if image_mask is None:
                 indices = self.tid2eid[flat_ids].long()

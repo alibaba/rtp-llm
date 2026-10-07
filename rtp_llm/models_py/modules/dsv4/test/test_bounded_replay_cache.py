@@ -169,9 +169,9 @@ class BoundedReplayCacheTest(unittest.TestCase):
             self.assertIsNone(attn._cp_ctx)
         self.assertIs(attn._block_tables_by_type, old_table)
         self.assertIsNone(attn._kv_cache)
-        with self.assertRaisesRegex(RuntimeError, "Missing physical SWA"):
-            with self.bind(attn, cache, {7: tables[7]}):
-                self.fail("missing region8 accepted")
+        with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+            with self.bind(attn, cache, tables):
+                raise RuntimeError("consumer failed")
         self.assertIs(attn._block_tables_by_type, old_table)
         self.assertIsNone(attn._kv_cache)
 

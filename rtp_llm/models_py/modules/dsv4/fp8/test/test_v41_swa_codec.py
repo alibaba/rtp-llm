@@ -970,19 +970,6 @@ class BatchedBoundedSWA(unittest.TestCase):
                     )
                     offset += n
 
-    def test_workspace_rejects_incomplete_compact_kv_and_short_reused_suffix(self):
-        common, _ = self.common((2048, 13), (30720, 0))
-        owner = self.owner()
-        with self.assertRaisesRegex(ValueError, "per-request replay rows"):
-            owner._swa_prefill_workspace(
-                types.SimpleNamespace(kv_full=torch.zeros(128, 2)), common
-            )
-        common.cp_ctx.prefix_lengths_host = (30720, 1)
-        with self.assertRaisesRegex(ValueError, "128 fresh tokens"):
-            owner._swa_prefill_workspace(
-                types.SimpleNamespace(kv_full=torch.zeros(141, 2)), common
-            )
-
     def test_cache_write_selects_original_slots_and_compaction_without_mutation(self):
         Compaction = namedtuple("Compaction", "compact_slots unique_blocks")
         for byte_sliced in (True, False):

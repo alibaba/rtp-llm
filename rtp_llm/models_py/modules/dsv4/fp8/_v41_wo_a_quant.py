@@ -84,8 +84,6 @@ def _legacy(m, mode):
         .strip()
         .lower()
     )
-    if mode not in ("auto", "legacy", "v2"):
-        raise ValueError("DSV4_FP8_QUANT_KERNEL must be auto, legacy, or v2")
     return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
 
 
@@ -237,28 +235,6 @@ def is_ready(weight, scale):
     return bool(entry[0].v41_wo_a_is_current(entry[1]))
 
 
-def _validate_output(out, a, weight):
-    q, s = out
-    m, device = a[0].shape[0], a[0].device
-    if not (
-        q.device == s.device == device
-        and q.dtype == torch.float8_e4m3fn
-        and q.shape == (m, 8192)
-        and q.is_contiguous()
-        and s.dtype == torch.int32
-        and s.shape == (m, 64)
-        and s.stride() == (1, (m + 3) // 4 * 4)
-        and all(not t.requires_grad and t.data_ptr() % 16 == 0 for t in out)
-    ):
-        raise ValueError(
-            "expected disjoint aligned CUDA E4M3 [M,8192] and packed int32 [M,64]"
-        )
-    if torch._C._overlaps(q, s) or any(
-        torch._C._overlaps(t, x) for t in out for x in (*a, *weight)
-    ):
-        raise ValueError("quantized output must not overlap inputs, weights or scales")
-
-
 def try_grouped_quant(a, weight, *, out=None, quant_kernel=None):
     """Return caller-owned (Q, packed scales), or None; never compile here.
 
@@ -278,8 +254,6 @@ def try_grouped_quant(a, weight, *, out=None, quant_kernel=None):
         mode = _legacy(aq.shape[0], quant_kernel)
         if out is None:
             out = _output(aq.shape[0], aq.device)
-        else:
-            _validate_output(out, a, weight)
         stream = torch.cuda.current_stream(aq.device)
         status = lib.v41_wo_a_launch(
             handle,

@@ -109,10 +109,6 @@ class SparseAttnV4DecodeFp8Op:
         by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
         by the consumer.
         """
-        assert _FLASH_MLA_AVAILABLE, (
-            "flash_mla wheel is required for FP8 sparse decode "
-            "(install rtp_llm with cuda12_9 / cuda13 config)"
-        )
         return self._forward_flash_mla(
             q,
             kv_cache,
@@ -149,8 +145,6 @@ class SparseAttnV4DecodeFp8Op:
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
         # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
         # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.
-
-        assert topk_idxs is not None, "FP8 sparse decode requires topk_idxs"
 
         # FlashMLA FP8 kernel requires 4D k_cache: [num_blocks, block_size, num_heads_k=1, kv_dim].
         kv_4d = kv_cache.unsqueeze(-2)

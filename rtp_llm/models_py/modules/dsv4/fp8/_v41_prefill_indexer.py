@@ -60,8 +60,6 @@ def logits_chunk_rows(num_keys: int) -> int:
     topk calls and per-chunk glue than the 512-row cap at 16K+ contexts,
     with the same 256 MiB logits bound.
     """
-    if num_keys < 0:
-        raise ValueError("num_keys must be nonnegative")
     if num_keys == 0:
         return 512
     return max(1, min(4096, (256 * 1024 * 1024) // (4 * num_keys)))
@@ -162,8 +160,6 @@ def gather_indexer_keys(
 
     from ._indexer_cp_assembler import assemble_indexer_k, build_indexer_cp_chunk_plan
 
-    if ratio not in (1, 2) or owner_tokens_per_block % ratio:
-        raise ValueError("V4.1 indexer CP ownership must align to its ratio")
     owner_entries = owner_tokens_per_block // ratio
     plan = build_indexer_cp_chunk_plan(
         cp_ctx,

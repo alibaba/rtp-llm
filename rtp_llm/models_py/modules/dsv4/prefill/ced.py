@@ -62,8 +62,6 @@ def checkpoint_positions(prefix, length, block_ids, block_span, ring_entries):
     The 19 causal windows contribute 19*127 predecessor rows. Keeping at least
     3072 also bounds padding variations to the previously validated geometry.
     """
-    if prefix < 0 or length <= 0 or block_span <= 0 or ring_entries <= 0:
-        raise ValueError("invalid CED checkpoint geometry")
     end = prefix + length
     halo = max(_TAIL_TOKENS, 19 * 127 + ring_entries)
     endpoints = [end]
@@ -143,8 +141,6 @@ class _RowExchange:
     receive_is_identity: bool = False
 
     def compact(self, value):
-        if value.shape[0] != self.original_rows:
-            raise ValueError("CED source row count changed")
         send = value.index_select(0, self.send_indices).contiguous()
         received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
         torch.distributed.all_to_all_single(
@@ -160,8 +156,6 @@ class _RowExchange:
         return output.index_copy_(0, self.receive_positions, received)
 
     def restore(self, value, out=None):
-        if value.shape[0] != self.compact_rows:
-            raise ValueError("CED compact row count changed")
         send = value.index_select(0, self.receive_positions).contiguous()
         received = value.new_empty((sum(self.send_sizes), *value.shape[1:]))
         torch.distributed.all_to_all_single(
@@ -173,8 +167,6 @@ class _RowExchange:
         )
         if out is None:
             out = value.new_empty((self.original_rows, *value.shape[1:]))
-        if out.shape != (self.original_rows, *value.shape[1:]):
-            raise ValueError("CED restore destination shape changed")
         # received is independent even when value and out alias the aux buffer.
         out.zero_()
         return out.index_copy_(0, self.send_indices, received)
@@ -184,8 +176,6 @@ def _host_cp_metadata(info, name):
     host = getattr(info, name + "_cpu", None)
     if not isinstance(host, torch.Tensor) or host.numel() == 0:
         host = getattr(info, name)
-    if host.device.type != "cpu":
-        raise ValueError(f"CED requires the engine's CPU {name} metadata")
     return host.detach()
 
 
@@ -252,8 +242,6 @@ def _reference_query_layout_loop(
             (selected >= original_start) & (selected < original_start + length)
         ]
         count = chosen.numel()
-        if count == 0:
-            raise ValueError("CED must preserve the end of every request")
         padded = ((count + 2 * cp - 1) // (2 * cp)) * (2 * cp)
         chunk, half = padded // cp, padded // (2 * cp)
         canonical = torch.arange(count, dtype=torch.int64)
@@ -303,8 +291,6 @@ def _vectorized_query_layout_rows(
         counts,
         padded_counts,
     ) = _query_layout_reference_counts(lengths, prefixes, original_chunks, selected, cp)
-    if bool((counts == 0).any()):
-        raise ValueError("CED must preserve the end of every request")
     request_count = lengths_t.numel()
     chunks_t = padded_counts // cp
     halves_t = padded_counts // (2 * cp)
@@ -361,17 +347,6 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     lengths = original.input_lengths_global_host or (original.seq_len_full,)
     prefixes = original.prefix_lengths_host or (original.prefix_length,)
     original_chunks = original.chunk_lengths_per_req or (original.chunk_length,)
-    if (
-        len(lengths) != len(prefixes)
-        or len(lengths) != len(original_chunks)
-        or sum(lengths) != original.seq_len_full
-        or selected.ndim != 1
-        or selected.numel() == 0
-        or selected[0] < 0
-        or selected[-1] >= original.seq_len_full
-        or (selected[1:] <= selected[:-1]).any()
-    ):
-        raise ValueError("invalid per-request CED selection")
     owners, local, local_positions, absolute_positions, request_ids = [], [], [], [], []
     local_real, chunks = [], []
     if os.environ.get("DSV41_CED_VECTOR_LAYOUT", "1") == "1":
@@ -412,8 +387,6 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     info = original.cp_info
     restore = _host_cp_metadata(info, "prefill_qkv_restore_indice").long()
     mask = _host_cp_metadata(info, "prefill_qkv_padding_mask").bool()
-    if restore.shape != mask.shape or int(mask.sum()) != original.seq_len_full:
-        raise ValueError("CED requires the engine's complete CP inverse map")
     source_flat = restore[mask].index_select(0, selected)
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
@@ -492,12 +465,9 @@ class CEDPlan:
     exchange: _RowExchange
     indexer_groups: Tuple
     _capture_ids: Tuple[int, ...]
-    _compacted: bool = field(default=False, init=False)
-    _aux_restored: bool = field(default=False, init=False)
     _router_groups: Optional[Tuple] = field(default=None, init=False)
     _router_chunk_rows: Optional[int] = field(default=None, init=False)
     _router_gate_groups: Optional[Tuple] = field(default=None, init=False)
-    _router_gate_rows: int = field(default=0, init=False)
 
     @classmethod
     @torch.inference_mode()
@@ -549,8 +519,6 @@ class CEDPlan:
         regions = tuple(getattr(kv_cache, "group_region_names", ()))
         region = DECODER_SWA_KV if bounded_replay else SWA_KV
         groups = [i for i, r in enumerate(regions) if int(r) == int(region)]
-        if bounded_replay and len(groups) != 1:
-            raise ValueError("bounded replay requires a native decoder SWA pool")
         host = getattr(attn_inputs, "kv_cache_block_id_host", None)
         spans = tuple(getattr(kv_cache, "group_seq_size_per_block", ()))
         if (
@@ -595,11 +563,6 @@ class CEDPlan:
         ):
             return None
         group = collective_torch._get_group(Group.TP)
-        if (
-            torch.distributed.get_world_size(group) != cp_ctx.cp_size
-            or torch.distributed.get_rank(group) != cp_ctx.cp_rank
-        ):
-            raise ValueError("CED CP metadata does not match its process group")
         context, exchange, indexer_groups = _query_layout(
             cp_ctx, selected, group, keep_candidate_rows=bounded_replay
         )
@@ -689,7 +652,6 @@ class CEDPlan:
             self._router_chunk_rows = None
         gate_rows = int(getattr(ffn.gate, "_prefill_gate_chunk_rows", 0))
         outer_rows = self._router_chunk_rows or self.original_context.chunk_length
-        self._router_gate_rows = gate_rows
         self._router_gate_groups = (
             self._router_chunk_groups(outer_rows, gate_rows=gate_rows)
             if gate_rows > 0
@@ -701,27 +663,11 @@ class CEDPlan:
     def router_projection(self, ffn):
         """Scope original-row router arithmetic to the compact L20 FFN."""
         gate = getattr(ffn, "gate", None)
-        if (
-            not self._compacted
-            or cp_swa_replay_starts(self.context) is None
-            or not callable(getattr(gate, "_project_scores", None))
-            or not callable(getattr(ffn, "_should_chunk", None))
-            or ffn._should_chunk(self.context.chunk_length)
-        ):
-            raise ValueError("L20 router projection requires a supported compact plan")
         projection = self.project_indexer_weights
         if ffn._should_chunk(self.original_context.chunk_length):
-            if self._router_groups is None or self._router_chunk_rows != int(
-                ffn.max_tokens_per_rank
-            ):
-                raise ValueError("CED router chunk mapping was not prepared before L0")
             projection = partial(
                 self._project_original_rows, groups=self._router_groups
             )
-        elif self._router_groups is not None:
-            raise ValueError("CED router chunk policy changed after admission")
-        if int(getattr(gate, "_prefill_gate_chunk_rows", 0)) != self._router_gate_rows:
-            raise ValueError("CED gate chunk policy changed after admission")
         if self._router_gate_groups is not None:
             projection = self._project_router_weights
         missing = object()
@@ -738,17 +684,7 @@ class CEDPlan:
     @torch.inference_mode()
     def compact_l20(self, block, residual, post, comb, input_ids):
         """Move the current Block state after full L20 source production."""
-        if (
-            self._compacted
-            or cp_swa_replay_starts(self.context) is None
-            or block.layer_id != 20
-        ):
-            raise ValueError("invalid L20 CED transition")
         shared = block.attn._shared_attention
-        if "ced_candidate_rows" in shared:
-            raise ValueError(
-                "L20 compact queries cannot use original-owner candidate rows"
-            )
         residual = self.exchange.compact(residual)
         post = self.exchange.compact(post)
         comb = self.exchange.compact(comb)
@@ -757,13 +693,10 @@ class CEDPlan:
         shared["ced_indexer_projection"] = self.project_indexer_weights
         for key in _DERIVED_KEYS:
             shared.pop(key, None)
-        self._compacted = True
         return residual, post, comb, input_ids
 
     def l20_query_metadata(self, common):
         """Replace only query fields; L20 keeps exact SWA/global visibility."""
-        if not self._compacted or cp_swa_replay_starts(self.context) is None:
-            raise ValueError("L20 query metadata requires a completed transition")
         query_context = replace(
             self.context, swa_replay_start=None, swa_replay_starts_host=None
         )
@@ -787,8 +720,6 @@ class CEDPlan:
 
     @torch.inference_mode()
     def compact(self, v4, hidden, input_ids, shared):
-        if self._compacted:
-            raise ValueError("CED plan reused across forwards")
         pre_mix = v4.layers[20].ffn_hc.pre_mix_out
         topk = shared["topk"][20]
         candidates = shared["candidates"]
@@ -802,12 +733,9 @@ class CEDPlan:
         shared["ced_indexer_projection"] = self.project_indexer_weights
         for key in _DERIVED_KEYS:
             shared.pop(key, None)
-        self._compacted = True
         return compact_hidden, compact_ids
 
     def _router_chunk_groups(self, rows_per_chunk, *, gate_rows=0):
-        if rows_per_chunk <= 0 or not self.exchange.projection_groups_host:
-            raise ValueError("missing original router chunk geometry")
         device = self.context.global_positions.device
         groups = []
         for compact_rows, original_rows in self.exchange.projection_groups_host:
@@ -871,8 +799,6 @@ class CEDPlan:
         # Original CP owners can share the same local row index. Group them
         # separately: scattering all compact rows into one M-sized matrix loses
         # values at those collisions and changes sparse attention selection.
-        if x.shape[0] != self.context.chunk_length:
-            raise ValueError("CED projection query row count changed")
         output = x.new_zeros((x.shape[0], weight.shape[0]))
         for compact_rows, original_rows, rows in groups:
             full_x = x.new_zeros((rows, x.shape[1]))
@@ -884,19 +810,13 @@ class CEDPlan:
 
     @torch.inference_mode()
     def restore_rows(self, tensor):
-        if not self._compacted:
-            raise ValueError("CED restore before compact")
         return self.exchange.restore(tensor)
 
     @torch.inference_mode()
     def restore_aux(self, v4):
         if not self._capture_ids:
             return
-        if not self._compacted or self._aux_restored:
-            raise ValueError("CED auxiliary state restored out of order")
         buffer = v4._mtp_hidden_buffer
-        if tuple(v4.capture_aux_hidden_layer_ids) != self._capture_ids:
-            raise ValueError("CED auxiliary capture contract changed")
         self.exchange.restore(
             buffer[: self.context.chunk_length],
             out=buffer[: self.original_context.chunk_length],
@@ -904,4 +824,3 @@ class CEDPlan:
         v4._note_aux_hidden_rows(
             self.original_context.chunk_length, is_cuda_graph=False
         )
-        self._aux_restored = True

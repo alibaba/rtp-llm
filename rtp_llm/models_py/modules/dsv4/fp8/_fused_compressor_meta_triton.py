@@ -206,9 +206,6 @@ def fused_compressor_slot_mapping(
     Under CP sharding, fixed STATE rings are byte-sliced across ranks and FULL
     KV blocks use page-RR ownership; the same kernel applies both mappings.
     """
-    if not _TRITON_AVAILABLE:
-        raise RuntimeError("triton unavailable")
-
     N = positions.shape[0]
     device = positions.device
 
@@ -223,12 +220,6 @@ def fused_compressor_slot_mapping(
 
     has_kv = kv_bt is not None and kv_eb > 0
     if has_kv:
-        if kv_bt.shape[0] != state_bt.shape[0]:
-            raise RuntimeError(
-                "fused_compressor_slot_mapping expects state_bt and kv_bt to "
-                f"share batch dim, got state_bt={tuple(state_bt.shape)} and "
-                f"kv_bt={tuple(kv_bt.shape)}"
-            )
         kv_max_blocks = int(kv_bt.shape[1])
         tokens_per_block = int(kv_tokens_per_block or (kv_eb * ratio))
         kv_bt_arg = kv_bt

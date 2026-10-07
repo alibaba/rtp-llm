@@ -56,14 +56,6 @@ def _hash_windows_kernel(
 
 
 def hash_token_windows(windows, dead_mask, buffers, layout, pad_id):
-    if windows.ndim != 2 or windows.shape[1] != layout.max_ngram_size:
-        raise ValueError("Engram GPU token windows have the wrong width")
-    if windows.stride(1) != 1:
-        raise ValueError("Engram GPU token windows must have contiguous columns")
-    if dead_mask is not None and (
-        dead_mask.shape != windows.shape or dead_mask.stride(1) != 1
-    ):
-        raise ValueError("Engram GPU dead mask must match token windows")
     output = torch.empty(
         (windows.shape[0], len(layout.layer_ids), layout.n_hash_cols),
         dtype=torch.int64,
@@ -146,8 +138,6 @@ def _lookup_host_kernel(
 
 
 def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
-    if indices.ndim != 2:
-        raise ValueError("Engram GPU hashes must be [tokens, heads]")
     tokens, heads = indices.shape
     dim = weight_uva.shape[1]
     output = torch.empty(

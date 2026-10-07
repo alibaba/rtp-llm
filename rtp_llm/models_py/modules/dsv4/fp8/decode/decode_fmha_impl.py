@@ -174,12 +174,6 @@ class DSv4DecodeFmhaImplFP8:
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
-        if self._paged_entries_per_block and paged_block_tables is None:
-            raise RuntimeError(
-                "prepare_cuda_graph: paged_pool_specs configured "
-                "but paged_block_tables is empty — "
-                "framework did not provide block tables"
-            )
         update_decode_metadata_in_place_fp8(
             self.metadata,
             attn_inputs,

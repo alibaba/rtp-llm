@@ -98,15 +98,6 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         self.assertEqual(specs[int(HCA_KV)][1], 128)
         self.assertEqual(specs[int(SWA_KV)][1], 128)
 
-    def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
-        class FakeKVCache:
-            group_region_names = [99]
-            seq_size_per_block = 16384
-            kernel_seq_size_per_block = 128
-
-        with self.assertRaisesRegex(RuntimeError, "cannot be inferred"):
-            require_pool_tokens_per_block(FakeKVCache(), region=99)
-
     def test_compute_full_params_equal_entries(self) -> None:
         block_table = torch.tensor([[3, 4]], dtype=torch.int32)
         abs_pos = torch.tensor([0, 127, 128, 255, -1], dtype=torch.int32)

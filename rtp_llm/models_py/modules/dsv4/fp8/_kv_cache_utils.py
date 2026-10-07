@@ -105,12 +105,6 @@ def require_pool_tokens_per_block(
         if value is not None:
             return value
 
-    raise RuntimeError(
-        "DSV4 KVCache pool tokens-per-block cannot be inferred. "
-        "group=%r, region=%r, group_region_names=%r"
-        % (group, region, getattr(kv_cache, "group_region_names", None))
-    )
-
 
 class PoolBackedModule(nn.Module):
     """Base class for modules backed by framework-managed paged pools.

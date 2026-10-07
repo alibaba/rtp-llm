@@ -68,11 +68,6 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         if n_act in _DEEPEP_SUPPORTED_TOPK:
             return indices, weights
         pad_to = next((k for k in _DEEPEP_SUPPORTED_TOPK if k > n_act), None)
-        if pad_to is None:
-            raise RuntimeError(
-                f"n_activated_experts={n_act} exceeds largest DeepEP-supported "
-                f"topk ({max(_DEEPEP_SUPPORTED_TOPK)})"
-            )
         N = indices.size(0)
         pad_n = pad_to - n_act
         pad_idx = torch.full((N, pad_n), -1, dtype=indices.dtype, device=indices.device)
@@ -93,20 +88,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         called by the engine (``backend_manager.py``).
         """
         from rtp_llm.models_py.distributed.deepep_wrapper import (
-            DeepEPMode,
             DeepEPWrapper,
         )
 
-        if DeepEPWrapper._instance is None:
-            raise RuntimeError(
-                "DeepEPWrapper not initialised; ep_size>1 requires "
-                "init_deepep_wrapper() at engine startup (enable via "
-                "--use_deepep_moe 1)."
-            )
         wrapper = DeepEPWrapper._instance
-        assert (
-            wrapper.mode == DeepEPMode.NORMAL
-        ), f"expected NORMAL DeepEP mode, got {wrapper.mode}"
         buf = wrapper.buffer
         cfg = self.cfg
 

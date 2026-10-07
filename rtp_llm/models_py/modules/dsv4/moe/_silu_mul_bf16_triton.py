@@ -151,23 +151,6 @@ if triton is not None:
         )
 
 
-def _validated_gate_up(gate_up: torch.Tensor) -> Tuple[int, int]:
-    if triton is None:
-        raise RuntimeError("DSV4 fused BF16 SiLU path requires Triton")
-    if not gate_up.is_cuda:
-        raise RuntimeError("DSV4 fused BF16 SiLU path requires CUDA tensors")
-    if gate_up.dim() != 2 or gate_up.dtype != torch.bfloat16:
-        raise ValueError(
-            f"gate_up must be 2D bf16, got dim={gate_up.dim()} dtype={gate_up.dtype}"
-        )
-    if not gate_up.is_contiguous():
-        raise ValueError("gate_up must be contiguous")
-    M, two_n = gate_up.shape
-    if two_n % 2 != 0:
-        raise ValueError(f"gate_up last dim must be even, got {two_n}")
-    return M, two_n // 2
-
-
 def silu_mul_split_bf16(
     gate_up: torch.Tensor,  # [M, 2N] bf16, contiguous
     clamp_limit: float = 0.0,
@@ -179,19 +162,10 @@ def silu_mul_split_bf16(
     see :func:`rtp_llm.models_py.modules.dsv4._silu_mul_split_triton.silu_mul_split`
     for the clamp semantics (``clamp(up, ±L)`` + ``clamp(gate, max=L)``).
     """
-    M, N = _validated_gate_up(gate_up)
+    M, two_n = gate_up.shape
+    N = two_n // 2
     if out is None:
         out = torch.empty((M, N), dtype=torch.bfloat16, device=gate_up.device)
-    elif (
-        tuple(out.shape) != (M, N)
-        or out.dtype != torch.bfloat16
-        or out.device != gate_up.device
-        or not out.is_contiguous()
-    ):
-        raise ValueError(
-            "out must be contiguous bf16 [M, N] on the gate_up device; got "
-            f"shape={tuple(out.shape)}, dtype={out.dtype}"
-        )
     if M * N == 0:
         return out
     block_n = 1024
@@ -221,7 +195,8 @@ def silu_mul_fp8_g32_quant(
     auto selects v2 at M*N >= 4Mi elements. Legacy's unused scale-pack bytes
     are unspecified; this entry initializes them to zero, as v2 does.
     """
-    m, n = _validated_gate_up(gate_up)
+    m, two_n = gate_up.shape
+    n = two_n // 2
     quant = torch.empty((m, n), dtype=torch.float8_e4m3fn, device=gate_up.device)
     scales = torch.empty(
         (triton.cdiv(n, 128), triton.cdiv(m, 4) * 4),
@@ -231,10 +206,6 @@ def silu_mul_fp8_g32_quant(
     if m * n == 0:
         return quant, scales
     mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-    if mode not in ("auto", "legacy", "v2"):
-        raise ValueError(
-            "DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; " f"got {mode!r}"
-        )
     legacy = mode == "legacy" or (mode == "auto" and m * n < 4 * 1024 * 1024)
     apply_clamp = clamp_limit is not None and clamp_limit > 0.0
     _silu_mul_fp8_g32_quant_kernel[(m, triton.cdiv(n, 1024))](

@@ -4,8 +4,7 @@ Mirrors :meth:`rtp_llm.models_py.modules.dsv4.fp8.attention.AttentionFP8._prefil
 for the decode path. Dispatches the Triton writer that emits the
 584B/slot FP8 SWA layout (fp8 NoPE 448 + bf16 RoPE 128 + ue8m0 scale 8).
 
-BF16 SWA decode write is intentionally unsupported — :meth:`Attention.forward_decode`
-asserts ``_kv_cache_is_fp8`` at entry (mirrors the prefill FP8-only gate).
+BF16 SWA decode write is intentionally unsupported.
 """
 
 from __future__ import annotations
@@ -43,9 +42,4 @@ def decode_write_swa_fp8(
         kv_flat = kv_flat.to(torch.bfloat16)
     slot_mapping = slot_mapping[: bsz * q_len]
 
-    assert kv_flat.stride(0) == head_dim and kv_flat.stride(1) == 1, (
-        "DSV4 decode SWA Triton writer requires a row-contiguous "
-        f"[T, {head_dim}] KV view, got shape={tuple(kv_flat.shape)} "
-        f"stride={tuple(kv_flat.stride())}"
-    )
     quantize_and_insert_k_cache(kv_flat, swa_pool_3d, slot_mapping)

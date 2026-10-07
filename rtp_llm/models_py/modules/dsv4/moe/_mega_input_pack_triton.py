@@ -181,34 +181,6 @@ if triton is not None:
             )
 
 
-def _validate_inputs(
-    x: torch.Tensor,
-    weights: torch.Tensor,
-    indices: torch.Tensor,
-    out_sf: torch.Tensor,
-) -> tuple[int, int, int]:
-    if triton is None:
-        raise RuntimeError("triton is unavailable")
-    if not x.is_cuda:
-        raise RuntimeError("fused MegaMoE input packer requires CUDA tensors")
-    if x.dim() != 2:
-        raise ValueError(f"x must be [T,D], got {tuple(x.shape)}")
-    if weights.shape != indices.shape:
-        raise ValueError("weights and indices must have identical [T,topk] shape")
-    if weights.dtype != torch.float32:
-        raise ValueError(f"weights must be float32, got {weights.dtype}")
-    if indices.dtype != torch.int64:
-        raise ValueError(f"indices must be int64, got {indices.dtype}")
-    T, D = x.shape
-    if D % 128 != 0:
-        raise ValueError(f"fused MegaMoE packer requires D % 128 == 0, got D={D}")
-    if out_sf.shape[1] != D // 128:
-        raise ValueError(
-            f"out_sf shape mismatch: expected second dim {D // 128}, got {out_sf.shape}"
-        )
-    return T, D, weights.shape[1]
-
-
 def fused_pack_mega_moe_inputs_legacy(
     x: torch.Tensor,
     weights: torch.Tensor,
@@ -218,7 +190,8 @@ def fused_pack_mega_moe_inputs_legacy(
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
 ) -> None:
-    T, D, topk = _validate_inputs(x, weights, indices, out_sf)
+    T, D = x.shape
+    topk = weights.shape[1]
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
@@ -262,17 +235,14 @@ def fused_pack_mega_moe_inputs_optimized(
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
 ) -> None:
-    T, D, topk = _validate_inputs(x, weights, indices, out_sf)
+    T, D = x.shape
+    topk = weights.shape[1]
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
     block_m_env = os.environ.get("DSV4_MEGA_MOE_PACK_BLOCK_M")
     block_m = int(block_m_env) if block_m_env is not None else (8 if T >= 2048 else 2)
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid DSV4_MEGA_MOE_PACK_BLOCK_M={block_m}; expected 1, 2, 4, or 8"
-        )
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
@@ -318,6 +288,3 @@ def fused_pack_mega_moe_inputs(
         return fused_pack_mega_moe_inputs_optimized(
             x, weights, indices, out_fp8, out_sf, out_indices, out_weights
         )
-    raise ValueError(
-        f"invalid DSV4_MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; expected legacy|optimized"
-    )

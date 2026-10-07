@@ -130,20 +130,6 @@ def prepare_indexer_q(
     ``frequencies`` are complex64 [B*S, rope_head_dim/2]. Returns
     ``(payload [B,S,32,64] int8, sf [B,S,32] int32)``.
     """
-    if q.ndim != 4 or q.shape[2:] != (32, 128) or q.dtype != torch.bfloat16:
-        raise ValueError("V4.1 indexer Q must be BF16 [B,S,32,128]")
-    if weights.shape != q.shape[:-1] or weights.dtype != torch.float32:
-        raise ValueError("V4.1 indexer head weights must remain FP32 [B,S,32]")
-    if (
-        rope_head_dim <= 0
-        or rope_head_dim > 128
-        or rope_head_dim % 2
-        or freqs_cis.shape != (q.shape[0] * q.shape[1], rope_head_dim // 2)
-        or freqs_cis.dtype != torch.complex64
-    ):
-        raise ValueError("V4.1 indexer frequencies must match every query token")
-    if weights.device != q.device or freqs_cis.device != q.device:
-        raise ValueError("V4.1 indexer Q, weights and frequencies must share a device")
     from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import quantize_rows_fp4
     from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
@@ -219,17 +205,6 @@ def score_decode_indexer(
     full frequency table, enabling fused Q preparation. Without positions,
     preserve the original scaled-FP32-weights/gathered-frequencies contract.
     """
-    if (
-        pool.ndim != 3
-        or pool.shape[0] < 1
-        or pool.shape[2] != 68
-        or pool.dtype != torch.uint8
-    ):
-        raise ValueError("V4.1 indexer pool must be uint8 [blocks,entries,68]")
-    if not pool.is_contiguous():
-        raise ValueError("V4.1 indexer packed pool must have no block padding")
-    if q.ndim != 4:
-        raise ValueError("V4.1 indexer Q must have four dimensions")
     b, s, h, d = q.shape
     block_size = pool.shape[1]
     logical_entries = (
@@ -237,26 +212,6 @@ def score_decode_indexer(
     )
     if not is_supported(q.device, block_size, h, d):
         return None
-    if b < 1 or s < 1:
-        raise ValueError("V4.1 paged indexer requires positive B and S")
-    if block_table.ndim != 2 or block_table.shape[0] != b:
-        raise ValueError("V4.1 indexer block table must be [B,max_blocks]")
-    if context_lens.shape != (b, s):
-        raise ValueError("V4.1 indexer needs one context length for every [B,S] row")
-    if logical_entries not in (block_size, block_size // 2):
-        raise ValueError("V4.1 indexer supports full or half-filled physical blocks")
-    if not 0 < max_ctx_len <= block_table.shape[1] * logical_entries:
-        raise ValueError("V4.1 indexer capacity exceeds the source block table")
-    if any(t.device != q.device for t in (pool, block_table, context_lens)):
-        raise ValueError("V4.1 indexer cache, table, lengths and Q must share a device")
-    if block_table.dtype not in (
-        torch.int32,
-        torch.int64,
-    ) or context_lens.dtype not in (
-        torch.int32,
-        torch.int64,
-    ):
-        raise ValueError("V4.1 indexer block table and lengths must be integers")
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
     if positions is None:

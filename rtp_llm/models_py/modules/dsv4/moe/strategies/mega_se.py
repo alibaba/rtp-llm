@@ -498,20 +498,6 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             and _get_mega_se_gate_pack_kernels() is not None
         )
 
-    def _validate_capacity(self, tokens: int) -> None:
-        buf = self._mega_buf
-        if tokens > buf.num_max_tokens_per_rank:
-            raise RuntimeError(
-                f"Mega MoE SE input tokens={tokens} exceeds "
-                f"num_max_tokens_per_rank={buf.num_max_tokens_per_rank}. "
-                "Raise the startup MoE token budget."
-            )
-        if tokens > self._mega_y.size(0):
-            raise RuntimeError(
-                f"Mega MoE SE output rows={self._mega_y.size(0)} are smaller "
-                f"than input tokens={tokens}; aligned capacity is inconsistent"
-            )
-
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
 
@@ -540,7 +526,6 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         """Return BF16 routed+shared output; participate even for local T=0."""
 
         tokens = x.size(0)
-        self._validate_capacity(tokens)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
@@ -549,13 +534,8 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     def forward_with_gate_pack(self, x, gate, input_ids):
         kernels = _get_mega_se_gate_pack_kernels()
-        if kernels is None:
-            raise RuntimeError(
-                "MegaMoE-SE gate-pack was selected but kernels are unavailable"
-            )
         pack_nonhash, pack_hash, _ = kernels
         tokens = x.size(0)
-        self._validate_capacity(tokens)
         block_m = self._block_m(tokens)
         buf = self._mega_buf
         y = self._mega_y[:tokens]
@@ -564,7 +544,6 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_se_gate_pack"):
             if gate.hash:
-                assert input_ids is not None
                 pack_hash(
                     x,
                     scores_bf16.contiguous(),
@@ -580,7 +559,6 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     norm_eps=1.0e-12,
                 )
             else:
-                assert gate.bias is not None
                 pack_nonhash(
                     x,
                     scores_bf16.contiguous(),

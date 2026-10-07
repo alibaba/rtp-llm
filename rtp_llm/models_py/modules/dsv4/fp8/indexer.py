@@ -595,8 +595,6 @@ class IndexerFP8(PoolBackedModule):
             return q
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
-            if not rope_view.is_cuda:
-                raise RuntimeError("IndexerFP8._compute_indexer_q expects CUDA tensors")
             from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
                 rope_only_inplace,
             )

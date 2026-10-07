@@ -1224,12 +1224,6 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
             )
         )
 
-    def test_b1_legacy_indexer_and_compressor_args(self) -> None:
-        """``use_varlen=False`` is rejected by the FP8 prefill path."""
-        stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=1, bind_indexer=True)
-        with self.assertRaisesRegex(RuntimeError, "requires varlen metadata"):
-            self._call(stub, [4], [10], use_varlen=False)
-
     def test_b2_varlen_threads_all_kwargs(self) -> None:
         """B==2: indexer.prepare receives every per-request tensor,
         compressor.prepare_metadata uses position_ids/req_id_per_token
@@ -1397,12 +1391,6 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         self.assertIsNotNone(wm.dense_cmp_topk)
         # N=(256+128)//128=3, T=128.
         self.assertEqual(wm.dense_cmp_topk.shape, (128, 3))
-
-    def test_b1_legacy_compressor_call(self) -> None:
-        """``use_varlen=False`` is rejected by the FP8 prefill path."""
-        stub = _make_no_bind_stub(win=512, compress_ratio=128, n_reqs=1)
-        with self.assertRaisesRegex(RuntimeError, "requires varlen metadata"):
-            self._call(stub, [256], [128], use_varlen=False)
 
     def test_b2_varlen_compressor_and_workspace_dense_topk(self) -> None:
         """B==2: compressor gets is_batched=True + per-request tensors;

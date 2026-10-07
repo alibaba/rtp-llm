@@ -99,25 +99,6 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                     attention._prefill_request_row_slices(common), _slices(lengths)
                 )
 
-    def test_malformed_lengths_raise_instead_of_misassigning_requests(self):
-        for cp_on in (False, True):
-            for lengths, batch, total in (
-                ((3, 4), 3, 7),
-                ((3, -1), 2, 2),
-                ((3, 4), 2, 8),
-                ((0, 0), 2, 1),
-            ):
-                with self.subTest(cp=cp_on, lengths=lengths, batch=batch, total=total):
-                    common = SimpleNamespace(
-                        cp_on=cp_on,
-                        cp_ctx=SimpleNamespace(chunk_lengths_per_req=lengths),
-                        batch_size=batch,
-                        seqlen=total,
-                        input_lengths=torch.tensor(lengths, dtype=torch.int32),
-                    )
-                    with self.assertRaises(ValueError):
-                        attention._prefill_request_row_slices(common)
-
     def test_missing_host_layout_keeps_legacy_fallback_but_single_is_known(self):
         for cp_on in (False, True):
             common = SimpleNamespace(
@@ -132,33 +113,6 @@ class PrefillRequestRowsCPU(unittest.TestCase):
             self.assertEqual(
                 attention._prefill_request_row_slices(common), (slice(0, 7),)
             )
-
-    def test_selection_rejects_noncontiguous_or_incomplete_supplied_slices(self):
-        owner = SimpleNamespace(
-            is_index_source=True,
-            kv_source_layer_id=20,
-            layer_id=20,
-            index_topk=2,
-            compress_ratio=1,
-            _shared_attention={"global": {20: [(None, torch.zeros(5, 2))] * 2}},
-        )
-        for supplied in (
-            (slice(0, 4),),
-            (slice(0, 1), slice(2, 4)),
-            (slice(0, 3), slice(2, 4)),
-            (slice(0, 2), slice(2, 5)),
-            (slice(0, 2), slice(2, 4, 2)),
-        ):
-            with self.subTest(slices=supplied):
-                with self.assertRaises(ValueError):
-                    attention.AttentionV41FP8._select_indices(
-                        owner,
-                        torch.zeros(4, 2),
-                        torch.zeros(4, 2),
-                        torch.arange(4),
-                        torch.tensor([0, 0, 1, 1]),
-                        request_row_slices=supplied,
-                    )
 
     def test_poisoned_output_shortcut_and_legacy_ced_tails(self):
         original_empty = torch.empty

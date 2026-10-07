@@ -291,53 +291,7 @@ def _block_m(tokens: int) -> int:
         block_m = int(value)
     else:
         block_m = 8 if tokens >= 2048 else (4 if tokens >= 1024 else 2)
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError(
-            "invalid DSV4_MEGA_MOE_GATE_PACK_BLOCK_M="
-            f"{block_m}; expected 1, 2, 4, or 8"
-        )
     return block_m
-
-
-def _validate_common(
-    x: torch.Tensor,
-    scores_bf16: torch.Tensor,
-    out_fp8: torch.Tensor,
-    out_sf: torch.Tensor,
-    out_indices: torch.Tensor,
-    out_weights: torch.Tensor,
-) -> tuple[int, int, int, int]:
-    if triton is None:
-        raise RuntimeError("triton is unavailable")
-    if not x.is_cuda:
-        raise RuntimeError("MegaMoE gate-pack requires CUDA tensors")
-    if x.dtype != torch.bfloat16:
-        raise ValueError(f"x must be bfloat16, got {x.dtype}")
-    if scores_bf16.dtype != torch.bfloat16:
-        raise ValueError(f"scores_bf16 must be bfloat16, got {scores_bf16.dtype}")
-    if x.dim() != 2 or scores_bf16.dim() != 2:
-        raise ValueError(
-            f"x/scores_bf16 must be 2D, got {tuple(x.shape)} / {tuple(scores_bf16.shape)}"
-        )
-    tokens, dim = x.shape
-    score_tokens, experts = scores_bf16.shape
-    if score_tokens != tokens:
-        raise ValueError(f"scores rows {score_tokens} must match x rows {tokens}")
-    if dim % 128 != 0:
-        raise ValueError(f"MegaMoE gate-pack requires D % 128 == 0, got D={dim}")
-    if out_sf.shape[1] != dim // 128:
-        raise ValueError(
-            f"out_sf shape mismatch: expected second dim {dim // 128}, got {out_sf.shape}"
-        )
-    if out_indices.shape != out_weights.shape:
-        raise ValueError("out_indices and out_weights must share [T, topk] shape")
-    if out_indices.shape[0] != tokens:
-        raise ValueError("router output row count must match tokens")
-    if out_indices.dtype != torch.int64:
-        raise ValueError(f"out_indices must be int64, got {out_indices.dtype}")
-    if out_weights.dtype != torch.float32:
-        raise ValueError(f"out_weights must be float32, got {out_weights.dtype}")
-    return tokens, dim, experts, out_indices.shape[1]
 
 
 def fused_mega_moe_gate_pack_nonhash(
@@ -352,13 +306,9 @@ def fused_mega_moe_gate_pack_nonhash(
     route_scale: float,
     norm_eps: float = 1.0e-12,
 ) -> None:
-    tokens, dim, experts, topk = _validate_common(
-        x, scores_bf16, out_fp8, out_sf, out_indices, out_weights
-    )
-    if bias.dtype != torch.float32 or bias.dim() != 1 or bias.numel() != experts:
-        raise ValueError(
-            f"bias must be [E] float32 with E={experts}, got {tuple(bias.shape)} {bias.dtype}"
-        )
+    tokens, dim = x.shape
+    experts = scores_bf16.shape[1]
+    topk = out_indices.shape[1]
     if tokens == 0:
         return
     block_m = _block_m(tokens)
@@ -408,17 +358,9 @@ def fused_mega_moe_gate_pack_hash(
     route_scale: float,
     norm_eps: float = 1.0e-12,
 ) -> None:
-    tokens, dim, experts, topk = _validate_common(
-        x, scores_bf16, out_fp8, out_sf, out_indices, out_weights
-    )
-    if input_ids.dim() != 1 or input_ids.numel() != tokens:
-        raise ValueError(
-            f"input_ids must be [T] with T={tokens}, got {tuple(input_ids.shape)}"
-        )
-    if tid2eid.dim() != 2 or tid2eid.shape[1] != topk:
-        raise ValueError(
-            f"tid2eid must be [vocab, topk={topk}], got {tuple(tid2eid.shape)}"
-        )
+    tokens, dim = x.shape
+    experts = scores_bf16.shape[1]
+    topk = out_indices.shape[1]
     if tokens == 0:
         return
     block_m = _block_m(tokens)

@@ -48,13 +48,6 @@ def is_supported(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
     )
 
 
-def _check_pool(pool_3d: torch.Tensor, slots: torch.Tensor) -> None:
-    if not is_supported(pool_3d, slots):
-        raise ValueError(
-            "V4.1 SWA requires a CUDA uint8 [pages, entries, 528] pool and integer slots"
-        )
-
-
 def _valid_keys(kv, device, rows):
     return (
         kv.device == device
@@ -232,11 +225,6 @@ def quantize_and_insert_swa_k_cache(
     Valid slots must be in range and unique within a launch. Ring writers
     must apply their normal ownership mask before calling this function.
     """
-    _check_pool(pool_3d, slots)
-    if not _valid_keys(kv, pool_3d.device, slots.numel()):
-        raise ValueError(
-            "V4.1 SWA keys must be [N, 512] floating rows on the cache device"
-        )
     if slots.numel() == 0:
         return
     _quantize_and_insert_swa_kernel[(slots.numel(),)](
@@ -258,20 +246,9 @@ def dequantize_swa_k_cache(
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Gather to ``[slots.numel(), 512]``; masked slots produce zero rows."""
-    _check_pool(pool_3d, slots)
     if out is None:
         out = torch.empty(
             (slots.numel(), HEAD_DIM), dtype=out_dtype, device=pool_3d.device
-        )
-    if (
-        out.device != pool_3d.device
-        or out.shape != (slots.numel(), HEAD_DIM)
-        or out.stride(1) != 1
-        or out.stride(0) < HEAD_DIM
-        or out.dtype not in (torch.bfloat16, torch.float16, torch.float32)
-    ):
-        raise ValueError(
-            "V4.1 SWA output must be [N, 512] floating rows on the cache device"
         )
     if slots.numel():
         _dequantize_swa_kernel[(slots.numel(),)](
@@ -286,32 +263,6 @@ def dequantize_swa_k_cache(
     return out
 
 
-def _check_gather_output(out, device, slot_mapping, gather_lens, offset):
-    if (
-        slot_mapping.ndim != 2
-        or out.ndim != 3
-        or out.shape[0] != slot_mapping.shape[0]
-        or out.shape[2] != HEAD_DIM
-        or out.stride(2) != 1
-        or out.stride(1) < HEAD_DIM
-        or out.stride(0) < out.shape[1] * out.stride(1)
-        or out.device != device
-        or out.dtype not in (torch.bfloat16, torch.float16, torch.float32)
-        or offset < 0
-        or offset + slot_mapping.shape[1] > out.shape[1]
-    ):
-        raise ValueError("Invalid V4.1 SWA gather output/slot shape or offset")
-    if gather_lens is not None and (
-        gather_lens.device != out.device
-        or gather_lens.dtype not in (torch.int32, torch.int64)
-        or gather_lens.shape != (out.shape[0],)
-        or not gather_lens.is_contiguous()
-    ):
-        raise ValueError(
-            "SWA gather lengths must be a contiguous device integer [B] tensor"
-        )
-
-
 def dequantize_and_gather_k_cache_slots(
     out: torch.Tensor,
     k_cache: torch.Tensor,
@@ -324,8 +275,6 @@ def dequantize_and_gather_k_cache_slots(
     Rows outside each request's gather length are left untouched. Lengths
     remain on device, including during CUDA graph capture and replay.
     """
-    _check_pool(k_cache, slot_mapping)
-    _check_gather_output(out, k_cache.device, slot_mapping, gather_lens, offset)
     if slot_mapping.numel():
         _gather_swa_kernel[tuple(slot_mapping.shape)](
             k_cache,
@@ -347,18 +296,6 @@ def _gather_swa_rank_major(
     out, gathered, slots, lengths, offset, compact_blocks, local_bytes, entries
 ):
     """Decode private or all-gathered CP4 bytes; this helper has no collective."""
-    if not (
-        gathered.is_cuda
-        and gathered.dtype == torch.uint8
-        and gathered.is_contiguous()
-        and gathered.numel() == 4 * compact_blocks * local_bytes
-        and entries == 136
-        and local_bytes == 18048
-        and slots.device == gathered.device
-        and slots.dtype in (torch.int32, torch.int64)
-    ):
-        raise ValueError("Invalid V4.1 rank-major SWA gather metadata")
-    _check_gather_output(out, gathered.device, slots, lengths, offset)
     if slots.numel():
         _gather_swa_kernel[tuple(slots.shape)](
             gathered,
@@ -394,22 +331,6 @@ def _cp_addressing_supported(raw, slots, unique, entries, cp_size):
     )
 
 
-def _check_cp_pool(
-    raw: torch.Tensor, full_entries_per_block: int, cp_rank: int, cp_size: int
-) -> None:
-    if (
-        not raw.is_cuda
-        or raw.dtype != torch.uint8
-        or raw.ndim != 2
-        or raw.stride(1) != 1
-        or full_entries_per_block <= 0
-        or cp_size <= 0
-        or not 0 <= cp_rank < cp_size
-        or raw.shape[1] * cp_size < full_entries_per_block * ENTRY_BYTES
-    ):
-        raise ValueError("Invalid V4.1 CP SWA byte-sliced pool contract")
-
-
 def is_supported_fresh_store(
     k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
 ):
@@ -421,7 +342,17 @@ def is_supported_fresh_store(
     if compaction is None or fresh_slots is None:
         return False
     try:
-        _check_cp_pool(raw, full_entries_per_block, cp_rank, cp_size)
+        if (
+            not raw.is_cuda
+            or raw.dtype != torch.uint8
+            or raw.ndim != 2
+            or raw.stride(1) != 1
+            or full_entries_per_block <= 0
+            or cp_size <= 0
+            or not 0 <= cp_rank < cp_size
+            or raw.shape[1] * cp_size < full_entries_per_block * ENTRY_BYTES
+        ):
+            return False
     except (ValueError, AttributeError):
         return False
     return (
@@ -470,40 +401,7 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     Optional fresh output is a disjoint contiguous BF16 [B, M, 512] workspace.
     Only fresh_slots rows are written, with original BF16 bits preserved.
     """
-    _check_cp_pool(k_cache_raw, full_entries_per_block, cp_rank, cp_size)
-    if slot_mapping.numel() != compaction.compact_slots.numel():
-        raise ValueError("CP SWA compaction and original slots must have equal length")
     unique_blocks = compaction.unique_blocks
-    if fresh_out is not None:
-        if not is_supported_fresh_store(
-            k,
-            k_cache_raw,
-            slot_mapping,
-            full_entries_per_block,
-            cp_rank,
-            cp_size,
-            compaction,
-            fresh_slots,
-        ) or not (
-            fresh_out.device == k.device
-            and fresh_out.dtype == torch.bfloat16
-            and fresh_out.ndim == 3
-            and fresh_out.shape[2] == HEAD_DIM
-            and fresh_out.is_contiguous()
-            and all(
-                fresh_out.untyped_storage().data_ptr() != t.untyped_storage().data_ptr()
-                for t in (
-                    k,
-                    k_cache_raw,
-                    compaction.compact_slots,
-                    unique_blocks,
-                    fresh_slots,
-                )
-            )
-        ):
-            raise ValueError("Unsupported or aliased V4.1 SWA fresh workspace")
-    elif fresh_slots is not None:
-        raise ValueError("SWA fresh slots require fresh output")
     if slot_mapping.numel() == 0 or (unique_blocks.numel() == 0 and fresh_out is None):
         return
     local_bytes = k_cache_raw.shape[1]
@@ -602,9 +500,6 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     compaction: CPByteSlicedSlotCompaction,
 ) -> None:
     """All-gather byte slices and decode qualified rank-major storage directly."""
-    _check_cp_pool(k_cache_raw, full_entries_per_block, cp_rank, cp_size)
-    if slot_mapping.shape != compaction.compact_slots.shape:
-        raise ValueError("CP SWA compaction and original slots must have equal shape")
     if slot_mapping.numel() == 0:
         return
     unique_blocks = compaction.unique_blocks
@@ -635,8 +530,6 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
             if gathered is None:
                 gathered = all_gather(local, group=Group.TP)
-            if gathered.numel() != cp_size * local.numel():
-                raise RuntimeError("CP SWA all_gather size does not match cp_size")
             if rank_major and gathered.is_contiguous():
                 _gather_swa_rank_major(
                     out,

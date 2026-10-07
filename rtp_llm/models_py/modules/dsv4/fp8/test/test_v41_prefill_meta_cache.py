@@ -102,6 +102,37 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_release_rechecks_changed_consumers_and_noncontiguous_layers(self):
+        future = SimpleNamespace(
+            kv_source_layer_id=2, index_source_layer_id=4, is_index_source=True
+        )
+        # Registry insertion order need not follow execution order. Missing
+        # source attributes retain the existing None-source semantics.
+        layers = {9: future, 3: SimpleNamespace(), 1: SimpleNamespace()}
+        shared = {
+            "layers": layers,
+            "global": {None: object(), 2: object(), 7: object()},
+            "topk": {4: object(), 7: object()},
+            "candidates": object(),
+            "prefill_chunk_meta": object(),
+            "prefill_index_plan": object(),
+        }
+        release_v41_prefill_shared(shared, 1)
+        self.assertEqual(set(shared["global"]), {None, 2})
+        self.assertEqual(set(shared["topk"]), {4})
+        self.assertIn("candidates", shared)
+
+        future.kv_source_layer_id = 7
+        future.index_source_layer_id = 7
+        future.is_index_source = False
+        release_v41_prefill_shared(shared, 3)
+        self.assertEqual(shared["global"], {})
+        self.assertEqual(shared["topk"], {})
+        self.assertNotIn("prefill_chunk_meta", shared)
+        self.assertNotIn("prefill_index_plan", shared)
+        self.assertNotIn("candidates", shared)
+        self.assertIs(shared["layers"], layers)
+
     def test_shared_tensors_live_until_their_last_consumer(self):
         layers = {
             i: SimpleNamespace(
@@ -997,15 +1028,6 @@ class V41SwaHostPlanCudaTest(unittest.TestCase):
                         table, host, cp, entries=136, span=512, num_blocks=33
                     )
                 )
-        with self.assertRaisesRegex(ValueError, "physical pool"):
-            try_host_slot_metadata(
-                table,
-                torch.full_like(host, 33),
-                original,
-                entries=136,
-                span=512,
-                num_blocks=33,
-            )
 
 
 if __name__ == "__main__":

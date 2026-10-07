@@ -174,7 +174,6 @@ def _prefill_raw_x_groups(x, cp_ctx, groups):
             while t0 < real_end:
                 _, _, rows = next(segments)
                 # Complete-request groups never cut an original owner segment.
-                assert t0 + rows <= real_end
                 offset = t0 - real_start
                 yield t0, full[offset : offset + rows]
                 t0 += rows
@@ -202,7 +201,6 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
         offsets, columns = [], []
         while t0 < real_end:
             owner, start, rows = next(segments)
-            assert t0 + rows <= real_end
             group_tiles.append((t0, rows))
             if owner == cp_ctx.cp_rank:
                 offset = start - local_start
@@ -279,18 +277,12 @@ def _prefill_request_row_slices(common):
             lengths = lengths.detach().cpu().tolist()
     if lengths is None:
         return None
-    if len(lengths) != common.batch_size:
-        raise ValueError("V4.1 query row lengths do not match the request count")
     slices = []
     start = 0
     for length in lengths:
-        if length < 0:
-            raise ValueError("V4.1 query row lengths must be nonnegative")
         stop = start + length
         slices.append(slice(start, stop))
         start = stop
-    if start != common.seqlen:
-        raise ValueError("V4.1 query row lengths do not cover the local queries")
     return tuple(slices)
 
 
@@ -578,10 +570,6 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
     plan = sparse_prefill_indexer.prepare_plan(
         candidates, visible, key_count, block_size
     )
-    if plan is None:
-        raise RuntimeError(
-            "V4.1 sparse prefill plan rejected a supported scoring chunk"
-        )
     limit = max(
         0, int(os.environ.get("DSV41_SPARSE_PREFILL_PLAN_MAX_BYTES", 256 * 1024**2))
     )
@@ -692,8 +680,6 @@ class AttentionV41FP8(AttentionFP8):
 
         with record_function_range("dsv41.prefill.qkv.fused_attn_norm_input_quant"):
             result = rmsnorm_group32_quant(x, norm_weight, norm_eps, out_norm=x)
-        if result is None:
-            raise ValueError("V4.1 norm/quant requires the supported prefill gate")
         norm, quantized, scales = result
         return norm, (quantized, scales)
 
@@ -765,11 +751,6 @@ class AttentionV41FP8(AttentionFP8):
             replay_start is not None
             and getattr(common.cp_ctx, "swa_replay_starts_host", None) is None
         ):
-            if kv.shape[0] != self.window_size:
-                raise ValueError(
-                    "bounded decoder KV must contain exactly 128 rows; "
-                    "selected replay rows mismatch"
-                )
             slots = slots[replay_start:]
             if compaction is not None:
                 compaction = compaction._replace(
@@ -777,8 +758,6 @@ class AttentionV41FP8(AttentionFP8):
                 )
         elif cp_swa_replay_starts(common.cp_ctx) is not None:
             positions = common.cp_ctx.gather_restore_positions
-            if positions is None or kv.shape[0] != positions.numel():
-                raise ValueError("bounded decoder KV must match selected replay rows")
             slots = slots.index_select(0, positions)
             if compaction is not None:
                 compaction = compaction._replace(
@@ -1125,10 +1104,6 @@ class AttentionV41FP8(AttentionFP8):
         batched_groups=False,
     ):
         """Publish global pools in sequence order, carrying pairs across tiles."""
-        if projected_tiles is not None and raw_tiles is not None:
-            raise ValueError("Global producer accepts either raw or projected tiles")
-        if batched_groups and (not grouped_projection or projected_tiles is None):
-            raise ValueError("Batched producer requires complete projected groups")
         owner = self._owner()
         ratio = self.compress_ratio
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
@@ -1282,10 +1257,6 @@ class AttentionV41FP8(AttentionFP8):
         if batched_groups:
             from . import _v41_batched_producer as batched_producer
 
-            if producer_meta is None:
-                raise ValueError(
-                    "Batched producer requires the original segment metadata"
-                )
         previous = None
         producer_seq_ends = (
             producer_meta.seq_ends if producer_meta is not None else None
@@ -1334,8 +1305,6 @@ class AttentionV41FP8(AttentionFP8):
                     producer_meta, t0, t1, ratio=ratio, request_lengths=lengths_host
                 )
                 prepared = batched_producer.prepare(group_plan, x_full.device)
-                if prepared is None:
-                    raise ValueError("Unsupported batched producer group")
                 compact = slice(group_plan.first, group_plan.stop)
                 boundary_idx = prepared.boundaries
                 boundary_pos = producer_meta.positions[compact]
@@ -1434,8 +1403,6 @@ class AttentionV41FP8(AttentionFP8):
                     else None
                 )
             )
-            if batched_groups and latent is None:
-                raise ValueError("Batched compressor rejected the projected group")
             main_stored = latent is not None
             if latent is None:
                 if ratio == 2:
@@ -1473,10 +1440,9 @@ class AttentionV41FP8(AttentionFP8):
                 # The immutable predecessor snapshot and old carry are consumed
                 # before any ring writes or publication of the next tile carry.
                 if batched_groups:
-                    if not batched_producer.store_states(
+                    batched_producer.store_states(
                         values, scores, state_slots, state_pool, slots_are_unique=True
-                    ):
-                        raise ValueError("Batched producer rejected state publication")
+                    )
                 elif producer_meta is None:
                     self._write_states(
                         values,
@@ -1674,22 +1640,6 @@ class AttentionV41FP8(AttentionFP8):
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         globals_by_req = shared["global"][self.kv_source_layer_id]
-        if request_row_slices is not None:
-            if len(request_row_slices) != len(globals_by_req):
-                raise ValueError("V4.1 query slices do not match the request count")
-            end = 0
-            for rows in request_row_slices:
-                if (
-                    not isinstance(rows, slice)
-                    or rows.step not in (None, 1)
-                    or rows.start != end
-                    or rows.stop is None
-                    or rows.stop < end
-                ):
-                    raise ValueError("V4.1 query slices must form contiguous ranges")
-                end = rows.stop
-            if end != x.shape[0]:
-                raise ValueError("V4.1 query slices do not cover the local queries")
         out = torch.full(
             (x.shape[0], self.index_topk), -1, dtype=torch.int32, device=x.device
         )
@@ -1921,28 +1871,16 @@ class AttentionV41FP8(AttentionFP8):
                                 weights[output_rows],
                                 plan,
                             )
-                            if logits is None:
-                                raise RuntimeError(
-                                    "V4.1 sparse prefill score layout changed after dispatch"
-                                )
                         with record_function_range("dsv41.prefill.indexer.deepselect"):
                             selected = prefill_deepselect.try_select_sparse_tokens(
                                 logits, plan.end
                             )
-                            if selected is None:
-                                raise RuntimeError(
-                                    "V4.1 sparse prefill DeepSelect layout is unsupported"
-                                )
                             mapped = sparse_prefill_indexer.remap(
                                 selected,
                                 plan,
                                 logits=logits,
                                 out=out[output_rows] if contiguous else None,
                             )
-                            if mapped is None:
-                                raise RuntimeError(
-                                    "V4.1 sparse prefill remap layout is unsupported"
-                                )
                             if not contiguous:
                                 out[output_rows] = mapped
                         continue
@@ -2053,27 +1991,9 @@ class AttentionV41FP8(AttentionFP8):
         lengths_host = self._host_prefill_lengths(common)
         if self.swa_bounded_replay:
             prefixes = self._host_prefill_prefixes(common)
-            if any(
-                p > 0 and n < self.window_size for p, n in zip(prefixes, lengths_host)
-            ):
-                raise ValueError(
-                    "bounded replay cache reuse must leave 128 fresh tokens"
-                )
             replay_starts = cp_swa_replay_starts(common.cp_ctx)
             if replay_starts is not None:
                 sizes = [min(n, self.window_size) for n in lengths_host]
-                if (
-                    len(replay_starts) != len(sizes)
-                    or len(prefixes) != len(sizes)
-                    or any(
-                        s != n - size
-                        for n, size, s in zip(lengths_host, sizes, replay_starts)
-                    )
-                    or qkv.kv_full.shape[0] != sum(sizes)
-                ):
-                    raise ValueError(
-                        "bounded decoder KV must match per-request replay rows"
-                    )
                 return list(qkv.kv_full.split(sizes)), [
                     p + s for p, s in zip(prefixes, replay_starts)
                 ]
@@ -2642,10 +2562,6 @@ class AttentionV41FP8(AttentionFP8):
                 logical_entries_per_block=keys.logical_entries_per_block,
                 positions=positions.reshape(T),
             )
-            if all_logits is None:
-                raise RuntimeError(
-                    "V4.1 paged indexer support changed within a forward"
-                )
         else:
             weights = (
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5

@@ -129,14 +129,6 @@ def quantize_v4_kv_decode(
         kv_cache_packed: ``[num_blocks, block_size, 584]`` uint8 — packed
             FP8 cache. Modified in place.
     """
-    assert (
-        k_bf16.dim() == 2 and k_bf16.shape[1] == NOPE_DIM + ROPE_DIM
-    ), f"k_bf16 expected [T, 512], got {tuple(k_bf16.shape)}"
-    assert (
-        kv_cache_packed.dtype == torch.uint8
-        and kv_cache_packed.shape[-1] == ENTRY_BYTES
-    ), f"kv_cache_packed expected [..., 584] uint8, got {kv_cache_packed.shape}/{kv_cache_packed.dtype}"
-
     # Split V4 K into (kv_c[NoPE], k_pe[RoPE])
     kv_c = k_bf16[:, :NOPE_DIM].contiguous()
     k_pe = k_bf16[:, NOPE_DIM:].contiguous()

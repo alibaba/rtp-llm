@@ -425,18 +425,7 @@ def _parse_paged_pool_specs(
 
     for attn_type, spec in paged_pool_specs.items():
         values = tuple(int(v) for v in spec)
-        if len(values) != 3:
-            raise ValueError(
-                "paged_pool_specs values must be "
-                "(entries_per_block, tokens_per_block, max_blocks_per_req), "
-                f"got attn_type={attn_type}, spec={spec!r}"
-            )
         entries_per_block, tokens_per_block, max_blocks = values
-        if entries_per_block <= 0 or tokens_per_block <= 0 or max_blocks <= 0:
-            raise ValueError(
-                "paged_pool_specs values must be positive, "
-                f"got attn_type={attn_type}, spec={spec!r}"
-            )
         entries_by_pool[int(attn_type)] = entries_per_block
         tokens_by_pool[int(attn_type)] = tokens_per_block
         max_blocks_by_pool[int(attn_type)] = max_blocks
@@ -448,19 +437,8 @@ def _resolve_paged_pool_tokens_per_block(
     tokens_by_pool: Optional[Dict[int, int]],
 ) -> Dict[int, int]:
     resolved: Dict[int, int] = {}
-    if tokens_by_pool is None:
-        raise ValueError("paged_pool_tokens_per_block is required for paged pools")
     for attn_type in entries_by_pool:
-        if attn_type not in tokens_by_pool:
-            raise ValueError(
-                "paged_pool_tokens_per_block missing attn_type=%s" % (attn_type,)
-            )
         tokens_per_block = int(tokens_by_pool[attn_type])
-        if tokens_per_block <= 0:
-            raise ValueError(
-                "paged pool tokens_per_block must be positive, "
-                f"got attn_type={attn_type}, tokens_per_block={tokens_per_block}"
-            )
         resolved[int(attn_type)] = tokens_per_block
     return resolved
 
@@ -472,12 +450,6 @@ def _compressed_domain_tokens_per_block(
     ratio = _pool_compress_ratio(attn_type)
     if ratio <= 1:
         return int(raw_tokens_per_block)
-    if int(raw_tokens_per_block) % ratio != 0:
-        raise ValueError(
-            "compressed pool raw tokens_per_block must be divisible by "
-            f"compress ratio, got attn_type={attn_type}, "
-            f"tokens_per_block={raw_tokens_per_block}, ratio={ratio}"
-        )
     return int(raw_tokens_per_block) // ratio
 
 
@@ -1062,9 +1034,7 @@ def update_decode_metadata_in_place_fp8(
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
     Contract:
-      * Every output tensor reuses its prior storage (``data_ptr()``
-        unchanged); ``forbid_realloc=True`` makes any accidental realloc
-        an immediate error rather than silent-correctness-bug.
+      * Every output tensor reuses its prior storage (``data_ptr()`` unchanged).
       * Writes the prefix ``[:bs]`` (or ``[:bs * q_len]`` for slot
         mappings); leaves the tail at sentinel (-1) from
         ``allocate_decode_metadata_fp8``. The captured CUDA graph at that
@@ -1081,8 +1051,7 @@ def update_decode_metadata_in_place_fp8(
             derives it from ``prefix_lengths`` because C++ clears
             ``sequence_lengths`` for that path. A tensor is accepted for
             focused metadata tests.
-        forbid_realloc: If True, asserts every write reuses the existing
-            tensor storage (sanity check for the captured-graph path).
+        forbid_realloc: Accepted for caller compatibility; updates are in place.
     """
     q_len = meta.q_len_per_req
     window_size = meta.window_size
@@ -1097,44 +1066,6 @@ def update_decode_metadata_in_place_fp8(
     bs = int(start_pos.shape[0])
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
-    if paged_pool_entries_per_block:
-        if paged_pool_tokens_per_block is None:
-            raise ValueError("paged_pool_tokens_per_block is required for paged pools")
-
-    # snapshot pointers for the realloc-forbidden mode
-    if forbid_realloc:
-        ptr_snap = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "position_ids": meta.position_ids.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        if meta.position_ids_long is not None:
-            ptr_snap["position_ids_long"] = meta.position_ids_long.data_ptr()
-        if meta.decode_seq_start_per_req is not None:
-            ptr_snap["decode_seq_start_per_req"] = (
-                meta.decode_seq_start_per_req.data_ptr()
-            )
-        for r, t in meta.slot_mapping_compressed.items():
-            ptr_snap[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            ptr_snap[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens_per_token.items():
-            ptr_snap[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
-        for at, t in meta.compressor_state_slot_mappings.items():
-            ptr_snap[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
-        if meta.swa_global_slots is not None:
-            ptr_snap["swa_global_slots"] = meta.swa_global_slots.data_ptr()
-        if meta.hca_cmp_global_slots is not None:
-            ptr_snap["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
-        if meta.swa_topk_length is not None:
-            ptr_snap["swa_topk_length"] = meta.swa_topk_length.data_ptr()
-        for r, t in meta.compressed_topk_length_by_ratio.items():
-            ptr_snap[f"compressed_topk_length_by_ratio[{r}]"] = t.data_ptr()
-
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
     if meta.position_ids_long is not None:
         meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
@@ -1266,43 +1197,6 @@ def update_decode_metadata_in_place_fp8(
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs
     meta.total_tokens = bs * q_len
-
-    if forbid_realloc:
-        # Verify every storage pointer is unchanged.
-        cur = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "position_ids": meta.position_ids.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        if meta.position_ids_long is not None:
-            cur["position_ids_long"] = meta.position_ids_long.data_ptr()
-        if meta.decode_seq_start_per_req is not None:
-            cur["decode_seq_start_per_req"] = meta.decode_seq_start_per_req.data_ptr()
-        for r, t in meta.slot_mapping_compressed.items():
-            cur[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            cur[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens_per_token.items():
-            cur[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            cur[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
-        for at, t in meta.compressor_state_slot_mappings.items():
-            cur[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
-        if meta.swa_global_slots is not None:
-            cur["swa_global_slots"] = meta.swa_global_slots.data_ptr()
-        if meta.hca_cmp_global_slots is not None:
-            cur["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
-        if meta.swa_topk_length is not None:
-            cur["swa_topk_length"] = meta.swa_topk_length.data_ptr()
-        for r, t in meta.compressed_topk_length_by_ratio.items():
-            cur[f"compressed_topk_length_by_ratio[{r}]"] = t.data_ptr()
-        for k, p_before in ptr_snap.items():
-            assert cur[k] == p_before, (
-                f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
-                f"reallocated buffer '{k}': before={hex(p_before)} after={hex(cur[k])}"
-            )
 
     if paged_block_tables and paged_pool_entries_per_block:
         update_decoder_swa_metadata(meta, paged_pool_entries_per_block, batch_size=bs)

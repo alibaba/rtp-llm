@@ -38,7 +38,7 @@ def _metadata(m=33):
             dtype=dtype,
             is_cuda=True,
             requires_grad=False,
-            stride=lambda: stride,
+            stride=lambda axis=None: stride if axis is None else stride[axis],
             is_contiguous=lambda: True,
             data_ptr=lambda: 256,
         )
@@ -54,6 +54,95 @@ def _metadata(m=33):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def test_linear_valid_quantized_calls_keep_output_and_gemm_geometry(self):
+        linear_cls = self._linear_class()
+        linear = linear_cls.__new__(linear_cls)
+        torch.nn.Module.__init__(linear)
+        linear.N, linear.K = 8, 128
+        linear.weight = torch.ones(8, 128, dtype=torch.float8_e4m3fn)
+        linear.weight_scales = torch.ones(8, 1, dtype=torch.int32)
+        calls = []
+
+        def gemm(a, b, output, *, recipe):
+            calls.append((a, b, output, recipe))
+            output.copy_(a[0].float() @ b[0].float().T)
+
+        with mock.patch.dict(
+            sys.modules, {"deep_gemm": SimpleNamespace(fp8_fp4_gemm_nt=gemm)}
+        ):
+            for shape in ((33, 128), (2, 17, 128), (0, 128)):
+                for supplied in (False, True):
+                    with self.subTest(shape=shape, supplied=supplied):
+                        q = torch.ones(shape, dtype=torch.float8_e4m3fn)
+                        rows = q.numel() // 128
+                        scales = torch.empty(
+                            1, max(1, (rows + 3) // 4 * 4), dtype=torch.int32
+                        ).T[:rows]
+                        out = (
+                            torch.empty((*shape[:-1], 8), dtype=torch.bfloat16)
+                            if supplied
+                            else None
+                        )
+                        calls.clear()
+                        actual = linear.forward_quantized(q, scales, out=out)
+                        self.assertEqual(actual.shape, (*shape[:-1], 8))
+                        self.assertEqual(actual.dtype, torch.bfloat16)
+                        if supplied:
+                            self.assertIs(actual, out)
+                        self.assertEqual(len(calls), int(rows > 0))
+                        if rows:
+                            a, b, output, recipe = calls[0]
+                            self.assertEqual(a[0].shape, (rows, 128))
+                            self.assertIs(a[1], scales)
+                            self.assertIs(b[0], linear.weight)
+                            self.assertIs(b[1], linear.weight_scales)
+                            self.assertEqual(output.shape, (rows, 8))
+                            self.assertEqual(output.data_ptr(), actual.data_ptr())
+                            self.assertEqual(recipe, (1, 1, 32))
+                            torch.testing.assert_close(
+                                actual, torch.full_like(actual, 128)
+                            )
+
+    def test_linear_forward_preserves_subclass_and_instance_dispatch(self):
+        linear_cls = self._linear_class()
+        calls = []
+        pair, output = (object(), object()), object()
+
+        class Custom(linear_cls):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
+            def _quantize_input(self, x):
+                calls.append("quantize")
+                return pair
+
+            def forward_quantized(self, q, scales, out=None):
+                calls.append(("subclass", q, scales, out))
+                return output
+
+        linear = Custom()
+        x, out = torch.ones(2, 128), object()
+        self.assertIs(linear.forward(x, out=out), output)
+        self.assertEqual(calls, ["quantize", ("subclass", *pair, out)])
+        linear.forward_quantized = mock.Mock(return_value=output)
+        self.assertIs(linear.forward(x, out=out), output)
+        linear.forward_quantized.assert_called_once_with(*pair, out=out)
+
+    @staticmethod
+    def _linear_class():
+        path = _ROOT.parent / "utils.py"
+        cls = next(
+            node
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.ClassDef) and node.name == "V41MXFP8Linear"
+        )
+        namespace = {"torch": torch}
+        exec(
+            compile(ast.Module(body=[cls], type_ignores=[]), str(path), "exec"),
+            namespace,
+        )
+        return namespace[cls.name]
+
     def test_disk_cache_reuses_host_architecture_but_separates_arm_and_x86(self):
         def compile_fixture(command, **kwargs):
             Path(command[command.index("-o") + 1]).write_bytes(b"compiled fixture")
@@ -107,8 +196,6 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             ):
                 self.assertEqual(op._legacy(511, None), small)
                 self.assertEqual(op._legacy(512, None), large)
-        with self.assertRaises(ValueError):
-            op._legacy(33, "unknown")
 
     def test_supported_metadata_and_unprepared_fallback_never_load(self):
         a, w = _metadata()
@@ -251,26 +338,40 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         self.assertFalse(op.is_supported((x, torch.empty(0)), (x, torch.empty(0))))
         self.assertFalse(op._device_supported(torch.device("cpu")))
 
-    def test_output_dtype_shape_stride_and_overlap_are_rejected(self):
-        a = (
-            torch.empty(8, 4, 4096, dtype=torch.float8_e4m3fn).transpose(0, 1),
-            torch.empty(4, 8, 32, dtype=torch.int32),
+    def test_supplied_output_preserves_launch_and_stream_lifetimes(self):
+        a, weight = _metadata()
+        output = (
+            SimpleNamespace(data_ptr=lambda: 512, shape=(33, 8192)),
+            SimpleNamespace(data_ptr=lambda: 768, shape=(33, 64)),
         )
-        w = (torch.empty(1), torch.empty(1))
-        good = (
-            torch.empty(4, 8192, dtype=torch.float8_e4m3fn),
-            torch.empty(64, 4, dtype=torch.int32).T,
+        recorded = []
+        for index, tensor in enumerate((*a, *weight, *output)):
+            tensor.record_stream = lambda stream, i=index: recorded.append((i, stream))
+        lib = SimpleNamespace(
+            v41_wo_a_is_current=mock.Mock(return_value=1),
+            v41_wo_a_launch=mock.Mock(return_value=0),
         )
-        op._validate_output(good, a, w)
-        bad = (
-            (good[0].float(), good[1]),
-            (good[0][:, :4096], good[1]),
-            (good[0], good[1].contiguous()),
-            (a[0].transpose(0, 1).flatten()[: 4 * 8192].view(4, 8192), good[1]),
+        handle = object()
+        stream = SimpleNamespace(cuda_stream=123)
+        with mock.patch.dict(
+            op._READY, {0: (lib, handle)}, clear=True
+        ), mock.patch.object(
+            op, "_device_supported", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "device"
+        ), mock.patch.object(
+            torch.cuda, "current_stream", return_value=stream
+        ), mock.patch.object(
+            op, "_output"
+        ) as allocate:
+            self.assertIs(
+                op.try_grouped_quant(a, weight, out=output, quant_kernel="v2"), output
+            )
+        allocate.assert_not_called()
+        lib.v41_wo_a_launch.assert_called_once_with(
+            handle, 256, 256, 256, 256, 512, 768, 33, 4096, 33 * 4096, False, 123
         )
-        for output in bad:
-            with self.subTest(shape=output[0].shape), self.assertRaises(ValueError):
-                op._validate_output(output, a, w)
+        self.assertEqual(recorded, [(i, stream) for i in range(6)])
 
     def test_warmup_cannot_load_inside_capture(self):
         _, w = _metadata()

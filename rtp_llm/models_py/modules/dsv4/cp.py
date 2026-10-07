@@ -197,10 +197,6 @@ class SyncCPGatherImpl:
         )
 
     def wait(self, handle: Any) -> torch.Tensor:
-        if not isinstance(handle, CPSyncGatherHandle):
-            raise TypeError(
-                f"SyncCPGatherImpl.wait expected CPSyncGatherHandle, got {type(handle)!r}"
-            )
         return handle.full_2d
 
 
@@ -224,19 +220,9 @@ class CudaAsyncCPGatherImpl:
     ) -> CPCudaAsyncGatherHandle:
         profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
-        if not local_2d.is_cuda:
-            raise RuntimeError("CudaAsyncCPGatherImpl requires CUDA tensor input")
-        if not torch.distributed.is_initialized():
-            raise RuntimeError(
-                "CudaAsyncCPGatherImpl requires initialized torch.distributed"
-            )
 
         process_group = collective_torch._get_group(Group.TP)
         world_size = torch.distributed.get_world_size(process_group)
-        if world_size != cp_ctx.cp_size:
-            raise RuntimeError(
-                f"CP gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
-            )
 
         gather_rows = world_size * local_2d.size(0)
         # Both compressor roles draw from the per-forward workspace (a dedicated
@@ -259,21 +245,16 @@ class CudaAsyncCPGatherImpl:
         # ``local_2d`` stays owned by the handle until ``wait`` joins the gather
         # on the compute stream. ``gathered`` is a per-forward workspace view.
         # Together those lifetimes replace allocator ``record_stream`` calls.
-        try:
-            with torch.cuda.stream(gather_stream):
-                with record_function_range(f"{profile_name}.launch"):
-                    work = torch.distributed.all_gather_into_tensor(
-                        gathered,
-                        local_2d,
-                        group=process_group,
-                        async_op=True,
-                    )
-                    completion_event = torch.cuda.Event()
-                    completion_event.record(gather_stream)
-        except Exception as exc:
-            raise RuntimeError(
-                "failed to launch CUDA CP all_gather_into_tensor"
-            ) from exc
+        with torch.cuda.stream(gather_stream):
+            with record_function_range(f"{profile_name}.launch"):
+                work = torch.distributed.all_gather_into_tensor(
+                    gathered,
+                    local_2d,
+                    group=process_group,
+                    async_op=True,
+                )
+                completion_event = torch.cuda.Event()
+                completion_event.record(gather_stream)
 
         return CPCudaAsyncGatherHandle(
             cp_ctx=cp_ctx,
@@ -288,10 +269,6 @@ class CudaAsyncCPGatherImpl:
         )
 
     def wait(self, handle: Any) -> torch.Tensor:
-        if not isinstance(handle, CPCudaAsyncGatherHandle):
-            raise TypeError(
-                f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
-            )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
@@ -361,8 +338,6 @@ def build_cp_context_for_forward(
 
 
 def _host_int_tuple(values: torch.Tensor) -> Tuple[int, ...]:
-    if values.dim() != 1:
-        raise ValueError(f"expected 1-D length metadata, got {tuple(values.shape)}")
     host_values = values if values.device.type == "cpu" else values.cpu()
     return tuple(int(value) for value in host_values.tolist())
 
@@ -386,12 +361,6 @@ def build_cp_context(
     if restore_indices.device != device:
         restore_indices = restore_indices.to(device, non_blocking=True)
     padded_seq_len = int(padding_mask.shape[0])
-
-    if cp_size * chunk_length != padded_seq_len:
-        raise ValueError(
-            f"cp_size({cp_size}) * chunk_length({chunk_length}) != "
-            f"padded_seq_len({padded_seq_len})"
-        )
 
     prepare_fusion_requested = False
     try:
@@ -692,7 +661,7 @@ def _cp_gather_2d(
     local_2d: torch.Tensor,
     cp_ctx: CPContext,
 ) -> torch.Tensor:
-    """Validate CP gather input and return contiguous token-major 2D data.
+    """Return contiguous token-major 2D data.
 
     Contract:
     - input shape is flattened ``[T_local, H]``;
@@ -700,18 +669,6 @@ def _cp_gather_2d(
     - no batch dimension is accepted here, so callers own any
       ``[1, T, H]`` squeeze/unsqueeze at module boundaries.
     """
-    if local_2d.dim() != 2:
-        raise ValueError(
-            f"CP gather expects 2D [T_local, H], got shape {tuple(local_2d.shape)}"
-        )
-    if local_2d.size(0) != cp_ctx.chunk_length:
-        raise ValueError(
-            f"CP gather T_local({local_2d.size(0)}) != cp_ctx.chunk_length({cp_ctx.chunk_length})"
-        )
-    if local_2d.size(1) <= 0:
-        raise ValueError(
-            f"CP gather hidden dimension must be positive, got shape {tuple(local_2d.shape)}"
-        )
     if local_2d.is_contiguous():
         return local_2d
     return local_2d.contiguous()
@@ -732,27 +689,10 @@ def _cp_restore_gathered_full_2d(
     rearranged tensor each gather. The prefix-restore path takes the view
     fast path and ignores ``out``.
     """
-    if gathered.dim() != 2:
-        raise ValueError(
-            f"CP gathered tensor must be 2D [T_padded, H], got shape {tuple(gathered.shape)}"
-        )
-    expected_rows = cp_ctx.cp_size * cp_ctx.chunk_length
-    if gathered.size(0) != expected_rows:
-        raise ValueError(
-            f"CP gathered rows({gathered.size(0)}) != expected rows({expected_rows})"
-        )
     if getattr(cp_ctx, "gather_restore_positions", None) is not None:
         expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
         if out is None:
             out = gathered.new_empty(expected_shape)
-        elif (
-            out.shape != expected_shape
-            or out.dtype != gathered.dtype
-            or out.device != gathered.device
-        ):
-            raise ValueError(
-                "CED CP restore buffer does not match the original KV view"
-            )
         full = out.zero_().index_copy_(
             0,
             cp_ctx.gather_restore_positions,
@@ -762,30 +702,10 @@ def _cp_restore_gathered_full_2d(
         full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
     else:
         if out is not None:
-            expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
-            if tuple(out.shape) != expected_shape:
-                raise ValueError(
-                    f"out buffer shape {tuple(out.shape)} != expected "
-                    f"{expected_shape}"
-                )
-            if out.dtype != gathered.dtype:
-                raise ValueError(
-                    f"out buffer dtype {out.dtype} != gathered.dtype "
-                    f"{gathered.dtype}"
-                )
-            if out.device != gathered.device:
-                raise ValueError(
-                    f"out buffer device {out.device} != gathered.device "
-                    f"{gathered.device}"
-                )
             torch.index_select(gathered, 0, cp_ctx.unpad_restore, out=out)
             full = out
         else:
             full = gathered.index_select(0, cp_ctx.unpad_restore)
-    if full.size(0) != cp_ctx.seq_len_full:
-        raise ValueError(
-            f"CP restored rows({full.size(0)}) != cp_ctx.seq_len_full({cp_ctx.seq_len_full})"
-        )
     return full
 
 
@@ -845,9 +765,7 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     """Wait for a deferred CP gather and return flattened ``[T_full, H]``."""
     if isinstance(handle, CPSyncGatherHandle):
         return SyncCPGatherImpl().wait(handle)
-    if isinstance(handle, CPCudaAsyncGatherHandle):
-        return CudaAsyncCPGatherImpl().wait(handle)
-    raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
+    return CudaAsyncCPGatherImpl().wait(handle)
 
 
 def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tensor:
@@ -896,26 +814,6 @@ def cp_all_gather_full_varlen(
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    if replay_only:
-        starts = cp_swa_replay_starts(cp_ctx)
-        lengths = getattr(cp_ctx, "input_lengths_global_host", None)
-        if lengths is None and starts is not None and len(starts) == 1:
-            lengths = (cp_ctx.seq_len_full,)
-        positions = getattr(cp_ctx, "gather_restore_positions", None)
-        if (
-            starts is None
-            or lengths is None
-            or len(starts) != len(lengths)
-            or not lengths
-            or sum(lengths) != cp_ctx.seq_len_full
-            or any(n <= 0 or s != max(0, n - 128) for n, s in zip(lengths, starts))
-            or positions is None
-            or positions.numel() != sum(min(n, 128) for n in lengths)
-            or cp_ctx.unpad_restore.numel() != positions.numel()
-        ):
-            raise ValueError(
-                "compact KV gather requires a complete bounded replay domain"
-            )
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
@@ -1012,10 +910,6 @@ def cp_all_gather_to_full(
     ``[chunk_length, H] -> [seq_len_full, H]``.
     """
     device = local.device
-    if local.dim() != 2:
-        raise ValueError(
-            f"cp_all_gather_to_full expects 2D [T_local, H], got shape {tuple(local.shape)}"
-        )
     chunk_length = local.size(0)
     ctx = build_cp_context(cp_info, cp_size, cp_rank, chunk_length, device)
     return cp_all_gather_full(local, ctx)
@@ -1327,20 +1221,8 @@ def cp_interleave_gathered_pool_blocks(
       Logical block ``b`` is at row ``b``, sourced from rank ``b % cp_size``'s
       local block ``b // cp_size``.
     """
-    if gathered.dim() < 1:
-        raise ValueError(
-            f"gathered must have rank >= 1, got shape {tuple(gathered.shape)}"
-        )
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
     n = gathered.size(0)
-    if n % cp_size != 0:
-        raise ValueError(f"gathered.size(0)={n} not divisible by cp_size={cp_size}")
     L = n // cp_size
-    if total_logical_blocks > n:
-        raise ValueError(
-            f"total_logical_blocks({total_logical_blocks}) > gathered rows({n})"
-        )
     block_shape = gathered.shape[1:]
     # Rank-major view: [cp_size, L, *block_shape] -> permute to
     # [L, cp_size, *block_shape] so flatten yields logical order
@@ -1383,28 +1265,6 @@ def cp_gather_request_pool_blocks(
       ``[total_logical_blocks, *block_shape]`` logical-order assembly of the
       request's full prefix data.
     """
-    if local_pool.dim() < 2:
-        raise ValueError(
-            f"local_pool must have rank >= 2, got shape {tuple(local_pool.shape)}"
-        )
-    if local_block_table_for_req.dim() != 1:
-        raise ValueError(
-            f"local_block_table_for_req must be 1D, got shape "
-            f"{tuple(local_block_table_for_req.shape)}"
-        )
-    L = int(local_block_table_for_req.numel())
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if not (0 <= cp_rank < cp_size):
-        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
-
-    expected_L = (total_logical_blocks + cp_size - 1) // cp_size
-    if L != expected_L:
-        raise ValueError(
-            f"local_block_table size {L} != ceil(total_logical_blocks="
-            f"{total_logical_blocks} / cp_size={cp_size}) = {expected_L}"
-        )
-
     # Pack owned blocks contiguously.
     local_owned = local_pool.index_select(
         0, local_block_table_for_req.to(device=local_pool.device, dtype=torch.long)
@@ -1478,16 +1338,6 @@ def build_kv_allgather_restore_indices(
       ``flat_global`` is the K for that logical token, in
       request-concatenated logical order.
     """
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
-    if per_req_total_kv_lens.dim() != 1:
-        raise ValueError(
-            f"per_req_total_kv_lens must be 1D, got shape "
-            f"{tuple(per_req_total_kv_lens.shape)}"
-        )
-
     # Vectorized formulation (mirrors branch
     # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
     total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
@@ -1502,8 +1352,6 @@ def build_kv_allgather_restore_indices(
     )
     if total_real == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
-    if total_real < 0:
-        raise ValueError(f"total_kv_len must be non-negative, got {total_real}")
 
     if total_local_kv is None:
         if batch_size == 1 and total_kv_len is not None:
@@ -1574,10 +1422,6 @@ def build_kv_allgather_restore_indices(
 
 def cp_padded_local_kv_len(total_kv_len: int, cp_size: int, block_size: int) -> int:
     """Scalar counterpart of :func:`cp_padded_local_kv_lens`."""
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
     total_kv_len = int(total_kv_len)
     virtual_block_size = block_size * cp_size
     return ((total_kv_len + virtual_block_size - 1) // virtual_block_size) * block_size
@@ -1590,12 +1434,6 @@ def cp_actual_owned_kv_len(
     cp_rank: int,
 ) -> int:
     """Scalar counterpart of :func:`cp_actual_owned_kv_lens`."""
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
-    if cp_rank < 0 or cp_rank >= cp_size:
-        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
     total_kv_len = int(total_kv_len)
     full_blocks, tail = divmod(total_kv_len, block_size)
     owned_full_blocks = (
@@ -1615,10 +1453,6 @@ def cp_padded_local_kv_lens(
     ``all_gather`` sees identical shapes. Rows past the actual owned count are
     padding and must be initialized by the caller before gather.
     """
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
     virtual_block_size = block_size * cp_size
     lens = per_req_total_kv_lens.to(torch.int64)
     n_virtual_blocks = (lens + virtual_block_size - 1) // virtual_block_size
@@ -1637,13 +1471,6 @@ def cp_actual_owned_kv_lens(
     ``b % cp_size``. The last owned block may be partial, so this can be
     smaller than :func:`cp_padded_local_kv_lens`.
     """
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be positive, got {cp_size}")
-    if block_size <= 0:
-        raise ValueError(f"block_size must be positive, got {block_size}")
-    if cp_rank < 0 or cp_rank >= cp_size:
-        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
-
     T = per_req_total_kv_lens.to(torch.int64)
     total_blocks = (T + block_size - 1) // block_size
     raw = total_blocks - cp_rank

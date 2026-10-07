@@ -153,13 +153,8 @@ class QuantizedLinear(nn.Module):
         then run FP8 × packed-FP4 GEMM against our stored weight/scale.
         """
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-            _fp8_fp4_gemm_nt_impl, fp8_fp4_gemm_nt,
+            fp8_fp4_gemm_nt,
         )
-        if _fp8_fp4_gemm_nt_impl is None or not x.is_cuda:
-            raise RuntimeError(
-                "DSV4 FP4 QuantizedLinear requires deep_gemm fp8_fp4_gemm_nt "
-                f"on CUDA; got device={x.device}, impl={_fp8_fp4_gemm_nt_impl}"
-            )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
         orig_shape = x.shape
@@ -176,10 +171,6 @@ class QuantizedLinear(nn.Module):
             scale_ue8m0=True,
         )
         out = torch.empty(M, self.out_features, dtype=torch.bfloat16, device=x.device)
-        if self.scale_gemm is None or self.scale_gemm.dtype != torch.int32:
-            raise RuntimeError(
-                "DSV4 FP4 QuantizedLinear requires init-time packed int32 scale"
-            )
         fp8_fp4_gemm_nt(
             (x_fp8, x_scale),
             (self.weight, self.scale_gemm),

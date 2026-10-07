@@ -230,8 +230,6 @@ _CP_STREAM_CACHE_LOCK = threading.Lock()
 
 def _cuda_device_index(device: torch.device) -> int:
     device = torch.device(device)
-    if device.type != "cuda":
-        raise ValueError(f"expected a CUDA device, got {device}")
     return device.index if device.index is not None else torch.cuda.current_device()
 
 
@@ -2268,8 +2266,6 @@ class AttentionFP8(nn.Module):
         with bind_attn_cache(self, kv_cache, attn_metadata.pool_block_tables):
             if self._swa_cache_region != SWA_KV:
                 attn_metadata = attn_metadata.decoder_swa_metadata
-                if attn_metadata is None:
-                    raise RuntimeError("Missing decoder SWA decode metadata")
             self._set_compressor_pool_context()
             try:
                 return self._forward_decode_body(x, attn_metadata)
@@ -3613,8 +3609,6 @@ class AttentionFP8(nn.Module):
         the target columns. Replaces the original O(T·P_count) Python double
         loop with O(P_count) GPU ops — catastrophic at T=1M, fine at 64k.
         """
-        if not parts:
-            raise ValueError("_compact_indices requires at least one tensor")
         T = int(parts[0].shape[0])
         device = parts[0].device
         max_width = sum(int(p.shape[1]) for p in parts)
@@ -4445,12 +4439,6 @@ class AttentionFP8(nn.Module):
         )
 
         win = self.window_size
-        # ``use_varlen`` is required — set by ``_build_shared_prefill_meta``
-        # (the single env-read point + contract guard for the whole prefill
-        # stack). UT helpers must pass it explicitly.
-
-        if not use_varlen:
-            raise RuntimeError("DSV4 FP8 prefill requires varlen metadata")
         if use_varlen:
             cu_seqlens = _flat_1d(cu_seqlens)
             input_lengths = _flat_1d(input_lengths)
@@ -4797,32 +4785,8 @@ class AttentionFP8(nn.Module):
     def _prefill_common_setup(
         self, x: torch.Tensor, positions: torch.Tensor
     ) -> PrefillMeta:
-        """Return the shared prefill meta broadcast by ``forward_layers``.
-
-        Standalone FP8 prefill (calling this layer's prefill forward WITHOUT the
-        upper-layer broadcast) is UNSUPPORTED: the per-forward union
-        ``PrefillWorkspace`` is allocated once in
-        ``prefill/forward.py::forward_layers`` and threaded in via
-        ``build_and_propagate_prefill_meta_fp8`` (``meta._replace(workspace=…)``).
-        A standalone call would carry ``workspace=None`` and the deferred Q
-        materialization (:meth:`_materialize_prefill_q`) would have no backing
-        buffer. We fail loud HERE — at the point the contract is violated —
-        rather than NoneType-deref deep in Q materialization, and we do NOT
-        fabricate a fallback workspace (single authoritative buffer, owned by
-        the forward; see the ``workspace`` contract in ``cp.PrefillWorkspace``).
-        In production every ``AttentionFP8`` layer always receives the broadcast
-        (``forward_layers`` runs it before the layer loop), so this branch is
-        unreachable there.
-        """
-        meta = self._prefill_meta_shared
-        if meta is None:
-            raise RuntimeError(
-                "AttentionFP8 prefill requires the per-forward workspace "
-                "broadcast from forward_layers (build_and_propagate_prefill_"
-                "meta_fp8); standalone prefill with no _prefill_meta_shared is "
-                "unsupported."
-            )
-        return meta
+        """Return the per-forward metadata and workspace owned by the caller."""
+        return self._prefill_meta_shared
 
     def _build_swa_prefill_meta_varlen(
         self,

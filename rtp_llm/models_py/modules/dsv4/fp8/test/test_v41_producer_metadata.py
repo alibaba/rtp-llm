@@ -612,12 +612,6 @@ class ProducerMetadataCPU(unittest.TestCase):
                 ("main", "index", "state"),
             )
         )
-        plan = metadata.prepare(
-            cp, pos, req, starts, sizes, 2, tiles, mapper, ("main", "index", "state")
-        )
-        with self.assertRaises(ValueError):
-            plan.tile(0, 1)
-
     def _producer(self, ratio, use_metadata, state_fast=True):
         scope = functions()
         cp, positions, requests, starts, lengths = inputs(
@@ -911,12 +905,8 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
                             expected.contiguous().view(torch.uint8),
                         )
                     )
-        with self.assertRaises(ValueError):
-            plan.tile(0, 1)
         if c.tile_rows == 65536 and len(c.pos) >= 65536:
             self.assertTrue(bool((plan.tile(0, 65536)[0] >= 32768).any()))
-            with self.assertRaises(ValueError):
-                plan.tile(0, 32768)
 
     def test_raw_bytes_crossings_odd_empty_pairs_all_ranks_strides(self):
         fixtures = [

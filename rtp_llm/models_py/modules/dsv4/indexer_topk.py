@@ -41,7 +41,6 @@ def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     if score.dim() == 3:
         rows = score.shape[0] * score.shape[1]
         return score.reshape(rows, score.shape[-1]).contiguous(), shape
-    raise ValueError(f"score must be [rows,T] or [B,S,T], got {shape}")
 
 
 def _reshape_indices(
@@ -66,10 +65,6 @@ def _normalize_lengths(
         )
     else:
         lengths = lengths.to(device=score.device, dtype=torch.int32).reshape(-1)
-    if lengths.numel() != rows:
-        raise ValueError(
-            f"lengths rows mismatch: expected {rows}, got {lengths.numel()}"
-        )
     return lengths.clamp_(min=0, max=score.shape[-1])
 
 
@@ -178,16 +173,6 @@ class FastIndexerTopKBackend(IndexerTopKBackend):
         lengths: Optional[torch.Tensor] = None,
         offset: int | torch.Tensor = 0,
     ) -> torch.Tensor:
-        if not (
-            score.is_cuda
-            and score.dtype == torch.float32
-            and int(topk) in _FAST_TOPK_VALUES
-        ):
-            raise RuntimeError(
-                "DSV4 fast indexer TopK requires CUDA float32 scores and "
-                "topk=2048; "
-                f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
-            )
         flat, shape = _flatten_score(score)
         lengths_i32 = _normalize_lengths(score, topk, lengths)
 
@@ -215,16 +200,6 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
         lengths: Optional[torch.Tensor] = None,
         offset: int | torch.Tensor = 0,
     ) -> torch.Tensor:
-        if not (
-            score.is_cuda
-            and score.dtype == torch.float32
-            and int(topk) in _PERSISTENT_TOPK_VALUES
-        ):
-            raise RuntimeError(
-                "DSV4 persistent indexer TopK requires CUDA float32 scores and "
-                "topk in {512, 1024, 2048}; "
-                f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
-            )
         flat, shape = _flatten_score(score)
         lengths_i32 = _normalize_lengths(score, topk, lengths)
 
@@ -321,12 +296,8 @@ def get_indexer_topk_backend() -> IndexerTopKBackend:
         return PersistentIndexerTopKBackend()
     if name == "hisa":
         return HisaIndexerTopKBackend()
-    if name != "auto":
-        raise ValueError(
-            "invalid DSV4_INDEXER_TOPK_BACKEND="
-            f"{name!r}; expected auto|torch|fast|persistent|hisa"
-        )
-    return AutoIndexerTopKBackend()
+    if name == "auto":
+        return AutoIndexerTopKBackend()
 
 
 def select_indexer_topk(

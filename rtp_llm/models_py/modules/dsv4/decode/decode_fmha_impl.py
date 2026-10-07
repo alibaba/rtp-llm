@@ -109,10 +109,8 @@ class DSv4DecodeFmhaImpl:
         # CudaGraphRunner::initCapture BEFORE any prepare_cuda_graph) reads
         # valid values rather than the zero/-1 sentinels from allocation.
         # Mirrors flashmla_sparse_impl.py:386 (create_params → prepare in __init__).
-        # ``forbid_realloc=True`` here too — allocate_decode_metadata has
-        # already created every destination buffer; update_decode_metadata_in_place
-        # only ``.copy_`` into them, so any realloc on the first prepare is a
-        # bug (and would silently bake the new ptr into the captured graph).
+        # allocate_decode_metadata has already created every destination buffer;
+        # update_decode_metadata_in_place only copies into them.
         if attn_inputs is not None:
             self.prepare(attn_inputs, forbid_realloc=True)
 
@@ -172,8 +170,5 @@ class DSv4DecodeFmhaImpl:
 
     def prepare_cuda_graph(self, attn_inputs) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
-        replay. Re-runs ``prepare`` with ``forbid_realloc=True`` so any
-        accidental buffer reallocation surfaces as an immediate error
-        rather than a silent correctness bug (a captured graph still
-        holds the old pointer and would compute on stale values)."""
+        replay. Re-runs ``prepare`` to update the graph's existing buffers."""
         self.prepare(attn_inputs, forbid_realloc=True)

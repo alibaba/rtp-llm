@@ -21,10 +21,7 @@ def wrap_hc_batch(
     """Convert flat HC tensors to the batched shape required by TileLang.
 
     TileLang kernels consume batched tensors. The public HC interface accepts
-    either flat prefill ``[T, ...]`` or batched decode ``[B, S, ...]``. Before
-    adding a synthetic batch dimension, assert the tensor is exactly the flat
-    rank expected by the public contract; otherwise assert it is already the
-    batched rank.
+    either flat prefill ``[T, ...]`` or batched decode ``[B, S, ...]``.
     """
     if t.dim() == batched_dims - 1:
         # Flat prefill uses the public HC layout [T, ...], with request
@@ -38,7 +35,6 @@ def wrap_hc_batch(
 
 def squeeze_hc_batch(t: torch.Tensor, wrapped: bool, *, name: str) -> torch.Tensor:
     if wrapped:
-        # Undo only the synthetic batch dimension from wrap_hc_batch. Enforce
-        # size 1 so a real batch axis can never be removed accidentally.
+        # Undo only the synthetic batch dimension from wrap_hc_batch.
         return t.squeeze(0)
     return t

@@ -179,16 +179,6 @@ def fused_update_decode_meta_pure(
     Callers handle pool_write_slot_mappings, swa_global_slots,
     hca_cmp_global_slots, and topk_buffer_compressed reset separately.
     """
-    assert start_pos.is_cuda, (
-        "fused_update_decode_meta_pure requires CUDA tensors, "
-        f"got start_pos on {start_pos.device}"
-    )
-    for r in meta.slot_mapping_compressed:
-        assert r in (4, 128), (
-            f"fused_update_decode_meta_pure only supports compress ratios "
-            f"{{4, 128}} or SWA-only, got ratio={r}"
-        )
-
     bs = int(start_pos.shape[0])
     q_len = meta.q_len_per_req
     window_size = meta.window_size
@@ -388,11 +378,6 @@ def fused_phase2b_pool_slot_mapping(
     Writes pool_write_slot_mappings[:bs*q_len] for present pools.
     Absent pools are compile-time eliminated via constexpr flags.
     """
-    assert start_pos.is_cuda, (
-        "fused_phase2b_pool_slot_mapping requires CUDA tensors, "
-        f"got start_pos on {start_pos.device}"
-    )
-
     from rtp_llm.models_py.modules.dsv4.attn_type import (
         CSA_KV,
         HCA_KV,
@@ -444,11 +429,6 @@ def fused_phase2b_pool_slot_mapping(
         return int(paged_pool_tokens_per_block[attn_type])
 
     def _compressed_tokens(raw_tokens_per_block: int, ratio: int) -> int:
-        if raw_tokens_per_block % ratio != 0:
-            raise ValueError(
-                "compressed pool tokens_per_block must be divisible by "
-                f"ratio, got tokens={raw_tokens_per_block}, ratio={ratio}"
-            )
         return raw_tokens_per_block // ratio
 
     swa_tokens = _raw_tokens(SWA_KV) if has_swa else 1

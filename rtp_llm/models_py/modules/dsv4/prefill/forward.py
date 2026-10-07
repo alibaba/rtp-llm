@@ -540,7 +540,6 @@ def forward_layers(
             # The workspace was allocated at function entry, before
             # embedding could fragment its cached address range.  It remains a
             # per-forward local so the MTP draft can reuse the block immediately.
-            assert ws is not None
             prefill_write_by_region = build_and_propagate_prefill_meta_fp8(
                 v4,
                 h,
@@ -841,9 +840,6 @@ def forward_prefill(
     Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
     """
     attn = inputs.attention_inputs
-    if getattr(v4, "swa_bounded_replay", False) and not permits_ced(inputs):
-        raise ValueError("bounded SWA replay does not support full-prompt outputs")
-
     # Context-Parallel setup must precede the per-layer loop because
     # forward_layers reads v4._cp_info to build the CP context.
     set_cp_info(v4, parallelism_config, attn, is_prefill=True)

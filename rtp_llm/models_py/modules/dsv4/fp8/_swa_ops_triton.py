@@ -101,11 +101,6 @@ def compute_prefill_gather_lens(
     out = torch.empty(num_prefills, dtype=torch.int32, device=seq_lens.device)
     if num_prefills == 0:
         return out
-    if num_prefills > _GATHER_LENS_FIXED_BLOCK_SIZE:
-        raise ValueError(
-            f"num_prefills={num_prefills} exceeds fixed BLOCK_SIZE="
-            f"{_GATHER_LENS_FIXED_BLOCK_SIZE}; bump _GATHER_LENS_FIXED_BLOCK_SIZE."
-        )
     block_size = _GATHER_LENS_FIXED_BLOCK_SIZE
     _compute_prefill_gather_lens_kernel[(1,)](
         out,
@@ -768,10 +763,6 @@ def compute_swa_slot_in_flat_from_cu(
     if not prefix_lengths.is_contiguous():
         prefix_lengths = prefix_lengths.contiguous()
     num_reqs = int(prefix_lengths.numel())
-    if num_reqs > 1024:
-        raise ValueError(
-            f"num_reqs={num_reqs} exceeds compute_swa_slot_in_flat_from_cu limit"
-        )
     block_b = max(1, triton.next_power_of_2(num_reqs))
     block_m = 256
     _compute_swa_slot_in_flat_from_cu_kernel[(triton.cdiv(num_tokens, block_m),)](

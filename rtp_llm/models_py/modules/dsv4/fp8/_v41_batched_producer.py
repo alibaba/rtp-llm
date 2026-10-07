@@ -65,8 +65,6 @@ class PreparedPlan:
 
 def reduction_width(count):
     """The original compact-M reduction partition, including empty segments."""
-    if count < 0:
-        raise ValueError("Negative compact count")
     return 0 if count == 0 else min(128, 512 // min(1 << (count.bit_length() - 1), 16))
 
 

@@ -63,23 +63,6 @@ _USE_DEEP_GEMM_FAST_PATH = (
 )
 
 
-def _fast_path_unavailable_reason(q_indexer: torch.Tensor) -> str:
-    if not q_indexer.is_cuda:
-        return f"q_indexer is on {q_indexer.device}, expected CUDA"
-    if not torch.cuda.is_available():
-        return "torch.cuda.is_available() is False"
-    if deep_gemm is None:
-        return "deep_gemm import failed"
-    missing = [
-        name
-        for name in ("fp8_paged_mqa_logits", "get_paged_mqa_logits_metadata")
-        if not hasattr(deep_gemm, name)
-    ]
-    if missing:
-        return f"deep_gemm missing required symbols: {missing}"
-    return "unknown"
-
-
 class IndexerDecodeV4Op:
     """Decode-time Indexer top-K op for DeepSeek-V4 CSA layers.
 
@@ -140,34 +123,7 @@ class IndexerDecodeV4Op:
         Returns:
             ``out_buffer`` (same tensor; in-place fill).
         """
-        assert q_indexer.dim() == 4, f"expected [B,q_len,H,D], got {q_indexer.shape}"
-        B, q_len, H, D = q_indexer.shape
-        assert kv_indexer.dim() == 3, f"expected [B,T,D], got {kv_indexer.shape}"
-        Bk, T_max, Dk = kv_indexer.shape
-        assert Bk == B and Dk == D, "q/kv batch & D must match"
-        assert weights.shape == (
-            B,
-            q_len,
-            H,
-        ), f"weights shape mismatch: {weights.shape}"
-        assert compressed_len_per_req.shape == (
-            B,
-        ), f"len shape mismatch: {compressed_len_per_req.shape}"
-        assert out_buffer.shape == (
-            B,
-            q_len,
-            self.index_topk,
-        ), f"out_buffer shape mismatch: {out_buffer.shape}"
-        assert out_buffer.dtype == torch.int32, "out_buffer must be int32"
-
         if (not force_reference) and _USE_DEEP_GEMM_FAST_PATH:
-            if not _fast_path_available() or not q_indexer.is_cuda:
-                raise RuntimeError(
-                    "DSV4 indexer decode fast path is required by default but "
-                    f"is unavailable: {_fast_path_unavailable_reason(q_indexer)}. "
-                    "Set RTP_LLM_DSV4_INDEXER_DECODE_FAST_PATH=0 or pass "
-                    "force_reference=True for explicit reference execution."
-                )
             return self._forward_fast(
                 q_indexer,
                 kv_indexer,

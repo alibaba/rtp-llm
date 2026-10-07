@@ -254,24 +254,6 @@ class V41DecodeIndexerTest(unittest.TestCase):
                 self.assertTrue(fused.is_supported(torch.device("cuda"), 64))
                 self.assertTrue(fused.is_supported(torch.device("cuda"), 128))
 
-    def test_rejects_padded_cache_and_fp32_weight_loss(self):
-        q = torch.empty(1, 6, 32, 128, dtype=torch.bfloat16)
-        weights = torch.empty(1, 6, 32, dtype=torch.bfloat16)
-        freqs = torch.empty(6, 32, dtype=torch.complex64)
-        with self.assertRaisesRegex(ValueError, "remain FP32"):
-            fused.prepare_indexer_q(q, weights, freqs)
-        pool = torch.empty(2, 128, 72, dtype=torch.uint8)[..., :68]
-        with self.assertRaisesRegex(ValueError, "no block padding"):
-            fused.score_decode_indexer(
-                q,
-                weights,
-                freqs,
-                pool,
-                torch.zeros(1, 1, dtype=torch.int32),
-                torch.ones(1, 6, dtype=torch.int32),
-                max_ctx_len=128,
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

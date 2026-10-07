@@ -29,10 +29,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
-    validate_block_table_lookup,
-    validate_slot_mapping,
 )
 
 
@@ -220,26 +217,6 @@ def dequantize_and_gather_k_cache(
     # → 149760 for SWA bs=256), so this MUST come from the actual tensor
     # stride and NOT be reconstructed as block_size * ENTRY_BYTES.
     num_reqs = seq_lens.shape[0]
-    if invalid_kv_access_validation_enabled():
-        seq_i64 = seq_lens.detach().reshape(-1).to(torch.int64)
-        if gather_lens is None:
-            gather_i64 = seq_i64
-        else:
-            gather_i64 = gather_lens.detach().reshape(-1).to(torch.int64)
-        max_gather = int(gather_i64.max().item()) if int(gather_i64.numel()) > 0 else 0
-        if max_gather > 0:
-            steps = torch.arange(max_gather, device=seq_lens.device, dtype=torch.int64)
-            pos = seq_i64[:, None] - gather_i64[:, None] + steps[None, :]
-            use = steps[None, :] < gather_i64[:, None]
-            req = torch.arange(num_reqs, device=seq_lens.device, dtype=torch.int64)
-            validate_block_table_lookup(
-                "swa.dequantize_and_gather.block_table",
-                block_table,
-                req[:, None].expand_as(pos),
-                pos // int(block_size),
-                use,
-                num_blocks=int(k_cache.shape[0]),
-            )
     NUM_WORKERS = 128
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
         out,
@@ -497,13 +474,6 @@ def dequantize_and_gather_k_cache_slots(
         return
 
     slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
-    validate_slot_mapping(
-        "swa.dequantize_and_gather.slot_mapping",
-        slots_i64.reshape(-1),
-        block_size=int(k_cache.shape[1]),
-        num_blocks=int(k_cache.shape[0]),
-        negative_mode="skip_any",
-    )
     gather_lens_i32 = (
         None
         if gather_lens is None
@@ -576,13 +546,6 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
     if batch_size == 0 or max_gather_len == 0:
         return True
 
-    validate_slot_mapping(
-        "swa.dequantize_and_gather.workspace_slot_mapping",
-        slot_mapping.reshape(-1),
-        block_size=int(k_cache.shape[1]),
-        num_blocks=int(k_cache.shape[0]),
-        negative_mode="skip_any",
-    )
     _launch_dequantize_and_gather_k_slots_unchecked(
         out,
         k_cache,
@@ -1280,13 +1243,6 @@ def dequantize_slots_to_bf16(
     if N == 0:
         return out
     slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
-    validate_slot_mapping(
-        "swa.dequantize_slots.slot_indices",
-        slots_i64,
-        block_size=block_size,
-        num_blocks=int(pool_3d.shape[0]),
-        negative_mode="skip_any",
-    )
     _dequantize_slots_kernel[(N,)](
         out,
         out.stride(0),
@@ -1362,12 +1318,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     from rtp_llm.models_py.distributed.collective_torch import Group
 
     process_group = collective_torch._get_group(Group.TP)
-    world_size = torch.distributed.get_world_size(process_group)
-    if world_size != cp_size:
-        raise RuntimeError(
-            f"CP byte-sliced SWA gather world_size({world_size}) != cp_size({cp_size})"
-        )
-
     device = k_cache_raw.device
     gather_lens_i32 = _device_gather_lens(
         gather_lens,
@@ -1376,8 +1326,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         device=device,
     )
     current_stream = torch.cuda.current_stream(device)
-    if stream is None:
-        raise ValueError("CP byte-sliced SWA async gather requires a stream")
     gather_stream = stream
     gather_stream.wait_stream(current_stream)
 
@@ -1441,8 +1389,6 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     if pending.ready_event is not None:
         return
     device = pending.gathered.device
-    if stream is None:
-        raise ValueError("CP byte-sliced SWA async prepare requires a stream")
     assemble_stream = stream
     current_stream = torch.cuda.current_stream(out.device)
     # ``out`` is the shared attention workspace.  Keep postprocess ordered after
@@ -1512,8 +1458,6 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
 def wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     pending: CPByteSlicedSwaPrefixPending,
 ) -> None:
-    if pending.ready_event is None:
-        raise RuntimeError("CP byte-sliced SWA prefix pending was not prepared")
     current_stream = torch.cuda.current_stream(pending.gathered.device)
     current_stream.wait_event(pending.ready_event)
     _wait_swa_prefix_work_once(pending)

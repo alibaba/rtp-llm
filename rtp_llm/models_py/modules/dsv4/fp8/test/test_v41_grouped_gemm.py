@@ -4,6 +4,7 @@ import importlib.util
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -22,6 +23,21 @@ op = load()
 
 
 class HostContractTest(unittest.TestCase):
+    def test_valid_supplied_output_preserves_launch_arguments(self):
+        x = SimpleNamespace(device=torch.device("cuda:0"), shape=(12, 512))
+        weight, out, library = object(), object(), object()
+        with mock.patch.object(op, "_enabled", return_value=True), mock.patch.object(
+            op, "is_supported", return_value=True
+        ), mock.patch.dict(op._READY, {0: library}, clear=True), mock.patch.object(
+            torch.cuda, "device"
+        ), mock.patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ), mock.patch.object(
+            op, "_execute", return_value=out
+        ) as execute:
+            self.assertIs(op.try_grouped_index_gemm(x, weight, (5, 7), out=out), out)
+        execute.assert_called_once_with(library, x, weight, (5, 7), out)
+
     def test_import_and_cpu_fallback_have_no_cuda_or_compiler_side_effect(self):
         with mock.patch.object(torch.cuda, "_lazy_init") as init, mock.patch.object(
             op.ctypes, "CDLL"
@@ -88,10 +104,11 @@ class CUDAContractTest(unittest.TestCase):
                     torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
                 )
 
-    def test_output_validation_cold_disabled_and_unsupported(self):
+    def test_supplied_output_cold_disabled_and_unsupported(self):
         x = torch.randn(12, 512, device="cuda").bfloat16()
         out = torch.empty(12, 128, dtype=torch.bfloat16, device="cuda")
         self.assertIs(op.try_grouped_index_gemm(x, self.weight, (5, 7), out=out), out)
+        torch.testing.assert_close(out, self.reference(x, (5, 7)), rtol=0, atol=0)
         with mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
             op, "_load"
         ) as build:
@@ -106,12 +123,6 @@ class CUDAContractTest(unittest.TestCase):
         )
         self.assertIsNone(op.try_grouped_index_gemm(x[:, ::2], self.weight, (5, 7)))
         self.assertIsNone(op.try_grouped_index_gemm(x, self.weight, (6, 7)))
-        with self.assertRaises(ValueError):
-            op.try_grouped_index_gemm(
-                x, self.weight, (5, 7), out=x.view(-1)[: 12 * 128].view(12, 128)
-            )
-        with self.assertRaises(ValueError):
-            op.try_grouped_index_gemm(x, self.weight, (5, 7), out=out.float())
 
     def test_current_side_stream_and_pointer_table_lifetime(self):
         rows = (17, 31, 67, 127)

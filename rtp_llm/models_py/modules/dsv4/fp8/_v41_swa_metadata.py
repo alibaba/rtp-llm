@@ -127,8 +127,6 @@ def try_host_slot_metadata(
         for column, block in enumerate(host_table[req, first:stop].tolist(), first):
             block = int(block)
             if block > 0:
-                if block >= num_blocks:
-                    raise ValueError("SWA host block id exceeds physical pool")
                 active.append((req, column, block))
     unique = sorted({block for _, _, block in active})
     indices = {block: i for i, block in enumerate(unique)}

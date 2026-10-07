@@ -36,22 +36,7 @@ def merge_lse_output(
     shards are empty for a row, the merged output is zero and merged LSE stays
     ``-inf``.
     """
-    if local_outs.dim() < 1:
-        raise ValueError("local_outs must have at least one dimension")
-    if local_lse.dim() < 1:
-        raise ValueError("local_lse must have at least one dimension")
-    if local_outs.size(dim) != local_lse.size(dim):
-        raise ValueError(
-            f"rank dimension mismatch: local_outs.size({dim})="
-            f"{local_outs.size(dim)} != local_lse.size({dim})={local_lse.size(dim)}"
-        )
-
     dim = dim % local_outs.dim()
-    lse_dim = dim % local_lse.dim()
-    if dim != lse_dim:
-        raise ValueError(
-            "dim must refer to the same positive axis in local_outs and local_lse"
-        )
 
     lse_f = local_lse.float()
     out_f = local_outs.float()

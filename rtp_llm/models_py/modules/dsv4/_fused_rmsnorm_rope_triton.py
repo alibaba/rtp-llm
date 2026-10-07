@@ -245,11 +245,6 @@ def fused_rmsnorm_rope(
                 )
             )
             selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
-    if selected_group_heads not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid DSV4_RMSNORM_ROPE_GROUP_HEADS={selected_group_heads}; "
-            "expected 1, 2, 4, or 8"
-        )
     can_group_heads = (
         selected_group_heads in (2, 4, 8)
         and not inplace

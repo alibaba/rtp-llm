@@ -19,17 +19,8 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 # Expert.forward chain.  See _silu_mul_split_triton.py module docstring.
 try:
     from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
-
-    _SILU_MUL_SPLIT_OK = True
 except Exception:  # pragma: no cover — keep V4 importable without Triton
     silu_mul_split = None
-    _SILU_MUL_SPLIT_OK = False
-
-
-def require_silu_mul_split():
-    if not _SILU_MUL_SPLIT_OK:
-        raise RuntimeError("DSV4 fused Expert SiLU path is required but unavailable")
-    return silu_mul_split
 
 
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
@@ -124,7 +115,7 @@ class Expert(nn.Module):
         with record_function_range("dsv4.expert.silu_mul"):
             # Fused SiLU + optional SwiGLU clamp + multiply (1 launch).
             # Replaces 2 clamp launches (when swiglu_limit>0) + silu + mul.
-            x = require_silu_mul_split()(
+            x = silu_mul_split(
                 gate.contiguous(),
                 up.contiguous(),
                 clamp_limit=self.swiglu_limit,

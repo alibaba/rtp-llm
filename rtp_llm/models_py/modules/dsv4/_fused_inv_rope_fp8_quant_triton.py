@@ -418,14 +418,6 @@ def fused_inv_rope_fp8_quant(
         o_flat = o
 
     chunks_per_head = D // quant_group_size
-    if (
-        quant_group_size not in (32, 128)
-        or D % quant_group_size
-        or chunks_per_head % 4
-        or H != n_groups * heads_per_group
-        or D != nope_dim + rope_head_dim
-    ):
-        raise ValueError("unsupported inverse RoPE FP8 quantization shape")
 
     d_per_group = heads_per_group * D
     num_scale_blocks = d_per_group // quant_group_size
@@ -486,19 +478,9 @@ def fused_inv_rope_fp8_quant(
             selected_heads_per_cta = int(env_heads_per_cta)
         else:
             selected_heads_per_cta = 8 if _is_blackwell_device(o.device) else 2
-        if selected_heads_per_cta not in (1, 2, 4, 8):
-            raise ValueError(
-                f"invalid DSV4_INV_ROPE_HEADS_PER_CTA={selected_heads_per_cta}; "
-                "expected 1, 2, 4, or 8"
-            )
         if heads_per_group % selected_heads_per_cta != 0:
             selected_heads_per_cta = 1
         selected_num_warps = int(os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2"))
-        if selected_num_warps not in (1, 2, 4, 8):
-            raise ValueError(
-                f"invalid DSV4_INV_ROPE_NUM_WARPS={selected_num_warps}; "
-                "expected 1, 2, 4, or 8"
-            )
         freqs_ri = torch.view_as_real(freqs_cis_per_b)
         grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
         _fused_inv_rope_fp8_quant_group_heads[grid](
@@ -528,11 +510,6 @@ def fused_inv_rope_fp8_quant(
             enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=selected_num_warps,
             num_stages=1,
-        )
-    else:
-        raise ValueError(
-            f"invalid DSV4_INV_ROPE_FP8_QUANT_IMPL={selected_impl!r}; "
-            "expected legacy|optimized"
         )
     # Transpose (0, 1) so the consumer sees [M, G, …]:
     #   fp8  : [M, G, d]          stride (d, M*d, 1)   — contiguous-like on inner

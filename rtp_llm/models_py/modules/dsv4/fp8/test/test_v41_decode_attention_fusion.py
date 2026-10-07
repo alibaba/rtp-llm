@@ -264,10 +264,22 @@ class V41DecodeAttentionFusionCPU(unittest.TestCase):
                 self.assertTrue(torch.isin(valid // 8, candidates[row]).all())
 
     def test_unexpected_support_change_is_not_silently_fallback(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_decode_topk as decode_topk
+
         attn, _, x, qr, positions = _fixture("cpu", 2)
-        with patch.object(indexer, "score_decode_indexer", return_value=None):
-            with self.assertRaisesRegex(RuntimeError, "support changed"):
+        # Pin the native selector gate so the missing scorer output fails at
+        # its first tensor access, independently of the installed backend.
+        with patch.object(
+            indexer, "score_decode_indexer", return_value=None
+        ) as scorer, patch.object(decode_topk, "_TOPK_V3_OK", True), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention_v41.rope_only"
+        ) as fallback_rope, patch.object(torch, "einsum") as fallback_score:
+            with self.assertRaisesRegex(AttributeError, "is_cuda"):
                 _select(attn, x, qr, positions)
+            scorer.assert_called_once()
+            fallback_rope.assert_not_called()
+            fallback_score.assert_not_called()
+        self.assertEqual(attn._shared_attention["topk"], {})
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

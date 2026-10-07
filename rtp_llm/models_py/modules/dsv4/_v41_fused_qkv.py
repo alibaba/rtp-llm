@@ -83,8 +83,6 @@ def try_project_qr_kv(linear, x, q_norm, q_rank: int, eps: float, quantized_inpu
         projected = linear(x)
     else:
         x_q, x_s = quantized_input
-        if x_q.shape != (x.numel() // linear.K, linear.K):
-            raise ValueError("quantized input rows must match the BF16 input")
         projected = linear.forward_quantized(x_q, x_s).view(*x.shape[:-1], linear.N)
     qr = strided_q_rmsnorm(projected[..., :q_rank], q_norm, eps)
     # KV's existing RMSNorm/RoPE kernel takes an explicit row stride.

@@ -110,13 +110,8 @@ def rope_only_inplace(
     """
     if x.numel() == 0 or freqs_cis.numel() == 0:
         return x
-    assert x.is_cuda
-    assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
-    assert x.dim() >= 2
-    assert x.stride(-1) == 1
 
     RD = x.shape[-1]
-    assert RD % 2 == 0
     N = x.numel() // RD
     row_stride = x.stride(-2)
 
@@ -124,8 +119,6 @@ def rope_only_inplace(
         freqs_cis = freqs_cis.contiguous()
     freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
     N_freq = freqs_flat.shape[0]
-    assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
-    assert freqs_flat.shape[-1] == RD // 2
     freq_stride_n = N // N_freq
     freqs_ri = torch.view_as_real(freqs_flat)
 

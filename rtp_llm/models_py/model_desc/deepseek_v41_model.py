@@ -80,19 +80,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
     def _prepare_engram(self, inputs) -> None:
         if not self._engram_layers:
             return
-        windows = getattr(inputs, "engram_token_windows", None)
-        if windows is None or windows.numel() == 0:
-            raise RuntimeError(
-                "DeepSeek V4.1 Engram requires engine token windows with the "
-                "current token and its three predecessors"
-            )
-        if windows.ndim != 2 or windows.shape[1] != 4:
-            raise ValueError(f"Invalid Engram token windows shape: {windows.shape}")
-        if windows.shape[0] != inputs.input_ids.numel():
-            raise ValueError(
-                "Engram token windows must follow the same CP split and padding "
-                f"as input_ids: {windows.shape[0]} vs {inputs.input_ids.numel()}"
-            )
+        windows = inputs.engram_token_windows
         config = self._v4_args.v41_config
         windows = windows.to(device=self.v4.embed.weight.device, non_blocking=True)
         image_token = int(config.get("image_token_id", 129264))

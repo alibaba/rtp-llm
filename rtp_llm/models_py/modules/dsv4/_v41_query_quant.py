@@ -55,19 +55,6 @@ def _query_norm_quant_kernel(
 
 def query_norm_quant(x: torch.Tensor, weight: torch.Tensor, eps: float):
     """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
-    if not (
-        x.is_cuda
-        and x.dtype == torch.bfloat16
-        and x.ndim >= 2
-        and x.stride(-1) == 1
-        and x.shape[-1] % 32 == 0
-        and 128 <= x.shape[-1] <= 8192
-        and weight.device == x.device
-        and weight.dtype == x.dtype
-        and weight.shape == (x.shape[-1],)
-        and weight.is_contiguous()
-    ):
-        raise ValueError("Unsupported V4.1 query normalization layout")
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
     normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)

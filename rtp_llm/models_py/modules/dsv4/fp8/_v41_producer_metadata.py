@@ -48,9 +48,7 @@ class ProducerMetadata:
     lengths: torch.Tensor | None = None
 
     def tile(self, start, end):
-        expected_end, first, stop, phase = self.segments[start]
-        if end != expected_end:
-            raise ValueError("CP producer metadata does not match the original segment")
+        _, first, stop, phase = self.segments[start]
         return (
             (
                 _slice_rows(self.raw_indices, first, stop)
@@ -106,7 +104,6 @@ def _raw_plan(cp, ratio, tile_rows=_RAW_TILE_ROWS):
             offset += size
         segments[start] = (end, first, first + completed, 0)
         first += completed
-    assert first == count
     return segments, rows, count
 
 

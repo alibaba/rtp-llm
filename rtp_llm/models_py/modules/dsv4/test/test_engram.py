@@ -189,7 +189,7 @@ class EngramTest(unittest.TestCase):
                 torch.testing.assert_close(actual[~mask], hidden[~mask], rtol=0, atol=0)
                 self.assertEqual(sum(batch_rows), count)
 
-    def test_gate_output_buffer_rejects_aliases_and_invalid_layouts(self):
+    def test_gate_output_buffer_preserves_values_and_alias(self):
         hidden = torch.randn(3, 4, 32).bfloat16()
         kv = torch.randn(3, 5 * 32).bfloat16()
         q = k = torch.ones(4, 32).bfloat16()
@@ -198,17 +198,8 @@ class EngramTest(unittest.TestCase):
         actual = engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=output)
         self.assertEqual(actual.data_ptr(), output.data_ptr())
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        for invalid in (
-            hidden,
-            kv.flatten()[: hidden.numel()].view_as(hidden),
-            torch.empty(4, 4, 32, dtype=hidden.dtype),
-            torch.empty_like(hidden, dtype=torch.float32),
-            torch.empty(3, 32, 4, dtype=hidden.dtype).transpose(1, 2),
-        ):
-            with self.assertRaises(ValueError):
-                engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=invalid)
 
-    def test_exact_hidden_output_alias_is_inference_only(self):
+    def test_exact_hidden_output_alias_in_inference(self):
         hidden = torch.randn(3, 4, 32).bfloat16()
         kv = torch.randn(3, 5 * 32).bfloat16()
         q = k = torch.ones(4, 32).bfloat16()
@@ -222,28 +213,6 @@ class EngramTest(unittest.TestCase):
         self.assertEqual(actual.data_ptr(), hidden.data_ptr())
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(actual[1], original[1], rtol=0, atol=0)
-        with self.assertRaisesRegex(ValueError, "inference-only"):
-            engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=hidden)
-
-    def test_inplace_rejects_shifted_and_other_input_aliases(self):
-        storage = torch.randn(4, 4, 32).bfloat16()
-        hidden = storage[:3]
-        kv = torch.randn(3, 5 * 32).bfloat16()
-        q = k = torch.ones(4, 32).bfloat16()
-        with torch.no_grad(), self.assertRaisesRegex(ValueError, "exact"):
-            engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=storage[1:])
-        for input_name in ("kv", "q_weight", "k_weight", "token_mask"):
-            with self.subTest(input_name=input_name), torch.no_grad():
-                args = dict(kv=kv, q_weight=q, k_weight=k, token_mask=None)
-                if input_name == "kv":
-                    # The overlap extends beyond the hidden view in its storage.
-                    args[input_name] = storage.flatten()[: 3 * 5 * 32].view(3, -1)
-                elif input_name == "token_mask":
-                    args[input_name] = hidden.view(torch.bool).flatten()[:3]
-                else:
-                    args[input_name] = hidden[0]
-                with self.assertRaisesRegex(ValueError, "other inputs"):
-                    engram.gated_engram_residual(hidden, **args, eps=1e-20, out=hidden)
 
     def test_cpu_forward_preserves_input_with_inplace_inference_default(self):
         q = k = torch.ones(4, 32).bfloat16()

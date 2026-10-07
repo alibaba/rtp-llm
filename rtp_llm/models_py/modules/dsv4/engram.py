@@ -171,12 +171,6 @@ def make_token_windows(
     ids = input_ids.detach().to(device="cpu", dtype=torch.int64).flatten()
     boundaries = cu_seqlens.detach().to(device="cpu", dtype=torch.int64).tolist()
     lookback = lookback_token_ids.detach().to(device="cpu", dtype=torch.int64)
-    if lookback.ndim != 2 or lookback.shape[0] != len(boundaries) - 1:
-        raise ValueError("Engram lookback rows must match packed request chunks")
-    if not boundaries or boundaries[0] != 0 or boundaries[-1] != ids.numel():
-        raise ValueError("Engram cu_seqlens must cover every input token")
-    if any(a > b for a, b in zip(boundaries, boundaries[1:])):
-        raise ValueError("Engram cu_seqlens must be nondecreasing")
     depth = lookback.shape[1]
     windows = torch.empty((ids.numel(), depth + 1), dtype=torch.int64, device="cpu")
     for request, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
@@ -260,14 +254,8 @@ class NgramHashState:
                 self.pad_id,
             )
         windows = token_windows.detach().to(device="cpu", dtype=torch.int64)
-        if windows.ndim != 2 or windows.shape[1] != self.layout.max_ngram_size:
-            raise ValueError("Engram token windows have the wrong n-gram width")
-        if bool((windows >= self.token_map.numel()).any()):
-            raise ValueError("Engram received a token outside the tokenizer vocabulary")
         blocked = windows < 0
         if dead_mask is not None:
-            if dead_mask.shape != windows.shape:
-                raise ValueError("Engram dead mask must match the token windows")
             blocked = blocked | dead_mask.to(device="cpu", dtype=torch.bool)
         # An image or sequence boundary terminates every longer n-gram.
         blocked = blocked.to(torch.int32).cumsum(dim=1) > 0
@@ -513,12 +501,8 @@ class HostEngramEmbedding:
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv4 import _engram_triton
 
-            if self._uva is None:
-                raise RuntimeError("GPU Engram lookup requires pinned UVA host tables")
             return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
-        if bool(((indices < -1) | (indices >= self.weight.shape[0])).any()):
-            raise IndexError("Engram hash bucket is outside the embedding table")
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()
         if self.weight.element_size() == 1:
@@ -609,28 +593,8 @@ def gated_engram_residual(
 
     In inference, ``out`` may exactly alias ``hidden``. The native kernel
     owns disjoint rows; the reference materializes its result before copying.
-    All other shared-storage outputs are rejected conservatively.
+    The caller supplies a contiguous output disjoint from the other inputs.
     """
-    if out is not None and (
-        out.shape != hidden.shape
-        or out.dtype != hidden.dtype
-        or out.device != hidden.device
-        or not out.is_contiguous()
-    ):
-        raise ValueError("Engram output must be contiguous and match hidden states")
-    if out is not None and out.numel():
-        output_storage = out.untyped_storage().data_ptr()
-        if any(
-            value is not None and output_storage == value.untyped_storage().data_ptr()
-            for value in (kv, q_weight, k_weight, token_mask)
-        ):
-            raise ValueError("Engram output must not share storage with other inputs")
-        if output_storage == hidden.untyped_storage().data_ptr() and (
-            torch.is_grad_enabled()
-            or out.storage_offset() != hidden.storage_offset()
-            or out.stride() != hidden.stride()
-        ):
-            raise ValueError("Engram hidden alias must be exact and inference-only")
     if (
         _engram_inject_supported(hidden, q_weight, k_weight, token_mask)
         and kv.shape == hidden.shape[:-2] + (5 * 5120,)
@@ -754,15 +718,6 @@ class Engram(nn.Module):
         )
 
     def forward(self, hidden, hash_ids, token_mask=None):
-        if hidden.is_cuda and not hash_ids.is_cuda:
-            raise RuntimeError("CUDA Engram requires device-resident token hashes")
-        if hidden.ndim != 3 or hash_ids.shape != (
-            hidden.shape[0],
-            self.layout.n_hash_cols,
-        ):
-            raise ValueError(
-                "Engram hidden states and hash rows must describe the same tokens"
-            )
         if hidden.shape[0] == 0:
             return hidden
         # Engram is token-local after hashing. Bound lookup/projection/gate

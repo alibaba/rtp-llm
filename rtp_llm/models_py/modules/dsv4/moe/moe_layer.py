@@ -426,11 +426,6 @@ class MoE(nn.Module):
         if x.dim() != 2 or x.size(1) != self.dim:
             x = x.view(-1, self.dim)
         input_ids_flat = input_ids if input_ids.dim() == 1 else input_ids.flatten()
-        if input_ids_flat.numel() != x.size(0):
-            raise RuntimeError(
-                "MoE input_ids/token mismatch: "
-                f"input_ids={input_ids_flat.numel()} tokens={x.size(0)}"
-            )
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None

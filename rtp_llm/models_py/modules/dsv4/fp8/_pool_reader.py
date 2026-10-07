@@ -201,7 +201,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
         block_size: int,
         offset: int,
     ) -> None:
-        self._validate_call(block_size=block_size, gather_lens=gather_lens)
         device = out.device
 
         local_flat = self._build_local_flat(
@@ -246,7 +245,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
         stream waits for it, and ``prepare_fill_async`` later queues restore /
         dequant / scatter on the shared post stream.
         """
-        self._validate_call(block_size=block_size, gather_lens=gather_lens)
         if (
             stream is None
             or not out.is_cuda
@@ -255,7 +253,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
         ):
             return None
 
-        cfg = self.cfg
         device = out.device
         local_flat = self._build_local_flat(
             k_cache=k_cache,
@@ -268,10 +265,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         process_group = collective_torch._get_group(Group.TP)
         world_size = torch.distributed.get_world_size(process_group)
-        if world_size != cfg.cp_ctx.cp_size:
-            raise RuntimeError(
-                f"CP pool reader world_size({world_size}) != cp_size({cfg.cp_ctx.cp_size})"
-            )
 
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
@@ -319,8 +312,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
     ) -> None:
         if handle.done_event is not None:
             return
-        if stream is None:
-            raise ValueError("prepare_fill_async requires an explicit stream")
         current_stream = torch.cuda.current_stream(handle.out.device)
         # ``out`` is the caller's workspace.  Queue postprocess after any
         # current-stream writes to that workspace; otherwise disjoint-looking
@@ -362,22 +353,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
         if not handle.work_waited:
             handle.work.wait()
             handle.work_waited = True
-
-    def _validate_call(
-        self,
-        *,
-        block_size: int,
-        gather_lens: Optional[torch.Tensor],
-    ) -> None:
-        if self.cfg.block_size != block_size:
-            raise ValueError(
-                f"block_size mismatch: cfg={self.cfg.block_size} call={block_size}"
-            )
-        if gather_lens is not None:
-            raise NotImplementedError(
-                "CPShardedPoolReader does not support gather_lens yet; "
-                "pass full per-request seq_lens or add suffix-aware restore/scatter."
-            )
 
     def _build_local_flat(
         self,
@@ -570,12 +545,6 @@ def make_compressed_k_pool_reader(
         return LocalPoolReader()
     if cp_ctx is None or cp_ctx.cp_size <= 1:
         return LocalPoolReader()
-    if per_req_total_kv_lens is None or block_size is None:
-        raise ValueError(
-            "kv_cache_sharded + cp_size>1 requires per_req_total_kv_lens and "
-            "block_size; got None. Pass torch.zeros(B, dtype=int64) only when "
-            "this iteration has no compressed-K rows to restore."
-        )
     if total_kv_len is not None:
         if int(total_kv_len) <= 0:
             return LocalPoolReader()
@@ -586,8 +555,6 @@ def make_compressed_k_pool_reader(
 
     device = per_req_total_kv_lens.device
     owner_bs = int(owner_block_size or block_size)
-    if owner_bs <= 0:
-        raise ValueError(f"owner_block_size must be positive, got {owner_bs}")
     batch_size = int(per_req_total_kv_lens.numel())
     if batch_size == 1 and total_kv_len is not None:
         total_local = cp_padded_local_kv_len(

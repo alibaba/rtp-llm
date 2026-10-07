@@ -61,8 +61,6 @@ def is_supported(o, freqs, weight, weight_scale) -> bool:
 def quantization_scale_min(tokens: int, group_width: int) -> float:
     """Mirror the per-group V41MXFP8Linear -> sgl quantizer dispatch."""
     backend = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-    if backend not in ("auto", "legacy", "v2"):
-        raise ValueError("DSV4_FP8_QUANT_KERNEL must be auto, legacy, or v2")
     use_v2 = backend == "v2" or (
         backend == "auto" and tokens * group_width >= 4 * 1024 * 1024
     )

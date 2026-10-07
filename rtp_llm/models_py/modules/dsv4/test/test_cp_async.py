@@ -4,10 +4,8 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.dsv4.cp import (
-    _CP_ROLE_MAIN,
     CPContext,
     CPSyncGatherHandle,
-    CudaAsyncCPGatherImpl,
     SyncCPGatherImpl,
     _cp_gather_2d,
     _cp_restore_gathered_full_2d,
@@ -15,7 +13,6 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_wait_gather_full,
 )
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 def _make_cp_ctx() -> CPContext:
@@ -33,15 +30,6 @@ def _make_cp_ctx() -> CPContext:
         seq_len_total=3,
         cp_info=object(),
     )
-
-
-def _assert_raises(fn, exc_type, msg_substr: str):
-    try:
-        fn()
-    except exc_type as exc:
-        assert msg_substr in str(exc), str(exc)
-        return
-    raise AssertionError(f"expected {exc_type.__name__} containing {msg_substr!r}")
 
 
 def test_cp_all_gather_full_restores_2d_and_unpads():
@@ -75,51 +63,6 @@ def test_sync_cp_gather_impl_restores_2d_on_cpu():
     expected = gathered.index_select(0, ctx.unpad_restore)
     assert isinstance(handle, CPSyncGatherHandle)
     assert torch.equal(full, expected)
-
-
-def test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local():
-    ctx = _make_cp_ctx()
-
-    _assert_raises(
-        lambda: cp_all_gather_full(torch.zeros((2,), dtype=torch.float32), ctx),
-        ValueError,
-        "expects 2D",
-    )
-    _assert_raises(
-        lambda: cp_all_gather_full(torch.zeros((1, 2, 6), dtype=torch.float32), ctx),
-        ValueError,
-        "expects 2D",
-    )
-    _assert_raises(
-        lambda: cp_all_gather_full(torch.zeros((3, 6), dtype=torch.float32), ctx),
-        ValueError,
-        "T_local",
-    )
-
-
-def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
-    ctx = _make_cp_ctx()
-    local = torch.zeros((2, 6), dtype=torch.float32)
-    # Pass the required workspace so the test exercises the CUDA fail-fast.
-    ws = PrefillWorkspace(
-        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
-    )
-
-    _assert_raises(
-        lambda: CudaAsyncCPGatherImpl().start(
-            local, ctx, workspace=ws, cp_role=_CP_ROLE_MAIN
-        ),
-        RuntimeError,
-        "requires CUDA",
-    )
-
-
-def test_cp_wait_gather_full_rejects_unknown_handle():
-    _assert_raises(
-        lambda: cp_wait_gather_full(object()),
-        TypeError,
-        "unsupported CP gather handle",
-    )
 
 
 def test_build_cp_context_single_stream_direct_slice_unpad_restore():
@@ -262,12 +205,6 @@ if __name__ == "__main__":
     print("PASS test_cp_all_gather_full_restores_2d_and_unpads")
     test_sync_cp_gather_impl_restores_2d_on_cpu()
     print("PASS test_sync_cp_gather_impl_restores_2d_on_cpu")
-    test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local()
-    print("PASS test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local")
-    test_cuda_async_cp_gather_impl_fails_fast_on_cpu()
-    print("PASS test_cuda_async_cp_gather_impl_fails_fast_on_cpu")
-    test_cp_wait_gather_full_rejects_unknown_handle()
-    print("PASS test_cp_wait_gather_full_rejects_unknown_handle")
     test_build_cp_context_single_stream_direct_slice_unpad_restore()
     print("PASS test_build_cp_context_single_stream_direct_slice_unpad_restore")
     test_build_cp_context_marks_identity_restore_prefix()

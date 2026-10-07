@@ -276,9 +276,10 @@ class ChunkedMoETest(unittest.TestCase):
             clear=False,
         )
         self.env.start()
-
-    def tearDown(self) -> None:
-        self.env.stop()
+        self.addCleanup(self.env.stop)
+        # Service-wide chunk overrides must not change test defaults.
+        os.environ.pop("DSV4_CHUNK_TOKENS", None)
+        os.environ.pop("DSV4_MOE_CHUNK_TOKENS", None)
 
     def test_env_helpers_default_on(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -570,19 +571,17 @@ class ChunkedMoETest(unittest.TestCase):
 
     def test_env_can_disable_chunking(self):
         moe = _fake_moe(dim=2, cap=4)
+        # The backend can accept the complete request when chunking is disabled.
+        moe._strategy = _FakeStrategy(cap=9)
         x = torch.randn(9, 2)
         input_ids = torch.arange(9, dtype=torch.long)
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
-            with self.assertRaisesRegex(RuntimeError, "chunk overflow"):
-                moe(x, input_ids)
+            out = moe(x, input_ids)
 
-    def test_input_ids_must_match_flat_tokens(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.randn(5, 2)
-        input_ids = torch.arange(4, dtype=torch.long)
-
-        with self.assertRaisesRegex(RuntimeError, "input_ids/token mismatch"):
-            moe(x, input_ids)
+        self.assertEqual(moe.gate.token_chunks, [9])
+        self.assertEqual(moe._strategy.token_chunks, [9])
+        self.assertEqual(moe._shared_executor.token_chunks, [9])
+        self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
 
     def test_mega_output_capacity_uses_aligned_buffer_capacity(self):
         aligned = SimpleNamespace(num_max_tokens_per_rank=50304)

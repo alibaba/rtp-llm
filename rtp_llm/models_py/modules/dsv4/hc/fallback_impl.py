@@ -34,9 +34,6 @@ def _hc_split_sinkhorn(
     """
     hc = hc_mult
     *batch, mix_hc = mixes.size()
-    assert (
-        mix_hc == (hc + 2) * hc
-    ), f"mix_hc={mix_hc}, expected (hc+2)*hc={(hc + 2) * hc}"
 
     pre_raw = mixes[..., :hc] * hc_scale[0] + hc_base[:hc]
     pre = pre_raw.sigmoid() + eps

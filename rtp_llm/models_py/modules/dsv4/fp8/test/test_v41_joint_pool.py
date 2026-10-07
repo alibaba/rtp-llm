@@ -56,7 +56,7 @@ class JointPoolHostTest(unittest.TestCase):
         with patch.dict(joint._READY, {}, clear=True), patch.object(
             torch, "empty", side_effect=AssertionError("allocation")
         ):
-            with self.assertRaisesRegex(RuntimeError, "cold"):
+            with self.assertRaises(KeyError):
                 joint.try_gather(
                     attn, None, None, [1] * 32, seq, groups=[(0, 32, 8192)]
                 )
@@ -313,20 +313,14 @@ class JointPoolCudaTest(unittest.TestCase):
                                 self.assert_bits(a, b)
                                 self.assertTrue(a.is_contiguous())
 
-    def test_cold_invalid_alignment_and_transport_error_never_fallback(self):
+    def test_cold_and_transport_error_never_fallback(self):
         attn, main, index, host, ends = self.fixture([7] * 32, 1, 0)
         attn._gather_shards = Mock()
         with patch.dict(joint._READY, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "cold"):
+            with self.assertRaises(KeyError):
                 pools.try_gather_prefill_pools(attn, main, index, host, ends)
         attn._gather_shards.assert_not_called()
         self.warm(1, 0, torch.int32)
-        unaligned = torch.empty(main.numel() + 1, dtype=torch.uint8, device="cuda")[
-            1:
-        ].view(main.shape)
-        with self.assertRaisesRegex(RuntimeError, "local storage"):
-            pools.try_gather_prefill_pools(attn, unaligned, index, host, ends)
-        attn._gather_shards.assert_not_called()
         attn._gather_shards.side_effect = RuntimeError("transport witness")
         with self.assertRaisesRegex(RuntimeError, "transport witness"):
             pools.try_gather_prefill_pools(attn, main, index, host, ends)
@@ -373,7 +367,7 @@ class JointPoolCudaTest(unittest.TestCase):
                 "empty",
                 side_effect=AssertionError("allocation before readiness"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "cold"):
+                with self.assertRaises(KeyError):
                     pools.try_gather_prefill_pools(attn, main, index, host, ends)
         attn._gather_shards.assert_not_called()
 

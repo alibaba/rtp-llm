@@ -115,33 +115,8 @@ def quant_bf16_fp8_packed_ue8m0(
     group_size: int = 128,
     eps: float = 1.0e-4,
 ) -> None:
-    if triton is None:
-        raise RuntimeError("DSV4 fused FP8 activation quantization requires Triton")
-    if not x.is_cuda:
-        raise RuntimeError(
-            "DSV4 fused FP8 activation quantization requires CUDA tensors"
-        )
-    if x.dim() != 2:
-        raise ValueError(f"x must be [M,N], got {tuple(x.shape)}")
-    if not x.is_contiguous():
-        raise ValueError("x must be contiguous")
-    if x.dtype != torch.bfloat16:
-        raise ValueError(f"x must be bf16, got {x.dtype}")
     M, N = x.shape
-    if N % group_size != 0:
-        raise ValueError(f"N={N} must be divisible by group_size={group_size}")
-    if out_q.shape != x.shape or out_q.dtype != torch.float8_e4m3fn:
-        raise ValueError(
-            f"out_q must be float8_e4m3fn with shape {tuple(x.shape)}, "
-            f"got shape={tuple(out_q.shape)}, dtype={out_q.dtype}"
-        )
     expected_scale_cols = (N // group_size + 3) // 4
-    if out_scale.shape != (M, expected_scale_cols) or out_scale.dtype != torch.int32:
-        raise ValueError(
-            "out_scale must be packed int32 UE8M0 with shape "
-            f"{(M, expected_scale_cols)}, got shape={tuple(out_scale.shape)}, "
-            f"dtype={out_scale.dtype}"
-        )
     if M == 0:
         return
     finfo = torch.finfo(torch.float8_e4m3fn)
@@ -173,32 +148,8 @@ def fused_moe_epilogue(
     out_dtype: torch.dtype,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if triton is None:
-        raise RuntimeError("DSV4 fused shared-expert add requires Triton")
-    if not (routed.is_cuda and shared.is_cuda):
-        raise RuntimeError(
-            "DSV4 fused shared-expert add requires CUDA tensors; "
-            f"got routed={routed.device}, shared={shared.device}"
-        )
-    if routed.shape != shared.shape:
-        raise ValueError(
-            f"shape mismatch: routed={routed.shape}, shared={shared.shape}"
-        )
-    if routed.dim() != 2 or shared.dim() != 2:
-        raise ValueError(
-            f"expected 2D tensors, got routed={routed.dim()}D shared={shared.dim()}D"
-        )
     if out is None:
         out = torch.empty(routed.shape, dtype=out_dtype, device=routed.device)
-    elif (
-        out.shape != routed.shape
-        or out.dtype != out_dtype
-        or out.device != routed.device
-    ):
-        raise ValueError(
-            "out must match routed shape/device and requested dtype; "
-            f"got shape={tuple(out.shape)}, dtype={out.dtype}, device={out.device}"
-        )
     M, N = routed.shape
     if M * N == 0:
         return out

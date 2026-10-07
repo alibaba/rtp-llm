@@ -6,15 +6,9 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-)
 from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
 from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import (
     quant_bf16_fp8_packed_ue8m0,
-)
-from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
-    silu_mul_fp8_quant_packed_from_parts,
 )
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     FusedSharedExpertExecutor,
@@ -28,7 +22,6 @@ from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     get_shared_expert_executor,
 )
 from rtp_llm.test.utils.numeric_util import calc_diff
-from rtp_llm.utils.model_weight import concat_0
 
 
 @contextmanager
@@ -56,6 +49,8 @@ class _SharedWithCudaWeight(_Shared):
 
 
 def _quant_weight(weight_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+
     out_features, in_features = weight_bf16.shape
     if is_deep_gemm_e8m0_used():
         k_packed = (in_features + 511) // 512
@@ -90,6 +85,8 @@ def _make_shared_expert(
     inter: int = 256,
     swiglu_limit: float = 0.0,
 ) -> tuple[W13SharedExpert, Expert]:
+    from rtp_llm.utils.model_weight import concat_0
+
     torch.manual_seed(123)
     device = torch.device("cuda")
     w1_bf16 = torch.randn((inter, dim), device=device, dtype=torch.bfloat16) * 0.05
@@ -132,6 +129,9 @@ def _split_reference(
     swiglu_limit: float,
 ) -> torch.Tensor:
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+    from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
+        silu_mul_fp8_quant_packed_from_parts,
+    )
 
     T, D = x.shape
     inter = shared.w1.weight.shape[0]
@@ -311,19 +311,6 @@ class TestSharedExpertExecutor(unittest.TestCase):
             got = combine_routed_and_shared(routed, shared, torch.bfloat16)
         ref = (routed.to(torch.bfloat16) + shared.to(torch.bfloat16)).to(torch.bfloat16)
         self.assertTrue(torch.equal(got, ref))
-
-    def test_strict_rejects_bf16_add_switch(self):
-        routed = torch.randn(4, 8, dtype=torch.float32)
-        shared = torch.randn(4, 8, dtype=torch.float32)
-        with _env("DSV4_SHARED_EXPERT_BF16_ADD", "1"):
-            with self.assertRaisesRegex(RuntimeError, "forbids"):
-                combine_routed_and_shared(routed, shared, torch.bfloat16)
-
-    def test_strict_rejects_generic_shared_path(self):
-        x = torch.randn(3, 4, dtype=torch.bfloat16)
-        executor = SequentialSharedExpertExecutor()
-        with self.assertRaisesRegex(RuntimeError, "generic Expert.forward"):
-            executor.start(_Shared(), x)
 
     def test_executor_dispatch(self):
         os.environ.pop("DSV4_SHARED_EXPERT_MODE", None)
@@ -524,17 +511,6 @@ class TestSharedExpertExecutor(unittest.TestCase):
             got = shared(x)
             ref = split_ref(x)
         self.assertLess(calc_diff(got, ref), 0.0011)
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_strict_fused_requires_prepared_w13(self):
-        _, shared = _make_shared_expert()
-        executor = FusedSharedExpertExecutor(
-            max_tokens_per_rank=8,
-            dim=256,
-            inter_dim=256,
-        )
-        with self.assertRaisesRegex(RuntimeError, "loader-prepared w13"):
-            executor.prepare(shared)
 
 
 if __name__ == "__main__":

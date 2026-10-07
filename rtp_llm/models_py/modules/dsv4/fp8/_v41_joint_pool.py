@@ -343,37 +343,8 @@ def warmup(main_layout, index_layout, *, cp_size, cp_rank, device):
     return True
 
 
-def _pool_valid(pool, table, device, entries, width, batch):
-    return (
-        isinstance(pool, torch.Tensor)
-        and pool.device == device
-        and pool.dtype == torch.uint8
-        and pool.layout == torch.strided
-        and pool.ndim == 3
-        and pool.shape[0] > 0
-        and pool.shape[1:] == (entries, width)
-        and pool.stride(2) == 1
-        and pool.stride(1) == width
-        and pool.stride(0) >= entries * width
-        and pool.stride(0) % 4 == 0
-        and pool.stride(0) < 2**31
-        and pool.data_ptr() % 16 == 0
-        and pool.shape[0] * pool.stride(0) < 2**63
-        and isinstance(table, torch.Tensor)
-        and table.device == device
-        and table.layout == torch.strided
-        and table.dtype in (torch.int32, torch.int64)
-        and table.ndim == 2
-        and table.shape[0] == batch
-        and table.shape[1] > 0
-        and table.stride(1) == 1
-        and table.stride(0) >= table.shape[1]
-        and table.shape[0] * table.stride(0) < 2**31
-    )
-
-
 def try_gather(attn, main, index, ends, seq_ends, *, groups):
-    """Choose the schedule from common host geometry; local failures are fatal."""
+    """Choose the schedule from common host geometry and prepared pool layouts."""
     if not _MIN_BATCH <= len(ends) <= 128:
         return None
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
@@ -386,33 +357,11 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
         or cache is None
     ):
         return None
-    if (
-        tables is None
-        or not isinstance(seq_ends, torch.Tensor)
-        or seq_ends.device.type != "cuda"
-        or seq_ends.dtype != torch.int64
-        or seq_ends.layout != torch.strided
-        or seq_ends.shape != (len(ends),)
-        or seq_ends.stride(0) <= 0
-        or seq_ends.stride(0) * len(ends) >= 2**31
-        or not all(type(x) is int and 0 <= x < 2**31 for x in ends)
-    ):
-        raise RuntimeError("qualified joint pool has invalid local sequence metadata")
     region = attn._global_region()
     mt, it = tables.get(region), tables.get(INDEXER_KV)
-    if not isinstance(mt, torch.Tensor) or not isinstance(it, torch.Tensor):
-        raise RuntimeError("qualified joint pool has missing local block tables")
-    try:
-        mtpb = require_pool_tokens_per_block(cache, region=region)
-        itpb = require_pool_tokens_per_block(cache, region=INDEXER_KV)
-    except RuntimeError as error:
-        raise RuntimeError("qualified joint pool has invalid model layout") from error
+    mtpb = require_pool_tokens_per_block(cache, region=region)
+    itpb = require_pool_tokens_per_block(cache, region=INDEXER_KV)
     ratio, owner, rank = attn.compress_ratio, cache.seq_size_per_block, cp.cp_rank
-    if mt.dtype not in (torch.int32, torch.int64) or it.dtype not in (
-        torch.int32,
-        torch.int64,
-    ):
-        raise RuntimeError("qualified joint pool has invalid local block table dtype")
     main_entries = attn._source_entries(region, main)
     index_entries = attn._source_entries(INDEXER_KV, index)
     if not is_supported_layout(
@@ -432,18 +381,7 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
         main_entries,
         index_entries,
     )
-    if not _layout_valid(*layout):
-        raise RuntimeError("qualified joint pool layout was not accepted at startup")
-    kernels = _READY.get((seq_ends.device.index, *layout))
-    if kernels is None or not (
-        _pool_valid(main, mt, seq_ends.device, main_entries, _RAW, len(ends))
-        and _pool_valid(
-            index, it, seq_ends.device, index_entries, _PAYLOAD + _SCALE, len(ends)
-        )
-    ):
-        raise RuntimeError(
-            "qualified joint pool is cold or has invalid local storage; startup warmup is required"
-        )
+    kernels = _READY[(seq_ends.device.index, *layout)]
     from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,
     )

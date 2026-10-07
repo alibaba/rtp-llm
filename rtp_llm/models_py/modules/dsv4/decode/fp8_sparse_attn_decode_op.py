@@ -48,16 +48,6 @@ except (ImportError, AttributeError, ValueError) as e:
     )
 
 
-def _flash_mla_unavailable_reason(q: torch.Tensor, kv_cache: torch.Tensor) -> str:
-    if not _FLASH_MLA_AVAILABLE:
-        return "flash_mla import failed or CUDA version is below 12.9"
-    if not q.is_cuda:
-        return f"q is on {q.device}, expected CUDA"
-    if not kv_cache.is_cuda:
-        return f"kv_cache is on {kv_cache.device}, expected CUDA"
-    return "unknown"
-
-
 def _dequant_kv_view_to_bf16(
     kv_cache_packed: torch.Tensor,
 ) -> torch.Tensor:
@@ -127,11 +117,6 @@ class SparseAttnV4DecodeFp8Op:
         cache_seqlens: Optional[torch.Tensor] = None,
         block_table: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if not (_FLASH_MLA_AVAILABLE and q.is_cuda and kv_cache.is_cuda):
-            raise RuntimeError(
-                "DSV4 FP8 sparse attention requires the FlashMLA fast path by "
-                f"default: {_flash_mla_unavailable_reason(q, kv_cache)}."
-            )
         return self._forward_flash_mla(
             q,
             kv_cache,
@@ -208,12 +193,6 @@ class SparseAttnV4DecodeFp8Op:
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
         )
-        # V4-Flash attn_sink is zero; non-zero case is unsupported by FlashMLA native path.
-        if attn_sink is not None and attn_sink.abs().max().item() > 0:
-            logging.warning(
-                "[dsv4-fp8] non-zero attn_sink with FlashMLA path: sink correction deferred"
-            )
-
         return attn_out.view(B, q_len, H, self.head_dim).contiguous()
 
     def _forward_reference(

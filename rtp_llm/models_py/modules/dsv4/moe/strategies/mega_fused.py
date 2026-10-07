@@ -277,18 +277,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         T = x.size(0)
         buf = self._mega_buf
-        if T > buf.num_max_tokens_per_rank:
-            raise RuntimeError(
-                f"Mega MoE fused input tokens={T} exceeds num_max_tokens_per_rank="
-                f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
-                f"max_tokens_per_rank). Raise the budget at startup."
-            )
-        if T > self._mega_y.size(0):
-            raise RuntimeError(
-                f"Mega MoE fused output buffer rows={self._mega_y.size(0)} is "
-                f"smaller than input tokens={T}. This indicates inconsistent "
-                "aligned MegaMoE buffer sizing."
-            )
 
         # Like the non-fused kernel, ``fp8_fp4_mega_moe_fused`` is a
         # peer-symmetric NVLink collective: every rank MUST enter together,
@@ -331,10 +319,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
     ) -> torch.Tensor:
         """Run MegaMoE fused with router gate + input pack fused together."""
         kernels = _get_gate_pack_kernels()
-        if kernels is None:
-            raise RuntimeError(
-                "MegaMoE gate-pack was selected but kernels are unavailable"
-            )
         (
             fused_mega_moe_gate_pack_nonhash,
             fused_mega_moe_gate_pack_hash,
@@ -343,18 +327,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         T = x.size(0)
         buf = self._mega_buf
-        if T > buf.num_max_tokens_per_rank:
-            raise RuntimeError(
-                f"Mega MoE fused input tokens={T} exceeds num_max_tokens_per_rank="
-                f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
-                f"max_tokens_per_rank). Raise the budget at startup."
-            )
-        if T > self._mega_y.size(0):
-            raise RuntimeError(
-                f"Mega MoE fused output buffer rows={self._mega_y.size(0)} is "
-                f"smaller than input tokens={T}. This indicates inconsistent "
-                "aligned MegaMoE buffer sizing."
-            )
         y = self._mega_y[:T]
         import deep_gemm
 
