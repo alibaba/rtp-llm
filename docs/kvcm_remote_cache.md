@@ -4,33 +4,37 @@
 
 `deps/kvcm.bzl` pins the internal KVCM, public SDK/Manager, and PACE revisions. Build the client RPM and server archive from the same source combination, with matching SDK headers and shared libraries. The updated virtual interfaces and StartWrite arguments change the ABI; legacy RPMs and the public PACE stub are incompatible.
 
-The built-in artifact records are empty. Supply URLs, SHA256 hashes, and the matching `KVCM_SOURCE_ID` in those records, or pass `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json`. Client and server selection follows the BUILD configuration:
+The built-in artifact records pin the published SDK RPMs and x86 Manager archive from build `77672840`, including their URLs, SHA256 hashes, and matching `KVCM_SOURCE_ID`. The source tuple is internal `1c24aeac35c819c544316e9753eec0186ea53bd3`, public SDK/Manager `a71117d9745d7228f92aaf64c5414737878bd153`, and PACE `770bd4df361f86cd937f9144e910d202e1a7401f`. No external manifest is required for these artifacts.
+
+Client selection follows the BUILD configuration. The standalone Manager is shared across x86 CUDA configurations:
 
 | Build configuration | Client manifest variant | Server manifest variant |
 |---|---|---|
-| CUDA 13 x86 | `cuda130_x86` | `server_cuda130` |
-| CUDA 13 ARM | `cuda130_arm` | `server_cuda130` |
-| Other configurations | `cpu` or `cuda`, selected by `--repo_env=KVCM_CLIENT_VARIANT=cpu\|cuda` | `server` |
+| CUDA 12 x86 | `cuda` | `server` (x86) |
+| CUDA 12.9 x86 | `cuda129_x86` | `server` (x86) |
+| CUDA 13 x86 | `cuda130_x86` | `server` (x86) |
+| CUDA 13 ARM | `cuda130_arm` | No local ARM Manager package; use an external Manager |
 
-CUDA 13 variants are selected by Bazel and are not overridden by `KVCM_CLIENT_VARIANT`. Each artifact record must contain the corresponding platform build; absent variants fail instead of falling back to another architecture.
+CUDA 12.9 and CUDA 13 variants are selected by Bazel and are not overridden by `KVCM_CLIENT_VARIANT`. Other configurations default to the CUDA 12 x86 SDK. No CPU-only SDK is included in this release; `--repo_env=KVCM_CLIENT_VARIANT=cpu` requires an explicit paired CPU artifact in an override manifest. Targets that launch the packaged Manager are restricted to x86; the ARM SDK can communicate with an external Manager.
 
-The manifest requires exactly one entry for the selected client variant and its server variant. All source IDs must match `internal_commit:opensource_commit:pace_commit` from the source lock:
+To override the published artifacts, pass `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json`. The manifest requires exactly one entry for the selected client variant and the `server` variant. All source IDs must match `internal_commit:opensource_commit:pace_commit` from the source lock:
 
 ```json
 {
   "source_id": "<internal commit>:<opensource commit>:<pace commit>",
   "artifacts": [
-    {"variant": "cpu", "source_id": "<same source_id>", "url": "<CPU RPM URL>", "sha256": "<SHA256>"},
-    {"variant": "cuda", "source_id": "<same source_id>", "url": "<CUDA RPM URL>", "sha256": "<SHA256>"},
-    {"variant": "server", "source_id": "<same source_id>", "url": "<server archive URL>", "sha256": "<SHA256>"},
+    {"variant": "cuda", "source_id": "<same source_id>", "url": "<CUDA 12 x86 RPM URL>", "sha256": "<SHA256>"},
+    {"variant": "cuda129_x86", "source_id": "<same source_id>", "url": "<CUDA 12.9 x86 RPM URL>", "sha256": "<SHA256>"},
     {"variant": "cuda130_x86", "source_id": "<same source_id>", "url": "<CUDA 13 x86 RPM URL>", "sha256": "<SHA256>"},
     {"variant": "cuda130_arm", "source_id": "<same source_id>", "url": "<CUDA 13 ARM RPM URL>", "sha256": "<SHA256>"},
-    {"variant": "server_cuda130", "source_id": "<same source_id>", "url": "<CUDA 13 server archive URL>", "sha256": "<SHA256>"}
+    {"variant": "server", "source_id": "<same source_id>", "url": "<x86 Manager archive URL>", "sha256": "<SHA256>"}
   ]
 }
 ```
 
 Bazel validates the source IDs and download hashes. The server archive must also contain the matching `KVCM_SOURCE_ID` marker.
+
+The `remote_cache_pace_contract` and `remote_cache_pace_ssd_contract` targets exercise CPU buffers using the selected SDK; their `smoke_kvcm_p1_cpu*` suite names describe the buffer type, not a CPU-only SDK requirement. With the published SDKs, the matching CUDA runtime must be available. Model smoke tests still require a CUDA SDK. CUDA 13 keeps remote cache opt-in: place `--config=remote_kv_cache` after `--config=cuda13` or `--config=cuda13_arm`. An external `KVCM_PACE_FIXTURE` must carry the updated source ID; the PACE provider and consumer revision remains unchanged.
 
 SDK packaging must isolate its internal autil/gRPC symbols from RTP to avoid symbol interposition and duplicate destruction. Link with `-Wl,-Bsymbolic` and a version script exporting only the KVCM API (`_ZN16kv_cache_manager*`, `_ZNK16kv_cache_manager*`, `_ZTVN16kv_cache_manager*`, `_ZTIN16kv_cache_manager*`, and `_ZTSN16kv_cache_manager*`), with all other symbols local. Update the RPM hash in the manifest after relinking.
 

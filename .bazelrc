@@ -186,9 +186,8 @@ build:cuda13 --copt=-Wno-narrowing
 build:cuda13 --define=using_cuda13_x86=true
 build:cuda13 --define=using_cuda12_9_x86=false
 build:cuda13 --define=using_cuda12_x86=false
-# remote_kv_cache 3rdparty prebuilt (kv_cache_manager_client.so) is linked
-# against libcudart.so.12 — pulls a missing dep into libth_transformer.so on
-# cu13 toolchain. cuda13_arm already disables it; mirror here.
+# Keep remote cache opt-in on CUDA 13, as on ARM. The paired CUDA 13 SDK
+# is selected when --config=remote_kv_cache follows --config=cuda13.
 build:cuda13 --define=use_remote_kv_cache=false
 # nvcc 13 dropped Volta (sm_70) and Turing (sm_75); supported set on
 # CUDA 13.x is sm_80..sm_120.  With sm_70/sm_75 left in the list nvcc

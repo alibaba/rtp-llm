@@ -11,12 +11,9 @@ def runfile(repository, relative):
     repositories = {
         "remote_kv_cache_manager_client_rpm": [
             "remote_kv_cache_manager_client_rpm",
+            "remote_kv_cache_manager_client_rpm_cuda129_x86",
             "remote_kv_cache_manager_client_rpm_cuda130_x86",
             "remote_kv_cache_manager_client_rpm_cuda130_arm",
-        ],
-        "remote_kv_cache_manager_server": [
-            "remote_kv_cache_manager_server",
-            "remote_kv_cache_manager_server_cuda130",
         ],
     }.get(repository, [repository])
     candidates = {
@@ -112,7 +109,7 @@ class PaceFixture:
 
     def configure(self, server):
         # The manager is private to this test; all allocations use a small quota.
-        name = f"pace_smoke_{server._rpc_port}"
+        name = f"pace_smoke_{server.rpc_port}"
         self.instance_group = name
         server.post_json("addStorage", {
             "trace_id": name,

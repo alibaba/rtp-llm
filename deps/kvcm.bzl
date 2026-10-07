@@ -1,10 +1,10 @@
 """Pinned KVCM/PACE sources and the paired binary artifact gate."""
 
 # The SDK changes virtual interfaces. The April RPM cannot provide this ABI.
-# Populate artifact records only after packaging these source commits.
+# Published SDKs and Manager share the source tuple below.
 KVCM_SOURCE_LOCK = {
-    "internal_commit": "32dc3162ec4f9f981617f8d82f9696a4faa2fe5b",
-    "opensource_commit": "6015fca48a091dc18ea9497518138cb58959c3f2",
+    "internal_commit": "1c24aeac35c819c544316e9753eec0186ea53bd3",
+    "opensource_commit": "a71117d9745d7228f92aaf64c5414737878bd153",
     "pace_commit": "770bd4df361f86cd937f9144e910d202e1a7401f",
 }
 
@@ -12,11 +12,31 @@ KVCM_SOURCE_ID = ":".join([KVCM_SOURCE_LOCK[key] for key in [
     "internal_commit", "opensource_commit", "pace_commit",
 ]])
 
-KVCM_CLIENT_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
-KVCM_SERVER_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
-KVCM_CLIENT_CUDA130_X86_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
-KVCM_CLIENT_CUDA130_ARM_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
-KVCM_SERVER_CUDA130_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
+KVCM_CLIENT_ARTIFACT = {
+    "urls": ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_08_00_51-77672840-cuda12.x86_64.rpm"],
+    "sha256": "f49ce9a3e2bc16053d558a0d976f955ab9d25a06c34dac84aa4b09a28bc04538",
+    "source_id": KVCM_SOURCE_ID,
+}
+KVCM_CLIENT_CUDA129_X86_ARTIFACT = {
+    "urls": ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_08_00_52-77672840-cuda129.x86_64.rpm"],
+    "sha256": "2c463314a91a73d98248bf7866a55808e3761f0914597d4012204fd04a098fa5",
+    "source_id": KVCM_SOURCE_ID,
+}
+KVCM_CLIENT_CUDA130_X86_ARTIFACT = {
+    "urls": ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_08_00_52-77672840-cuda130.x86_64.rpm"],
+    "sha256": "14aec756d95c64a9abf5899f14f3f3d5ebfa9ee131264f3900871ad01edd0054",
+    "source_id": KVCM_SOURCE_ID,
+}
+KVCM_CLIENT_CUDA130_ARM_ARTIFACT = {
+    "urls": ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_08_00_52-77672840-cuda130.aarch64.rpm"],
+    "sha256": "6612b00830ea9a97acb01e2d7ecb96c5f6b8254a70011f4de15a42083ef2948c",
+    "source_id": KVCM_SOURCE_ID,
+}
+KVCM_SERVER_ARTIFACT = {
+    "urls": ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv-cache-manager-server-77672840.x86_64.tar.gz"],
+    "sha256": "d0b2f7d8ba6b0f38ec1be9d9b5d0c14cd386308723fbfbb5af4941f467528f0d",
+    "source_id": KVCM_SOURCE_ID,
+}
 
 def _client_variant(ctx):
     if ctx.attr.client_variant:
@@ -29,6 +49,8 @@ def _client_variant(ctx):
 def _artifact_from_manifest(ctx):
     manifest_path = ctx.os.environ.get("KVCM_ARTIFACT_MANIFEST", "")
     if not manifest_path:
+        if ctx.attr.kind == "client" and _client_variant(ctx) == "cpu":
+            fail("No CPU-only SDK is published in the source lock. Supply a paired cpu artifact via KVCM_ARTIFACT_MANIFEST.")
         return {"urls": ctx.attr.urls, "sha256": ctx.attr.sha256, "source_id": ctx.attr.source_id}
     manifest = json.decode(ctx.read(ctx.path(manifest_path)))
     if manifest.get("source_id") != ctx.attr.expected_source_id:
@@ -96,10 +118,10 @@ _kvcm_artifact = repository_rule(
 def kvcm_deps():
     for name, kind, client_variant, server_variant, artifact in [
         ("remote_kv_cache_manager_client_rpm", "client", "", "server", KVCM_CLIENT_ARTIFACT),
-        ("remote_kv_cache_manager_client_rpm_cuda130_x86", "client", "cuda130_x86", "server_cuda130", KVCM_CLIENT_CUDA130_X86_ARTIFACT),
-        ("remote_kv_cache_manager_client_rpm_cuda130_arm", "client", "cuda130_arm", "server_cuda130", KVCM_CLIENT_CUDA130_ARM_ARTIFACT),
+        ("remote_kv_cache_manager_client_rpm_cuda129_x86", "client", "cuda129_x86", "server", KVCM_CLIENT_CUDA129_X86_ARTIFACT),
+        ("remote_kv_cache_manager_client_rpm_cuda130_x86", "client", "cuda130_x86", "server", KVCM_CLIENT_CUDA130_X86_ARTIFACT),
+        ("remote_kv_cache_manager_client_rpm_cuda130_arm", "client", "cuda130_arm", "server", KVCM_CLIENT_CUDA130_ARM_ARTIFACT),
         ("remote_kv_cache_manager_server", "server", "", "server", KVCM_SERVER_ARTIFACT),
-        ("remote_kv_cache_manager_server_cuda130", "server", "", "server_cuda130", KVCM_SERVER_CUDA130_ARTIFACT),
     ]:
         _kvcm_artifact(
             name = name,

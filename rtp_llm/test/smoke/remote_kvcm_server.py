@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -62,6 +63,14 @@ class RemoteKVCMServer:
             return
         shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True)
 
+    @property
+    def rpc_port(self) -> int:
+        return self._rpc_port
+
+    @property
+    def http_port(self) -> int:
+        return self._http_port
+
     def address(self) -> str:
         return self._address
 
@@ -97,6 +106,7 @@ class RemoteKVCMServer:
         self._server_process = subprocess.Popen(
             cmd,
             cwd=self._work_dir,
+            start_new_session=True,
         )
         if self.wait_sever_done(timeout):
             if self.pace_fixture is not None:
@@ -191,38 +201,39 @@ class RemoteKVCMServer:
             time.sleep(retry_interval)
 
     def stop_server(self):
-        if self._fault_trigger:
-            if self.clearFaults():
-                logging.info("clear faults injection success")
-            else:
-                logging.warning("clear faults injection failed")
-        if self._server_process is not None and self._server_process.pid is not None:
-            if self._server_process.poll() is not None:
-                self._server_process = None
-                return
+        process = self._server_process
+        if process is None:
+            return
+        if self._fault_trigger and process.poll() is None:
             try:
-                logging.info(
-                    "stop remote kvcm server and children: %d", self._server_process.pid
+                if self.clearFaults():
+                    logging.info("clear faults injection success")
+                else:
+                    logging.warning("clear faults injection failed")
+            except Exception:
+                logging.exception(
+                    "clear faults injection failed; continuing process cleanup"
                 )
-                parent = psutil.Process(self._server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                try:
-                    parent.wait(timeout=5)
-                except psutil.TimeoutExpired:
-                    parent.kill()
-                    parent.wait(timeout=5)
-                self._server_process = None
-            except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
-                self._server_process = None
+        try:
+            # start_new_session makes this PID the group ID. Descendants keep
+            # that group after the manager exits, even if poll() has reaped it.
+            logging.info("stop remote kvcm process group: %d", process.pid)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    process.poll()
+                    os.killpg(process.pid, 0)
+                    time.sleep(0.1)
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+        except Exception:
+            logging.exception("failed to stop remote kvcm process group: %d", process.pid)
+            return
+        self._server_process = None
+        self._fault_trigger = False
 
     def check_fault_injection(self):
         fault_map = {

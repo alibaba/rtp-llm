@@ -7,7 +7,7 @@ from rtp_llm.test.smoke.pace_contract_smoke import event_contract
 class EventContractTest(unittest.TestCase):
     def make_server(self, retry_after_ms):
         server = Mock()
-        server._rpc_port = 12345
+        server.rpc_port = 12345
         server.post_json.side_effect = [
             {"snapshot_required": True},
             {},

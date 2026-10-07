@@ -73,7 +73,8 @@ filegroup(
     srcs = ["data/model/qwen3/q_r_new_model_py.json"],
 )
 
-# This helper links only the selected SDK RPM, not the RTP model or CUDA stack.
+# This helper links the selected SDK RPM without the RTP model stack.
+# Published SDKs require the corresponding CUDA runtime even for CPU buffers.
 cc_binary(
     name = "pace_sdk_smoke",
     testonly = True,
@@ -108,6 +109,13 @@ py_test(
     legacy_create_init = 0,
 )
 
+py_test(
+    name = "remote_kvcm_server_test",
+    srcs = ["remote_kvcm_server_test.py"],
+    deps = [":pace_smoke_fixture"],
+    legacy_create_init = 0,
+)
+
 _PACE_SMOKE_DATA = [
     ":pace_sdk_smoke",
     ":pace_publisher_smoke",
@@ -123,7 +131,8 @@ py_test(
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
     args = ["--sdk", "$(location :pace_sdk_smoke)", "--publisher", "$(location :pace_publisher_smoke)", "--backend", "pace"],
-    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
+    # The contract uses CPU buffers with either a CPU-only or CUDA SDK.
+    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID},
     env_inherit = ["KVCM_PACE_FIXTURE"],
     tags = ["manual", "smoke_case", "no-remote", "requires-pace"],
     timeout = "long",
@@ -137,7 +146,7 @@ py_test(
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
     args = ["--sdk", "$(location :pace_sdk_smoke)", "--publisher", "$(location :pace_publisher_smoke)", "--backend", "pace_ssd"],
-    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
+    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID},
     env_inherit = ["KVCM_PACE_FIXTURE"],
     tags = ["manual", "smoke_case", "no-remote", "requires-pace-ssd"],
     timeout = "long",

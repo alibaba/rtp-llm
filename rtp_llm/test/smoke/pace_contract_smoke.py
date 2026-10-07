@@ -18,7 +18,7 @@ def assert_equal(actual, expected, message):
 
 
 def event_contract(server, instance_id, keys):
-    host = f"127.0.0.1:{server._rpc_port}"
+    host = f"127.0.0.1:{server.rpc_port}"
     base = {"instance_id": instance_id, "host_ip_port": host, "storage_type": 7}
 
     def report(event_type, params, check=True):
@@ -59,14 +59,14 @@ def event_contract(server, instance_id, keys):
 
 
 def publisher_contract(server, executable, output):
-    instance_id = f"pace_publisher_{server._rpc_port}"
-    host = f"127.0.0.1:{server._rpc_port}"
+    instance_id = f"pace_publisher_{server.rpc_port}"
+    host = f"127.0.0.1:{server.rpc_port}"
     first = time.time_ns()
     second = first + 1
     log_path = output / "pace_publisher.log"
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen([
-            executable, f"http://127.0.0.1:{server._http_port}",
+            executable, f"http://127.0.0.1:{server.http_port}",
             server.pace_fixture.instance_group, instance_id, host, str(first), str(second),
         ], stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, text=True)
         try:
@@ -131,7 +131,7 @@ def main():
             env.update(server.client_env())
             summaries = []
             for query_type in (1, 2, 3, 4):
-                instance_id = f"pace_contract_{server._rpc_port}_{query_type}"
+                instance_id = f"pace_contract_{server.rpc_port}_{query_type}"
                 config = server.pace_fixture.sdk_config(server, instance_id, query_type)
                 config_path = Path(directory) / f"client_{query_type}.json"
                 config_path.write_text(json.dumps(config), encoding="utf-8")
