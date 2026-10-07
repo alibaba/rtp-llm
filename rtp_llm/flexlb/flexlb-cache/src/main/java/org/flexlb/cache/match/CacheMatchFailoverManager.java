@@ -60,8 +60,10 @@ public class CacheMatchFailoverManager {
         if (!kvcmEnabled) {
             return;
         }
-        KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
+        updateFromKvcmHealth(kvcmGrpcClient.healthSnapshot());
+    }
 
+    private void updateFromKvcmHealth(KvcmHealthSnapshot health) {
         // A manual fallback is an operator override and has higher priority than health updates.
         if (manualFallbackActive.get()) {
             cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
@@ -109,7 +111,7 @@ public class CacheMatchFailoverManager {
             throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
         }
         manualFallbackActive.set(false);
-        updateFromKvcmHealth();
+        updateFromKvcmHealth(health);
         log.info("Manual cache failover cleared; active cache source follows KVCM health, source={}", activeSource());
     }
 

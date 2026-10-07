@@ -103,7 +103,7 @@ class BuildHtmlTest(unittest.TestCase):
         global.setTimeout = () => 0;
         '''
         result = subprocess.run([node, "-e", bootstrap + before + checks + "  })();" + after],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_builds_self_contained_replay_from_workbook(self) -> None:
@@ -150,15 +150,15 @@ class BuildHtmlTest(unittest.TestCase):
 
             node = shutil.which("node")
             if node:
-                script = re.search(r"<script>([\s\S]*?)</script>", html)
-                self.assertIsNotNone(script)
+                script = html.split("<script>", 1)[1].split("</script>", 1)[0]
                 script_path = root / "replay.js"
-                script_path.write_text(script.group(1), encoding="utf-8")
+                script_path.write_text(script, encoding="utf-8")
                 result = subprocess.run(
                     [node, "--check", str(script_path)],
                     check=False,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -180,7 +180,7 @@ class BuildHtmlTest(unittest.TestCase):
           throw new Error('Current estimates lost their units or unknown values');
         if (!decode.includes('-0.250000')) throw new Error('Decode weight rounded to zero');
         '''
-        result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cache_comparison_card_preserves_zero_signed_delta_and_unknown(self) -> None:
@@ -200,7 +200,7 @@ class BuildHtmlTest(unittest.TestCase):
           || !html.includes('— · 差值 —') || !html.includes('&lt;Standby&gt;'))
           throw new Error('Cache comparison lost zero, signed delta, unknown, or source escaping');
         '''
-        result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_builds_replay_from_legacy_requests_header_row(self) -> None:
