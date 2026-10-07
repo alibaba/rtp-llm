@@ -79,6 +79,19 @@ class FlexlbScheduleEngineIndexTest {
     }
 
     @Test
+    void scheduleIncludesZeroEngineIndexForMultiEngineWorker() throws Exception {
+        when(routeService.route(any(BalanceContext.class))).thenReturn(
+                CompletableFuture.completedFuture(response(serverStatus(0, 2))));
+
+        var result = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.parseFrom(
+                schedule().toByteArray());
+
+        assertTrue(result.getSuccess());
+        assertTrue(result.getServerStatus(0).hasEngineIndex());
+        assertEquals(0, result.getServerStatus(0).getEngineIndex());
+    }
+
+    @Test
     void scheduleOmitsEngineIndexForSingleEngineWorker() {
         when(routeService.route(any(BalanceContext.class))).thenReturn(
                 CompletableFuture.completedFuture(response(serverStatus(0, 1))));
