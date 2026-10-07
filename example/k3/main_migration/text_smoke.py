@@ -2086,19 +2086,19 @@ class Runner:
             for index in range(size):
                 case = self.record_case(f"{name}_{index:02d}",
                                         index % owner_count,
-                                        words=12)
+                                        words=56 if size >= 63 and not diagnostic else 12)
                 if diagnostic:
                     case = replace(case, expected_json=None, expected_regex=r".",
                                    max_tokens=512)
                 else:
-                    case = replace(case, max_tokens=256,
+                    case = replace(case, max_tokens=1280 if size >= 63 else 256,
                                    require_mtp_draft=True, thinking_disabled=True)
                 cases.append(case)
+            # A PD group admits the large boundary batch in one Prefill
+            # forward. The longer exact answer keeps all Decode rows alive
+            # until both owners reach their intended Graph buckets.
             self._required_stage(name, cases, concurrent=size > 1,
-                                 admission_wave_size=(
-                                     None if diagnostic or size <= 8 else 8),
-                                 admission_gap_s=(
-                                     0 if diagnostic or size <= 8 else 1.0))
+                                 grouped_pd=size >= 63 and not diagnostic)
 
     def _orthogonal_page_boundaries(self) -> None:
         owners = max(1, len(self.decode_role_addrs))
