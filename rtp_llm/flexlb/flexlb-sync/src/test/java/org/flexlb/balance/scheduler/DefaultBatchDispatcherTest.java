@@ -300,11 +300,13 @@ class DefaultBatchDispatcherTest {
         submit(reservation, List.of(item), 4L, 100,
                 "shutdown_drain", callback);
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
-        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
-                "dispatch capacity must be released after the RPC handoff");
+        // New contract (in-flight bounding, 2475756fe5): the admission
+        // permit is held until the EnqueueBatch RPC COMPLETES, so capacity
+        // is NOT released merely by the RPC handoff.
+        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+                "capacity must stay held while the RPC is pending");
         assertFalse(rpcFuture.isDone());
 
-        dispatcher.shutdown();
         rpcFuture.complete(ackResponse(4L, List.of(1L)));
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
@@ -581,15 +583,20 @@ class DefaultBatchDispatcherTest {
                         "dispatch_handoff_capacity", callback));
 
         allowHandoff.countDown();
-        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
-        assertTrue(unavailable.availability().isAvailable());
+        // New contract (in-flight bounding, 2475756fe5): the permit is held
+        // until the RPC completes, not until the handoff returns.
+        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+                "capacity must stay held while the RPC is pending");
+        assertFalse(unavailable.availability().isAvailable());
         assertFalse(rpcFuture.isDone());
         assertEquals(0, callback.successCount.get());
+        rpcFuture.complete(ackResponse(1L, List.of(1L)));
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
+                "capacity must be released after the RPC completes");
+        assertTrue(unavailable.availability().isAvailable());
         PreparedSubmission replacement = reservePermit();
 
         replacement.close();
-
-        rpcFuture.complete(ackResponse(1L, List.of(1L)));
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.successCount.get());
