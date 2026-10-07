@@ -263,6 +263,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("get_server_config", &GrpcConfig::get_server_config)
         .def(py::pickle(
             [](const GrpcConfig& self) {
+                // Convert maps to Python dicts for serialization
                 py::dict client_dict;
                 py::dict server_dict;
                 auto     client_config = self.get_client_config();
@@ -284,6 +285,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     py::dict server_dict = t[1].cast<py::dict>();
                     int      max_pollers = (t.size() == 3) ? t[2].cast<int>() : 0;
 
+                    // Convert Python dicts to JSON string
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -983,14 +985,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register ModelSpecificConfig
     py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig", py::dynamic_attr())
         .def(py::init<>())
-        .def_readwrite("load_python_model", &ModelSpecificConfig::load_python_model)
         .def("to_string", &ModelSpecificConfig::to_string)
-        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(self.load_python_model); },
+        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(); },
                         [](py::tuple t) {
                             ModelSpecificConfig c;
-                            if (t.size() >= 1) {
-                                c.load_python_model = t[0].cast<bool>();
-                            }
                             return c;
                         }));
 

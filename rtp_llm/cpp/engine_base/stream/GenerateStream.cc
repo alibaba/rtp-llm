@@ -746,10 +746,6 @@ bool GenerateStream::reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>
     return true;
 }
 
-void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
-    reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
-}
-
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return hasEventWithoutLock(event);
