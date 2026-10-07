@@ -59,6 +59,33 @@ public class ChannelConfiguration {
         );
     }
 
+    /**
+     * Bounded event-loop task queue capacity per client event-loop thread.
+     *
+     * <p>Root-cause fix (case55 diagnostic 92649, 2026-10-08): the previously
+     * used {@code PlatformDependent::newMpscQueue} (unbounded) let the gRPC
+     * client event-loop task queue grow without limit under high-concurrency
+     * ramps (512-1024 threads); queued tasks retained CompositeByteBuf
+     * payloads until the JVM ran out of Java heap (45.6 GB heap dump on the
+     * faulted master) and deep CompositeByteBuf release recursion overflowed
+     * the stack. A bounded LinkedBlockingQueue (available on the pinned Netty 4.1.101,
+     * whose PlatformDependent.newMpscQueue has no capacity overload) makes
+     * backpressure observable via the existing
+     * {@code RejectedExecutionHandlers.reject()} rejection path instead of
+     * exhausting the heap.
+     */
+    static final int GRPC_CLIENT_EVENT_LOOP_TASK_QUEUE_CAPACITY = 10_000;
+
+    /**
+     * Bounded task queue for one event loop. Package-private for the
+     * regression test; bounds Netty's requested {@code maxPendingTasks} by
+     * the configured cap.
+     */
+    static LinkedBlockingQueue<Runnable> boundedTaskQueue(int maxPendingTasks) {
+        return new LinkedBlockingQueue<>(
+                Math.min(Math.max(1, maxPendingTasks), GRPC_CLIENT_EVENT_LOOP_TASK_QUEUE_CAPACITY));
+    }
+
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(
@@ -68,7 +95,7 @@ public class ChannelConfiguration {
                 SelectorProvider.provider(),
                 DefaultSelectStrategyFactory.INSTANCE,
                 RejectedExecutionHandlers.reject(),
-                PlatformDependent::newMpscQueue
+                ChannelConfiguration::boundedTaskQueue
         );
     }
 
