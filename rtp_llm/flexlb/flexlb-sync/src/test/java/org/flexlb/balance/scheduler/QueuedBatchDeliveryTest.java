@@ -171,15 +171,17 @@ class QueuedBatchDeliveryTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, decode.routingView().inflightExpectedKv());
-        // New in-flight contract (2475756fe5): the setup delivery's permit
-        // is held until the shared reply future completes (the RPC is the
-        // close() path), so admission here may legitimately be exhausted.
-        // Rejection is the expected, safe outcome — not a leaked permit.
+        // In-flight permit contract: the setup delivery's permit is held
+        // until the shared reply future completes. After the @AfterEach
+        // reply completion, admission MUST be available again — the permit
+        // held by the last delivery must be returned exactly once. The
+        // previous conditional (accept-or-reject) tolerated a leaked permit.
         CapacityBoundary.Attempt<?> admission = dispatcher.tryPrepareSubmission();
-        if (admission.accepted()) {
-            assertInstanceOf(BatchDeliveryStrategy.PreparedSubmission.class, admission.value())
-                    .close();
-        }
+        assertTrue(admission.accepted(),
+                "admission permit must be available after RPC completion; "
+                        + "a rejection here means a permit leaked");
+        assertInstanceOf(BatchDeliveryStrategy.PreparedSubmission.class, admission.value())
+                .close();
     }
 
     @ParameterizedTest
