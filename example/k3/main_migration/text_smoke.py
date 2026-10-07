@@ -2078,6 +2078,7 @@ class Runner:
 
     def _orthogonal_decode_batches(self) -> None:
         owner_count = max(1, len(self.decode_role_addrs))
+        diagnostic = self.args.suite == "orthogonal-flow"
         sizes = (1, 4, 8, 63, 64)
         for stage_index, size in enumerate(sizes):
             name = f"orthogonal_decode_{stage_index:02d}_batch_{size}"
@@ -2086,16 +2087,18 @@ class Runner:
                 case = self.record_case(f"{name}_{index:02d}",
                                         index % owner_count,
                                         words=12)
-                if self.args.suite == "orthogonal-flow":
+                if diagnostic:
                     case = replace(case, expected_json=None, expected_regex=r".",
-                                   max_tokens=64)
+                                   max_tokens=512)
                 else:
                     case = replace(case, max_tokens=256,
                                    require_mtp_draft=True, thinking_disabled=True)
                 cases.append(case)
             self._required_stage(name, cases, concurrent=size > 1,
-                                 admission_wave_size=8 if size > 8 else None,
-                                 admission_gap_s=1.0 if size > 8 else 0)
+                                 admission_wave_size=(
+                                     None if diagnostic or size <= 8 else 8),
+                                 admission_gap_s=(
+                                     0 if diagnostic or size <= 8 else 1.0))
 
     def _orthogonal_page_boundaries(self) -> None:
         owners = max(1, len(self.decode_role_addrs))
