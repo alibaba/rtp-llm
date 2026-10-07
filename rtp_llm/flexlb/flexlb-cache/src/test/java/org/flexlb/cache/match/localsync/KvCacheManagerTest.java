@@ -15,9 +15,14 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ForkJoinPool;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -41,6 +46,24 @@ class KvCacheManagerTest {
 
     @InjectMocks
     private KvCacheManager kvCacheManager;
+
+    @Test
+    void engineLocalViewCreatesPoolForDiffAndClosesItOnShutdown() {
+        EngineLocalView view = new EngineLocalView();
+        ReflectionTestUtils.setField(view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        assertNull(ReflectionTestUtils.getField(view, "customPool"));
+
+        try {
+            assertEquals(Set.of(11L), view.calculateDiff("10.0.0.1:8080", Set.of(11L)).getAddedBlocks());
+            ForkJoinPool pool = (ForkJoinPool) ReflectionTestUtils.getField(view, "customPool");
+            view.shutdown();
+            assertTrue(pool.isShutdown());
+            assertThrows(IllegalStateException.class,
+                    () -> view.calculateDiff("10.0.0.1:8080", Set.of(12L)));
+        } finally {
+            view.shutdown();
+        }
+    }
 
     @Test
     void findsRtpSingleEngineCacheByLogicalWorkerStatusIdentity() {

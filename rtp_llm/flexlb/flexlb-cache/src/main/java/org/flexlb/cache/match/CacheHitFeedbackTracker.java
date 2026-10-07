@@ -29,6 +29,7 @@ import java.util.function.Function;
  * Bounded request/role/generation correlation, independent of scheduling ownership.
  */
 final class CacheHitFeedbackTracker {
+    private static final Logger LOG = LoggerFactory.getLogger(CacheHitFeedbackTracker.class);
     private static final Logger PV = LoggerFactory.getLogger("pvLogger");
     private final Cache<Key, Prediction> predictions = Caffeine.newBuilder()
             .maximumSize(100_000).expireAfterWrite(Duration.ofHours(1)).build();
@@ -60,9 +61,22 @@ final class CacheHitFeedbackTracker {
                                                              WorkerStatus.StatusObservation status) {
         List<CompletableFuture<CacheHitComparisonResult>> results = new ArrayList<>();
         // Prefer terminal telemetry if the Engine includes the task in both lists.
-        status.finishedTasks().values().forEach(task -> observeTask(worker, status.role(), task, true, results));
-        status.activeTasks().values().forEach(task -> observeTask(worker, status.role(), task, false, results));
+        status.finishedTasks().values().forEach(task -> observeTaskBestEffort(worker, status.role(), task, true, results));
+        status.activeTasks().values().forEach(task -> observeTaskBestEffort(worker, status.role(), task, false, results));
         return results;
+    }
+
+    private void observeTaskBestEffort(WorkerStatus worker,
+                                       RoleType role,
+                                       WorkerStatus.TaskObservation task,
+                                       boolean finished,
+                                       List<CompletableFuture<CacheHitComparisonResult>> results) {
+        try {
+            observeTask(worker, role, task, finished, results);
+        } catch (RuntimeException error) {
+            LOG.warn("Failed to record cache-hit feedback for task: requestId={}, role={}",
+                    task == null ? null : task.requestId(), role, error);
+        }
     }
 
     private void observeTask(WorkerStatus worker,

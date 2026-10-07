@@ -20,11 +20,15 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Orchestrates the KVCM and complete local-snapshot cache matching sources. */
 @Slf4j
 @Component
 public class CacheMatchQueryOrchestrator {
+
+    private static final long KVCM_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final LocalSyncCacheMatchProvider localSyncProvider;
     private final KvcmCacheMatchProvider kvcmProvider;
@@ -34,6 +38,7 @@ public class CacheMatchQueryOrchestrator {
     private final LocalStandbyComparisonService comparisonService;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchConfiguration configuration;
+    private final AtomicLong nextKvcmWarningNanos = new AtomicLong(Long.MIN_VALUE);
 
     @Autowired
     public CacheMatchQueryOrchestrator(
@@ -80,8 +85,13 @@ public class CacheMatchQueryOrchestrator {
             return new CacheMatchResult(
                     matches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException error) {
-            log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY",
-                    query.requestId(), error);
+            long now = System.nanoTime();
+            long nextWarning = nextKvcmWarningNanos.get();
+            if (now >= nextWarning
+                    && nextKvcmWarningNanos.compareAndSet(nextWarning, now + KVCM_WARNING_INTERVAL_NANOS)) {
+                log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY",
+                        query.requestId(), error);
+            }
             cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
             return queryAndTrackLocalStandby(query, startTimeNs);
         }

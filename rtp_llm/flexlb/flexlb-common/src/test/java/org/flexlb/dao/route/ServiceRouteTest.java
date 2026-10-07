@@ -49,6 +49,17 @@ class ServiceRouteTest {
     }
 
     @Test
+    void serializesRoleEndpointsUnderItsWireName() throws Exception {
+        ServiceRoute route = objectMapper.readValue(ROUTE_JSON, ServiceRoute.class);
+
+        var json = objectMapper.valueToTree(route);
+
+        Assertions.assertTrue(json.has("role_endpoints"));
+        Assertions.assertFalse(json.has("roleEndpoints"));
+        assertStandardRoute(objectMapper.treeToValue(json, ServiceRoute.class));
+    }
+
+    @Test
     void testConfigLoaderList() {
         List<ServiceRoute> serviceRoutes = JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {
         });

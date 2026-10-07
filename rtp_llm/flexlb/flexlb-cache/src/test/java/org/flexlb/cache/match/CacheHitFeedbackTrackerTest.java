@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -27,6 +28,38 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class CacheHitFeedbackTrackerTest {
+
+    @Test
+    void failedTaskFeedbackDoesNotDiscardLaterTasks() {
+        WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
+        LocalStandbyComparisonService comparisonService = mock(LocalStandbyComparisonService.class);
+        when(comparisonService.captureComparison("broken", RoleType.PREFILL))
+                .thenReturn(feedback -> { throw new IllegalStateException("comparison failed"); });
+        when(comparisonService.captureComparison("healthy", RoleType.PREFILL))
+                .thenReturn(feedback -> CompletableFuture.completedFuture(null));
+        CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService);
+        for (String requestId : List.of("broken", "healthy")) {
+            tracker.track(requestId, RoleType.PREFILL, "default", worker,
+                    100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM));
+        }
+        WorkerStatus.TaskTelemetry telemetry = new WorkerStatus.TaskTelemetry(
+                true, 1, 2, 3, 4, 5, 0, 6, 0, 0, 0, 0, 0, 0, 0);
+        Map<String, WorkerStatus.TaskObservation> tasks = new LinkedHashMap<>();
+        for (String requestId : List.of("broken", "healthy")) {
+            tasks.put(requestId, new WorkerStatus.TaskObservation(
+                    requestId, 0, 0, 100, 0, 0, 0, 0, 0, "", 0,
+                    TaskPhase.RUNNING, 0, null, telemetry));
+        }
+        WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
+        when(status.role()).thenReturn(RoleType.PREFILL);
+        when(status.finishedTasks()).thenReturn(tasks);
+        when(status.activeTasks()).thenReturn(Map.of());
+
+        var results = tracker.observe(worker, status);
+
+        assertEquals(1, results.size());
+        assertTrue(results.getFirst().isDone());
+    }
 
     @Test
     void concurrentStatusReportsApplyComparisonAndWriteWorkerPvOnce() throws Exception {

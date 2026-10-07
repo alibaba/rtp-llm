@@ -70,7 +70,7 @@ public class CacheMatchFailoverManager {
         // Healthy snapshots converge the cache source back to KVCM.
         if (health.isHealthy()) {
             manualFallbackWarningLogged.set(false);
-            updateActiveSource(CacheMatchSource.KVCM, "KVCM heartbeat recovered");
+            updateActiveSource(CacheMatchSource.KVCM, "KVCM health recovered");
             cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
             return;
         }

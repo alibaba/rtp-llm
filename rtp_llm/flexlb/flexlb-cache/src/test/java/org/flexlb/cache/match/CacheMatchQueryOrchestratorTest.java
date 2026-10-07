@@ -1,5 +1,7 @@
 package org.flexlb.cache.match;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -13,6 +15,7 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
@@ -21,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +46,31 @@ class CacheMatchQueryOrchestratorTest {
             mock(CacheMetricsReporter.class);
     private final CacheMatchQuery query = new CacheMatchQuery(
             "request-1", List.of(11L, 22L), 2192L, RoleType.PREFILL, "default");
+
+    @Test
+    void rateLimitsKvcmFailureWarningsWithoutDroppingFallbackMetrics() {
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
+        when(kvcmProvider.findMatchingEngines(
+                query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group()))
+                .thenThrow(new IllegalStateException("KVCM unavailable"));
+        CacheMatchQueryOrchestrator orchestrator = orchestrator();
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CacheMatchQueryOrchestrator.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertEquals(CacheMatchSource.LOCAL_STANDBY, orchestrator.findMatchingEngines(query).source());
+            assertEquals(CacheMatchSource.LOCAL_STANDBY, orchestrator.findMatchingEngines(query).source());
+            assertEquals(1, appender.list.stream()
+                    .filter(event -> event.getFormattedMessage().contains("KVCM cache query failed"))
+                    .count());
+            verify(cacheMetricsReporter, times(2)).reportStandbyFallback("kvcm_query_failure");
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
 
     @Test
     void usesLocalSyncWhenKvcmIsDisabled() {

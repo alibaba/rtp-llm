@@ -46,7 +46,7 @@ class CacheMatchFailoverManagerTest {
         healthSnapshotListener.accept(
                 health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
-        assertEquals("KVCM heartbeat recovered", manager.lastFailoverReason());
+        assertEquals("KVCM health recovered", manager.lastFailoverReason());
         verify(metricsReporter).reportCacheMatchSourceChange(
                 CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
         verify(metricsReporter).reportCacheMatchSourceChange(

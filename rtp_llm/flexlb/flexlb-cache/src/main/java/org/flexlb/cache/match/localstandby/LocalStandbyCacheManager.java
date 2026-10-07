@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Coordinates Local Standby cache matching, request-derived metadata updates and index sizing.
@@ -41,7 +42,7 @@ public class LocalStandbyCacheManager {
     private final long configuredMaximumEntries;
     private final double capacityMultiplier;
     private final LocalStandbyCacheIndex cacheIndex;
-    private volatile long nextCapacityWarningNanos;
+    private final AtomicLong nextCapacityWarningNanos = new AtomicLong(Long.MIN_VALUE);
 
     public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
                                     WorkerStatusProvider workerStatusProvider,
@@ -176,8 +177,9 @@ public class LocalStandbyCacheManager {
 
         cacheMetricsReporter.reportLocalStandbyCapacityRejected();
         long now = System.nanoTime();
-        if (now >= nextCapacityWarningNanos) {
-            nextCapacityWarningNanos = now + CAPACITY_WARNING_INTERVAL_NANOS;
+        long nextWarning = nextCapacityWarningNanos.get();
+        if (now >= nextWarning
+                && nextCapacityWarningNanos.compareAndSet(nextWarning, now + CAPACITY_WARNING_INTERVAL_NANOS)) {
             log.warn("Local Standby cache reached its capacity limit; rejected {} new "
                             + "mappings while existing mappings remain refreshable, "
                             + "currentMappings={}, maximumEntries={}",

@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,7 +38,9 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -164,6 +167,26 @@ class EncoderSchedulingIntegrationTest {
         Response response = scheduler.submit(context).get(2, TimeUnit.SECONDS);
 
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void expiredEncoderEntryIsRemovedEvenWhenItsRequestSlotIsMissing() {
+        useEncoderQueue(1);
+        EncoderQueueCoordinator queue = (EncoderQueueCoordinator) ReflectionTestUtils.getField(scheduler, "encoderQueue");
+        BalanceContext context = mock(BalanceContext.class);
+        when(context.getRequestId()).thenReturn("expired-without-slot");
+        when(context.getPriority()).thenReturn(50);
+        when(context.requestExpired(anyLong())).thenReturn(true);
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+
+        assertTrue(queue.offer(context, pending));
+
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+            while (queue.size() != 0) {
+                Thread.sleep(5L);
+            }
+        });
+        assertFalse(pending.isDone());
     }
 
     @Test
