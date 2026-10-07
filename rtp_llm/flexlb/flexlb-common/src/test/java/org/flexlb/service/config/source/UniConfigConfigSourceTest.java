@@ -115,6 +115,7 @@ class UniConfigConfigSourceTest {
         AtomicInteger updates = new AtomicInteger();
         configService.addUpdateListener(config -> updates.incrementAndGet());
         FlexlbConfig original = configService.loadBalanceConfig();
+        String startupDispatcherType = original.getDispatcher().typeName();
 
         poll.run();
 
@@ -129,7 +130,8 @@ class UniConfigConfigSourceTest {
         poll.run();
 
         assertThat(source.load()).isEqualTo(currentConfig);
-        assertThat(configService.loadBalanceConfig().isDirect()).isTrue();
+        assertThat(configService.loadBalanceConfig().isQueue()).isTrue();
+        assertThat(configService.loadBalanceConfig().getDispatcher().typeName()).isEqualTo(startupDispatcherType);
         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                 .isEqualTo(1048585L);
         assertThat(updates).hasValue(2);

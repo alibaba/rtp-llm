@@ -8,6 +8,7 @@ import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.NormalizedConfig;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.service.config.parser.ConfigDocumentParser;
+import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
 import org.flexlb.service.config.parser.ModelServiceConfigParser;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -92,6 +94,7 @@ public class ConfigService {
         if (parsers.isEmpty()) {
             throw new IllegalStateException("No ConfigDocumentParser beans registered");
         }
+        parsers.forEach(ConfigDocumentParserResolver::register);
         FlexlbConfig defaults = new FlexlbConfig();
         defaults.getRequestLifecycle().getRequest().setTimeoutMs(300_000L);
         this.currentFlexlbConfig = new AtomicReference<>(defaults);
@@ -237,10 +240,10 @@ public class ConfigService {
     }
 
     /**
-     * Removes a runtime attempt to change either decision type before normal
+     * Removes runtime changes to scheduler, dispatcher and decision modes before normal
      * merge validation runs.
      *
-     * <p>The two types select threads and strategy beans at startup, so a
+     * <p>These modes select threads and strategy beans at startup, so a
      * type update cannot take effect safely. Active numeric fields are left in
      * the document and continue through the regular hot-update path. Fields
      * belonging only to a requested-but-inactive fixed-window mode are removed
@@ -251,15 +254,35 @@ public class ConfigService {
             return content;
         }
         JsonNode parsed = JsonUtils.readStrictTree(content);
-        if (!(parsed instanceof ObjectNode document)
-                || !(document.get("scheduler") instanceof ObjectNode scheduler)) {
+        if (!(parsed instanceof ObjectNode document)) {
             return content;
         }
         boolean changed = false;
-        if (scheduler.get("decision") instanceof ObjectNode decision) {
-            changed |= preserveWorkerDecisionType(decision);
+        if (document.get("scheduler") instanceof ObjectNode scheduler) {
+            changed |= preserveStartupMode(scheduler, "scheduler.type",
+                    startupDecisionTopology.schedulerType().name(), Set.of("DIRECT", "QUEUE"));
+            if (scheduler.get("decision") instanceof ObjectNode decision) {
+                changed |= preserveWorkerDecisionType(decision);
+            }
+        }
+        if (document.get("dispatcher") instanceof ObjectNode dispatcher) {
+            changed |= preserveStartupMode(dispatcher, "dispatcher.type",
+                    startupDecisionTopology.dispatcherType().name(), Set.of("BATCH", "NON_BATCH"));
         }
         return changed ? JsonUtils.toStrictString(document) : content;
+    }
+
+    private boolean preserveStartupMode(ObjectNode settings, String path,
+                                        String activeType, Set<String> supportedTypes) {
+        JsonNode type = settings.get("type");
+        if (type == null || !type.isTextual() || !supportedTypes.contains(type.textValue())
+                || activeType.equals(type.textValue())) {
+            return false;
+        }
+        settings.remove("type");
+        log.warn("Ignored runtime update to startup-fixed {}: requested={}, active={}",
+                path, type.textValue(), activeType);
+        return true;
     }
 
     /**
@@ -292,12 +315,17 @@ public class ConfigService {
         return true;
     }
 
-    private record StartupDecisionTopology(DecisionPolicyConfig.Type decisionType) {
+    private record StartupDecisionTopology(SchedulerConfig.Type schedulerType,
+                                           DispatcherConfig.Type dispatcherType,
+                                           DecisionPolicyConfig.Type decisionType) {
 
-        /** Captures the non-hot-swappable scheduling topology once at startup. */
+        /**
+         * Captures the scheduling modes selected when the application starts.
+         */
         private static StartupDecisionTopology from(FlexlbConfig config) {
             SchedulerConfig scheduler = config.getScheduler();
-            return new StartupDecisionTopology(scheduler.getDecision().getType());
+            return new StartupDecisionTopology(scheduler.getType(), config.getDispatcher().getType(),
+                    scheduler.getDecision().getType());
         }
     }
 

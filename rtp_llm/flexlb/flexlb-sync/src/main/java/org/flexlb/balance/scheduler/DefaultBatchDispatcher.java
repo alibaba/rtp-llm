@@ -746,7 +746,7 @@ public class DefaultBatchDispatcher {
     private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(role))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
                 .setRoleStr(role.getCode())
                 .setIp(serverStatus.getServerIp())
                 .setHttpPort(serverStatus.getHttpPort())
@@ -758,7 +758,7 @@ public class DefaultBatchDispatcher {
             EngineRpcService.RoleAddrPB cached,
             ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
-        return cached.getRole() == RoleTypeProtoConverter.toLegacyProto(role)
+        return cached.getRole() == RoleTypeProtoConverter.toRoleAddrProto(role)
                 && cached.getRoleStr().equals(role.getCode())
                 && cached.getIp().equals(serverStatus.getServerIp())
                 && cached.getHttpPort() == serverStatus.getHttpPort()

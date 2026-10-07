@@ -128,6 +128,24 @@ class RoutingServiceDiscoveryTest {
         assertIterableEquals(List.of(2, 2), hosts.stream().map(WorkerHost::getMultiEngineNum).toList());
     }
 
+    @Test
+    void rejectsInvalidDerivedPortsBeforePublishingHosts() {
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("grpc");
+        for (int discoveredPort : List.of(0, 1, 65535, Integer.MAX_VALUE)) {
+            RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(
+                    new RecordingProvider(List.of(WorkerHost.of("10.0.0.1", discoveredPort)))));
+            assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
+        }
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(
+                new RecordingProvider(List.of(WorkerHost.of("10.0.0.1", 8081)))));
+        endpoint.setWorkerStatusPort(65535);
+        endpoint.setMultiEngineNum(2);
+        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
+        endpoint.setWorkerStatusPort(Integer.MAX_VALUE);
+        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
+    }
+
     private Endpoint endpoint() {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(ServiceDiscoveryType.STATIC_ENV);

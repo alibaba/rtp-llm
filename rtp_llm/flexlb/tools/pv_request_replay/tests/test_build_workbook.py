@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ def epoch_ms(hour: int, minute: int, second: int = 0) -> int:
     )
 
 
-def pv_line(log_time: str, record: dict) -> str:
+def pv_line(log_time: str, record: object) -> str:
     return (
         f"{log_time} INFO test pvLogger - "
         + json.dumps(record, separators=(",", ":"))
@@ -648,6 +649,99 @@ class BuildWorkbookTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "No routing PV records matched"):
                 workbook_module.build_workbook(source, destination)
             self.assertFalse(destination.exists())
+
+
+class PvInputValidationTest(unittest.TestCase):
+    def test_non_object_manifest_uses_directory_fallback_and_reports_direct_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "instance-a.log"
+            snapshot.write_text("", encoding="utf-8")
+            manifest = root / "collect_manifest.json"
+            for payload in ([], ["snapshot"], "invalid", 123, True, None):
+                with self.subTest(payload=payload):
+                    manifest.write_text(json.dumps(payload), encoding="utf-8")
+                    sources = workbook_module.discover_sources(root)
+                    self.assertEqual(sources, [workbook_module.PvSource(snapshot.resolve(), "instance-a")])
+                    with self.assertRaisesRegex(ValueError, "No usable snapshots in manifest"):
+                        workbook_module.discover_sources(manifest)
+
+    def test_non_object_pv_records_are_skipped_without_losing_valid_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "pv.log"
+            invalid_lines = [pv_line("2026-08-11 01:45:00.010", payload)
+                             for payload in ([], [1, 2], "invalid", 123, True, None)]
+            for line in invalid_lines:
+                self.assertIsNone(workbook_module.parse_pv_record(line))
+            source.write_text("".join(invalid_lines) + pv_line("2026-08-11 01:45:00.020",
+                route_record("valid", epoch_ms(1, 45), "10.0.0.8")), encoding="utf-8")
+            rows, event_counts, _ = workbook_module.build_rows(
+                [workbook_module.PvSource(source, "instance-a")])
+            self.assertEqual([row["request_id"] for row in rows], ["valid"])
+            self.assertEqual(event_counts["route"], 1)
+
+    def test_zero_route_time_takes_priority_over_missing_time_in_both_input_orders(self):
+        zero_time = {"requestTimeMs": 0}
+        missing_time = {}
+        for records in ((zero_time, missing_time), (missing_time, zero_time)):
+            with self.subTest(records=records):
+                events = {}
+                for record in records:
+                    event_time = "2026-08-11 01:45:00.020" if record is missing_time else "2026-08-11 01:45:00.010"
+                    workbook_module._store_route(events, ("instance-a", "request-a"), event_time, record)
+                self.assertIs(events[("instance-a", "request-a")][1], zero_time)
+
+
+class ObservedOverlapTest(unittest.TestCase):
+    def test_overlap_annotations_match_predecessor_scan_with_ties_and_missing_telemetry(self):
+        randomizer = random.Random(1457)
+        copied_fields = ("request_id", "actual_hit_rate_pct", "uncache_tokens",
+                         "prefill_engine_ttft_ms", "first_token_time")
+        for sample in range(50):
+            rows = [{"request_id": f"request-{index}",
+                     "request_time_ms": randomizer.choice([None, *range(26)]),
+                     "first_token_time_ms": randomizer.choice([None, *range(71)]),
+                     "actual_hit_rate_pct": randomizer.choice([None, 0, 89.9, 90, 100]),
+                     "uncache_tokens": index * 10,
+                     "prefill_engine_ttft_ms": index * 20,
+                     "first_token_time": f"first-token-{index}"}
+                    for index in range(60)]
+            rows.sort(key=lambda row: (row["request_time_ms"] is None,
+                                      row["request_time_ms"] or 0, row["request_id"]))
+            original_rows = [dict(row) for row in rows]
+            workbook_module.observed_overlap(rows)
+            for index, row in enumerate(rows):
+                decision_ms = row["request_time_ms"]
+                active = [previous for previous in original_rows[:index]
+                          if decision_ms is not None and previous["first_token_time_ms"] is not None
+                          and previous["first_token_time_ms"] > decision_ms]
+                low_hit = [previous for previous in active
+                           if previous["actual_hit_rate_pct"] is not None
+                           and previous["actual_hit_rate_pct"] < 90]
+                with self.subTest(sample=sample, index=index):
+                    self.assertEqual(row["host_sequence_no"], index + 1)
+                    self.assertEqual(row["prior_before_first_token_count"], len(active))
+                    self.assertEqual(row["prior_low_hit_before_first_token_count"], len(low_hit))
+                    for prefix, candidates in (("previous_", active), ("low_hit_predecessor_", low_hit)):
+                        latest = max(candidates, key=lambda candidate: candidate["request_time_ms"] or -1) if candidates else {}
+                        for field in copied_fields:
+                            self.assertEqual(row[prefix + field], latest.get(field))
+                    expected_evidence = ("Earlier low-hit request had not reached first token" if low_hit
+                                         else "Earlier request had not reached first token" if active
+                                         else "No earlier route record still before first token")
+                    self.assertEqual(row["same_host_predecessor_evidence"], expected_evidence)
+
+    def test_large_overlapping_window_keeps_counts_and_latest_low_hit_predecessor(self):
+        count = 10_000
+        rows = [{"request_id": str(index), "request_time_ms": index + 1,
+                 "first_token_time_ms": count + 1,
+                 "actual_hit_rate_pct": 50 if index % 2 == 0 else 100}
+                for index in range(count)]
+        workbook_module.observed_overlap(rows)
+        self.assertEqual(rows[-1]["prior_before_first_token_count"], count - 1)
+        self.assertEqual(rows[-1]["prior_low_hit_before_first_token_count"], count // 2)
+        self.assertEqual(rows[-1]["previous_request_id"], str(count - 2))
+        self.assertEqual(rows[-1]["low_hit_predecessor_request_id"], str(count - 2))
 
 
 if __name__ == "__main__":

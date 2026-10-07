@@ -699,11 +699,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 && ctx.getResponse() != null
                 && ctx.getResponse().getServerStatus() != null) {
             for (ServerStatus worker : ctx.getResponse().getServerStatus()) {
-                if (worker.getRole() == RoleType.PREFILL
-                        || worker.getRole() == RoleType.PDFUSION) {
+                if (worker != null && (worker.getRole() == RoleType.PREFILL
+                        || worker.getRole() == RoleType.PDFUSION)) {
                     batchSchedulerReporter.reportAckToResponseTimeMs(
                             worker.getRole().name(),
-                            worker.getMetricIpPort(),
+                            worker.getMetricIpPort() == null ? "" : worker.getMetricIpPort(),
                             Math.max(0L, System.currentTimeMillis() - ctx.getAckAtMs()));
                     break;
                 }
@@ -741,6 +741,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         engineHealthReporter.reportRequestPayload(ctx);
                     }
                 }
+            } catch (RuntimeException monitoringError) {
+                Logger.warn("Failed to report schedule completion metrics, request_id={}",
+                        ctx == null ? "" : ctx.getRequestId(), monitoringError);
             } finally {
                 if (ctx != null) {
                     logPvRecord(ctx, response, origin);
@@ -828,12 +831,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             String selectedEncoder = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
+                    if (ss == null) {
+                        continue;
+                    }
+                    String selectedAddress = ss.getMetricIpPort() == null ? "" : ss.getMetricIpPort();
                     if (ss.getRole() != null && ss.getRole().supportsPrefill()) {
-                        selectedPrefill = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        selectedPrefill = selectedAddress;
                     } else if (ss.getRole() == RoleType.DECODE) {
-                        selectedDecode = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        selectedDecode = selectedAddress;
                     } else if (ss.getRole() == RoleType.ENCODER) {
-                        selectedEncoder = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        selectedEncoder = selectedAddress;
                     }
                 }
             }
@@ -874,7 +881,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return buildErrorResponse(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                     "request scheduling deadline exceeded");
         }
-        if (cause instanceof IllegalArgumentException) {
+        if (cause instanceof InvalidScheduleRequestException) {
             return buildErrorResponse(
                     StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                     cause.getMessage() != null
@@ -912,11 +919,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         var config = configService.loadBalanceConfig();
         BalanceContext ctx = new BalanceContext(config);
-        ctx.setRequestMessageBytes((long) pb.getSerializedSize());
+        ctx.setRequestMessageBytes(GrpcServerTimingInterceptor.getRequestMessageBytes());
         ctx.recordRequestTiming(pb.getRequestTimeMs(), null);
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
-        String requestId = RequestId.parse(pb);
+        String requestId;
+        try {
+            requestId = RequestId.parse(pb);
+        } catch (IllegalArgumentException error) {
+            throw new InvalidScheduleRequestException(error.getMessage(), error);
+        }
         FlexlbTrace.setRequestAttributes(span, requestId);
         FlexlbTrace.setAttribute(span, FlexlbTrace.SCHEDULE_PRIORITY, (long) pb.getPriority());
         Set<RoleType> requestedRoles = requestedRoles(pb);
@@ -927,6 +939,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 : modelRoute == null ? Set.of() : Set.copyOf(modelRoute.getAllRoleTypes());
         if (effectiveRoles.equals(Set.of(RoleType.ENCODER))) {
             ctx.setRequestPhase(RequestPhase.ENCODER);
+        }
+
+        if (config.isBatchDispatch() && ctx.getRequestPhase() != RequestPhase.ENCODER) {
+            try {
+                RequestId.requireMatchingGenerateInput(requestId, pb.getGenerateInput());
+            } catch (IllegalArgumentException error) {
+                throw new InvalidScheduleRequestException(error.getMessage(), error);
+            }
         }
 
         Request request = new Request();
@@ -948,7 +968,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setSeqLen(pb.getSeqLen());
         if (pb.hasEncoderCacheHitLen()) {
             if (pb.getEncoderCacheHitLen() < 0 || pb.getEncoderCacheHitLen() > pb.getSeqLen()) {
-                throw new IllegalArgumentException("encoder_cache_hit_len must be in [0, seq_len]");
+                throw new InvalidScheduleRequestException("encoder_cache_hit_len must be in [0, seq_len]");
             }
             request.setEncoderCacheHitLen(pb.getEncoderCacheHitLen());
         }
@@ -967,7 +987,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
         request.setBlockSize(pb.getCacheKeyBlockSize());
         if (pb.getBlockCacheKeysCount() > 0 && pb.getCacheKeyBlockSize() <= 0) {
-            throw new IllegalArgumentException(
+            throw new InvalidScheduleRequestException(
                     "cache_key_block_size must be greater than 0 when block_cache_keys are provided");
         }
 
@@ -1022,18 +1042,28 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.ScheduleRolePB scheduleRole =
                     FlexlbScheduleProtocol.ScheduleRolePB.forNumber(role);
             if (scheduleRole == null) {
-                throw new IllegalArgumentException("invalid schedule_roles value: " + role);
+                throw new InvalidScheduleRequestException("invalid schedule_roles value: " + role);
             }
             roles.add(switch (scheduleRole) {
                 case SCHEDULE_ROLE_ENCODER -> RoleType.ENCODER;
                 case SCHEDULE_ROLE_PREFILL -> RoleType.PREFILL;
                 case SCHEDULE_ROLE_DECODE -> RoleType.DECODE;
                 case SCHEDULE_ROLE_PDFUSION -> RoleType.PDFUSION;
-                default -> throw new IllegalArgumentException(
+                default -> throw new InvalidScheduleRequestException(
                         "invalid schedule_roles value: " + role);
             });
         }
         return Set.copyOf(roles);
+    }
+
+    private static final class InvalidScheduleRequestException extends IllegalArgumentException {
+        private InvalidScheduleRequestException(String message) {
+            super(message);
+        }
+
+        private InvalidScheduleRequestException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private static RequestPhase requestPhase(FlexlbScheduleProtocol.RequestPhasePB phase) {

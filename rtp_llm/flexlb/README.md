@@ -205,8 +205,10 @@ Local file discovery uses `MODEL_SERVICE_CONFIG.discovery_file`, pointing to a
 JSON mapping of service domains to HTTP host:port lists. Production discovery
 providers continue to resolve their service domains.
 
-Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
-`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring binds environment
+Master configuration uses `FLEXLB_CONFIG` and `MODEL_SERVICE_CONFIG`.
+Leader election and logging are configured through `FLEXLB_CONFIG.consistency`
+and `FLEXLB_CONFIG.observability.logging`; the separate `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+and `LOG_LEVEL` environment variables are no longer consumed. Spring binds environment
 variables to infrastructure properties, including `SERVER_PORT` and
 `FLEXLB_MONITOR_PROVIDER`. Ports, RPC transport and logging also accept standard
 command-line properties, such as `--server.port` and

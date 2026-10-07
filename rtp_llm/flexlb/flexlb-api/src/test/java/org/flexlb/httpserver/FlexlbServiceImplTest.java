@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
 import io.grpc.Context;
 import io.grpc.Status;
@@ -10,6 +11,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -21,6 +23,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -70,6 +73,92 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
+
+    @ParameterizedTest
+    @ValueSource(strings = {"007", "+7", "-0", "request-a", "9223372036854775808", "8"})
+    void rejectsBatchIdsThatCannotMatchTheEngineBeforeRouting(String requestId) {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(requestId)
+                .setGenerateInput(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(7L)
+                        .build().toByteString())
+                .build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+        assertTrue(response.getValue().getErrorMessage().contains("canonical int64"));
+        verifyNoInteractions(routeService, grpcForwarder);
+    }
+
+    @Test
+    void batchGenerationRejectsMissingOrMalformedInputBeforeRouting() {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+
+        for (ByteString input : List.of(ByteString.EMPTY, ByteString.copyFrom(new byte[]{(byte) 0x80}))) {
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("7").setGenerateInput(input).build(), observer);
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(response.capture());
+            verify(observer).onCompleted();
+            assertFalse(response.getValue().getSuccess());
+            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+            assertTrue(response.getValue().getErrorMessage().contains("generate_input"));
+        }
+        verifyNoInteractions(routeService, grpcForwarder);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {7L, 9007199254740993L, Long.MIN_VALUE, Long.MAX_VALUE})
+    void batchRoutingKeepsLargeEngineIdsAsExactStrings(long requestId) {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(Long.toString(requestId))
+                .setGenerateInput(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(requestId)
+                        .build().toByteString())
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertEquals(Long.toString(requestId), context.getValue().getRequestId());
+    }
+
+    @Test
+    void batchEncoderRoutingDoesNotRequireAnEngineGenerationPayload() {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("encoder-request")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertEquals(RequestPhase.ENCODER, context.getValue().getRequestPhase());
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"", " ", "\t"})
@@ -263,7 +352,9 @@ class FlexlbServiceImplTest {
                         0L, 10L, 20L, "route delivered"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         ch.qos.logback.classic.Logger scheduleLogger =
-                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.flexlb.util.Logger.LOGGER_NAME);
+        ch.qos.logback.classic.Level previousLevel = scheduleLogger.getLevel();
+        scheduleLogger.setLevel(ch.qos.logback.classic.Level.DEBUG);
         ListAppender<ILoggingEvent> scheduleAppender = new ListAppender<>();
         scheduleAppender.start();
         scheduleLogger.addAppender(scheduleAppender);
@@ -274,6 +365,7 @@ class FlexlbServiceImplTest {
                     .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                     .build(), observer);
         } finally {
+            scheduleLogger.setLevel(previousLevel);
             scheduleLogger.detachAppender(scheduleAppender);
             scheduleAppender.stop();
         }
@@ -287,7 +379,7 @@ class FlexlbServiceImplTest {
                 result.getValue().getLifecycle().getState());
         assertTrue(scheduleAppender.list.stream().map(ILoggingEvent::getFormattedMessage)
                 .anyMatch(message -> message.contains("phase=ENCODER")
-                        && message.contains("selected_encoder=10.0.0.31")));
+                        && message.contains("selected_encoder=10.0.0.31:8080")));
     }
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
@@ -303,6 +395,12 @@ class FlexlbServiceImplTest {
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
 
+    private static FlexlbConfig routingConfig() {
+        FlexlbConfig config = org.flexlb.mock.TestFlexlbConfigs.create();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        return config;
+    }
+
     @BeforeEach
     void setUp() {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
@@ -314,7 +412,7 @@ class FlexlbServiceImplTest {
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
 
         configService = mock(ConfigService.class);
-        FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+        FlexlbConfig flexlbConfig = routingConfig();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         service = new FlexlbServiceImpl(
@@ -472,7 +570,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void testSchedule_localRouting() {
-        FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+        FlexlbConfig requestConfig = routingConfig();
         when(configService.loadBalanceConfig()).thenReturn(requestConfig)
                 .thenThrow(new IllegalStateException("configuration must only be read once"));
         // Given: not master, no consistency needed
@@ -1322,6 +1420,56 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getErrorMessage().contains("test error"));
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
         verify(engineHealthReporter).reportRequestPayload(any(BalanceContext.class));
+    }
+
+    @Test
+    void internalIllegalArgumentDoesNotBecomeInvalidRequest() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any(BalanceContext.class))).thenReturn(
+                CompletableFuture.failedFuture(new IllegalArgumentException("invalid internal configuration")));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("internal-error").build(), observer);
+
+        var response = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getValue().getCode());
+        assertTrue(response.getValue().getErrorMessage().contains("invalid internal configuration"));
+    }
+
+    @Test
+    void completionMetricsFailurePreservesObserverFailureAndPvLog() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        doThrow(new RuntimeException("client disconnected")).when(observer).onNext(any());
+        doThrow(new RuntimeException("monitor unavailable"))
+                .when(engineHealthReporter).reportRequestPayload(any());
+
+        var scheduleLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.flexlb.util.Logger.LOGGER_NAME);
+        ListAppender<ILoggingEvent> scheduleAppender = new ListAppender<>();
+        scheduleAppender.start();
+        scheduleLogger.addAppender(scheduleAppender);
+        try {
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("metrics-failure").build(), observer);
+
+            verify(observer).onNext(any());
+            verify(observer, never()).onCompleted();
+            verify(routeService).cancelRequest("metrics-failure", 0L, CancelReason.CLIENT_CANCELLED);
+            assertPvContains("\"requestId\":\"metrics-failure\"");
+            assertTrue(scheduleAppender.list.stream().anyMatch(event ->
+                    event.getThrowableProxy() != null
+                            && "client disconnected".equals(event.getThrowableProxy().getMessage())));
+        } finally {
+            scheduleLogger.detachAppender(scheduleAppender);
+            scheduleAppender.stop();
+        }
     }
 
     @Test

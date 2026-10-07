@@ -249,7 +249,9 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", requestScheduler.getTrackedRequestCount());
+            int trackedRequests = requestScheduler.getTrackedRequestCount();
+            result.put("scheduler_tracked", trackedRequests);
+            result.put("scheduler_inflight", trackedRequests);
             result.put("scheduler_blocked", requestScheduler.getBlockedRequestCount());
             result.put("decode_max_engine_requests",
                     configService.loadBalanceConfig().getRouter().getRoles()

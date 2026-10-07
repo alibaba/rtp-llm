@@ -43,6 +43,7 @@ public class OptimizerClient {
     private final String basePath;
     private final boolean enabled;
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
+    private final Object discoveryLifecycleLock = new Object();
 
     @Autowired
     public OptimizerClient(GeneralHttpNettyService httpService,
@@ -99,14 +100,6 @@ public class OptimizerClient {
     public void init() {
         monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        if (!enabled) {
-            return;
-        }
-        try {
-            addressResolver.start();
-        } catch (Exception e) {
-            log.warn("Optimizer discovery resolver failed to start", e);
-        }
     }
 
     public void traceQuery(Request request, ServerStatus selectedWorker) {
@@ -126,6 +119,10 @@ public class OptimizerClient {
             String instanceId = resolveInstanceId(request, selectedWorker);
             if (StringUtils.isBlank(instanceId)) {
                 reportSkipped("instance_id_unavailable");
+                return;
+            }
+            if (!startAddressResolver()) {
+                reportSkipped("shutdown");
                 return;
             }
             List<String> addresses = addressResolver.getAddresses();
@@ -149,6 +146,16 @@ public class OptimizerClient {
                             error -> reportFailed("http_error", request.getRequestId(), uri, error));
         } catch (Exception e) {
             reportFailed("dispatch_error", request == null ? null : request.getRequestId(), null, e);
+        }
+    }
+
+    private boolean startAddressResolver() {
+        synchronized (discoveryLifecycleLock) {
+            if (shutdown.get()) {
+                return false;
+            }
+            addressResolver.start();
+            return true;
         }
     }
 
@@ -194,11 +201,13 @@ public class OptimizerClient {
 
     @PreDestroy
     public void shutdown() {
-        if (!shutdown.compareAndSet(false, true)) {
-            return;
-        }
-        if (addressResolver != null) {
-            addressResolver.shutdown();
+        synchronized (discoveryLifecycleLock) {
+            if (!shutdown.compareAndSet(false, true)) {
+                return;
+            }
+            if (addressResolver != null) {
+                addressResolver.shutdown();
+            }
         }
     }
 

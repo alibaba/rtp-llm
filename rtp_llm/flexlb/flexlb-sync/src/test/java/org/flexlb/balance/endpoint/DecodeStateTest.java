@@ -283,6 +283,98 @@ class DecodeStateTest {
         return task;
     }
 
+    @Test
+    void returnedPreemptionCanRollBackBeforeDeliveryWithoutDroppingVictim() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
+                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        var incoming = state.reservationHandle("11");
+        assertEquals(STILL_OWNED, state.release(incoming, ReleaseReason.COUNTERPART_FINISHED));
+        assertEquals(RELEASED, state.release(incoming, ReleaseReason.LOCAL_ROLLBACK));
+        assertTrue(state.hasOwnedResources(victim));
+        assertFalse(state.hasOwnedResources(incoming));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertAdmissionMetricsMatch(state);
+    }
+
+    @Test
+    void workerConfirmationClearsReturnedAttemptWithoutRollingBackVictimClaim() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
+                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        var incoming = state.reservationHandle("11");
+        calibrate(state, status,
+                Map.of("10", task(10, TaskPhase.RUNNING), "11", task(11, TaskPhase.RUNNING)), Map.of());
+
+        assertEquals(STILL_OWNED, state.release(incoming, ReleaseReason.COUNTERPART_FINISHED));
+        assertThrows(IllegalStateException.class, () -> state.release(incoming, ReleaseReason.LOCAL_ROLLBACK));
+        assertTrue(state.hasOwnedResources(victim));
+        assertEquals(2, state.routingView().engineCapacityUsed());
+        assertFalse(state.finishPreemption(1, DecodeEndpoint.PreemptionDecision.ABORT));
+        for (int round = 0; round < 2; round++) {
+            calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)), Map.of());
+            assertEquals(2, state.routingView().engineCapacityUsed());
+            assertEquals(9_900L, state.routingView().realKvAvailable());
+            assertTrue(state.hasOwnedResources(victim));
+        }
+        calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
+                Map.of("10", task(10, TaskPhase.RUNNING)));
+        assertFalse(state.hasOwnedResources(victim));
+        assertTrue(state.hasOwnedResources(incoming));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertAdmissionMetricsMatch(state);
+    }
+
+    @Test
+    void returnedPreemptionDispatchKeepsVictimUntilFinishedReport() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
+                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        var incoming = state.reservationHandle("11");
+        assertTrue(state.markQueued(incoming));
+        var permit = state.acquireDispatchPermit(incoming, new AdmissionCapacity(1, 100)).permit();
+        assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
+        assertEquals(STILL_OWNED, state.release(incoming, ReleaseReason.COUNTERPART_FINISHED));
+        assertTrue(state.hasOwnedResources(victim));
+        calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
+                Map.of("10", task(10, TaskPhase.RUNNING)));
+        assertFalse(state.hasOwnedResources(victim));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertAdmissionMetricsMatch(state);
+    }
+
+    @Test
+    void returnedIncomingCanFinishBeforeAnyActiveWorkerReport() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
+                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        var incoming = state.reservationHandle("11");
+
+        var finished = calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)),
+                Map.of("11", task(11, TaskPhase.RUNNING)));
+
+        assertTrue(finished.facts().stream().anyMatch(fact ->
+                fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL
+                        && fact.reservation().equals(incoming)));
+        assertFalse(state.hasOwnedResources(incoming));
+        assertTrue(state.hasOwnedResources(victim));
+        assertFalse(state.finishPreemption(1, DecodeEndpoint.PreemptionDecision.ABORT));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertAdmissionMetricsMatch(state);
+    }
+
     private static WorkerStatus status() {
         WorkerStatus status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001);
         EndpointTestSupport.publishStatus(status, response());

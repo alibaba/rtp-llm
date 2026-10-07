@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.Banner;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.logging.LoggerGroups;
 import org.springframework.boot.logging.LoggingSystem;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,7 +15,6 @@ import org.springframework.context.annotation.Import;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,7 +33,10 @@ class FlexlbLoggingStartupTest {
             context.getBean(FlexlbLogManager.class).setLogLevel(LogLevel.DEBUG);
 
             LoggingSystem loggingSystem = context.getBean(LoggingSystem.class);
-            for (String loggerName : List.of("org.flexlb", "flexlbLogger", "syncLogger", "syncConsistencyLogger")) {
+            var groupMembers = context.getBean(LoggerGroups.class)
+                    .get(FlexlbLogManager.LOG_GROUP_NAME).getMembers();
+            assertTrue(!groupMembers.isEmpty());
+            for (String loggerName : groupMembers) {
                 assertEquals(org.springframework.boot.logging.LogLevel.DEBUG,
                         loggingSystem.getLoggerConfiguration(loggerName).getConfiguredLevel());
             }

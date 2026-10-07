@@ -85,7 +85,7 @@ public class RequestRegistry {
                 Objects.requireNonNull(configService, "configService"));
         this.completionPublisher = new RequestCompletionPublisher(
                 completionPublisherWorkers(configService), reporter);
-        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
+        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
     }
 
     synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
@@ -373,6 +373,7 @@ public class RequestRegistry {
             attachRequestExpiration(context, future);
             return future;
         } catch (Throwable failure) {
+            requestReporter.reportLifecycleFailure("registration");
             Logger.error(
                     "Request registration failed for request id: {}",
                     context.getRequestId(),
@@ -418,6 +419,9 @@ public class RequestRegistry {
                 ? PlacementResult.Status.CLOSED : slot.commitRoute(item, publication);
     }
 
+    /**
+     * Checks the Generation admission gate. Encoder routes use claimEncoderRoute.
+     */
     public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
@@ -431,6 +435,9 @@ public class RequestRegistry {
         }
     }
 
+    /**
+     * Claims a Generation admission handle. Encoder routes use claimEncoderRoute.
+     */
     public AdmissionHandle claimAdmissionHandle(
             String requestId, CompletableFuture<?> future) {
         if (!enterAdmissionHandleGate()) {

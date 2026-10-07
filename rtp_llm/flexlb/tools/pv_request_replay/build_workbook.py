@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import heapq
 import json
 import math
 import re
@@ -89,6 +90,8 @@ def _manifest_sources(manifest_path: Path) -> list[PvSource]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    if not isinstance(payload, dict):
         return []
     items: Any = payload.get("sources") or payload.get("snapshots")
     if not isinstance(items, list):
@@ -221,9 +224,12 @@ def parse_pv_record(content: str) -> tuple[str | None, dict[str, Any]] | None:
         return None
     raw_json = content[marker_at + len(PV_MARKER):].strip()
     try:
-        return log_time_from_content(content), json.loads(raw_json)
+        record = json.loads(raw_json)
     except json.JSONDecodeError:
         return None
+    if not isinstance(record, dict):
+        return None
+    return log_time_from_content(content), record
 
 
 def iter_pv_contents(source: PvSource):
@@ -433,27 +439,36 @@ def largest_phase(row: dict[str, Any]) -> tuple[str, float | None]:
 
 
 def observed_overlap(host_rows: list[dict[str, Any]]) -> None:
-    """Annotate same-host predecessors that had not reached first token yet.
+    """Annotate predecessors in same-host rows ordered by request time.
 
+    Unknown request times come last.  A predecessor leaves the active set
+    once its first token is no later than the current routing decision.
     This is descriptive overlap evidence only.  It does not prove that the
     predecessor was the reason a later request waited.
     """
 
-    prior: list[dict[str, Any]] = []
+    first_token_times: list[tuple[float, int, bool]] = []
+    latest_predecessors: list[tuple[float, int, dict[str, Any]]] = []
+    latest_low_hit_predecessors: list[tuple[float, int, dict[str, Any]]] = []
+    active_sequence_numbers: set[int] = set()
+    low_hit_count = 0
     for index, row in enumerate(host_rows, start=1):
         decision_ms = row.get("request_time_ms")
-        active = [candidate for candidate in prior
-                  if decision_ms is not None
-                  and candidate.get("first_token_time_ms") is not None
-                  and candidate["first_token_time_ms"] > decision_ms]
-        low_hit = [candidate for candidate in active
-                   if candidate.get("actual_hit_rate_pct") is not None
-                   and candidate["actual_hit_rate_pct"] < 90.0]
+        if decision_ms is not None:
+            while first_token_times and first_token_times[0][0] <= decision_ms:
+                _, expired_index, expired_low_hit = heapq.heappop(first_token_times)
+                active_sequence_numbers.remove(expired_index)
+                low_hit_count -= int(expired_low_hit)
+        for predecessors in (latest_predecessors, latest_low_hit_predecessors):
+            while predecessors and predecessors[0][1] not in active_sequence_numbers:
+                heapq.heappop(predecessors)
+        active_count = len(active_sequence_numbers) if decision_ms is not None else 0
+        active_low_hit_count = low_hit_count if decision_ms is not None else 0
         row["host_sequence_no"] = index
-        row["prior_before_first_token_count"] = len(active)
-        row["prior_low_hit_before_first_token_count"] = len(low_hit)
-        if active:
-            latest = max(active, key=lambda candidate: candidate.get("request_time_ms") or -1)
+        row["prior_before_first_token_count"] = active_count
+        row["prior_low_hit_before_first_token_count"] = active_low_hit_count
+        if active_count:
+            latest = latest_predecessors[0][2]
             row["previous_request_id"] = latest.get("request_id")
             row["previous_actual_hit_rate_pct"] = latest.get("actual_hit_rate_pct")
             row["previous_uncache_tokens"] = latest.get("uncache_tokens")
@@ -470,8 +485,8 @@ def observed_overlap(host_rows: list[dict[str, Any]]) -> None:
         # the most recent *low-hit* overlapping predecessor separately so the
         # P99 investigation can navigate directly to the hypothesized source
         # of same-host interference instead of inferring it from a count.
-        if low_hit:
-            latest_low_hit = max(low_hit, key=lambda candidate: candidate.get("request_time_ms") or -1)
+        if active_low_hit_count:
+            latest_low_hit = latest_low_hit_predecessors[0][2]
             row["low_hit_predecessor_request_id"] = latest_low_hit.get("request_id")
             row["low_hit_predecessor_actual_hit_rate_pct"] = latest_low_hit.get("actual_hit_rate_pct")
             row["low_hit_predecessor_uncache_tokens"] = latest_low_hit.get("uncache_tokens")
@@ -484,13 +499,24 @@ def observed_overlap(host_rows: list[dict[str, Any]]) -> None:
             row["low_hit_predecessor_prefill_engine_ttft_ms"] = None
             row["low_hit_predecessor_first_token_time"] = None
 
-        if low_hit:
+        if active_low_hit_count:
             row["same_host_predecessor_evidence"] = "Earlier low-hit request had not reached first token"
-        elif active:
+        elif active_count:
             row["same_host_predecessor_evidence"] = "Earlier request had not reached first token"
         else:
             row["same_host_predecessor_evidence"] = "No earlier route record still before first token"
-        prior.append(row)
+        first_token_ms = row.get("first_token_time_ms")
+        if first_token_ms is not None and (decision_ms is None or first_token_ms > decision_ms):
+            is_low_hit = (row.get("actual_hit_rate_pct") is not None
+                          and row["actual_hit_rate_pct"] < 90.0)
+            active_sequence_numbers.add(index)
+            heapq.heappush(first_token_times, (first_token_ms, index, is_low_hit))
+            # Equal request times keep the first predecessor in input order.
+            predecessor = (-(decision_ms or -1), index, row)
+            heapq.heappush(latest_predecessors, predecessor)
+            if is_low_hit:
+                low_hit_count += 1
+                heapq.heappush(latest_low_hit_predecessors, predecessor)
 
 
 def _store_latest(events: dict[tuple[str, str], tuple[str | None, dict[str, Any]]],
@@ -509,8 +535,12 @@ def _store_route(events: dict[tuple[str, str], tuple[str | None, dict[str, Any]]
     """Keep the latest route decision when overlapping snapshots repeat it."""
 
     previous = events.get(key)
-    current_order = (as_number(record.get("requestTimeMs")) or -1, event_time or "")
-    previous_order = ((as_number(previous[1].get("requestTimeMs")) or -1), previous[0] or "") if previous else None
+    request_time = as_number(record.get("requestTimeMs"))
+    current_order = (request_time if request_time is not None else -1, event_time or "")
+    previous_order = None
+    if previous is not None:
+        previous_time = as_number(previous[1].get("requestTimeMs"))
+        previous_order = (previous_time if previous_time is not None else -1, previous[0] or "")
     if previous_order is None or current_order >= previous_order:
         events[key] = (event_time, record)
 

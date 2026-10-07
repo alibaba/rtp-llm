@@ -4,13 +4,14 @@ import hashlib
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
@@ -206,6 +207,12 @@ def request_ids(lines: list[str]) -> list[str]:
 
 
 class WindowFilterTest(unittest.TestCase):
+    def test_rotation_starting_within_end_second_is_included(self) -> None:
+        files = {f"{LOG_DIR}/pv.log": [
+            line_at("2026-09-19 20:01:00.500", "end-second"),
+        ]}
+        self.assertEqual(["end-second"], request_ids(fetch(files)))
+
     def test_invalid_windows_are_rejected_before_running_remote_commands(self) -> None:
         now = datetime.now().astimezone()
         pod = source.WhalePod(
@@ -245,6 +252,17 @@ class WindowFilterTest(unittest.TestCase):
 
 
 class ChunkedReadTest(unittest.TestCase):
+    def test_command_runner_preserves_original_newline_bytes(self) -> None:
+        result = subprocess.CompletedProcess(["asicli"], 0, b"line\r\n", b"")
+        with patch.object(source.subprocess, "run", return_value=result):
+            self.assertEqual("line\r\n", source.default_runner(["asicli"]))
+
+    def test_non_utf8_output_has_actionable_error(self) -> None:
+        result = subprocess.CompletedProcess(["asicli"], 0, b"line\xff\n", b"")
+        with patch.object(source.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(source.WhaleSourceError, "remote log encoding"):
+                source.default_runner(["asicli"])
+
     def test_chunks_reassemble_in_order(self) -> None:
         files = {f"{LOG_DIR}/pv.log": [log_line(i % 60, f"r-{i}") for i in range(7)]}
         lines = fetch(files, page_lines=2)

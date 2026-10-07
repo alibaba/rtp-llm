@@ -29,6 +29,11 @@ public class MetricConstant {
 
     public static final String ENGINE_ENCODER_WORKER_NUMBER = "app.engine.health.check.engine.encoder.worker.number";
 
+    /**
+     * Successful service-discovery host count before cache fallback or logical worker expansion.
+     */
+    public static final String ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT = "app.engine.health.check.engine.worker.number.service.discovery.result";
+
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
     /**
@@ -52,6 +57,9 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_ALL_RT = "app.engine.balancing.master.all.rt";
 
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
+
+    public static final String ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL =
+            "app.engine.balancing.master.worker.select.detail";
 
     public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON = "app.engine.balancing.master.dispatch.reason";
 
@@ -213,6 +221,11 @@ public class MetricConstant {
     public static final String ZK_MASTER_EVENT = "app.engine.zk.master.event";
 
     /**
+     * Latest occurrence time, in epoch milliseconds, for each master-election event.
+     */
+    public static final String ZK_MASTER_EVENT_TIME_MS = "app.engine.zk.master.event.time.ms";
+
+    /**
      * Load balancing service thread pool status
      */
     public static final String ENGINE_BALANCING_THREAD_POOL_INFO = "app.engine.balancing.thread.pool.info";
@@ -228,16 +241,11 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
     /**
-     * Variance of each role's observable endpoint load. The metric name is
-     * retained for dashboard compatibility; Prefill reports committed work-ms
-     * while Decode and status-only roles report active task counts.
+     * Variance of each role's observable logical endpoint load. Prefill reports
+     * committed work-ms while Decode and status-only roles report active task counts.
      */
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
-    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
-            "app.engine.worker.status.observed.decision.to.waiting.ms";
-    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS =
-            "app.engine.worker.status.observed.waiting.to.running.ms";
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS =
             "app.engine.worker.status.engine.waiting.to.running.ms";
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS =
@@ -453,7 +461,7 @@ public class MetricConstant {
     public static final String CACHE_STATUS_CHECK_FAIL = "app.cache.status.check.fail";
 
     /**
-     * Cache block size
+     * Cache block size shared by workers in the same role, tagged by role.
      */
     public static final String CACHE_BLOCK_SIZE = "app.cache.block.size";
 
@@ -473,7 +481,7 @@ public class MetricConstant {
     public static final String CACHE_AVAILABLE_KV_CACHE_TOKENS = "app.cache.available.kv.cache.tokens";
 
     /**
-     * Total KV cache token count
+     * Worker-reported total KV cache token capacity, tagged by role and bare engine IP.
      */
     public static final String CACHE_TOTAL_KV_CACHE_TOKENS = "app.cache.total.kv.cache.tokens";
 
@@ -601,9 +609,6 @@ public class MetricConstant {
     /** Protobuf message size excluding gRPC framing and compression. */
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
 
-    /** Request payload size from Content-Length when available. */
-    public static final String REQUEST_BODY_BYTES = "app.request.body.bytes";
-
     /**
      * Graceful online/offline lifecycle events
      */
@@ -639,8 +644,7 @@ public class MetricConstant {
     public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE = "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor rejected task total since startup (cumulative gauge).
-     * The wire name is retained for existing dashboards; rejection uses AbortPolicy.
+     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
      */
     public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS = "grpc.server.executor.caller.runs";
 
@@ -662,6 +666,11 @@ public class MetricConstant {
     public static final String DISPATCH_EXECUTOR_POOL_SIZE = "dispatch.executor.pool.size";
 
     /* ------------------------ Auto-TPM Request Scheduler ----------------------------- */
+
+    /**
+     * Request registration or terminal cleanup failures, tagged by the failing stage.
+     */
+    public static final String REQUEST_LIFECYCLE_FAILURES_TOTAL = "auto_tpm.request.lifecycle.failures.total";
 
     /**
      * Auto-TPM request count by priority (QPS), tags: priority

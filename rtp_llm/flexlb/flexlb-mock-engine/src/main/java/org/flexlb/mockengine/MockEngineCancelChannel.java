@@ -3,6 +3,7 @@ package org.flexlb.mockengine;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.engine.grpc.RequestId;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -59,6 +60,12 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
         if (service == null) {
             return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
+        long engineRequestId;
+        try {
+            engineRequestId = RequestId.toEngineRequestId(requestId);
+        } catch (IllegalArgumentException error) {
+            return CompletableFuture.failedFuture(error);
+        }
         // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as the
         // gRPC Cancel handler and the HTTP /cancel_request surface: an armed
         // fault short-circuits BEFORE cancelRequest so the engine cancel
@@ -90,7 +97,7 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(
-                    Long.parseLong(requestId));
+                    engineRequestId);
             if (result.found()) {
                 return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
             }

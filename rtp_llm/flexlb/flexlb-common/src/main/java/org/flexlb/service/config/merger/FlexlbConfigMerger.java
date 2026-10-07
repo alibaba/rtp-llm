@@ -9,10 +9,13 @@ import org.flexlb.util.JsonUtils;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 public final class FlexlbConfigMerger {
 
     private static final String FLEXLB_CONFIG = "FLEXLB_CONFIG";
+    private static final Set<String> REPLACE_ON_TYPE_CHANGE_PATHS = Set.of(
+            "cacheMatching", "consistency", "scheduler.ordering", "scheduler.decision");
 
     private FlexlbConfigMerger() {}
 
@@ -26,7 +29,7 @@ public final class FlexlbConfigMerger {
             return baseConfig;
         }
         ObjectNode merged = JsonUtils.strictValueToTree(baseConfig);
-        deepMerge(merged, overrides);
+        deepMerge(merged, overrides, "");
         FlexlbConfigValidator.validateDocumentShape(overrides, merged);
         return parseMergedConfig(merged, sourceName);
     }
@@ -61,22 +64,26 @@ public final class FlexlbConfigMerger {
         }
     }
 
-    private static void deepMerge(ObjectNode target, ObjectNode overrides) {
+    private static void deepMerge(ObjectNode target, ObjectNode overrides, String parentPath) {
         Iterator<Map.Entry<String, JsonNode>> fields = overrides.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> field = fields.next();
             JsonNode current = target.get(field.getKey());
             JsonNode replacement = field.getValue();
+            String path = parentPath.isEmpty() ? field.getKey() : parentPath + "." + field.getKey();
             if (current instanceof ObjectNode currentObject && replacement instanceof ObjectNode replacementObject
-                    && hasCompatibleType(currentObject, replacementObject)) {
-                deepMerge(currentObject, replacementObject);
+                    && hasCompatibleType(path, currentObject, replacementObject)) {
+                deepMerge(currentObject, replacementObject, path);
             } else {
                 target.set(field.getKey(), replacement.deepCopy());
             }
         }
     }
 
-    private static boolean hasCompatibleType(ObjectNode current, ObjectNode replacement) {
+    private static boolean hasCompatibleType(String path, ObjectNode current, ObjectNode replacement) {
+        if (!REPLACE_ON_TYPE_CHANGE_PATHS.contains(path)) {
+            return true;
+        }
         JsonNode replacementType = replacement.get("type");
         return replacementType == null || replacementType.equals(current.get("type"));
     }

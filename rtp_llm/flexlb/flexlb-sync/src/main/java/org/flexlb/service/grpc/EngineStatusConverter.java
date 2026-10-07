@@ -150,7 +150,10 @@ public class EngineStatusConverter {
                             task.getLastPrefillStepId(),
                             task.getPrefillStepCount(),
                             task.getPrefillNonfinalChunkTokensMin(),
-                            task.getPrefillNonfinalChunkTokensMax()));
+                            task.getPrefillNonfinalChunkTokensMax(),
+                            task.hasCompletedPrefillTokens() ? task.getCompletedPrefillTokens() : null,
+                            task.hasRemainingPrefillTokens() ? task.getRemainingPrefillTokens() : null,
+                            task.hasLastCompletedPrefillStepId() ? task.getLastCompletedPrefillStepId() : null));
             tasks.put(observation.requestId(), observation);
         }
         return Map.copyOf(tasks);

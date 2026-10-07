@@ -14,6 +14,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
@@ -44,7 +45,7 @@ class EngineStatusConverterTest {
                 .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
-        var activeTasks = observation.runningTasks();
+        var activeTasks = observation.activeTasks();
 
         assertEquals(Set.of("running", "received", "allocated", "pending", "legacy-waiting", "legacy-running"),
                 activeTasks.keySet());
@@ -85,7 +86,7 @@ class EngineStatusConverterTest {
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status.build());
 
         var expected = Set.of("req-a-p-001", "req-b-p-002", "00123", "123");
-        assertEquals(expected, observation.runningTasks().keySet());
+        assertEquals(expected, observation.activeTasks().keySet());
         assertEquals(expected, observation.finishedTasks().keySet());
         for (var task : observation.finishedTasks().values()) {
             assertEquals(3584, task.prefixLength());
@@ -135,8 +136,8 @@ class EngineStatusConverterTest {
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
 
-        assertEquals("123", observation.runningTasks().get("123").requestId());
-        assertEquals(42, observation.runningTasks().get("123").batchId());
+        assertEquals("123", observation.activeTasks().get("123").requestId());
+        assertEquals(42, observation.activeTasks().get("123").batchId());
         assertEquals("456", observation.finishedTasks().get("456").requestId());
     }
 
@@ -161,7 +162,7 @@ class EngineStatusConverterTest {
         var status = statusBuilder().addRunningTaskInfo(runningTask).build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
-        var task = observation.runningTasks().get("1");
+        var task = observation.activeTasks().get("1");
 
         assertEquals(128, task.prefixLength());
         assertTrue(task.telemetry().prefixLengthValid());
@@ -212,6 +213,52 @@ class EngineStatusConverterTest {
 
         assertEquals(1, observation.engine().blockHashLookaheadTokens());
         assertEquals(1, observation.engine().cacheMatchRollbackBlocks());
+    }
+
+    @Test
+    void preservesOptionalPrefillProgressAndDistinguishesMissingFromZero() {
+        var status = statusBuilder()
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("old-engine"))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("prefilling")
+                        .setCompletedPrefillTokens(128).setRemainingPrefillTokens(256)
+                        .setLastCompletedPrefillStepId(7))
+                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("finished")
+                        .setCompletedPrefillTokens(384).setRemainingPrefillTokens(0)
+                        .setLastCompletedPrefillStepId(9))
+                .build();
+
+        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var missing = observation.activeTasks().get("old-engine").telemetry();
+        assertNull(missing.completedPrefillTokens());
+        assertNull(missing.remainingPrefillTokens());
+        assertNull(missing.lastCompletedPrefillStepId());
+        var progress = observation.activeTasks().get("prefilling").telemetry();
+        assertEquals(128L, progress.completedPrefillTokens());
+        assertEquals(256L, progress.remainingPrefillTokens());
+        assertEquals(7L, progress.lastCompletedPrefillStepId());
+        var finished = observation.finishedTasks().get("finished").telemetry();
+        assertEquals(384L, finished.completedPrefillTokens());
+        assertEquals(0L, finished.remainingPrefillTokens());
+        assertEquals(9L, finished.lastCompletedPrefillStepId());
+    }
+
+    @Test
+    void rejectsTheWholeObservationWhenAnyTaskHasNoRequestId() {
+        for (String requestId : List.of("", "  ")) {
+            for (boolean invalidFinishedTask : List.of(false, true)) {
+                var status = statusBuilder().addRunningTaskInfo(
+                        EngineRpcService.TaskInfoPB.newBuilder().setRequestId("valid"));
+                var invalid = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(requestId);
+                if (invalidFinishedTask) {
+                    status.addFinishedTaskList(invalid);
+                } else {
+                    status.addRunningTaskInfo(invalid);
+                }
+                assertThrows(IllegalArgumentException.class,
+                        () -> EngineStatusConverter.convertToStatusObservation(owner, status.build()));
+                assertTrue(owner.committedEngineObservation().runningTaskList().isEmpty());
+            }
+        }
     }
 
     @Test
