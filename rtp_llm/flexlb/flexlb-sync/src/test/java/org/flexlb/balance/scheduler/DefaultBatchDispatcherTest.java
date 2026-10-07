@@ -855,4 +855,42 @@ class DefaultBatchDispatcherTest {
             }
         }
     }
+
+    @Test
+    void admissionPermitHeldUntilRpcCompletion() throws Exception {
+        // Regression (case55 re-validation 92674): the direct-buffer OOM
+        // recurred because the admission permit was released as soon as the
+        // EnqueueBatch dispatch call returned, while the RPC future still
+        // held the serialized batch payload in direct buffers. Admission
+        // must bound IN-FLIGHT RPCs.
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(invocation -> pending);
+
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        // Exhaust the single admission permit with one in-flight batch.
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
+        PreparedSubmission permit = reservePermit();
+        assertDoesNotThrow(() -> submit(
+                permit, List.of(item), 1L, 100,
+                "inflight_hold", callback));
+
+        // The RPC is invoked but not completed: no new admission is possible.
+        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        assertFalse(rejected.accepted(),
+                "permit must stay held while the EnqueueBatch RPC is pending");
+
+        // Completing the RPC (success) releases the permit.
+        pending.complete(ackResponse(1L, List.of(1L)));
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
+                "the completed RPC must deliver its callback");
+        CapacityBoundary.Attempt<?> readmitted = dispatcher.tryPrepareSubmission();
+        assertTrue(readmitted.accepted(),
+                "permit must be released after the RPC completes");
+    }
+
 }
