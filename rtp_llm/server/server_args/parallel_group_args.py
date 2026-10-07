@@ -113,19 +113,6 @@ def init_parallel_group_args(
         default=0,
         help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用。",
     )
-    prefill_cp_size_bind_to = (
-        (prefill_cp_config, "prefill_cp_size")
-        if hasattr(prefill_cp_config, "prefill_cp_size")
-        else None
-    )
-    parallel_group.add_argument(
-        "--prefill_cp_size",
-        env_name="PREFILL_CP_SIZE",
-        bind_to=prefill_cp_size_bind_to,
-        type=int,
-        default=0,
-        help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用；decode 开启 PREFILL_CP 且 prefill_cp_kv_cache_sharded 时必须设置。",
-    )
     parallel_group.add_argument(
         "--use_ub_comm",
         env_name="USE_UB_COMM",

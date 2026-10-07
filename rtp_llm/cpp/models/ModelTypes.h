@@ -19,10 +19,6 @@ namespace kmonitor {
 class MetricsReporter;
 }
 
-namespace kmonitor {
-class MetricsReporter;
-}
-
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration

@@ -72,12 +72,6 @@ class KVCacheWriteOp:
             batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
             positions = self.params.positions_d.narrow(0, 0, nnz)
 
-            # FlashInfer requires batch_indices/positions size == nnz.
-            # Device planner leaves buffers oversized, so narrow without a host sync.
-            nnz = key.size(0)
-            batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
-            positions = self.params.positions_d.narrow(0, 0, nnz)
-
             # Append K and V to paged cache using HND layout
             page.append_paged_kv_cache(  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]

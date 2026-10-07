@@ -270,18 +270,6 @@ py_test(
 )
 
 py_test(
-    name = "start_server_warmup_test",
-    srcs = [
-        "start_server_warmup_test.py",
-    ],
-    deps = [
-        "//rtp_llm:sdk",
-        "//rtp_llm:testlib",
-    ],
-    exec_properties = {'gpu':'H20'},
-)
-
-py_test(
     name = "auto_configure_deepep_test",
     srcs = [
         "auto_configure_deepep_test.py",
@@ -368,27 +356,6 @@ py_test(
     imports=[],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
-)
-
-py_test(
-    name="mtp_tool_call_segmentation_test",
-    srcs=[
-        "mtp_tool_call_segmentation_test.py",
-    ],
-    data=[],
-    deps=["//rtp_llm:testlib"],
-    imports=[],
-)
-
-py_test(
-    name="frontend_streaming_utf8_replay_test",
-    srcs=[
-        "frontend_streaming_utf8_replay_test.py",
-    ],
-    data=[],
-    deps=["//rtp_llm:testlib"],
-    imports=[],
-    exec_properties={"gpu": "H20"},
 )
 
 py_test(
