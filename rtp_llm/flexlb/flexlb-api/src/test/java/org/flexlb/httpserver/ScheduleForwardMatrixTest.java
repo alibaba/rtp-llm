@@ -111,8 +111,6 @@ class ScheduleForwardMatrixTest {
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
         cacheAwareService = mock(CacheAwareService.class);
-        when(cacheAwareService.prepareBlockCacheKeys(any()))
-                .thenReturn(CompletableFuture.completedFuture(null));
 
         service = new FlexlbServiceImpl(
                 routeService,
@@ -495,7 +493,6 @@ class ScheduleForwardMatrixTest {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(Long.toString(requestId))
                 .setSeqLen(1024)
-                .addInputIds(1)
                 .build();
     }
 

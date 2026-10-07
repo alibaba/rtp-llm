@@ -148,31 +148,6 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
-    void usesConfiguredStandbyBlockSizeToDeriveMaximumEntries() {
-        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
-        WorkerStatus worker = workerStatus(
-                "10.0.0.1",
-                8080,
-                RoleType.PREFILL,
-                true,
-                CacheStatus.builder()
-                .totalKvCache(10_000)
-                .blockSize(100)
-                .build());
-        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
-                .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000, 1_000, 10.0, 200),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
-
-        manager.refreshCapacityLimits();
-
-        assertEquals(500, manager.maximumEntryCount());
-        manager.shutdown();
-    }
-
-    @Test
     void capsAggregateWorkerEstimatesAtGlobalMaximum() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         WorkerStatus worker1 = workerWithCacheCapacity("10.0.0.1", 8080, 10_000, 100);
@@ -243,14 +218,6 @@ class LocalStandbyCacheManagerTest {
             long expirationMs,
             long maximumEntries,
             double capacityMultiplier) {
-        return configuration(expirationMs, maximumEntries, capacityMultiplier, 0);
-    }
-
-    private CacheMatchConfiguration configuration(
-            long expirationMs,
-            long maximumEntries,
-            double capacityMultiplier,
-            long blockSize) {
         KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
@@ -270,7 +237,6 @@ class LocalStandbyCacheManagerTest {
                     Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
             standby.setMaximumEntries(maximumEntries);
             standby.setCapacityMultiplier(capacityMultiplier);
-            standby.setBlockSize(blockSize);
         });
     }
 }

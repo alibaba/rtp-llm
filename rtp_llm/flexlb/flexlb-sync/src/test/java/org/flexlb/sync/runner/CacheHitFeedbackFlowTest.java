@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.CacheMatchFailoverManager;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
@@ -122,7 +121,7 @@ class CacheHitFeedbackFlowTest {
         var query = new CacheMatchQueryOrchestrator(mock(LocalSyncCacheMatchProvider.class), kvcm, standby,
                 mock(LocalStandbyCacheManager.class), failover, comparison, cacheMetrics, cacheConfig);
         cache = new CacheAwareService(cacheMetrics, query, comparison,
-                mock(CacheMetadataUpdateOrchestrator.class), mock(RequestBlockHashService.class));
+                mock(CacheMetadataUpdateOrchestrator.class));
         EngineGrpcClient engineClient = mock(EngineGrpcClient.class);
         LoopResources loops = mock(LoopResources.class);
         when(engineClient.getEventLoopGroup()).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
@@ -309,8 +308,8 @@ class CacheHitFeedbackFlowTest {
         request.setSeqLen(1000);
         request.setBlockSize(100);
         request.setBlockCacheKeys(List.of(1L));
-        request.setLocalStandbyBlockSize(100);
-        request.setLocalStandbyBlockCacheKeys(List.of(1L));
+        request.setBlockSize(100);
+        request.setBlockCacheKeys(List.of(1L));
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));

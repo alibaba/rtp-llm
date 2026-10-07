@@ -89,14 +89,12 @@ message FlexlbScheduleRequestPB {
     FlexlbServerStatusPB selected_vit = 17;
     // Select ViT before media hashes are ready; this query owns no generation lifecycle.
     bool vit_route_only = 18;
-    // Raw prompt token IDs used by the Master to derive block_cache_keys when
-    // the client does not provide precomputed keys.
-    repeated int32 input_ids = 19;
-    repeated ScheduleRolePB schedule_roles = 20;
+    reserved "input_ids";
+    repeated ScheduleRolePB schedule_roles = 19;
     // Estimated MM encoder tokens already cached when this Encoder request is
     // routed. Absent means the client did not provide a cache estimate; zero
     // means it checked and found no cached encoder tokens.
-    optional int64 encoder_cache_hit_len = 21;
+    optional int64 encoder_cache_hit_len = 20;
 }
 
 message FlexlbServerStatusPB {

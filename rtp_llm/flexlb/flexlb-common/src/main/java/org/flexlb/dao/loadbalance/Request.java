@@ -1,7 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
@@ -33,17 +32,6 @@ public class Request {
 
     @JsonProperty("vit_route_only")
     private boolean vitRouteOnly;
-
-    @JsonIgnore
-    @ToString.Exclude
-    private List<Long> localStandbyBlockCacheKeys;
-
-    @JsonIgnore
-    private long localStandbyBlockSize;
-
-    @ToString.Exclude
-    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
-    private TokenIds inputIds;
 
     @JsonProperty("block_size")
     private long blockSize;
@@ -103,19 +91,5 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
-
-    @JsonIgnore
-    public void setInputIds(TokenIds inputIds) {
-        this.inputIds = inputIds;
-    }
-
-    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
-    public void setInputIds(int[] inputIds) {
-        this.inputIds = inputIds == null ? null : TokenIds.wrap(inputIds);
-    }
-
-    public void clearInputIds() {
-        this.inputIds = null;
-    }
 
 }

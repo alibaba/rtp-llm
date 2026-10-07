@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
+import com.google.protobuf.UnknownFieldSet;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.kvcm.KvcmHealthState;
@@ -55,7 +56,7 @@ class KvcmGrpcClientTest {
     }
 
     @Test
-    void reportsLogicalWorkerMatchesAndMillisecondCallMetrics() {
+    void reportsLogicalWorkerMatchesAndMillisecondCallMetrics() throws Exception {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmConfig config = new KvcmConfig();
         KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
@@ -115,6 +116,10 @@ class KvcmGrpcClientTest {
         assertEquals(List.of("hbm", "kvs"), sentRequest.getValue().getMediumList());
         assertEquals(5, sentRequest.getValue().getGlobalKvsHostCount());
         assertTrue(sentRequest.getValue().getEnableP2P());
+        UnknownFieldSet wireFields = UnknownFieldSet.parseFrom(sentRequest.getValue().toByteArray());
+        assertEquals(List.of(5L), wireFields.getField(7).getVarintList());
+        assertEquals(List.of(1L), wireFields.getField(8).getVarintList());
+        assertTrue(wireFields.getField(8).getLengthDelimitedList().isEmpty());
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
         assertEquals(10, result.get("10.0.0.1:8601@1").globalMatchBlocks());
@@ -230,6 +235,7 @@ class KvcmGrpcClientTest {
                 .getHostCacheState(any(), sentRequest.capture(), timeout.capture());
         assertEquals(3, sentRequest.getAllValues().get(0).getGlobalKvsHostCount());
         assertEquals(9, sentRequest.getAllValues().get(1).getGlobalKvsHostCount());
+        assertFalse(sentRequest.getAllValues().get(0).getEnableP2P());
         assertTrue(sentRequest.getAllValues().get(1).getEnableP2P());
         assertEquals(List.of("kvs"), sentRequest.getAllValues().get(1).getMediumList());
         assertEquals(900L, timeout.getAllValues().get(1));

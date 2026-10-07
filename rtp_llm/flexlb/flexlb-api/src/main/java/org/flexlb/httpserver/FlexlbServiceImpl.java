@@ -17,7 +17,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
@@ -654,7 +653,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
-        return prepareBlockCacheKeys(ctx).thenCompose(ignored -> routeService.route(ctx)).thenApply(response -> {
+        return routeService.route(ctx).thenApply(response -> {
             // RouteService's side-effect callback may run after this dependent stage.
             // Publish the result before response completion reports balancing metrics.
             ctx.setResponse(response);
@@ -674,12 +673,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             return builder.build();
         });
-    }
-
-    private CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
-        return cacheAwareService == null
-                ? CompletableFuture.completedFuture(null)
-                : cacheAwareService.prepareBlockCacheKeys(context);
     }
 
     private void completeSchedule(BalanceContext ctx,
@@ -957,8 +950,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
         request.setBlockSize(pb.getCacheKeyBlockSize());
-        if (pb.getInputIdsCount() > 0) {
-            request.setInputIds(TokenIds.wrap(pb.getInputIdsCount(), pb::getInputIds));
+        if (pb.getBlockCacheKeysCount() > 0 && pb.getCacheKeyBlockSize() <= 0) {
+            throw new IllegalArgumentException(
+                    "cache_key_block_size must be greater than 0 when block_cache_keys are provided");
         }
 
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB

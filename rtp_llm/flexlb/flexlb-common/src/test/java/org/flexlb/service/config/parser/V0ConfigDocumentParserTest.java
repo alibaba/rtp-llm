@@ -57,7 +57,6 @@ class V0ConfigDocumentParserTest {
                   "syncStatusInterval": 50,
                   "scheduleWorkerSize": 1,
                   "maxQueueSize": 200000,
-                  "blockHashStrategy": "VLLM",
                   "cacheAffinityFirstOutstandingUncachedTokensThreshold": 50000,
                   "shortestTtftSimilarityThresholdRatio": 0.2,
                   "loadBalanceStrategy": "CACHE_AFFINITY_FIRST",
@@ -71,8 +70,7 @@ class V0ConfigDocumentParserTest {
                         "minimum_ttl_ms": 86400000,
                         "maximum_entries": 200000000,
                         "ttl_ms": 86400000,
-                        "ttl_reduction_start_ratio": 0.99,
-                        "block_size": 1152
+                        "ttl_reduction_start_ratio": 0.99
                       },
                       "address": "kvcm.example",
                       "port": 6381,

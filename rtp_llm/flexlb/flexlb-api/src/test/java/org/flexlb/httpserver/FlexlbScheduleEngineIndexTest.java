@@ -44,8 +44,6 @@ class FlexlbScheduleEngineIndexTest {
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
 
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
-        when(cacheAwareService.prepareBlockCacheKeys(any(BalanceContext.class)))
-                .thenReturn(CompletableFuture.completedFuture(null));
 
         service = new FlexlbServiceImpl(
                 routeService,
@@ -95,7 +93,6 @@ class FlexlbScheduleEngineIndexTest {
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("5001")
                 .setSeqLen(16)
-                .addInputIds(1)
                 .build(), observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
