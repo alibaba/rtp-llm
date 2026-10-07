@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,13 +49,14 @@ class CacheMatchFailoverManagerTest {
     }
 
     @Test
-    void manualRecoveryKeepsStandbyWhenHealthChangesAfterValidation() {
+    void manualRecoveryUsesValidatedHealthBeforeLaterNotifications() {
         for (boolean autoSwitch : new boolean[]{true, false}) {
             KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+            KvcmHealthSnapshot unhealthy = health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure");
             when(client.healthSnapshot()).thenReturn(
                     health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"),
                     health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"),
-                    health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+                    unhealthy);
             CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
             CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
                     configuration(autoSwitch), client, reporter);
@@ -64,9 +64,14 @@ class CacheMatchFailoverManagerTest {
 
             manager.recoverPrimaryManually();
 
-            assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
-            verify(reporter, never()).reportCacheMatchSourceChange(
+            assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+            verify(client, times(2)).healthSnapshot();
+            verify(reporter).reportCacheMatchSourceChange(
                     CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
+
+            healthSnapshotListener(client).accept(unhealthy);
+            assertEquals(autoSwitch ? CacheMatchSource.LOCAL_STANDBY : CacheMatchSource.KVCM,
+                    manager.activeSource());
         }
     }
 
