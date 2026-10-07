@@ -106,6 +106,9 @@ public class JsonUtils {
     public static <I, T> T toObject(I input, Class<T> clazz) throws FlexLBException {
         ObjectReader reader = MAPPER.readerFor(clazz);
         try {
+            if (input == null) {
+                throw new IllegalArgumentException("Input must not be null");
+            }
             T res;
             if (input instanceof String string) {
                 res = reader.readValue(string);
@@ -118,7 +121,7 @@ public class JsonUtils {
                 throw new RuntimeException("The result of json mapper is null.");
             }
             return res;
-        } catch (Throwable e) {
+        } catch (Exception e) {
             throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + input, e);
         }
     }
@@ -138,7 +141,7 @@ public class JsonUtils {
                 throw new RuntimeException("The result of json mapper is null.");
             }
             return res;
-        } catch (Throwable e) {
+        } catch (Exception e) {
             throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + text, e);
         }
     }

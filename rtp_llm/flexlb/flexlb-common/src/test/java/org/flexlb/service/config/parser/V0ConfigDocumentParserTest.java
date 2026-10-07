@@ -33,6 +33,13 @@ class V0ConfigDocumentParserTest {
     }
 
     @Test
+    void rejectsMalformedDocumentBeforeSelectingFallbackParser() {
+        assertThatThrownBy(() -> ConfigDocumentParserResolver.resolve("{not json"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid configuration JSON");
+    }
+
+    @Test
     void rejectsMissingV0CompatibilityDocument() {
         V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
         assertThatThrownBy(() -> parser.parse(null, null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");

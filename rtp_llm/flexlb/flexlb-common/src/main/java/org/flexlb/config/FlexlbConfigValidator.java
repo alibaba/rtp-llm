@@ -387,10 +387,10 @@ public final class FlexlbConfigValidator {
                 "cacheMatching.localStandby.minimumTtlMs",
                 "must be less than or equal to ttlMs");
         require(Double.isFinite(localStandby.getTtlReductionStartRatio())
-                        && localStandby.getTtlReductionStartRatio() > 0
-                        && localStandby.getTtlReductionStartRatio() < 1,
+                        && localStandby.getTtlReductionStartRatio() >= 0
+                        && localStandby.getTtlReductionStartRatio() <= 1,
                 "cacheMatching.localStandby.ttlReductionStartRatio",
-                "must be finite and in (0, 1)");
+                "must be finite and in [0, 1]");
         positive(localStandby.getMaximumEntries(),
                 "cacheMatching.localStandby.maximumEntries");
         require(Double.isFinite(localStandby.getCapacityMultiplier())

@@ -419,15 +419,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
         String requestId;
+        RequestPhase phase;
         try {
             requestId = RequestId.parse(request);
+            phase = requestPhase(request.getPhase());
         } catch (IllegalArgumentException error) {
             responseObserver.onError(Status.INVALID_ARGUMENT
                     .withDescription(error.getMessage()).withCause(error).asRuntimeException());
             return;
         }
         FlexlbTrace.setRequestAttributes(Span.fromContext(entryTraceContext()), requestId);
-        RequestPhase phase = requestPhase(request.getPhase());
         RequestState snapshot = getRequestStateForPhase(requestId, request.getBatchId(), phase);
         if (snapshot == null && shouldForwardToMaster()) {
             FlexlbScheduleProtocol.GetRequestStateResponsePB forwarded =
@@ -465,8 +466,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
         String requestId;
+        RequestPhase phase;
         try {
             requestId = RequestId.parse(request);
+            phase = requestPhase(request.getPhase());
         } catch (IllegalArgumentException error) {
             responseObserver.onError(Status.INVALID_ARGUMENT
                     .withDescription(error.getMessage()).withCause(error).asRuntimeException());
@@ -475,7 +478,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbTrace.setRequestAttributes(Span.fromContext(entryTraceContext()), requestId);
         FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse;
         try {
-            localResponse = cancelLocally(request, requestId);
+            localResponse = cancelLocally(request, requestId, phase);
         } catch (Exception error) {
             Logger.error("FlexlbService.cancel error, request_id={}",
                     requestId, error);
@@ -582,10 +585,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request, String requestId) {
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request, String requestId, RequestPhase phase) {
         RequestState snapshot = cancelRequestForPhase(
                 requestId, request.getBatchId(),
-                toCancelReason(request.getReason()), requestPhase(request.getPhase()));
+                toCancelReason(request.getReason()), phase);
         FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
                 FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
                         .setFound(snapshot != null);
@@ -1067,8 +1070,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static RequestPhase requestPhase(FlexlbScheduleProtocol.RequestPhasePB phase) {
-        return phase == FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER
-                ? RequestPhase.ENCODER : RequestPhase.GENERATION;
+        return switch (phase) {
+            case REQUEST_PHASE_ENCODER -> RequestPhase.ENCODER;
+            case REQUEST_PHASE_GENERATION, REQUEST_PHASE_UNSPECIFIED -> RequestPhase.GENERATION;
+            default -> throw new IllegalArgumentException("Unsupported request phase: " + phase);
+        };
     }
 
     private RequestState getRequestStateForPhase(String requestId, long batchId, RequestPhase phase) {

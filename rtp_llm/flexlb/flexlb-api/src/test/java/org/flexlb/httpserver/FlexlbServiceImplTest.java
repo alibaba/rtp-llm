@@ -334,6 +334,36 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void omittedPhaseContinuesToUseGenerationLifecycle() {
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId("two-stage-request").build(), mock(StreamObserver.class));
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId("two-stage-request").build(), mock(StreamObserver.class));
+
+        verify(routeService).getRequestState("two-stage-request", 0L);
+        verify(routeService).cancelRequest("two-stage-request", 0L, CancelReason.CLIENT_CANCELLED);
+    }
+
+    @Test
+    void rejectsUnknownLifecyclePhaseBeforeReadingOrCancellingState() {
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> stateObserver = mock(StreamObserver.class);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> cancelObserver = mock(StreamObserver.class);
+
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId("two-stage-request").setPhaseValue(99).build(), stateObserver);
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId("two-stage-request").setPhaseValue(99).build(), cancelObserver);
+
+        ArgumentCaptor<Throwable> stateError = ArgumentCaptor.forClass(Throwable.class);
+        ArgumentCaptor<Throwable> cancelError = ArgumentCaptor.forClass(Throwable.class);
+        verify(stateObserver).onError(stateError.capture());
+        verify(cancelObserver).onError(cancelError.capture());
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(stateError.getValue()).getCode());
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(cancelError.getValue()).getCode());
+        verifyNoInteractions(routeService);
+    }
+
+    @Test
     void encoderRouteResponseUsesEncoderRoleAndLifecycle() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ServerStatus encoder = new ServerStatus();

@@ -140,6 +140,7 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         if (entry.context.requestExpired(System.currentTimeMillis())) {
             requests.cancelRequest(entry.context.getRequestId(), 0L,
                     CancelReason.DEADLINE_EXCEEDED, RequestPhase.ENCODER);
+            remove(entry);
             return;
         }
         try {

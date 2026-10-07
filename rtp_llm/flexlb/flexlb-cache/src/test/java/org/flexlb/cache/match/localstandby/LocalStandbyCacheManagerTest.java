@@ -1,5 +1,7 @@
 package org.flexlb.cache.match.localstandby;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.LocalStandbyConfig;
@@ -13,19 +15,47 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LocalStandbyCacheManagerTest {
+
+    @Test
+    void capacityWarningsAreRateLimitedAcrossConcurrentRequests() {
+        CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                configuration(300_000, 1, 10.0), mock(WorkerStatusProvider.class), reporter);
+        manager.addRoutedRequestBlocks("worker", List.of(1L));
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(LocalStandbyCacheManager.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            IntStream.range(0, 32).parallel().forEach(index ->
+                    manager.addRoutedRequestBlocks("worker-" + index, List.of(100L + index)));
+
+            assertEquals(1, appender.list.stream()
+                    .filter(event -> event.getFormattedMessage().contains("reached its capacity limit"))
+                    .count());
+            verify(reporter, times(32)).reportLocalStandbyCapacityRejected();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+            manager.shutdown();
+        }
+    }
 
     @Test
     void matchesOnlyContiguousPrefixForEachWorker() {

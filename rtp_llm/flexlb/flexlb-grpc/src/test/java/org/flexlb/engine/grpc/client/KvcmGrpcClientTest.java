@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,6 +51,44 @@ import static org.mockito.Mockito.when;
 class KvcmGrpcClientTest {
 
     private KvcmGrpcClient client;
+
+    @Test
+    void shutdownInterruptsAnActiveServiceStateRefresh() throws InterruptedException {
+        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
+        CountDownLatch refreshStarted = new CountDownLatch(1);
+        CountDownLatch refreshInterrupted = new CountDownLatch(1);
+        CountDownLatch releaseRefresh = new CountDownLatch(1);
+        KvcmLeaderResolver leaderResolver = mock(KvcmLeaderResolver.class);
+        KvcmWorkerMetadataResolver metadataResolver = mock(KvcmWorkerMetadataResolver.class);
+        when(leaderResolver.refresh()).thenAnswer(ignored -> {
+            refreshStarted.countDown();
+            try {
+                releaseRefresh.await(5, TimeUnit.SECONDS);
+                return true;
+            } catch (InterruptedException error) {
+                refreshInterrupted.countDown();
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        });
+        client = createClient(configuration, mock(KvcmMetaServiceClient.class), leaderResolver,
+                metadataResolver, mock(GrpcReporter.class));
+        try {
+            assertTrue(refreshStarted.await(2, TimeUnit.SECONDS));
+
+            client.shutdown();
+
+            assertTrue(refreshInterrupted.await(2, TimeUnit.SECONDS));
+            verify(metadataResolver, never()).refreshNamespacesAndQueryTypes();
+        } finally {
+            releaseRefresh.countDown();
+        }
+    }
 
     @Test
     void querySuccessesRecoverUnhealthyClientAtTheExistingRecoveryThreshold() throws Exception {

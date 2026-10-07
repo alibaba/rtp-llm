@@ -5,6 +5,7 @@ import org.flexlb.cache.domain.DiffResult;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,13 +31,41 @@ public class EngineLocalView {
     /**
      * Custom ForkJoin thread pool for parallel computation
      */
-    private final ForkJoinPool customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+    private volatile ForkJoinPool customPool;
+    private volatile boolean closed;
 
     /**
      * Dynamic sync interval manager
      */
     @Autowired
     private DynamicCacheIntervalService dynamicIntervalManager;
+
+    private ForkJoinPool diffPool() {
+        if (closed) {
+            throw new IllegalStateException("Engine local view is closed");
+        }
+        ForkJoinPool pool = customPool;
+        if (pool != null) {
+            return pool;
+        }
+        synchronized (this) {
+            if (closed) {
+                throw new IllegalStateException("Engine local view is closed");
+            }
+            if (customPool == null) {
+                customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+            }
+            return customPool;
+        }
+    }
+
+    @PreDestroy
+    public synchronized void shutdown() {
+        closed = true;
+        if (customPool != null) {
+            customPool.shutdown();
+        }
+    }
 
     /**
      * Calculate diff result
@@ -57,13 +86,14 @@ public class EngineLocalView {
         Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
 
         // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
-        ForkJoinTask<?> addedTask = customPool.submit(() ->
+        ForkJoinPool pool = diffPool();
+        ForkJoinTask<?> addedTask = pool.submit(() ->
             newCacheBlocks.parallelStream()
                  .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
                  .forEach(addedBlocks::add)
         );
 
-        ForkJoinTask<?> removedTask = customPool.submit(() ->
+        ForkJoinTask<?> removedTask = pool.submit(() ->
             oldCacheBlocks.parallelStream()
                 .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
                 .forEach(removedBlocks::add)

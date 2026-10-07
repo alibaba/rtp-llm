@@ -230,6 +230,9 @@ public class KvcmGrpcClient {
             log.warn("Failed to refresh KVCM leader state; keeping the last known value", error);
             recordHeartbeat(false);
         }
+        if (refreshExecutor != null && refreshExecutor.isShutdown()) {
+            return;
+        }
         try {
             workerMetadataResolver.refreshNamespacesAndQueryTypes();
         } catch (RuntimeException error) {
@@ -390,7 +393,14 @@ public class KvcmGrpcClient {
     @PreDestroy
     public void shutdown() {
         if (refreshExecutor != null) {
-            refreshExecutor.shutdown();
+            refreshExecutor.shutdownNow();
+            try {
+                if (!refreshExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                    log.warn("KVCM service-state refresher did not stop within 1 second");
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
