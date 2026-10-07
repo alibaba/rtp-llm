@@ -23,7 +23,8 @@ _spec.loader.exec_module(fused)
 def reference_plan(
     selected, positions, offset, global_count, swa_start, window_size=128
 ):
-    """Frozen eager attention path, deliberately using stable argsort."""
+    """Canonical selected IDs followed by the original stable validity partition."""
+    selected = selected.sort(dim=-1).values
     swpos = (
         positions[:, None]
         - window_size
@@ -63,11 +64,11 @@ def make_inputs(rows, k=512, *, device="cpu", strided=False, dtype=torch.int32):
 
 
 class IndexPlanCPU(unittest.TestCase):
-    def test_oracle_preserves_valid_order_duplicates_and_padding(self):
+    def test_oracle_canonicalizes_order_preserving_duplicates_and_padding(self):
         selected = torch.tensor([[7, -3, 2, 7, -1], [-1, -1, -1, -1, -1]])
         actual, lengths = reference_plan(selected, torch.tensor([4, -1]), 10, 20, 3, 4)
         self.assertEqual(actual.shape, (2, 64))
-        self.assertEqual(actual[0, :5].tolist(), [17, 12, 17, 30, 31])
+        self.assertEqual(actual[0, :5].tolist(), [12, 17, 17, 30, 31])
         self.assertEqual(lengths.tolist(), [5, 0])
         self.assertTrue((actual[0, 5:] == -1).all())
         self.assertTrue((actual[1] == -1).all())
@@ -77,7 +78,7 @@ class IndexPlanCPU(unittest.TestCase):
             selected, positions = make_inputs(rows, 17, strided=True)
             got, lengths = reference_plan(selected, positions, 7, 4096, 29, 7)
             for row, values in enumerate(selected.tolist()):
-                expected = [7 + x for x in values if x >= 0]
+                expected = [7 + x for x in sorted(values) if x >= 0]
                 expected += [
                     7 + 4096 + p - 29
                     for p in range(int(positions[row]) - 6, int(positions[row]) + 1)
@@ -91,7 +92,7 @@ class IndexPlanCPU(unittest.TestCase):
         selected = torch.tensor([[2**31 - 1, -9, 3]], dtype=torch.int64)
         got, lengths = reference_plan(selected, torch.tensor([2**31]), 1, 7, 0, 1)
         self.assertEqual(lengths.tolist(), [1])
-        self.assertEqual(got[0, :4].tolist(), [4, -(2**31), -1, -(2**31) + 8])
+        self.assertEqual(got[0, :4].tolist(), [4, -1, -(2**31), -(2**31) + 8])
 
     def test_cpu_and_tensor_metadata_fall_back_without_cuda_queries(self):
         selected, positions = make_inputs(32)
@@ -182,6 +183,16 @@ class IndexPlanCUDA(unittest.TestCase):
         for rows in (0, 1, 17, 32, 1664, 8192, 32768):
             with self.subTest(rows=rows):
                 self.check(*make_inputs(rows, device="cuda", strided=bool(rows % 2)))
+
+    def test_selection_permutation_does_not_change_attention_plan(self):
+        selected, positions = make_inputs(257, device="cuda", strided=True)
+        expected = fused.try_build_index_plan(selected, positions, 11, 4096, 17)
+        permutation = torch.randperm(selected.shape[1], device="cuda")
+        actual = fused.try_build_index_plan(
+            selected[:, permutation], positions, 11, 4096, 17
+        )
+        for got, reference in zip(actual, expected):
+            torch.testing.assert_close(got, reference, rtol=0, atol=0)
 
     def test_shapes_dtypes_padding_offsets_and_invalid_holes(self):
         for k, window in ((1, 1), (17, 7), (511, 127), (512, 128), (1024, 128)):

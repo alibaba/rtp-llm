@@ -1,4 +1,4 @@
-"""FlashMLA index plans without a bool argsort or host reads.
+"""FlashMLA index plans with canonical global-KV order and no host reads.
 
 The caller still owns per-forward plan caching and CED/layout invalidation.
 Unsupported metadata returns None before allocation/launch; execution errors
@@ -45,6 +45,7 @@ if triton is not None:
         WINDOW: tl.constexpr,
         PADDED: tl.constexpr,
         BLOCK: tl.constexpr,
+        SELECTED_BLOCK: tl.constexpr,
         TENSOR_META: tl.constexpr = False,
         OFFSET_STRIDE: tl.constexpr = 0,
         COUNT_STRIDE: tl.constexpr = 0,
@@ -52,9 +53,21 @@ if triton is not None:
     ):
         row = tl.program_id(0).to(tl.int64)
         column = tl.arange(0, BLOCK)
+        selected_column = tl.arange(0, SELECTED_BLOCK)
+        if selected.dtype.element_ty == tl.int32:
+            sentinel: tl.constexpr = 0x7FFFFFFF
+        else:
+            sentinel: tl.constexpr = 0x7FFFFFFFFFFFFFFF
         picked = tl.load(
-            selected + row * SELECTED_STRIDE + column, column < K, other=-1
-        ).to(tl.int64)
+            selected + row * SELECTED_STRIDE + selected_column,
+            selected_column < K,
+            other=sentinel,
+        )
+        # Atomic top-k emission order must not change FlashMLA's reduction order.
+        picked = tl.sort(picked, descending=False)
+        picked = tl.gather(picked, tl.minimum(column, SELECTED_BLOCK - 1), axis=0).to(
+            tl.int64
+        )
         position = tl.load(positions + row * POSITION_STRIDE)
         if TENSOR_META:
             offset = tl.load(OFFSET + row * OFFSET_STRIDE).to(tl.int64)
@@ -75,7 +88,7 @@ if triton is not None:
         valid = active & (value >= 0)
         prefix = tl.cumsum(valid.to(tl.int32), axis=0)
         count = tl.sum(valid.to(tl.int32), axis=0)
-        # Valid columns scatter to [0,count) in original order. Invalid
+        # Sorted global IDs precede chronological SWA IDs. Invalid
         # columns fill [count,K+WINDOW), normally with -1. Preserve wrapped
         # negative int32 payloads as well, matching eager .int()+stable sort.
         destination = tl.where(valid, prefix - 1, count + column - prefix)
@@ -147,7 +160,8 @@ def try_build_index_plan(
     """Return contiguous int32 (indices[M,pad64(K+window)], lengths[M]).
 
     Metadata follows _prefill_chunk_meta's scalar or per-row [M,1] contract.
-    Negative selected entries are normalized to -1 before offsetting. SWA
+    Global selected IDs are sorted; duplicates are retained. Negative selected
+    entries are normalized to -1 before offsetting. SWA
     validity uses exactly the eager lower bound, with no extra upper clamp.
     Optional outputs avoid allocation during graph capture/replay. No tensor
     is cached, synchronized, or retained by the module.
@@ -200,6 +214,7 @@ def try_build_index_plan(
             window_size,
             padded,
             triton.next_power_of_2(padded),
+            triton.next_power_of_2(k),
             **(
                 {
                     "TENSOR_META": True,

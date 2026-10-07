@@ -118,6 +118,8 @@ __device__ __forceinline__ void copy_output(
     }
 }
 
+// Both DSV4 v3 entry points choose the lowest raw indices at an exact cutoff tie.
+// Candidate-block JIT users keep the header's default fallback policy.
 template <int Level, bool kAlignedInput, bool kFilterFinite = false>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void main_kernel(const __grid_constant__ Params params) {
@@ -129,16 +131,16 @@ void main_kernel(const __grid_constant__ Params params) {
     __shared__ impl::MaxSmem<
         Register1::Smem, Register2::Smem, Register4::Smem, Streaming::Smem> smem;
     if constexpr (Level == -1) {
-        Register1::forward<false, kAlignedInput>(problem, &smem);
+        Register1::forward<false, kAlignedInput, false, true>(problem, &smem);
     } else if constexpr (Level == 0) {
-        Register2::forward<false, kAlignedInput>(problem, &smem);
+        Register2::forward<false, kAlignedInput, false, true>(problem, &smem);
     } else if constexpr (Level == 1) {
-        Register4::forward<false, kAlignedInput>(problem, &smem);
+        Register4::forward<false, kAlignedInput, false, true>(problem, &smem);
     } else {
         if (problem.seq_len <= kReg4MaxSeqLen) {
-            Register4::forward<false, kAlignedInput>(problem, &smem);
+            Register4::forward<false, kAlignedInput, false, true>(problem, &smem);
         } else {
-            Streaming::forward<false, kAlignedInput>(problem, &smem);
+            Streaming::forward<false, kAlignedInput, true>(problem, &smem);
         }
     }
     if constexpr (kFilterFinite) {
@@ -163,7 +165,7 @@ void direct_cluster_kernel(const __grid_constant__ Params params) {
     auto* destination = problem.out;
     const auto cluster = cooperative_groups::this_cluster();
     problem.out = cluster.map_shared_rank(indices, worker_rank);
-    ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+    ClusterImpl::template forward<false, kAlignedInput, true>(problem, &smem);
     cluster.sync();
     if (blockIdx.y == worker_rank) copy_output<kFilterFinite>(problem, destination);
 }
@@ -183,7 +185,7 @@ void persistent_cluster_kernel(const __grid_constant__ Params params) {
             if (blockIdx.y == worker_rank) trivial<kFilterFinite>(problem);
         } else {
             problem.out = cluster.map_shared_rank(indices, worker_rank);
-            ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+            ClusterImpl::template forward<false, kAlignedInput, true>(problem, &smem);
             cluster.sync();
             if (blockIdx.y == worker_rank) copy_output<kFilterFinite>(problem, destination);
         }

@@ -2473,7 +2473,8 @@ class AttentionV41FP8(AttentionFP8):
                 swidx = torch.where(
                     swpos >= swstart, offsets + ns + swpos - swstart, -1
                 )
-                global_idx = torch.where(selected >= 0, offsets + selected, -1)
+                ordered = selected.sort(dim=-1).values
+                global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
                 indices = torch.cat((global_idx, swidx), -1).int()
                 # FlashMLA's length bounds count a compact valid prefix.
                 indices = indices.gather(

@@ -17,7 +17,8 @@ Op contract (mirrors vLLM):
 Equivalence semantics:
   topk_set(logits[r, : lengths[r]]) == set(output[r, :min(K, lengths[r])])
   output[r, k] == -1 for k >= min(K, lengths[r])
-  Order across the valid prefix is unspecified.
+  Order across the valid prefix is unspecified. Exact ordered-FP32 cutoff
+  ties select the lowest raw indices (NaNs canonicalized, +0 above -0).
 
 Run:
   cd .../github-opensource && CUDA_VISIBLE_DEVICES=0 \\
@@ -745,6 +746,159 @@ def test_histogram_256_negative_candidate_overflow_exact():
     )
 
 
+def _assert_stable_membership(logits, lengths, *, finite=False, capture=False):
+    """An independent stable CPU sort defines membership, not GPU emission order."""
+    k, width = 512, logits.shape[1]
+    host = logits.cpu()
+    expected = torch.full((logits.shape[0], k), -1, dtype=torch.int32)
+    for row, length in enumerate(lengths.cpu().tolist()):
+        end = min(max(length, 0), width)
+        bits = host[row, :end].contiguous().view(torch.int32).to(torch.int64)
+        bits &= 0xFFFFFFFF
+        keys = torch.where(bits < 0x80000000, bits | 0x80000000, (~bits) & 0xFFFFFFFF)
+        keys[(bits & 0x7FFFFFFF) > 0x7F800000] = 0xFFFFFFFF
+        indices = keys.argsort(descending=True, stable=True)[:k].to(torch.int32)
+        if finite:
+            indices = torch.where(host[row, indices.long()].isfinite(), indices, -1)
+        expected[row, : indices.numel()] = indices
+    expected = expected.sort(dim=1).values
+    output = torch.empty_like(expected, device=logits.device)
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+    select = rtp_llm_ops.dsv41_topk_v3_finite if finite else rtp_llm_ops.topk_v3
+
+    def launch():
+        select(logits, lengths, output, workspace, k, width)
+
+    launch()
+    graph = None
+    if capture:
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch()
+    for _ in range(4):
+        output.fill_(-123456789)
+        if graph is not None:
+            graph.replay()
+        else:
+            launch()
+        torch.testing.assert_close(
+            output.cpu().sort(dim=1).values, expected, rtol=0, atol=0
+        )
+
+
+def test_cutoff_ties_choose_lowest_indices():
+    """Exercise all buffered tie branches, including both radix item counts."""
+    width = 4096
+    for tie_count in (24, 48, 96, 129, 1024, 2048):
+        logits = torch.full((1, width), -4.0, device="cuda")
+        logits[0, :500] = 2.0
+        tied = 512 + (torch.arange(tie_count, device="cuda") * 37) % (width - 512)
+        logits[0, tied] = 1.0
+        lengths = torch.tensor([width], dtype=torch.int32, device="cuda")
+        for finite in (False, True):
+            _assert_stable_membership(logits, lengths, finite=finite)
+
+
+def test_cutoff_ties_overflow_streaming_and_cluster():
+    """Cluster merges must retain global IDs, even for a non-primary overflow."""
+    for rows, width, cluster_size, tie_count in (
+        (1, 8193, 0, 4096),
+        (17, 32768, 0, 4096),
+        (1, 65536, 8, 1536),
+        (1, 65536, 8, 4096),
+        (17, 65536, 4, 4096),
+        (37, 65536, 2, 4096),
+    ):
+        logits = torch.full((rows, width), -4.0, device="cuda")
+        logits[0, -500:] = 2.0
+        if cluster_size and tie_count > 2048:
+            tied = width // cluster_size + torch.arange(tie_count, device="cuda")
+        else:
+            tied = (torch.arange(tie_count, device="cuda") * 37) % (width - 500)
+        logits[0, tied] = 1.0
+        lengths = torch.full((rows,), 3, dtype=torch.int32, device="cuda")
+        lengths[0] = width
+        _assert_stable_membership(logits, lengths)
+        _assert_stable_membership(
+            logits, lengths, finite=True, capture=cluster_size == 8
+        )
+
+
+def test_cutoff_ties_coarse_midpoint_and_special_values():
+    """The above-bin collector can itself contain an oversubscribed cutoff tie."""
+    midpoint = (-1.0 + -0.99951171875) * 0.5
+    # All 513 values round into the threshold bin but compare >= v_hi.
+    # count_gt=513, count_eq=0: the tie-buffer overflow path cannot repair this.
+    logits = torch.full((1, 513), midpoint, device="cuda")
+    lengths = torch.tensor([513], dtype=torch.int32, device="cuda")
+    _assert_stable_membership(logits, lengths)
+    _assert_stable_membership(logits, lengths, finite=True)
+    for width in (8193, 65536):
+        logits, lengths = _make_negative_midpoint_overflow(width)
+        _assert_stable_membership(logits, lengths)
+        _assert_stable_membership(logits, lengths, finite=True)
+    logits = torch.zeros((7, 4099), device="cuda")
+    logits[0].fill_(torch.inf)
+    logits[1].fill_(-torch.inf)
+    logits[2].fill_(float("nan"))
+    logits[3, 500:] = -0.0
+    logits[4, :500] = torch.inf
+    logits[5, :500] = -float("nan")
+    lengths = torch.tensor([4099] * 6 + [0], dtype=torch.int32, device="cuda")
+    _assert_stable_membership(logits, lengths)
+    _assert_stable_membership(logits, lengths, finite=True)
+
+
+def test_cutoff_ties_mixed_long_batch_graph_replay():
+    """Mix tie paths and worker ranks; current dispatch uses direct Cluster2.
+
+    Rows r, r+30 and r+60 deliberately change path, so the same fixture also
+    exercises scratch reuse if dispatched through the 30-cluster persistent
+    kernel. The public op currently selects Cluster2 before that branch.
+    """
+    rows, width, k = 80, 196608, 512
+    logits = torch.full((rows, width), -4.0, dtype=torch.float32)
+    lengths = torch.full((rows,), width, dtype=torch.int32)
+    expected = torch.full((rows, k), -1, dtype=torch.int32)
+    above = torch.arange(width - 500, width, dtype=torch.int32)
+    for row in range(rows):
+        phase = (row + row // 30) % 3
+        if phase == 2:
+            length = (0, 3, k)[(row // 3) % 3]
+            lengths[row] = length
+            expected[row, :length] = torch.arange(length, dtype=torch.int32)
+            continue
+        shift = (row % 7) * 37
+        tied = (
+            shift + torch.arange(1536) * 113
+            if phase == 0
+            else width // 2 + shift + torch.arange(4096)
+        )
+        logits[row, above.long()] = 2.0
+        logits[row, tied] = 1.0
+        expected[row, :500] = above
+        expected[row, 500:] = tied[: k - 500].to(torch.int32)
+    expected = expected.sort(dim=1).values
+    logits, lengths = logits.cuda(), lengths.cuda()
+    output = torch.empty((rows, k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    for select in (rtp_llm_ops.topk_v3, rtp_llm_ops.dsv41_topk_v3_finite):
+        select(logits, lengths, output, workspace, k, width)
+        torch.testing.assert_close(
+            output.cpu().sort(dim=1).values, expected, rtol=0, atol=0
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            select(logits, lengths, output, workspace, k, width)
+        for _ in range(4):
+            output.fill_(-123456789)
+            graph.replay()
+            torch.testing.assert_close(
+                output.cpu().sort(dim=1).values, expected, rtol=0, atol=0
+            )
+
+
 def test_batched_candidate_overflow_exact():
     """The batched dispatcher stays exact when the candidate buffer overflows."""
     N, T = 33, 32768
@@ -801,7 +955,6 @@ def test_length_clamp_and_output_guards():
         tag="direct invalid-length clamp",
     )
     assert (storage[rows:] == sentinel).all()
-
 
 
 def test_empty_batch_is_a_noop():
@@ -979,6 +1132,10 @@ if __name__ == "__main__":
     test_histogram_256_candidate_overflow_exact()
     test_histogram_256_overflow_with_fp32_pivot_ties_exact()
     test_histogram_256_negative_candidate_overflow_exact()
+    test_cutoff_ties_choose_lowest_indices()
+    test_cutoff_ties_overflow_streaming_and_cluster()
+    test_cutoff_ties_coarse_midpoint_and_special_values()
+    test_cutoff_ties_mixed_long_batch_graph_replay()
     test_batched_candidate_overflow_exact()
     test_single_coarse_bin_large_radix_exact()
     test_zero_length_row()
