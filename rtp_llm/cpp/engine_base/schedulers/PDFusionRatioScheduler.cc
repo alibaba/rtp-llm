@@ -452,6 +452,12 @@ size_t PDFusionRatioScheduler::promotePendingDecodeStreams() {
     return promoted_count;
 }
 
+void PDFusionRatioScheduler::admitWaitingForCoordination() {
+    admission_peak_state_.reset();
+    evaluateWaitingStreams(waiting_streams_);
+    admission_peak_state_.reset();
+}
+
 void PDFusionRatioScheduler::observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill) {
     // Called under lock after the existing state machine has made the batch executable.
     observation_.committed_prefill = prefill ? streams.size() : 0;

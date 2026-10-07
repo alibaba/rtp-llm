@@ -13,6 +13,9 @@
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -4679,6 +4682,203 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(result.value().size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
+}
+
+namespace {
+struct CoordTestState {
+    ModelConfig                                   model;
+    RuntimeConfig                                 runtime;
+    ResourceContext                               resource;
+    std::shared_ptr<KVCacheManager>               cache;
+    std::unique_ptr<PDFusionCoordinatedScheduler> scheduler;
+    explicit CoordTestState(int capacity = 4) {
+        cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 64, 8, DataType::TYPE_FP16, 1, 4));
+        if (!cache->init()) {
+            throw std::runtime_error("test cache initialization failed");
+        }
+        resource.cache_manager                                = cache;
+        model.max_seq_len                                     = 8192;
+        runtime.max_generate_batch_size                       = capacity;
+        runtime.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime.fifo_scheduler_config.max_context_batch_size  = 1;
+        runtime.fifo_scheduler_config.decode_prefill_ratio    = "2";
+        runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
+        runtime.fifo_scheduler_config.pdfusion_trace_run_id   = "unit-test";
+        scheduler                                             = std::make_unique<PDFusionCoordinatedScheduler>(
+            runtime, model, makePDFusionPDSepConfig(), ParallelismConfig{}, ModelSpecificConfig{}, cache);
+    }
+    GenerateStreamPtr stream() {
+        return makeStream({1, 2}, model, runtime, resource, 16);
+    }
+};
+class PendingCoordLoad: public AsyncContext {
+public:
+    void waitDone() override {
+        throw std::logic_error("must not wait under scheduler lock");
+    }
+    bool done() const override {
+        return false;
+    }
+    bool success() const override {
+        return false;
+    }
+};
+}  // namespace
+TEST_F(FIFOSchedulerTest, testCoordReservationCancellationAndLateArrival) {
+    CoordTestState f;
+    auto           first = f.stream(), late = f.stream();
+    const auto     free = f.cache->freeBlocksNum();
+    ASSERT_TRUE(f.scheduler->enqueue(first).ok());
+    auto state = f.scheduler->prepareLocal(1);
+    EXPECT_EQ(state.ready_prefill, 1);
+    EXPECT_LT(f.cache->freeBlocksNum(), free);
+    EXPECT_EQ(f.scheduler->onflightStreams(), 1);
+    ASSERT_TRUE(f.scheduler->enqueue(late).ok());
+    first->reportError(ErrorCode::CANCELLED, "cancel after prepare");
+    EXPECT_TRUE(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL).empty());
+    EXPECT_EQ(f.cache->freeBlocksNum(), free);
+    EXPECT_EQ(f.scheduler->waitingStreamsSize(), 1);
+    EXPECT_THROW(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL), std::logic_error);
+    EXPECT_THROW(f.scheduler->prepareLocal(2), std::logic_error);
+    f.scheduler->completeModelStep();
+    EXPECT_EQ(f.scheduler->prepareLocal(2).ready_prefill, 1);
+    auto next = f.scheduler->commitLocal(2, PDFusionPlan::PREFILL);
+    ASSERT_EQ(next.size(), 1);
+    EXPECT_EQ(next.front(), late);
+    f.scheduler->completeModelStep();
+}
+TEST_F(FIFOSchedulerTest, testCoordCapacityFullStillPreparesDecode) {
+    CoordTestState f(1);
+    auto           active = f.stream(), waiting = f.stream();
+    ASSERT_TRUE(f.scheduler->enqueue(active).ok());
+    EXPECT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
+    EXPECT_EQ(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL).size(), 1);
+    active->setSeqLength(active->seqLength() + 1);
+    active->setIsContextStream(false);
+    f.scheduler->completeModelStep();
+    ASSERT_TRUE(f.scheduler->enqueue(waiting).ok());
+    auto state = f.scheduler->prepareLocal(2);
+    EXPECT_EQ(state.ready_prefill, 0);
+    EXPECT_EQ(state.ready_decode, 1);
+    auto batch = f.scheduler->commitLocal(2, PDFusionPlan::DECODE);
+    ASSERT_EQ(batch.size(), 1);
+    EXPECT_EQ(batch.front(), active);
+    f.scheduler->completeModelStep();
+    active->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_EQ(f.scheduler->prepareLocal(3).ready_prefill, 1);
+    EXPECT_EQ(f.scheduler->commitLocal(3, PDFusionPlan::PREFILL).front(), waiting);
+    f.scheduler->completeModelStep();
+}
+TEST_F(FIFOSchedulerTest, testCoordPendingLoadIsNotReadyOrReAdmitted) {
+    CoordTestState f(1);
+    auto           loading = f.stream();
+    ASSERT_TRUE(loading->initKVBlock().ok());
+    loading->reportEvent(StreamEvents::CanRun);
+    loading->reportEvent(StreamEvents::LoadInitiated);
+    loading->generate_status_->status                  = StreamState::LOADING_CACHE;
+    loading->streamCacheResource().load_cache_context_ = std::make_shared<PendingCoordLoad>();
+    f.scheduler->loading_cache_streams_.push_back(loading);
+    const auto free  = f.cache->freeBlocksNum();
+    auto       state = f.scheduler->prepareLocal(1);
+    EXPECT_EQ(state.ready_prefill, 0);
+    EXPECT_EQ(state.loading, 1);
+    EXPECT_TRUE(f.scheduler->commitLocal(1, PDFusionPlan::IDLE).empty());
+    f.scheduler->completeModelStep();
+    loading->streamCacheResource().load_cache_context_.reset();
+    EXPECT_EQ(f.scheduler->prepareLocal(2).ready_prefill, 1);
+    EXPECT_EQ(f.cache->freeBlocksNum(), free);
+    EXPECT_EQ(f.scheduler->commitLocal(2, PDFusionPlan::PREFILL).size(), 1);
+    f.scheduler->completeModelStep();
+}
+TEST_F(FIFOSchedulerTest, testCoordIdleAndPreparedReservationSurvivesDecodePlan) {
+    CoordTestState f;
+    EXPECT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 0);
+    EXPECT_TRUE(f.scheduler->commitLocal(1, PDFusionPlan::IDLE).empty());
+    f.scheduler->completeModelStep();
+    auto stream = f.stream();
+    ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
+    EXPECT_EQ(f.scheduler->prepareLocal(2).ready_prefill, 1);
+    const auto free = f.cache->freeBlocksNum();
+    EXPECT_TRUE(f.scheduler->commitLocal(2, PDFusionPlan::DECODE).empty());
+    f.scheduler->completeModelStep();
+    EXPECT_EQ(f.scheduler->prepareLocal(3).ready_prefill, 1);
+    EXPECT_EQ(f.cache->freeBlocksNum(), free);
+    auto batch = f.scheduler->commitLocal(3, PDFusionPlan::PREFILL);
+    ASSERT_EQ(batch.size(), 1);
+    EXPECT_EQ(batch.front(), stream);
+    f.scheduler->completeModelStep();
+}
+TEST_F(FIFOSchedulerTest, testCoordStopDefersResourceReleaseUntilLoopJoined) {
+    CoordTestState f;
+    auto           stream = f.stream();
+    const auto     free   = f.cache->freeBlocksNum();
+    ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
+    EXPECT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
+    const auto reserved = f.cache->freeBlocksNum();
+    EXPECT_LT(reserved, free);
+    ASSERT_TRUE(f.scheduler->stop().ok());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(f.cache->freeBlocksNum(), reserved);
+    EXPECT_THROW(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL), std::logic_error);
+    f.scheduler->releaseStoppedStreams();
+    EXPECT_EQ(f.cache->freeBlocksNum(), free);
+    EXPECT_TRUE(f.scheduler->empty());
+}
+TEST_F(FIFOSchedulerTest, testCoordCancelledPreparedDecodeIsNotReplaced) {
+    CoordTestState f;
+    auto           active = f.stream();
+    ASSERT_TRUE(f.scheduler->enqueue(active).ok());
+    ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
+    ASSERT_EQ(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL).size(), 1);
+    active->setSeqLength(active->seqLength() + 1);
+    active->setIsContextStream(false);
+    f.scheduler->completeModelStep();
+    ASSERT_EQ(f.scheduler->prepareLocal(2).ready_decode, 1);
+    auto late = f.stream();
+    ASSERT_TRUE(f.scheduler->enqueue(late).ok());
+    active->reportError(ErrorCode::CANCELLED, "cancel prepared decode");
+    EXPECT_TRUE(f.scheduler->commitLocal(2, PDFusionPlan::DECODE).empty());
+    EXPECT_EQ(f.scheduler->waitingStreamsSize(), 1);
+    f.scheduler->completeModelStep();
+    EXPECT_EQ(f.scheduler->prepareLocal(3).ready_prefill, 1);
+    auto batch = f.scheduler->commitLocal(3, PDFusionPlan::PREFILL);
+    ASSERT_EQ(batch.size(), 1);
+    EXPECT_EQ(batch.front(), late);
+    f.scheduler->completeModelStep();
+}
+TEST_F(FIFOSchedulerTest, testCoordStopAfterCommitRetainsInFlightKV) {
+    CoordTestState f;
+    auto           stream = f.stream();
+    const auto     free   = f.cache->freeBlocksNum();
+    ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
+    ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
+    auto batch = f.scheduler->commitLocal(1, PDFusionPlan::PREFILL);
+    ASSERT_EQ(batch.size(), 1);
+    const auto reserved = f.cache->freeBlocksNum();
+    EXPECT_LT(reserved, free);
+    ASSERT_TRUE(f.scheduler->stop().ok());
+    EXPECT_EQ(f.cache->freeBlocksNum(), reserved);
+    f.scheduler->completeModelStep();
+    EXPECT_EQ(f.cache->freeBlocksNum(), reserved);
+    f.scheduler->releaseStoppedStreams();
+    EXPECT_EQ(f.cache->freeBlocksNum(), free);
+}
+
+TEST_F(FIFOSchedulerTest, testCoordCancelledReservationDoesNotLeakReadyAge) {
+    CoordTestState f;
+    auto           cancelled = f.stream(), next = f.stream();
+    ASSERT_TRUE(f.scheduler->enqueue(cancelled).ok());
+    ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
+    EXPECT_TRUE(f.scheduler->commitLocal(1, PDFusionPlan::DECODE).empty());
+    f.scheduler->completeModelStep();
+    f.scheduler->reserved_since_us_ = 1;
+    cancelled->reportError(ErrorCode::CANCELLED, "replace only at next prepare");
+    ASSERT_TRUE(f.scheduler->enqueue(next).ok());
+    auto state = f.scheduler->prepareLocal(2);
+    EXPECT_EQ(state.ready_prefill, 1);
+    EXPECT_EQ(state.oldest_ready_us, 0);
+    EXPECT_EQ(f.scheduler->commitLocal(2, PDFusionPlan::PREFILL).front(), next);
+    f.scheduler->completeModelStep();
 }
 
 }  // namespace rtp_llm

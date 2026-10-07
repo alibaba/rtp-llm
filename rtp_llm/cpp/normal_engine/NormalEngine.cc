@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -217,6 +218,34 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
+    const auto& fifo = runtime_config.fifo_scheduler_config;
+    RTP_LLM_CHECK_WITH_INFO(fifo.pdfusion_coord_mode == "off" || fifo.pdfusion_coord_mode == "cadence",
+                            "unknown pdfusion_coord_mode [%s]",
+                            fifo.pdfusion_coord_mode.c_str());
+    if (fifo.pdfusion_coord_mode == "cadence") {
+        RTP_LLM_CHECK_WITH_INFO(
+            pd_sep_config.role_type == RoleType::PDFUSION && parallelism_config.tp_size == 1
+                && parallelism_config.dp_size == 4 && parallelism_config.ep_size == 4 && parallelism_config.pp_size == 1
+                && parallelism_config.world_size == 4 && parallelism_config.local_world_size == 4
+                && !parallelism_config.prefill_cp_config.is_enabled() && !propose_params_
+                && !ffn_disaggregate_config.enable_ffn_disaggregate && !runtime_config.use_batch_decode_scheduler
+                && fifo.pdfusion_scheduler_mode == "ratio" && !fifo.enable_mixed_continuous_batching
+                && !deviceInputEnabled(),
+            "global cadence supports only single-host synchronous TP1/DP4/EP4 non-MTP PDFUSION ratio mode");
+        auto* normal = dynamic_cast<NormalExecutor*>(executor_.get());
+        RTP_LLM_CHECK_WITH_INFO(normal && normal->supportsCoordinatedSchedule(),
+                                "global cadence does not support async stream dispatch");
+        RTP_LLM_CHECK_WITH_INFO(fifo.pdfusion_trace_run_id != "unset", "global cadence requires a unique run id");
+        scheduler_.reset(new PDFusionCoordinatedScheduler(runtime_config,
+                                                          model_config_,
+                                                          pd_sep_config,
+                                                          parallelism_config,
+                                                          model_specific_config,
+                                                          resource_context_.cache_manager,
+                                                          metrics_reporter_));
+        RTP_LLM_LOG_INFO("create global PDFUSION cadence scheduler, run=%s", fifo.pdfusion_trace_run_id.c_str());
+        return;
+    }
     const auto pdfusion_scheduler_mode =
         parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
     if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
@@ -553,6 +582,9 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get())) {
+        coordinated->releaseStoppedStreams();
+    }
     return absl::OkStatus();
 }
 
@@ -614,13 +646,20 @@ absl::Status NormalEngine::step() try {
     }
 
     const bool              schedule_trace       = runtime_config.fifo_scheduler_config.pdfusion_schedule_trace;
-    const int64_t           control_epoch        = schedule_trace ? ++trace_control_epoch_ : 0;
+    auto*                   coordinated          = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get());
+    int64_t                 control_epoch        = schedule_trace && !coordinated ? ++trace_control_epoch_ : 0;
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+        }
+        if (coordinated) {
+            control_epoch = coordinated->controlEpoch();
+            if (coordinated->globalIdle()) {
+                return absl::OkStatus();
+            }
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
@@ -670,16 +709,20 @@ absl::Status NormalEngine::step() try {
     if (schedule_trace) {
         const auto observation = scheduler_->lastScheduleObservation();
         RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=begin run=%s rank=%d control_epoch=%ld model_step_id=%ld "
-                         "epoch_scope=local_model_order global_plan=local start_us=%ld execute_start_us=%ld "
+                         "epoch_scope=%s global_plan=%s start_us=%ld execute_start_us=%ld "
                          "snapshot_valid=%d intent=%s waiting=%ld loading=%ld running=%ld pending=%ld "
                          "kv_available=%ld kv_reserved=%ld reject_batch=%ld reject_tokens=%ld reject_kv=%ld "
                          "committed_prefill=%ld committed_decode=%ld committed_input_tokens=%ld "
                          "waiting_after=%ld loading_after=%ld oldest_waiting_us=%ld "
-                         "prefill=%d decode=%d fake=%d input_tokens=%ld graph_batch=-1",
+                         "prefill=%d decode=%d fake=%d input_tokens=%ld graph_batch=-1 "
+                         "ready_prefill=%ld ready_decode=%ld oldest_ready_us=%ld decode_unserved_us=%ld "
+                         "ready_mask=%ld commit_mask=%ld prepare_us=%ld control_us=%ld commit_us=%ld",
                          runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
                          parallelism_config.dp_rank,
                          control_epoch,
                          model_step_id,
+                         coordinated ? "global_control" : "local_model_order",
+                         coordinated ? (coordinated->plan() == PDFusionPlan::PREFILL ? "prefill" : "decode") : "local",
                          tps_schedule_time_us,
                          step_begin_time_us,
                          static_cast<int>(observation.valid),
@@ -702,7 +745,16 @@ absl::Status NormalEngine::step() try {
                          measurement_prefill,
                          measurement_decode,
                          measurement_fake,
-                         measurement_input_tokens);
+                         measurement_input_tokens,
+                         coordinated ? coordinated->lastPrepared().ready_prefill : -1L,
+                         coordinated ? coordinated->lastPrepared().ready_decode : -1L,
+                         coordinated ? coordinated->lastPrepared().oldest_ready_us : -1L,
+                         coordinated ? coordinated->lastPrepared().decode_unserved_us : -1L,
+                         coordinated ? coordinated->preparedMask() : 0L,
+                         coordinated ? coordinated->committedMask() : 0L,
+                         coordinated ? coordinated->prepareUs() : 0L,
+                         coordinated ? coordinated->controlUs() : 0L,
+                         coordinated ? coordinated->commitUs() : 0L);
     }
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
@@ -729,6 +781,9 @@ absl::Status NormalEngine::step() try {
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
+        if (status.ok() && coordinated) {
+            coordinated->completeModelStep();
+        }
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();

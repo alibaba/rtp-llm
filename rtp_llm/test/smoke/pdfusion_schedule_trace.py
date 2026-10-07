@@ -78,10 +78,49 @@ def align(lines, run_id, ranks=4, allow_drain_tail=False):
         for begin, end in pairs:
             if begin["control_epoch"] != end["control_epoch"]:
                 raise ValueError("epoch mismatch between begin/end")
-            if (
-                begin["epoch_scope"] != "local_model_order"
-                or begin["global_plan"] != "local"
-            ):
+            scope, plan = begin["epoch_scope"], begin["global_plan"]
+            if scope == "local_model_order":
+                if plan != "local":
+                    raise ValueError("unexpected local plan")
+            elif scope == "global_control":
+                if plan not in ("prefill", "decode"):
+                    raise ValueError("invalid global plan")
+                if (plan == "prefill" and begin["decode"]) or (
+                    plan == "decode" and begin["prefill"]
+                ):
+                    raise ValueError("real batch violates global phase")
+                for field in (
+                    "ready_prefill",
+                    "ready_decode",
+                    "oldest_ready_us",
+                    "decode_unserved_us",
+                    "prepare_us",
+                    "control_us",
+                    "commit_us",
+                ):
+                    if begin.get(field, -1) < 0:
+                        raise ValueError("missing or invalid global preparation")
+                if (
+                    begin["prefill"] > begin["ready_prefill"]
+                    or begin["decode"] > begin["ready_decode"]
+                ):
+                    raise ValueError("execution exceeds reservation")
+                real = begin["prefill"] + begin["decode"]
+                bit = 1 << begin["rank"]
+                if (
+                    not 0 <= begin["ready_mask"] <= 15
+                    or not 1 <= begin["commit_mask"] <= 15
+                ):
+                    raise ValueError("invalid global masks")
+                if bool(begin["ready_mask"] & bit) != bool(begin["ready_prefill"]):
+                    raise ValueError("ready mask disagrees with snapshot")
+                if bool(begin["commit_mask"] & bit) != bool(real):
+                    raise ValueError("commit mask disagrees with execution")
+                if begin["fake"] != int(real == 0) or (
+                    not real and end["output_tokens"] != 0
+                ):
+                    raise ValueError("fake participation or output accounting mismatch")
+            else:
                 raise ValueError("unsupported coordinator mode")
             if (
                 end["ok"] != 1
@@ -98,6 +137,14 @@ def align(lines, run_id, ranks=4, allow_drain_tail=False):
             rows.append(dict(begin, **end))
         if len({row["control_epoch"] for row in rows}) != 1:
             raise ValueError("cross-rank epoch mismatch")
+        if len({row["epoch_scope"] for row in rows}) != 1:
+            raise ValueError("mixed local/global coordination")
+        if complete and rows[0]["control_epoch"] <= complete[-1][0]["control_epoch"]:
+            raise ValueError("nonmonotonic control epoch")
+        if rows[0]["epoch_scope"] == "global_control":
+            for field in ("global_plan", "ready_mask", "commit_mask"):
+                if len({row[field] for row in rows}) != 1:
+                    raise ValueError("divergent global plan/mask")
         # Same counter values alone are not proof of global synchronization. A
         # common host-executor interval is an additional audit for this single-host EP run.
         overlap = min(row["end_us"] for row in rows) - max(
@@ -156,9 +203,31 @@ def summarize(steps, lo_us=0, hi_us=float("inf")):
             ),
             rejected_kv=sum(r["reject_kv"] for rows, _ in entries for r in rows),
             intent_prefill_fallback=sum(
-                r["intent"] == "prefill" and r["prefill"] == 0
+                r["epoch_scope"] == "local_model_order"
+                and r["intent"] == "prefill"
+                and r["prefill"] == 0
                 for rows, _ in entries
                 for r in rows
+            ),
+            global_empty_ranks=sum(
+                r["epoch_scope"] == "global_control" and r["prefill"] + r["decode"] == 0
+                for rows, _ in entries
+                for r in rows
+            ),
+            global_steps=sum(
+                rows[0]["epoch_scope"] == "global_control" for rows, _ in entries
+            ),
+            max_rank_control_sum_s=sum(
+                max(r.get("control_us", 0) for r in rows) for rows, _ in entries
+            )
+            / 1e6,
+            oldest_ready_max_us=max(
+                (r.get("oldest_ready_us", 0) for rows, _ in entries for r in rows),
+                default=0,
+            ),
+            decode_unserved_max_us=max(
+                (r.get("decode_unserved_us", 0) for rows, _ in entries for r in rows),
+                default=0,
             ),
         )
     return result
@@ -181,7 +250,7 @@ def main():
         run_id=args.run_id,
         completed_steps=len(steps),
         all=summarize(steps),
-        note="Engine-local explicit IDs and overlap checked; no synchronized control channel. "
+        note="Explicit model/control IDs, epoch scope, global plan/masks when present and overlap checked. "
         "Host executor time is not GPU kernel or peer-wait time. Graph bins come only from MODEL_EXECUTION records inside explicit begin/end brackets; missing records stay unobserved.",
     )
     if args.steady_summary:

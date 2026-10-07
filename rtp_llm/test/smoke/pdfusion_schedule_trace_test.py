@@ -22,7 +22,51 @@ def fixture(steps=2):
     return lines
 
 
+def global_fixture():
+    lines = [
+        line.replace(
+            "epoch_scope=local_model_order global_plan=local",
+            "epoch_scope=global_control global_plan=prefill",
+        )
+        .replace("control_epoch=1", "control_epoch=10")
+        .replace("control_epoch=2", "control_epoch=30")
+        for line in fixture()
+    ]
+    for i, line in enumerate(lines):
+        if "event=begin" in line:
+            line += " ready_prefill=1 ready_decode=7 oldest_ready_us=100 decode_unserved_us=20 ready_mask=15 commit_mask=7 prepare_us=10 control_us=20 commit_us=5"
+            if "rank=3 " in line:
+                line = (
+                    line.replace("committed_prefill=1", "committed_prefill=0")
+                    .replace(" prefill=1", " prefill=0")
+                    .replace("fake=0", "fake=1")
+                )
+        elif "rank=3 " in line:
+            line = line.replace("output_tokens=1", "output_tokens=0")
+        lines[i] = line
+    return lines
+
+
 class TraceTest(unittest.TestCase):
+    def test_global_control_with_idle_epoch_gaps_and_cancelled_rank(self):
+        rows, _ = align(global_fixture(), "test")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(summarize(rows)["prefill_present"]["global_steps"], 2)
+
+    def test_global_plan_masks_reservations_and_fake_are_checked(self):
+        for old, new in (
+            ("global_plan=prefill", "global_plan=decode"),
+            ("commit_mask=7", "commit_mask=15"),
+            ("ready_prefill=1", "ready_prefill=0"),
+            ("fake=1", "fake=0"),
+            ("control_us=20", "control_us=-1"),
+            ("control_epoch=30", "control_epoch=10"),
+        ):
+            lines = global_fixture()
+            lines = [line.replace(old, new) for line in lines]
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                align(lines, "test")
+
     def test_valid_explicit_ids(self):
         rows, metadata = align(fixture(), "test")
         self.assertEqual(metadata["rank_begin_counts"], [2] * 4)

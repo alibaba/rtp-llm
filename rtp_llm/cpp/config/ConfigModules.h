@@ -421,6 +421,8 @@ struct FIFOSchedulerConfig {
     // Opt-in CPU scheduling observations; no control collective or policy change.
     bool        pdfusion_schedule_trace        = false;
     std::string pdfusion_trace_run_id          = "unset";
+    std::string pdfusion_coord_mode            = "off";
+    int64_t     pdfusion_coord_timeout_ms      = 30000;
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;

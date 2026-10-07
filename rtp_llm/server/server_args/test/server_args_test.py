@@ -702,6 +702,28 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(old.pdfusion_schedule_trace)
         self.assertEqual(old.pdfusion_trace_run_id, "unset")
 
+    def test_pdfusion_coordinator_config_and_old_pickle(self):
+        import rtp_llm.server.server_args.server_args
+
+        sys.argv = [
+            "prog",
+            "--pdfusion_coord_mode",
+            "cadence",
+            "--pdfusion_coord_timeout_ms",
+            "4000",
+        ]
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        config = (
+            rtp_llm.server.server_args.server_args.setup_args().runtime_config.fifo_scheduler_config
+        )
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.pdfusion_coord_mode, "cadence")
+        self.assertEqual(restored.pdfusion_coord_timeout_ms, 4000)
+        old = type(config).__new__(type(config))
+        old.__setstate__((1, 0, "ratio", "0", True, 0, 0, False, True, "old-run"))
+        self.assertEqual(old.pdfusion_coord_mode, "off")
+        self.assertEqual(old.pdfusion_coord_timeout_ms, 30000)
+
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
         """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
         sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]

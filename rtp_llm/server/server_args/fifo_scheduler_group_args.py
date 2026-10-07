@@ -83,6 +83,22 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="Shared run identity for cross-rank trace validation.",
     )
     fifo_scheduler_group.add_argument(
+        "--pdfusion_coord_mode",
+        env_name="PDFUSION_COORD_MODE",
+        bind_to=[(fifo_scheduler_config, "pdfusion_coord_mode")],
+        choices=["off", "cadence"],
+        default="off",
+        help="Opt-in single-host TP1/DP4/EP4 global cadence; unsupported modes are rejected.",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_coord_timeout_ms",
+        env_name="PDFUSION_COORD_TIMEOUT_MS",
+        bind_to=[(fifo_scheduler_config, "pdfusion_coord_timeout_ms")],
+        type=int,
+        default=30000,
+        help="Control exchange deadline. Failure terminates the group without local fallback.",
+    )
+    fifo_scheduler_group.add_argument(
         "--cp_force_single_prefill",
         env_name="CP_FORCE_SINGLE_PREFILL",
         bind_to=[(fifo_scheduler_config, "cp_force_single_prefill")],

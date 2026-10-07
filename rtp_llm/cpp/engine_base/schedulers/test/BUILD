@@ -63,3 +63,14 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "pdfusion_schedule_coordinator_test",
+    srcs = ["PDFusionScheduleCoordinatorTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:pdfusion_schedule_coordinator",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+)

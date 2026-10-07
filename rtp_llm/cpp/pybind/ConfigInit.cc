@@ -1326,6 +1326,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("pdfusion_schedule_trace", &FIFOSchedulerConfig::pdfusion_schedule_trace)
         .def_readwrite("pdfusion_trace_run_id", &FIFOSchedulerConfig::pdfusion_trace_run_id)
+        .def_readwrite("pdfusion_coord_mode", &FIFOSchedulerConfig::pdfusion_coord_mode)
+        .def_readwrite("pdfusion_coord_timeout_ms", &FIFOSchedulerConfig::pdfusion_coord_timeout_ms)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
@@ -1341,10 +1343,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_batch_tokens_without_cache,
                                       self.enable_mixed_continuous_batching,
                                       self.pdfusion_schedule_trace,
-                                      self.pdfusion_trace_run_id);
+                                      self.pdfusion_trace_run_id,
+                                      self.pdfusion_coord_mode,
+                                      self.pdfusion_coord_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 10)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 10
+                    && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1367,6 +1372,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 10) {
                         c.pdfusion_schedule_trace = t[8].cast<bool>();
                         c.pdfusion_trace_run_id   = t[9].cast<std::string>();
+                    }
+                    if (t.size() >= 12) {
+                        c.pdfusion_coord_mode       = t[10].cast<std::string>();
+                        c.pdfusion_coord_timeout_ms = t[11].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

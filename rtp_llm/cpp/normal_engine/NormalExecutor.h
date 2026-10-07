@@ -52,6 +52,9 @@ public:
     static ModelFactory test_model_factory;
 
     bool updateEplbConfig(const EPLBConfig& config) override;
+    bool supportsCoordinatedSchedule() const {
+        return !useStreamAsync() && !useDropBroadSync();
+    }
 
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
@@ -100,16 +103,15 @@ private:
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
-    bool                                                                     enable_detail_log_       = false;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool enable_ffn_disaggregate_ = false;
+    bool enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
-    RoleType              role_type_           = RoleType::PDFUSION;
+    RoleType              role_type_ = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

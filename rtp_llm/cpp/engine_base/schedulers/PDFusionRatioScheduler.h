@@ -36,7 +36,7 @@ public:
     int64_t pendingDecodeStreamsSize();
     int64_t decodeSincePrefillForTest();
 
-private:
+protected:
     enum class RoundType {
         PREFILL,
         DECODE
@@ -58,6 +58,7 @@ private:
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
 
+    void                admitWaitingForCoordination();
     void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
     const bool          trace_enabled_;
     ScheduleObservation observation_;
@@ -68,7 +69,7 @@ private:
                                     int64_t                  initial_capacity,
                                     int64_t                  lifecycle_capacity);
 
-private:
+protected:
     std::list<GenerateStreamPtr> pending_decode_streams_;
     // Per-prefill-round scratch state, guarded by the scheduler lock.
     std::unique_ptr<AdmissionPeakState> admission_peak_state_;
