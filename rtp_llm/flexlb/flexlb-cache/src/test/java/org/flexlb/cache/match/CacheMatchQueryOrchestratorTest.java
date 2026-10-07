@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -46,6 +48,40 @@ class CacheMatchQueryOrchestratorTest {
             mock(CacheMetricsReporter.class);
     private final CacheMatchQuery query = new CacheMatchQuery(
             "request-1", List.of(11L, 22L), 2192L, RoleType.PREFILL, "default");
+
+    @Test
+    void invalidLocalStandbyBlockSizeReturnsFailedQueryWithoutInvokingProvider() {
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        for (long blockSize : new long[]{0L, -1L}) {
+            CacheMatchQuery invalid = new CacheMatchQuery(
+                    "request-invalid", List.of(11L), blockSize, RoleType.PREFILL, "default");
+
+            CacheMatchResult result = orchestrator().findMatchingEngines(invalid);
+
+            assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+            assertFalse(result.querySucceeded());
+            assertEquals(Map.of(), result.hostMatches());
+            verify(localStandbyProvider, never()).findMatchingEngines(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.any());
+        }
+    }
+
+    @Test
+    void localSyncStatusDoesNotReadUnconfiguredKvcmHealth() {
+        when(configuration.isKvcmEnabled()).thenReturn(false);
+
+        var status = orchestrator().status();
+
+        assertEquals(CacheMatchSource.LOCAL_SYNC, status.effectiveSource());
+        assertFalse(status.kvcmEnabled());
+        assertNull(status.kvcmHealthState());
+        assertEquals(0, status.consecutiveQueryFailures());
+        assertEquals(0, status.consecutiveHeartbeatFailures());
+        verify(failoverManager, never()).healthSnapshot();
+    }
 
     @Test
     void rateLimitsKvcmFailureWarningsWithoutDroppingFallbackMetrics() {

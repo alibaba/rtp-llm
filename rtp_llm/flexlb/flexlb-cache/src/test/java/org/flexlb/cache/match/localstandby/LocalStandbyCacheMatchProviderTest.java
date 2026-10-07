@@ -12,14 +12,19 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
+import static org.flexlb.cache.CacheMatchTestConfigurations.localSync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.after;
@@ -32,6 +37,34 @@ import static org.mockito.Mockito.when;
 class LocalStandbyCacheMatchProviderTest {
 
     private final CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
+
+    @Test
+    void disabledLocalStandbyDoesNotAllocateExecutors() {
+        LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
+        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
+                localSync(modelMetaConfig()), cacheManager, reporter);
+        try {
+            assertNull(ReflectionTestUtils.getField(provider, "asyncMatchExecutor"));
+            assertNull(ReflectionTestUtils.getField(provider, "updateExecutor"));
+            assertTrue(provider.asyncLocalStandbyMatch(new CacheMatchQuery(
+                    "request-disabled", List.of(11L), 2192L, RoleType.PREFILL, "default")).join().hostMatches().isEmpty());
+            verifyNoInteractions(cacheManager);
+        } finally {
+            provider.shutdown();
+        }
+    }
+
+    @Test
+    void rejectsInvalidQueueCapacityWhenEnabled() {
+        for (int capacity : new int[]{0, -1}) {
+            var configuration = kvcm(modelMetaConfig(),
+                    runtime -> runtime.getLocalStandby().setAsyncQueueCapacity(capacity));
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> new LocalStandbyCacheMatchProvider(
+                            configuration, mock(LocalStandbyCacheManager.class), reporter));
+            assertTrue(error.getMessage().contains("asyncQueueCapacity"));
+        }
+    }
 
     @Test
     void matchesClientProvidedKeysWithClientBlockSize() throws Exception {

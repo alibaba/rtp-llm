@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinTask;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -60,6 +61,30 @@ class KvCacheManagerTest {
             assertTrue(pool.isShutdown());
             assertThrows(IllegalStateException.class,
                     () -> view.calculateDiff("10.0.0.1:8080", Set.of(12L)));
+        } finally {
+            view.shutdown();
+        }
+    }
+
+    @Test
+    void diffFallsBackWhenPoolClosesBeforeSubmission() {
+        EngineLocalView view = new EngineLocalView();
+        ForkJoinPool closingPool = new ForkJoinPool(1) {
+            @Override
+            public ForkJoinTask<?> submit(Runnable task) {
+                shutdown();
+                return super.submit(task);
+            }
+        };
+        ReflectionTestUtils.setField(view, "customPool", closingPool);
+        ReflectionTestUtils.setField(view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        try {
+            view.addOrUpdateCacheBlock("engine", 11L);
+
+            DiffResult diff = view.calculateDiff("engine", Set.of(22L));
+
+            assertEquals(Set.of(22L), diff.getAddedBlocks());
+            assertEquals(Set.of(11L), diff.getRemovedBlocks());
         } finally {
             view.shutdown();
         }

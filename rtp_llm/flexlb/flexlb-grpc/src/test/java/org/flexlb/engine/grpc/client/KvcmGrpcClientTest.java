@@ -28,6 +28,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -42,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -335,6 +337,56 @@ class KvcmGrpcClientTest {
     }
 
     @Test
+    void missingWorkerMetadataFailsTheQueryAndLimitsImmediateRefreshes() throws Exception {
+        KvcmMetaServiceClient metaService = mock(KvcmMetaServiceClient.class);
+        KvcmLeaderResolver leader = mock(KvcmLeaderResolver.class);
+        KvcmWorkerMetadataResolver metadata = mock(KvcmWorkerMetadataResolver.class);
+        client = createQueryTestClient(metaService, leader, metadata, mock(GrpcReporter.class));
+        ScheduledExecutorService executor = (ScheduledExecutorService) ReflectionTestUtils.getField(client, "refreshExecutor");
+        executor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+
+        KvcmQueryException first = assertThrows(KvcmQueryException.class,
+                () -> client.findMatchingEngines("missing-1", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+        executor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+        KvcmQueryException second = assertThrows(KvcmQueryException.class,
+                () -> client.findMatchingEngines("missing-2", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+        executor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+
+        assertTrue(first.getMessage().contains("worker metadata unavailable"));
+        assertTrue(second.getMessage().contains("worker metadata unavailable"));
+        assertEquals(2, client.healthSnapshot().consecutiveQueryFailures());
+        verify(metaService, never()).getHostCacheState(any(), any(), any(Deadline.class));
+        verify(leader, times(2)).refresh();
+    }
+
+    @Test
+    void failingGrpcMetricsDoNotChangeSuccessOrMaskRequestFailure() {
+        KvcmMetaServiceClient metaService = mock(KvcmMetaServiceClient.class);
+        KvcmLeaderResolver leader = mock(KvcmLeaderResolver.class);
+        KvcmWorkerMetadataResolver metadata = mock(KvcmWorkerMetadataResolver.class);
+        when(leader.resolve()).thenReturn(new GrpcTarget("127.0.0.1", 7001));
+        when(metadata.resolveNamespace(RoleType.PREFILL, "default", 2192L)).thenReturn("deployment_2192");
+        when(metadata.resolveQueryType(RoleType.PREFILL, "default")).thenReturn(QueryType.QT_PREFIX_MATCH);
+        when(metaService.getHostCacheState(any(), any(), any(Deadline.class)))
+                .thenReturn(GetHostCacheStateResponse.newBuilder().setHeader(okHeader()).build())
+                .thenThrow(io.grpc.Status.DEADLINE_EXCEEDED.asRuntimeException());
+        GrpcReporter reporter = mock(GrpcReporter.class);
+        doThrow(new IllegalStateException("monitor unavailable")).when(reporter)
+                .reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), anyInt(), eq(false));
+        client = createQueryTestClient(metaService, leader, metadata, reporter);
+
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> first = client.findMatchingEngines(
+                "success", List.of(11L), 2192L, RoleType.PREFILL, "default");
+        KvcmQueryException failure = assertThrows(KvcmQueryException.class,
+                () -> client.findMatchingEngines("timeout", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+
+        assertTrue(first.isEmpty());
+        assertEquals(io.grpc.Status.Code.DEADLINE_EXCEEDED, io.grpc.Status.fromThrowable(failure).getCode());
+        assertEquals(1, client.healthSnapshot().consecutiveQueryFailures());
+        verify(metaService, times(2)).getHostCacheState(any(), any(), any(Deadline.class));
+    }
+
+    @Test
     void usesTheLatestRuntimeConfigForEveryQuery() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmCacheMatchingConfig initialConfig = new KvcmCacheMatchingConfig();
@@ -624,6 +676,20 @@ class KvcmGrpcClientTest {
         warmupState.setWarmupFinished(true);
         return new KvcmGrpcClient(configuration, metaServiceClient, leaderResolver, workerMetadataResolver,
                 warmupState, grpcReporter, new KvcmMetricsReporter(NoOpFlexMonitor.getInstance()));
+    }
+
+    private static KvcmGrpcClient createQueryTestClient(KvcmMetaServiceClient metaService,
+                                                        KvcmLeaderResolver leader,
+                                                        KvcmWorkerMetadataResolver metadata,
+                                                        GrpcReporter reporter) {
+        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        runtimeConfig.setMaxQueryRetryCount(0);
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
+        return createClient(configuration, metaService, leader, metadata, reporter);
     }
 
     private static CommonResponseHeader okHeader() {

@@ -95,7 +95,10 @@ public class CacheMatchFailoverManager {
 
     public void activateFallbackManually() {
         manualFallbackActive.set(true);
-        updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated");
+        if (!updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated")) {
+            lastFailoverReason.set("manual failover activated");
+            lastFailoverTimeMs.set(System.currentTimeMillis());
+        }
         log.info("Manual cache failover activated; Local Standby is the active cache source");
     }
 
@@ -121,11 +124,11 @@ public class CacheMatchFailoverManager {
         return kvcmGrpcClient.healthSnapshot();
     }
 
-    private void updateActiveSource(CacheMatchSource desiredSource, String reason) {
+    private boolean updateActiveSource(CacheMatchSource desiredSource, String reason) {
         while (true) {
             CacheMatchSource currentSource = activeSource.get();
             if (currentSource == desiredSource) {
-                return;
+                return false;
             }
             if (activeSource.compareAndSet(currentSource, desiredSource)) {
                 lastFailoverReason.set(reason);
@@ -136,7 +139,7 @@ public class CacheMatchFailoverManager {
                 } else {
                     log.info("KVCM cache matching restored, reason={}", reason);
                 }
-                return;
+                return true;
             }
         }
     }

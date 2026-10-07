@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Engine local view (small hash table)
@@ -87,20 +88,33 @@ public class EngineLocalView {
 
         // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
         ForkJoinPool pool = diffPool();
-        ForkJoinTask<?> addedTask = pool.submit(() ->
-            newCacheBlocks.parallelStream()
-                 .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                 .forEach(addedBlocks::add)
-        );
+        ForkJoinTask<?> addedTask = null;
+        try {
+            addedTask = pool.submit(() ->
+                newCacheBlocks.parallelStream()
+                     .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
+                     .forEach(addedBlocks::add)
+            );
 
-        ForkJoinTask<?> removedTask = pool.submit(() ->
-            oldCacheBlocks.parallelStream()
-                .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                .forEach(removedBlocks::add)
-        );
+            ForkJoinTask<?> removedTask = pool.submit(() ->
+                oldCacheBlocks.parallelStream()
+                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
+                    .forEach(removedBlocks::add)
+            );
 
-        addedTask.join();
-        removedTask.join();
+            addedTask.join();
+            removedTask.join();
+        } catch (RejectedExecutionException error) {
+            if (addedTask != null) {
+                addedTask.join();
+            }
+            newCacheBlocks.stream()
+                    .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
+                    .forEach(addedBlocks::add);
+            oldCacheBlocks.stream()
+                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
+                    .forEach(removedBlocks::add);
+        }
 
         // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();
