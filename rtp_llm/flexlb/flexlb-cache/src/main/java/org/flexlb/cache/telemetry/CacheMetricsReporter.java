@@ -245,6 +245,9 @@ public class CacheMetricsReporter {
     }
 
     public void reportLocalStandbyBlockSize(RoleType roleType, long blockSize) {
+        if (roleType == null) {
+            return;
+        }
         monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricTags.of("role", roleType.name()), blockSize);
     }
 

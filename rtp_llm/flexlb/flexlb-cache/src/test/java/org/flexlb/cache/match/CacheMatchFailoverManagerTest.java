@@ -21,11 +21,32 @@ import java.util.function.Consumer;
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheMatchFailoverManagerTest {
+
+    @Test
+    void manualFallbackRecordsOperatorActionWhenAlreadyOnStandby() {
+        KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+        CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
+        when(client.healthSnapshot()).thenReturn(
+                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
+                configuration(true), client, metricsReporter);
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+        long automaticFailoverTimeMs = manager.lastFailoverTimeMs();
+
+        manager.activateFallbackManually();
+
+        assertEquals("manual failover activated", manager.lastFailoverReason());
+        assertTrue(manager.lastFailoverTimeMs() >= automaticFailoverTimeMs);
+        verify(metricsReporter, times(1)).reportCacheMatchSourceChange(
+                CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
+    }
 
     @Test
     void automaticallyFollowsKvcmClientHealth() {

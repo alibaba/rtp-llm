@@ -44,11 +44,17 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.cacheManager = cacheManager;
-        int queueCapacity = enabled
-                ? config.getAsyncQueueCapacity()
-                : LocalStandbyConfig.DEFAULT_ASYNC_QUEUE_CAPACITY;
-        this.asyncMatchExecutor = createExecutor(queueCapacity, "local-standby-cache-matcher");
-        this.updateExecutor = createExecutor(queueCapacity, "local-standby-cache-updater");
+        if (enabled) {
+            int queueCapacity = config.getAsyncQueueCapacity();
+            if (queueCapacity <= 0) {
+                throw new IllegalArgumentException("Local Standby asyncQueueCapacity must be positive");
+            }
+            this.asyncMatchExecutor = createExecutor(queueCapacity, "local-standby-cache-matcher");
+            this.updateExecutor = createExecutor(queueCapacity, "local-standby-cache-updater");
+        } else {
+            this.asyncMatchExecutor = null;
+            this.updateExecutor = null;
+        }
     }
 
     @Override
@@ -149,7 +155,9 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
 
     @PreDestroy
     public void shutdown() {
-        asyncMatchExecutor.shutdown();
-        updateExecutor.shutdown();
+        if (asyncMatchExecutor != null) {
+            asyncMatchExecutor.shutdown();
+            updateExecutor.shutdown();
+        }
     }
 }

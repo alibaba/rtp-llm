@@ -43,6 +43,7 @@ import java.util.function.Consumer;
 public class KvcmGrpcClient {
 
     private static final String INITIAL_HEALTH_REASON = "initial";
+    private static final long MIN_IMMEDIATE_REFRESH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private final boolean enabled;
     private final CacheMatchConfiguration configuration;
@@ -55,6 +56,7 @@ public class KvcmGrpcClient {
     private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
     private final AtomicBoolean immediateRefreshQueued = new AtomicBoolean();
+    private final AtomicLong lastImmediateRefreshScheduledNs = new AtomicLong(Long.MIN_VALUE);
     private final AtomicReference<KvcmHealthState> healthState =
             new AtomicReference<>(KvcmHealthState.HEALTHY);
     private final AtomicInteger consecutiveHeartbeatFailures = new AtomicInteger();
@@ -127,7 +129,10 @@ public class KvcmGrpcClient {
         QueryType queryType = workerMetadataResolver.resolveQueryType(roleType, group);
         if (StringUtils.isBlank(namespace) || queryType == null) {
             requestImmediateRefresh();
-            return Collections.emptyMap();
+            recordQueryFailure();
+            metricsReporter.reportQueryFailure();
+            throw new KvcmQueryException("KVCM worker metadata unavailable for role=" + roleType
+                    + ", group=" + group);
         }
         return queryWithRetry(
                 requestId, blockCacheKeys, namespace, queryType, roleType, group);
@@ -206,11 +211,15 @@ public class KvcmGrpcClient {
             throw new KvcmQueryException(
                     "KVCM GetHostCacheState gRPC request failed", error);
         } finally {
-            grpcReporter.reportCallMetrics(
-                    "KVCM_GET_HOST_CACHE_STATE",
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
-                    responseBytes,
-                    retry);
+            try {
+                grpcReporter.reportCallMetrics(
+                        "KVCM_GET_HOST_CACHE_STATE",
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
+                        responseBytes,
+                        retry);
+            } catch (RuntimeException error) {
+                log.warn("Failed to report KVCM gRPC call metrics", error);
+            }
         }
         ErrorCode code = response.getHeader().getStatus().getCode();
         if (code != ErrorCode.OK) {
@@ -377,6 +386,14 @@ public class KvcmGrpcClient {
                 || !immediateRefreshQueued.compareAndSet(false, true)) {
             return;
         }
+        long nowNs = System.nanoTime();
+        long lastRefreshNs = lastImmediateRefreshScheduledNs.get();
+        if (lastRefreshNs != Long.MIN_VALUE
+                && nowNs - lastRefreshNs < MIN_IMMEDIATE_REFRESH_INTERVAL_NANOS) {
+            immediateRefreshQueued.set(false);
+            return;
+        }
+        lastImmediateRefreshScheduledNs.set(nowNs);
         try {
             refreshExecutor.execute(() -> {
                 try {

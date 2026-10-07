@@ -78,6 +78,13 @@ class CacheMetricsReporterTest {
     }
 
     @Test
+    void localStandbyBlockSizeWithoutRoleDoesNotReport() {
+        reporter.reportLocalStandbyBlockSize(null, 4096L);
+
+        verifyNoInteractions(monitor);
+    }
+
+    @Test
     void should_report_cache_affinity_decision() {
         reporter.reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");

@@ -29,6 +29,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public class CacheMatchQueryOrchestrator {
 
     private static final long KVCM_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    private static final KvcmHealthSnapshot NO_KVCM_HEALTH =
+            new KvcmHealthSnapshot(null, 0, 0, 0, 0, 0, "not applicable");
 
     private final LocalSyncCacheMatchProvider localSyncProvider;
     private final KvcmCacheMatchProvider kvcmProvider;
@@ -118,7 +120,8 @@ public class CacheMatchQueryOrchestrator {
     }
 
     public CacheMatchStatus status() {
-        KvcmHealthSnapshot health = failoverManager.healthSnapshot();
+        KvcmHealthSnapshot health = configuration.isKvcmEnabled()
+                ? failoverManager.healthSnapshot() : NO_KVCM_HEALTH;
         return new CacheMatchStatus(
                 configuration.isKvcmEnabled(),
                 configuration.isLocalStandbyEnabled(),
@@ -151,7 +154,7 @@ public class CacheMatchQueryOrchestrator {
     private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
         try {
             if (query.blockSize() <= 0) {
-                return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
+                return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
             }
             if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
                 return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs, query.blockSize());
