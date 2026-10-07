@@ -177,7 +177,8 @@ class QueuedBatchDeliveryTest {
         // Rejection is the expected, safe outcome — not a leaked permit.
         CapacityBoundary.Attempt<?> admission = dispatcher.tryPrepareSubmission();
         if (admission.accepted()) {
-            assertInstanceOf(PreparedSubmission.class, admission.value()).close();
+            assertInstanceOf(BatchDeliveryStrategy.PreparedSubmission.class, admission.value())
+                    .close();
         }
     }
 
