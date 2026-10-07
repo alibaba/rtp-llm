@@ -61,7 +61,7 @@ class RequestInactivityTest {
 
         BalanceContext context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
         CompletableFuture<Response> future = registry.register(context);
-        slot = registry.requestSlot(REQUEST_ID);
+        slot = registry.requestSlot(Long.toString(REQUEST_ID));
         registeredAtMs = slot.createdAtMs();
         prefill = mock(PrefillEndpoint.class);
         decode = mock(DecodeEndpoint.class);
@@ -69,7 +69,7 @@ class RequestInactivityTest {
         prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setServerIp("127.0.0.1");
         prefillStatus.setGrpcPort(8081);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 1L);
+        var reservation = new DecodeEndpoint.ReservationHandle(1L, Long.toString(REQUEST_ID), 1L);
         item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
                 prefill, decode, reservation, registeredAtMs);
         var registered = new RequestLifecycleTestSupport.Registered(item, future);
@@ -151,7 +151,7 @@ class RequestInactivityTest {
     void anEarlierClientCancellationDoesNotDisableInactivityExpiration() throws Exception {
         acknowledgeDelivery();
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
-                registry.cancelRequest(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
+                registry.cancelRequest(Long.toString(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED).state());
         assertLiveAndCharged();
 
         synchronized (slot) {
@@ -178,9 +178,9 @@ class RequestInactivityTest {
                 case DECODE_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", mock(DecodeEndpoint.class),
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
                 case DECODE_GENERATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
-                        new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
+                        new DecodeEndpoint.ReservationHandle(2L, Long.toString(REQUEST_ID), 1L)), lateStatusAt);
                 case DECODE_RESERVATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
-                        new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
+                        new DecodeEndpoint.ReservationHandle(1L, Long.toString(REQUEST_ID), 2L)), lateStatusAt);
             };
             assertSame(RequestSlot.EngineObservation.STALE, observation);
             assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", lateStatusAt));
@@ -238,7 +238,7 @@ class RequestInactivityTest {
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
         assertEquals(0, registry.trackedRequestCount());
-        assertEquals(expectedState, registry.getRequestState(REQUEST_ID, 0L).state());
+        assertEquals(expectedState, registry.getRequestState(Long.toString(REQUEST_ID), 0L).state());
         synchronized (slot) {
             assertFalse(slot.isLiveGeneration());
         }

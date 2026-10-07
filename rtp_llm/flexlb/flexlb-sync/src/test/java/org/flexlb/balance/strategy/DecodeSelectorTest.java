@@ -142,7 +142,7 @@ class DecodeSelectorTest {
     private BalanceContext context(long sequenceLength, long requestId) {
         Request request = new Request();
         request.setSeqLen(sequenceLength);
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
         context.setRequest(request);
         return context;
@@ -157,7 +157,7 @@ class DecodeSelectorTest {
             DecodeEndpoint.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
             try (var pin = endpoint.tryPinGeneration()) {
-                var reservation = endpoint.reserve(pin, 42L, 128L, 256L, 70);
+                var reservation = endpoint.reserve(pin, "42", 128L, 256L, 70);
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
@@ -587,7 +587,7 @@ class DecodeSelectorTest {
         ServerStatus fifoResult = fifoSelection.serverStatus();
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(request.getRequestId(), fifoResult.getRequestId());
-        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(3L),
+        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued("3"),
                 "selection must not mutate Decode reservation ownership");
         fifoSelection.close();
 
@@ -601,7 +601,7 @@ class DecodeSelectorTest {
                 strategy.select(DecodeBinding.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, priorityPlacement.status());
-        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(4L),
+        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued("4"),
                 "priority planning must leave capacity acquisition to commit");
         priorityPlacement.value().close();
     }
@@ -646,7 +646,7 @@ class DecodeSelectorTest {
                 counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
                 Assertions.assertFalse(decodeEndpoint(registry,
                         selected.serverStatus().getServerIp() + ":8080")
-                        .resourceSnapshot().isQueued(requestId), "selection cannot claim capacity");
+                        .resourceSnapshot().isQueued(Long.toString(requestId)), "selection cannot claim capacity");
             }
         }
         Assertions.assertEquals(Map.of("127.0.0.1", 5, "127.0.0.2", 5), counts);
@@ -699,7 +699,7 @@ class DecodeSelectorTest {
         int higherLoadSelections = 0;
 
         for (int index = 0; index < 20; index++) {
-            context.getRequest().setRequestId(30_000L + index);
+            context.getRequest().setRequestId(Long.toString(30_000L + index));
             ServerStatus selected = selectStatus(
                     strategy, context, RoleType.DECODE, null);
             if ("127.0.0.1".equals(selected.getServerIp())) {
@@ -765,7 +765,7 @@ class DecodeSelectorTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setPhase(phase);
         return task;
     }
@@ -784,7 +784,7 @@ class DecodeSelectorTest {
             long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserve(pin, requestId, kvTokens, kvBudgetTokens, priority);
+            endpoint.reserve(pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
         }
     }
 
@@ -802,7 +802,7 @@ class DecodeSelectorTest {
             long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserveUnqueued(pin, requestId, kvTokens, kvBudgetTokens, priority);
+            endpoint.reserveUnqueued(pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
         }
     }
 

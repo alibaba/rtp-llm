@@ -323,7 +323,7 @@ class DecodeEndpointTest {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, requiredKv, kvBudget, 0);
+                    endpoint.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -334,7 +334,7 @@ class DecodeEndpointTest {
         try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
             assertNotNull(pin);
             return target.reserveUnqueued(
-                    pin, requestId, requiredKv, kvBudget, 0);
+                    pin, Long.toString(requestId), requiredKv, kvBudget, 0);
         }
     }
 

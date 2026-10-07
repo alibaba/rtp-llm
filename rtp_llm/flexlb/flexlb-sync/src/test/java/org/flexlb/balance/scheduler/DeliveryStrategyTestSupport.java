@@ -74,13 +74,7 @@ public final class DeliveryStrategyTestSupport {
             long enqueuedAtMs,
             long seqLen,
             long hitCache) {
-        ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
-        Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
-        Mockito.when(item.priority()).thenReturn(priority);
-        Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
-        Mockito.when(item.seqLen()).thenReturn(seqLen);
-        Mockito.when(item.hitCache()).thenReturn(hitCache);
-        return item;
+        return item(Long.toString(requestId), priority, enqueuedAtMs, seqLen, hitCache);
     }
 
     static ScheduledRequest item(

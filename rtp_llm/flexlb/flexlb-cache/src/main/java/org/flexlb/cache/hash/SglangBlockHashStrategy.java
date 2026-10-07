@@ -18,8 +18,8 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
         if (inputIds == null) {
             throw new IllegalArgumentException("input_ids must not be null");
         }
-        if (blockSize <= 0) {
-            throw new IllegalArgumentException("block_size must be greater than 0");
+        if (blockSize <= 0 || blockSize > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("block_size must be between 1 and " + Integer.MAX_VALUE);
         }
         if (lookaheadTokens < 0 || lookaheadTokens > 1) {
             throw new IllegalArgumentException("SGLang block hashing supports only 0 or 1 lookahead token");

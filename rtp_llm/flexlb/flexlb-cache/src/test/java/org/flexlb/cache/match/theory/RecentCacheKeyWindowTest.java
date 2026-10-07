@@ -6,8 +6,34 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RecentCacheKeyWindowTest {
+
+    @Test
+    void repeatedKeysOnlyHitEntriesFromEarlierRequests() {
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, () -> 0L);
+
+        RecentCacheKeyWindow.Snapshot first = window.record(List.of(7L, 7L, 7L));
+        assertEquals(3L, first.getRequestOccurrences());
+        assertEquals(0L, first.getRequestHitOccurrences());
+
+        RecentCacheKeyWindow.Snapshot second = window.record(List.of(7L, 8L, 8L, 7L));
+        assertEquals(4L, second.getRequestOccurrences());
+        assertEquals(2L, second.getRequestHitOccurrences());
+    }
+
+    @Test
+    void rejectsInvalidWindowAndCapacityBeforeAllocatingThePool() {
+        for (long duration : new long[]{0L, -1L}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new RecentCacheKeyWindow(duration, 10L, () -> 0L));
+        }
+        for (long capacity : new long[]{0L, -1L, (long) Integer.MAX_VALUE + 1L}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new RecentCacheKeyWindow(1000L, capacity, () -> 0L));
+        }
+    }
 
     @Test
     void should_count_request_hits_against_prior_pool() {

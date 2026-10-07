@@ -128,10 +128,6 @@ public class RouteService {
                 : requestScheduler.getRequestState(requestId, expectedBatchId, phase);
     }
 
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
-        return getRequestState(Long.toString(requestId), expectedBatchId);
-    }
-
     /**
      * Cancel one scheduler-owned request generation.
      *
@@ -155,8 +151,4 @@ public class RouteService {
                 : requestScheduler.cancelRequest(requestId, expectedBatchId, reason, phase);
     }
 
-    public RequestState cancelRequest(
-            long requestId, long expectedBatchId, CancelReason reason) {
-        return cancelRequest(Long.toString(requestId), expectedBatchId, reason);
-    }
 }

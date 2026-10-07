@@ -77,7 +77,7 @@ class EngineAddressResolverTest {
     }
 
     @Test
-    void emptyPollsAndPushesRetainAddressesUntilNonEmptyRecovery() {
+    void emptyPollsAndNullOrEmptyPushesRetainAddressesUntilNonEmptyRecovery() {
         Endpoint first = new Endpoint();
         first.setAddress("vip-a");
         Endpoint second = new Endpoint();
@@ -98,6 +98,7 @@ class EngineAddressResolverTest {
         verify(discovery).listen(eq(first), callback.capture());
         EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
         resolver.subscribe(listener);
+        callback.getValue().onHostsChanged(null);
         callback.getValue().onHostsChanged(List.of());
         verify(listener).onAddressUpdate(argThat(
                 hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, b))));

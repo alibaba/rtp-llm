@@ -54,6 +54,10 @@ public class OptimizerAddressResolver {
             long pollIntervalMs) {
         this.serviceDiscovery = serviceDiscovery;
         this.endpoint = endpoint;
+        if (endpoint.getDiscovery() == null || endpoint.getDiscovery().getType() == null) {
+            throw new IllegalArgumentException(
+                    "Optimizer discovery type must be configured for address: " + endpoint.getAddress());
+        }
         this.address = endpoint.getAddress();
         this.port = port;
         this.pollIntervalMs = pollIntervalMs;
@@ -75,6 +79,7 @@ public class OptimizerAddressResolver {
                         pollIntervalMs,
                         TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException e) {
+                started.set(false);
                 log.warn("Service discovery refresh scheduling failed, address={}, msg={}",
                         address, e.getMessage());
                 return;

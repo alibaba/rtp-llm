@@ -142,7 +142,7 @@ class RandomStrategyTest {
 
     private static BalanceContext context(long requestId) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         BalanceContext context = new BalanceContext(new FlexlbConfig());
         context.setRequest(request);
         return context;

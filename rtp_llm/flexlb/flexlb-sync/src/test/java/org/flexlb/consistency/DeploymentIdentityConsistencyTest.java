@@ -10,12 +10,14 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -26,9 +28,10 @@ class DeploymentIdentityConsistencyTest {
     void uses_deployment_identity_for_master_change_notifications(String deploymentId) {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn(deploymentId);
+        ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
 
         LBStatusConsistencyService service = new LBStatusConsistencyService(
-                mock(ZookeeperMasterElectService.class), mock(Environment.class),
+                electionService, mock(Environment.class),
                 configService(true), identity);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(deploymentId);
@@ -36,6 +39,42 @@ class DeploymentIdentityConsistencyTest {
         MasterChangeNotifyResp response = service.handleMasterChange(request);
 
         assertThat(response.isSuccess()).isTrue();
+        verify(electionService).updateLatestMaster();
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"other-deployment"})
+    void disabledConsistencyRejectsMasterChangeNotifications(String notifiedRoleId) {
+        DeploymentIdentity identity = mock(DeploymentIdentity.class);
+        ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
+        LBStatusConsistencyService service = new LBStatusConsistencyService(
+                electionService, mock(Environment.class), configService(false), identity);
+        MasterChangeNotifyReq request = new MasterChangeNotifyReq();
+        request.setRoleId(notifiedRoleId);
+
+        MasterChangeNotifyResp response = service.handleMasterChange(request);
+
+        assertThat(response.isSuccess()).isFalse();
+        verifyNoInteractions(identity, electionService);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"other-deployment"})
+    void enabledConsistencyRejectsMissingOrDifferentNotificationRoleId(String notifiedRoleId) {
+        DeploymentIdentity identity = mock(DeploymentIdentity.class);
+        when(identity.getDeploymentId()).thenReturn("current-deployment");
+        ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
+        LBStatusConsistencyService service = new LBStatusConsistencyService(
+                electionService, mock(Environment.class), configService(true), identity);
+        MasterChangeNotifyReq request = new MasterChangeNotifyReq();
+        request.setRoleId(notifiedRoleId);
+
+        MasterChangeNotifyResp response = service.handleMasterChange(request);
+
+        assertThat(response.isSuccess()).isFalse();
+        verifyNoInteractions(electionService);
     }
 
     @ParameterizedTest

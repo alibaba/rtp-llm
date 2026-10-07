@@ -83,11 +83,11 @@ class DirectRequestLifetimeRaceTest {
 
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(invocation -> {
-                RequestSlot slot = requests.requestSlot(101L);
-                if (reason == CancelReason.CLIENT_CANCELLED) { requests.cancelRequest(101L, 0L, reason); }
+                RequestSlot slot = requests.requestSlot("101");
+                if (reason == CancelReason.CLIENT_CANCELLED) { requests.cancelRequest("101", 0L, reason); }
                 requests.expireInactiveRequest(slot, slot.createdAtMs()
                         + config.getRequestLifecycle().getRequest().getTimeoutMs());
-                assertTrue(requests.getRequestState(101L, 0L).state().isTerminal());
+                assertTrue(requests.getRequestState("101", 0L).state().isTerminal());
                 Object result = invocation.callRealMethod();
                 lateConfirmation.set(true);
                 return result;

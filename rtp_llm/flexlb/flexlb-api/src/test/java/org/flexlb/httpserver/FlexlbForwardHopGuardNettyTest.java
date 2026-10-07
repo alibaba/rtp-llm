@@ -321,7 +321,7 @@ class FlexlbForwardHopGuardNettyTest {
     private static RequestState requestState(
             long requestId, RequestState.Phase phase) {
         return new RequestState(
-                requestId,
+                Long.toString(requestId),
                 phase,
                 DeliveryClaimKind.NONE,
                 0L,

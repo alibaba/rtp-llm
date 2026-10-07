@@ -109,8 +109,10 @@ class FlexlbGrpcForwarderTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
+        String description = "stream reset\nfrom peer";
+        description += "x".repeat(511 - description.length()) + "\uD83D\uDE00tail";
         StatusRuntimeException failure = Status.UNKNOWN
-                .withDescription("stream reset\nfrom peer")
+                .withDescription(description)
                 .withCause(new IllegalStateException("transport closed"))
                 .asRuntimeException();
         when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class)))
@@ -123,7 +125,9 @@ class FlexlbGrpcForwarderTest {
         appender.start();
         logger.addAppender(appender);
         try {
-            assertEquals("UNKNOWN", await(forwarder.forwardScheduleToMaster(request(41))).failure());
+            assertEquals("UNKNOWN", await(forwarder.forwardScheduleToMaster(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId("41\r\n{}").build())).failure());
             assertEquals("UNKNOWN", forwarder.forwardCancelToMaster(
                     FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
                             .setRequestId("42").build()).toCompletableFuture().join().failure());
@@ -133,11 +137,15 @@ class FlexlbGrpcForwarderTest {
                     .toList();
             assertEquals(2, failures.size());
             assertTrue(failures.get(0).getFormattedMessage().contains("operation=schedule"));
+            assertTrue(failures.get(0).getFormattedMessage().contains("request_id=41  {}"));
             assertTrue(failures.get(1).getFormattedMessage().contains("operation=cancel"));
             for (ILoggingEvent event : failures) {
                 assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
                 assertTrue(event.getFormattedMessage().contains("description=stream reset from peer"));
                 assertFalse(event.getFormattedMessage().contains("\n"));
+                assertFalse(event.getFormattedMessage().contains("\r"));
+                assertFalse(event.getFormattedMessage().contains("\uD83D"));
+                assertFalse(event.getFormattedMessage().contains("\uDE00"));
                 assertEquals(StatusRuntimeException.class.getName(),
                         event.getThrowableProxy().getClassName());
                 assertEquals(IllegalStateException.class.getName(),

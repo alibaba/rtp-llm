@@ -55,10 +55,6 @@ public class Request {
         this.requestId = requestId;
     }
 
-    public void setRequestId(long requestId) {
-        this.requestId = Long.toString(requestId);
-    }
-
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
     private long generateTimeout = DEFAULT_GENERATE_TIMEOUT_MS;

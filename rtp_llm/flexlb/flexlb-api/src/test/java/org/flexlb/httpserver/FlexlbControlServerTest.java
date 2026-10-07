@@ -14,6 +14,8 @@ import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
@@ -28,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -130,6 +133,19 @@ class FlexlbControlServerTest {
 
         verify(cacheMatchQueryOrchestrator, never())
                 .applyFailoverAction(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"action\":null}", "{\"action\":\"\"}"})
+    void rejectsMissingFailoverActionBeforeApplyingOrForwarding(String body) {
+        webTestClient.post()
+                .uri("/flexlb/cache_match/failover")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
     }
 
     @Test

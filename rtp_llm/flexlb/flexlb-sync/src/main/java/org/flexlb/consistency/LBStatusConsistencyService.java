@@ -16,6 +16,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 @Slf4j
 @Component
@@ -135,7 +136,7 @@ public class LBStatusConsistencyService implements MasterElectService {
      */
     public MasterChangeNotifyResp handleMasterChange(MasterChangeNotifyReq req) {
         log.warn("recv MasterChangeNotifyReq:{}.", req);
-        if (!roleId.equals(req.getRoleId())) {
+        if (roleId == null || !Objects.equals(roleId, req.getRoleId())) {
             MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
             resp.setSuccess(false);
             resp.setMsg("roleId not match this:" + roleId);

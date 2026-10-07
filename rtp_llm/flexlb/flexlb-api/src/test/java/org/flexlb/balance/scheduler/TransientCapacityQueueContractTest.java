@@ -93,24 +93,24 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             var low = fixture.runtime.scheduler().submit(fixture.context(990_001L, 20));
             awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
-            var oldReservation = fixture.decodeEndpoint.reservationHandle(990_001L);
+            var oldReservation = fixture.decodeEndpoint.reservationHandle("990001");
             var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_002L) != null
-                    && fixture.decodeEndpoint.reservationHandle(990_001L) == null, 2_000L);
+            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990002") != null
+                    && fixture.decodeEndpoint.reservationHandle("990001") == null, 2_000L);
             awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
             assertFalse(low.isDone(), "local preemption must not return NO_AVAILABLE_WORKER");
             assertFalse(high.isDone());
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
-        fixture.runtime.scheduler().cancelRequest("990002", 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("990002", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_001L) != null
+            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990001") != null
                     && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(low.isDone());
-            assertTrue(fixture.decodeEndpoint.reservationHandle(990_001L).reservationToken()
+            assertTrue(fixture.decodeEndpoint.reservationHandle("990001").reservationToken()
                     != oldReservation.reservationToken());
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
-        fixture.runtime.scheduler().cancelRequest("990001", 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("990001", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
@@ -153,7 +153,7 @@ class TransientCapacityQueueContractTest {
             DecodeEndpoint.ReservationHandle settled;
             try (WorkerEndpoint.GenerationPin pin =
                          fixture.decodeEndpoint.tryPinGeneration()) {
-                settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50);
+                settled = fixture.decodeEndpoint.reserve(pin, Long.toString(requestId), 128L, 136L, 50);
             }
             assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());
@@ -1143,7 +1143,7 @@ class TransientCapacityQueueContractTest {
         private BalanceContext context(
                 long requestId, int priority, long sequenceLength) {
             Request request = new Request();
-            request.setRequestId(requestId);
+            request.setRequestId(Long.toString(requestId));
             request.setSeqLen(sequenceLength);
             request.setMaxNewTokens(8);
             request.setPriority(priority);
@@ -1431,7 +1431,7 @@ class TransientCapacityQueueContractTest {
         response.setMaxBatchTokensSize(1_000_000L);
         if (saturated) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(Fixture.EXTERNAL_REQUEST_ID);
+            task.setRequestId(Long.toString(Fixture.EXTERNAL_REQUEST_ID));
             task.setPhase(role == RoleType.PREFILL
                     ? TaskPhase.PENDING : TaskPhase.RUNNING);
             task.setInputLength(128L);
@@ -1454,7 +1454,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < runningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128L);
             running.put(Long.toString(requestId), task);
@@ -1471,7 +1471,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> running = new LinkedHashMap<>();
         for (long requestId : requestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.PENDING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);
@@ -1491,7 +1491,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> finished = new LinkedHashMap<>();
         for (long requestId : finishedRequestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             finished.put(Long.toString(requestId), task);
@@ -1500,7 +1500,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < unknownRunningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);

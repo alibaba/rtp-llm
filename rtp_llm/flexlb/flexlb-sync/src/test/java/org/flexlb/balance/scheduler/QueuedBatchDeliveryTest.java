@@ -128,8 +128,8 @@ class QueuedBatchDeliveryTest {
         ScheduledRequest first = item(1L);
         ScheduledRequest second = item(2L);
         submit(List.of(first, second));
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("1", 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("2", 0L).deliveryClaimKind());
         assertOccupancy(1, 2);
         for (ScheduledRequest item : all ? List.of(first, second) : List.of(first)) {
             RequestSlot slot = registry.requestSlot(item.requestId());
@@ -145,7 +145,7 @@ class QueuedBatchDeliveryTest {
         releaseExecutor.countDown();
         awaitDispatchTasks();
         assertFalse(first.future().get(5, TimeUnit.SECONDS).isSuccess());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("1", 0L).deliveryClaimKind());
         int survivors = all ? 0 : 1;
         assertOccupancy(survivors, survivors);
         assertEquals(survivors, decode.routingView().engineCapacityUsed());
@@ -158,14 +158,14 @@ class QueuedBatchDeliveryTest {
         } else {
             assertEquals(List.of(2L), sent.getFirst().getDpSlotsList().stream()
                     .flatMap(dp -> dp.getRequestsList().stream()).map(input -> input.getInput().getRequestId()).toList());
-            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, registry.getRequestState("2", 0L).deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
             ledger.finish(201L, second).forEach(fact -> registry.processPrefillStatus(prefill, RoleType.PREFILL, fact));
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
-        registry.cancelRequest(1L, 0L, CancelReason.CLIENT_CANCELLED);
+        registry.cancelRequest("1", 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inputKvReserved());
@@ -178,7 +178,7 @@ class QueuedBatchDeliveryTest {
     void lateHandoffStartsOneBoundedObservationWindowWithoutFabricatingWorkerActivity(boolean ack)
             throws Exception {
         ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestSlot slot = registry.requestSlot("1");
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(slot, "lastWorkerStatusAtMs", lastStatus);
         submit(List.of(item));
@@ -206,7 +206,7 @@ class QueuedBatchDeliveryTest {
     @Test
     void blockedRpcDoesNotHoldSlotOrTransactionMonitor() throws Exception {
         ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestSlot slot = registry.requestSlot("1");
         CountDownLatch rpcEntered = new CountDownLatch(1);
         CountDownLatch releaseRpc = new CountDownLatch(1);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
@@ -282,7 +282,7 @@ class QueuedBatchDeliveryTest {
         var future = registry.register(context);
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, id, 1L, 2L, 50);
+            reservation = decode.reserveUnqueued(pin, Long.toString(id), 1L, 2L, 50);
         }
         assertNotNull(reservation);
         DeliverySettlementTestSupport.queueDecode(decode, reservation);

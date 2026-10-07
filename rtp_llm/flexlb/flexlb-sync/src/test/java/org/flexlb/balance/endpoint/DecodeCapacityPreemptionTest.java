@@ -35,7 +35,7 @@ class DecodeCapacityPreemptionTest {
         long kvBudgetTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
+            victim = endpoint.reserveUnqueued(pin, "1", 100L, 200L, 30);
             var reservation = endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
@@ -52,8 +52,8 @@ class DecodeCapacityPreemptionTest {
         assertEquals(usageChanged ? DecodeEndpoint.PreemptionBeginResult.INFEASIBLE
                         : DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(1L, List.of(victim), "9", requiredKvTokens, kvBudgetTokens, 70, policy));
-        assertNotNull(endpoint.reservationHandle(1L));
-        if (usageChanged) { assertNull(endpoint.reservationHandle(9L)); }
+        assertNotNull(endpoint.reservationHandle("1"));
+        if (usageChanged) { assertNull(endpoint.reservationHandle("9")); }
     }
 
     @Test
@@ -64,7 +64,7 @@ class DecodeCapacityPreemptionTest {
         long kvBudgetTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30);
+            victim = endpoint.reserve(pin, "1", 100L, 200L, 30);
             assertNull(endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
@@ -72,8 +72,8 @@ class DecodeCapacityPreemptionTest {
         DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertTrue(endpoint.replaceQueuedRequests(List.of(victim), "9", requiredKvTokens, kvBudgetTokens, 70, policy));
-        assertNull(endpoint.reservationHandle(1L));
-        assertNotNull(endpoint.reservationHandle(9L));
+        assertNull(endpoint.reservationHandle("1"));
+        assertNotNull(endpoint.reservationHandle("9"));
     }
 
     @Test
@@ -84,7 +84,7 @@ class DecodeCapacityPreemptionTest {
         long kvBudgetTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 0L, 900L, 30);
+            victim = endpoint.reserve(pin, "1", 0L, 900L, 30);
         }
         DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(List.of("1"), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());

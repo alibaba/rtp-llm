@@ -17,9 +17,6 @@ public class TaskInfo {
         this.requestId = requestId;
     }
 
-    public void setRequestId(long requestId) {
-        this.requestId = Long.toString(requestId);
-    }
     @JsonProperty("prefix_length")
     private long prefixLength;    // cache hit len
     @JsonProperty("prefix_length_valid")

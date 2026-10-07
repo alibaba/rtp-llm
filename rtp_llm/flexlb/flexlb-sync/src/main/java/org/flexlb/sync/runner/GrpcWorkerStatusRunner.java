@@ -347,7 +347,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerStatus.PollHealth health =
                     workerStatus.recordTransportFailure();
             long failures = health.consecutiveTransportFailures();
-            logger.debug("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
+            logger.debug("Worker status check failed, consecutiveFailures={}/{}, msg={}",
                     failures, MAX_CONSECUTIVE_FAILURES, failure.getMessage());
             if (failures < MAX_CONSECUTIVE_FAILURES) {
                 return;
@@ -356,7 +356,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     roleType, ipPort, workerStatus);
             generationRetiring = true;
             if (failures == MAX_CONSECUTIVE_FAILURES) {
-                logger.error("worker {} marked dead after {} consecutive gRPC failures",
+                logger.error("worker {} marked dead after {} consecutive status check failures",
                         ipPort, failures);
             }
         } finally {

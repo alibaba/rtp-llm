@@ -106,7 +106,7 @@ class DirectAdmissionContractTest {
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(1, fixture.scheduler.getTrackedRequestCount());
             assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.scheduler.getRequestState("101", 0L).state());
-            var reservation = fixture.decode.reservationHandle(101L);
+            var reservation = fixture.decode.reservationHandle("101");
             assertNotNull(reservation);
             assertThrows(IllegalStateException.class, () -> fixture.decode.release(
                     reservation,
@@ -131,7 +131,7 @@ class DirectAdmissionContractTest {
             DecodeEndpoint.ReservationHandle occupant;
             try (var pin = fixture.decode.tryPinGeneration()) {
                 assertNotNull(pin);
-                occupant = fixture.decode.reserve(pin, 999L, 32L, 48L, 50);
+                occupant = fixture.decode.reserve(pin, "999", 32L, 48L, 50);
             }
             assertNotNull(occupant);
             var acquired = fixture.decode.acquireDispatchPermit(occupant, new DecodeEndpoint.AdmissionCapacity(1L, 90L));
@@ -145,8 +145,8 @@ class DirectAdmissionContractTest {
             assertFalse(response.isSuccess());
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
             fixture.assertNoPrefillOwnership();
-            assertNull(fixture.decode.reservationHandle(102L));
-            assertEquals(occupant, fixture.decode.reservationHandle(999L));
+            assertNull(fixture.decode.reservationHandle("102"));
+            assertEquals(occupant, fixture.decode.reservationHandle("999"));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L, fixture.decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
@@ -177,7 +177,7 @@ class DirectAdmissionContractTest {
             assertTrue(raced.get());
             assertFalse(response.isSuccess(), "an already ended request must not receive a new successful route");
             fixture.assertNoPrefillOwnership();
-            assertNull(fixture.decode.reservationHandle(103L));
+            assertNull(fixture.decode.reservationHandle("103"));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(0L, fixture.decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, fixture.scheduler.getTrackedRequestCount());
@@ -186,7 +186,7 @@ class DirectAdmissionContractTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setInputLength(32L);
         task.setPhase(phase);
         return task;
@@ -277,7 +277,7 @@ class DirectAdmissionContractTest {
         }
 
         private void assertItemNotBound(long requestId) {
-            RequestSlot slot = requests.requestSlot(requestId);
+            RequestSlot slot = requests.requestSlot(Long.toString(requestId));
             assertNotNull(slot);
             synchronized (slot) {
                 assertNull(slot.activeItem(), "this Engine observation must precede item binding");

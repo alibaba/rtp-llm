@@ -88,6 +88,11 @@ public class FlexlbControlServer {
     private Mono<ServerResponse> updateCacheMatchFailover(ServerRequest request) {
         return request.bodyToMono(CacheMatchFailoverRequest.class)
                 .flatMap(updateRequest -> {
+                    if (updateRequest.action() == null) {
+                        return ServerResponse.badRequest()
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .bodyValue("action is required");
+                    }
                     if (lbStatusConsistencyService.isNeedConsistency()
                             && !lbStatusConsistencyService.isMaster()) {
                         return forwardCacheMatchFailoverToMaster(updateRequest);

@@ -183,14 +183,6 @@ public class MetricConstant {
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
 
-    /** Local tasks known to FlexLB for a worker. */
-    public static final String ENGINE_LOCAL_TASK_MAP_SIZE =
-            "app.engine.health.check.local.task.map.size";
-
-    /** Tasks dispatched by FlexLB but not yet confirmed by the worker. */
-    public static final String ENGINE_IN_TRANSIT_TASK_SIZE =
-            "app.engine.health.check.in.transit.task.size";
-
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.
@@ -209,9 +201,6 @@ public class MetricConstant {
      * Engine running task info size
      */
     public static final String ENGINE_RUNNING_TASK_INFO_SIZE = "app.engine.health.check.running.task.info.size";
-
-    public static final String ENGINE_WAITING_TASK_INFO_SIZE =
-            "app.engine.health.check.waiting.task.info.size";
 
     /**
      * Prefill master node monitoring

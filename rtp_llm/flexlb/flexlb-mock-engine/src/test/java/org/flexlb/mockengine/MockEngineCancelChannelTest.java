@@ -94,7 +94,7 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome = channel
-                .cancel(target(prefill.getGrpcPort()), 1L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "1", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "mid-flight cancel must register the intent");
@@ -132,7 +132,7 @@ class MockEngineCancelChannelTest {
                 "stage 4 begins only after Prefill handed the request to Decode");
         assertTrue(prefill.hasDownstreamOwnership(51L));
 
-        CancelAck outcome = channel.cancel(target(prefill.getGrpcPort()), 51L, 2_000)
+        CancelAck outcome = channel.cancel(target(prefill.getGrpcPort()), "51", 2_000)
                 .get(2, TimeUnit.SECONDS);
 
         assertEquals(CancelAck.ACCEPTED, outcome);
@@ -168,7 +168,7 @@ class MockEngineCancelChannelTest {
         awaitAllInflightZero(5_000);
 
         CancelAck outcome = channel
-                .cancel(target(prefill.getGrpcPort()), 11L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "11", 2_000)
                 .get(2, TimeUnit.SECONDS);
         // Production-faithful branch (C++ Cancel handler):
         // seen-but-terminal answers NOT_FOUND — the completion record
@@ -192,12 +192,12 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck first = channel
-                .cancel(target(prefill.getGrpcPort()), 21L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "21", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first);
 
         CancelAck second = channel
-                .cancel(target(prefill.getGrpcPort()), 21L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "21", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second,
                 "accepted priority-cancel terminal records are idempotent");
@@ -222,7 +222,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelAck outcome = channel
-                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "424242", 2_000)
                 .get(2, TimeUnit.SECONDS);
         // Never-seen rid: REQUEST_FENCED — the ABSENT_FENCE record is
         // installed (production Prefill contract).
@@ -231,7 +231,7 @@ class MockEngineCancelChannelTest {
         // Fence idempotence: a retried cancel still reads REQUEST_FENCED (it
         // must NOT flip onto the ACCEPTED ACTIVE_CANCEL terminal record branch).
         CancelAck retry = channel
-                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "424242", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.REQUEST_FENCED, retry);
 
@@ -263,7 +263,7 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome = channel
-                .cancel(target(decodeServices.get(0).getGrpcPort()), 31L, 2_000)
+                .cancel(target(decodeServices.get(0).getGrpcPort()), "31", 2_000)
                 .get(2, TimeUnit.SECONDS);
 
         assertEquals(CancelAck.FAILED, outcome,
@@ -284,7 +284,7 @@ class MockEngineCancelChannelTest {
         assertFalse(channel.isSupported(endpoint(59999)));
 
         CancelAck outcome = channel
-                .cancel(target(59999), 1L, 2_000)
+                .cancel(target(59999), "1", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome);
     }
@@ -310,7 +310,7 @@ class MockEngineCancelChannelTest {
                 .build());
         try {
             CompletableFuture<CancelAck> future = channel
-                    .cancel(target(prefill.getGrpcPort()), 41L, 2_000);
+                    .cancel(target(prefill.getGrpcPort()), "41", 2_000);
             assertThrows(TimeoutException.class,
                     () -> future.get(500, TimeUnit.MILLISECONDS),
                     "cancel_no_respond must leave the cancel future pending");
@@ -329,7 +329,7 @@ class MockEngineCancelChannelTest {
         // After the injection clears, the same rid cancels normally — proof
         // the fault path installed no terminal record and no fence.
         CancelAck outcome = channel
-                .cancel(target(prefill.getGrpcPort()), 41L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), "41", 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome);
         awaitAllInflightZero(10_000);
@@ -349,7 +349,7 @@ class MockEngineCancelChannelTest {
                 .build());
         try {
             CompletableFuture<CancelAck> future = channel
-                    .cancel(target(prefill.getGrpcPort()), 424243L, 2_000);
+                    .cancel(target(prefill.getGrpcPort()), "424243", 2_000);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> future.get(2, TimeUnit.SECONDS),
                     "cancel_error must surface as a failed future");
@@ -386,7 +386,7 @@ class MockEngineCancelChannelTest {
                 .build());
         try {
             CompletableFuture<CancelAck> future = channel
-                    .cancel(target(prefill.getGrpcPort()), 424244L, 2_000);
+                    .cancel(target(prefill.getGrpcPort()), "424244", 2_000);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> future.get(2, TimeUnit.SECONDS),
                     "an out-of-contract ack status must fail the future");

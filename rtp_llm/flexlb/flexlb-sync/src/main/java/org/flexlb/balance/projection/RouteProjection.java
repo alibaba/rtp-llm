@@ -41,7 +41,6 @@ public final class RouteProjection {
                                      Predictions predictions, GroupPlanning planning) {
             return service(plan, predictions);
         }
-
     }
 
     /**
@@ -87,7 +86,6 @@ public final class RouteProjection {
                     "", 0, 0L, 0L, Long.MAX_VALUE,
                     seqLen, hitCache)));
         }
-
     }
 
     /** Invocation-local lazy service cursor for one exact planned group. */
@@ -139,13 +137,6 @@ public final class RouteProjection {
                 throw new IllegalArgumentException(
                         "routingCacheMatchTokens must be non-negative");
             }
-        }
-
-        public Probe(long requestId, int priority, long enqueuedAtMs,
-                     long expiresAtMs, long seqLen, long hitCache,
-                     long routingCacheMatchTokens) {
-            this(Long.toString(requestId), priority, enqueuedAtMs,
-                    expiresAtMs, seqLen, hitCache, routingCacheMatchTokens);
         }
     }
 
