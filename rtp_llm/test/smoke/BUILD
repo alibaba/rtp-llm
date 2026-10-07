@@ -1,3 +1,4 @@
+load(":qwen35_epd_fusion_4gpu_smoke.bzl", "qwen35_epd_fusion_4gpu_suite")
 load(":qwen35_e2p4d2_repro.bzl", "qwen35_e2p4d2_repro_suite")
 package(default_visibility = ["//visibility:public"])
 
@@ -94,6 +95,32 @@ test_suite(
 )
 
 qwen35_e2p4d2_repro_suite()
+
+qwen35_epd_fusion_4gpu_suite()
+
+
+py_test(
+    name = "qwen35_epd_fusion_4gpu_harness_test",
+    srcs = [
+        "qwen35_epd_fusion_4gpu_smoke.py",
+        "qwen35_epd_fusion_4gpu_smoke_test.py",
+    ],
+    main = "qwen35_epd_fusion_4gpu_smoke_test.py",
+    data = [
+        "qwen35_epd_fusion_4gpu_smoke.bzl",
+        "//rtp_llm:start_server.py",
+        "qwen35_e2p4d2_data/manifest.json",
+        "qwen35_e2p4d2_data/messages.json",
+        "qwen35_e2p4d2_data/video.mp4",
+    ],
+    deps = [
+        "//rtp_llm:requests",
+        "//rtp_llm/test/utils:device_resource",
+    ],
+    legacy_create_init = 0,
+    tags = ["manual"],
+    timeout = "moderate",
+)
 
 py_test(
     name = "pdfusion_schedule_trace_test",

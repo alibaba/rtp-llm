@@ -126,6 +126,10 @@ class DeviceResource:
         # bazel test timeout (7200s in CI) and reports "timed out" with no hint
         # that it never got a device.
         self.acquire_timeout = int(os.environ.get("RTP_GPU_ACQUIRE_TIMEOUT", 1800))
+        self.query_timeout = max(1, int(os.environ.get("RTP_GPU_QUERY_TIMEOUT", 10)))
+        # Shared containers can have different PID/lock namespaces. In passive
+        # mode the caller owns cleanup; never signal an observed GPU process.
+        self.passive_lock = os.environ.get("RTP_GPU_PASSIVE_LOCK", "0") == "1"
 
     def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
         """PIDs of compute processes on a physical GPU, or None if unknowable.
@@ -145,7 +149,7 @@ class DeviceResource:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=self.query_timeout,
             )
             if result.returncode != 0:
                 logging.warning(
@@ -156,9 +160,7 @@ class DeviceResource:
                 )
                 return None
             return [
-                int(p.strip())
-                for p in result.stdout.strip().splitlines()
-                if p.strip()
+                int(p.strip()) for p in result.stdout.strip().splitlines() if p.strip()
             ]
         except subprocess.TimeoutExpired:
             logging.warning("nvidia-smi timed out querying gpu %s", gpu_id)
@@ -193,6 +195,8 @@ class DeviceResource:
             return True
         if not pids:
             return False
+        if self.passive_lock:
+            return True
         return all(not self._pid_alive(p) for p in pids)
 
     def _ensure_gpus_released(self, timeout: int = 30):
@@ -204,6 +208,18 @@ class DeviceResource:
 
         Returns True if GPUs are clean, False if zombie contexts detected.
         """
+        if self.passive_lock:
+            if _nvidia_smi() is None:
+                return True
+            for gpu_id in self.gpu_ids:
+                pids = self._get_gpu_pids(gpu_id)
+                if pids is None or pids:
+                    logging.warning(
+                        "GPU %s busy or unqueryable; passive lock will not clean it",
+                        gpu_id,
+                    )
+                    return False
+            return True
         my_pid = os.getpid()
         sigterm_sent: Set[int] = set()
         sigkill_sent: Set[int] = set()
@@ -286,7 +302,9 @@ class DeviceResource:
                             logging.info(f"lock device {id} failed")
                             break
                         if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                            logging.info(
+                                f"skip GPU {id}: busy, stale, or unqueryable context"
+                            )
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")

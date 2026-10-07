@@ -341,7 +341,11 @@ def start_vit_server_impl(
     # mapping with the existing process-local rank semantics.
     load_gpu_nic_affinity()
 
-    if vit_server_count > 1:
+    # Opt-in benchmark topology: retain the proxy/RDMA path with one GPU.
+    # The default single-worker standalone mode is unchanged.
+    if vit_server_count > 1 or (
+        vit_server_count == 1 and os.environ.get("RTP_VIT_SINGLE_WORKER_PROXY") == "1"
+    ):
         logging.info(
             f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
             f"(role_type=VIT)"
