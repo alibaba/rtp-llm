@@ -448,7 +448,7 @@ py_test(
 )
 
 # NOTE: 纯配置校验测试，但 generate_config.py 导入链拉起 rtp_llm.ops (CUDA .so)，import 阶段需 CUDA worker 在场。
-# 不需要 H20：默认 remote_default_exec_properties(gpu=gpu_cuda12) 的通用 CUDA 机器即可，故不再固定 exec_properties。
+# 不需要 H20：默认 remote_default_exec_properties(gpu=L20D_DEV) 的通用 CUDA 13 机器即可；本用例固定 A10_CU13。
 # TODO(panyang): 拆分 rtp_llm.ops lazy-import 后移除 GPU 约束。
 py_test(
     name = "test_generate_config_validators",

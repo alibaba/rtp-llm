@@ -78,9 +78,9 @@ install_requirements() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 1 ]; then
     # Pip install requirements
     if [ `uname -m` == "aarch64" ]; then
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda12_arm.txt) || exit 1;
+      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda13_arm.txt) || exit 1;
     else
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
+      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda13.txt) || exit 1;
     fi
   fi
 }
