@@ -2,6 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit
 def _remap_to_local_ids_kernel(
@@ -55,7 +57,10 @@ def remap_to_local_ids(
     BLOCK_SIZE = 1024
     grid = (triton.cdiv(N, BLOCK_SIZE),)
 
-    _remap_to_local_ids_kernel[grid](
+    trace_triton(
+        "remap_local_ids_kernel:_remap_to_local_ids_kernel[grid]",
+        _remap_to_local_ids_kernel,
+        grid,
         dispatch_ids.view(-1),
         dispatch_weights.to(torch.float32).view(-1),
         local_ids.view(-1),

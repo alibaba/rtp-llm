@@ -31,6 +31,7 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _DEFAULT_GROUP = 128
 _DEFAULT_EPS = 1.0e-6
@@ -112,9 +113,9 @@ def _fused_add_rmsnorm_fp8_quant_kernel(
     n_mask = offs_n < N
     hidden_row = hidden_ptr + pid_m * hidden_stride_m
     residual_row = residual_ptr + pid_m * residual_stride_m
-    h = tl.load(hidden_row + offs_n, mask=n_mask, other=0.0, eviction_policy="evict_first").to(
-        tl.float32
-    )
+    h = tl.load(
+        hidden_row + offs_n, mask=n_mask, other=0.0, eviction_policy="evict_first"
+    ).to(tl.float32)
     r = tl.load(residual_row + offs_n, mask=n_mask, other=0.0).to(tl.float32)
     # FlashInfer: residual = residual + input; RMS / affine on the fp32 sum.
     x = h + r
@@ -216,7 +217,10 @@ def fused_add_rmsnorm_fp8_quant(
         num_stages = default_stages
 
     block_n = triton.next_power_of_2(n)
-    _fused_add_rmsnorm_fp8_quant_kernel[(m,)](
+    trace_triton(
+        "fused_add_rmsnorm_fp8_quant:_fused_add_rmsnorm_fp8_quant_kernel[m,]",
+        _fused_add_rmsnorm_fp8_quant_kernel,
+        (m,),
         hidden,
         residual,
         weight,

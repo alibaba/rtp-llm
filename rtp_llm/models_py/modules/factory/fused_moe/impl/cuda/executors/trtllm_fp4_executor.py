@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.utils.model_weight import W
 
 
@@ -73,7 +74,9 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.g1_scale_c = self.g1_alphas / w2_input_scale
 
         self.global_num_experts = config.expert_num
-        self._enable_pdl = device_support_pdl(self.w1.device)
+        self._enable_pdl = trace_call(
+            "trtllm_fp4_executor:device_support_pdl", device_support_pdl, self.w1.device
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -117,8 +120,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         ).view(torch.int16)
 
         if payload.expert_x.dtype is torch.bfloat16:
-            hidden_states, hidden_states_scale = fp4_quantize(
-                payload.expert_x, self.expert_x_scale, is_sf_swizzled_layout=False
+            hidden_states, hidden_states_scale = trace_call(
+                "trtllm_fp4_executor:fp4_quantize",
+                fp4_quantize,
+                payload.expert_x,
+                self.expert_x_scale,
+                is_sf_swizzled_layout=False,
             )
         else:
             hidden_states, hidden_states_scale = (
@@ -139,7 +146,9 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
                 f"hidden_states_scale: {hidden_states_scale.shape}"
             )
 
-        output = trtllm_fp4_block_scale_routed_moe(
+        output = trace_call(
+            "trtllm_fp4_executor:trtllm_fp4_block_scale_routed_moe",
+            trtllm_fp4_block_scale_routed_moe,
             topk_ids=packed_tensor,  # topk_ids
             routing_bias=None,  # routing_bias
             hidden_states=hidden_states,  # hidden_states

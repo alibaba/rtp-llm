@@ -1,7 +1,3 @@
-# Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_delta_h.py
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
 import logging
 from typing import Optional, Tuple
 
@@ -21,6 +17,12 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
     is_amd_cdna4,
     is_nvidia_hopper,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_delta_h.py
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 
 logger = logging.getLogger(__name__)
 
@@ -432,7 +434,10 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+    trace_triton(
+        "chunk_delta_h:chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid]",
+        chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
+        grid,
         k=k,
         v=u,
         w=w,

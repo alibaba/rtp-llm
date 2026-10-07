@@ -2,6 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit
 def moe_mmk(
@@ -211,7 +213,10 @@ def invoke_moe_batched_triton_kernel(
         triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
     )
 
-    batched_triton_kernel[grid](
+    trace_triton(
+        "grouped_gemm:batched_triton_kernel[grid]",
+        batched_triton_kernel,
+        grid,
         A,
         B,
         C,

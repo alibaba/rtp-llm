@@ -16,6 +16,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
@@ -265,7 +266,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
@@ -288,4 +291,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         input_fp8, input_scales = self.quantize_input(input)
 
         # Prepare output tensor
-        return self.forward_quantized(input_fp8, input_scales, out=out)
+        return trace_call(
+            "fp8_deepgemm_linear:self.forward_quantized",
+            self.forward_quantized,
+            input_fp8,
+            input_scales,
+            out=out,
+        )

@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.op import exp
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 # assume x always greater than 1
@@ -123,7 +124,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             # max_block_size — one past the end. Use tl.minimum to avoid if-branch
             # which can cause phi-node type mismatch or register overflow during
             # CUDA Graph capture on some backends.
-            load_block_offset = tl.minimum(load_block_offset, (max_block_size - 1).to(tl.int64))
+            load_block_offset = tl.minimum(
+                load_block_offset, (max_block_size - 1).to(tl.int64)
+            )
             read_block_id = tl.load(
                 block_map + i_n * block_map_stride_b + load_block_offset
             ).to(tl.int64)
@@ -169,7 +172,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             # stays in-bounds, then use write_ok flag to skip the actual store.
             # Avoids an if-branch that can fail during CUDA Graph capture.
             write_ok = write_block_offset < max_block_size
-            safe_write_offset = tl.minimum(write_block_offset, (max_block_size - 1).to(tl.int64))
+            safe_write_offset = tl.minimum(
+                write_block_offset, (max_block_size - 1).to(tl.int64)
+            )
             write_block_id = tl.load(
                 block_map + i_n * block_map_stride_b + safe_write_offset
             ).to(tl.int64)
@@ -247,7 +252,10 @@ def fused_recurrent_gated_delta_rule_fwd(
         max_block_size = block_map.shape[1]
 
     grid = (NK, NV, N * HV)
-    fused_recurrent_gated_delta_rule_fwd_kernel[grid](
+    trace_triton(
+        "fused_recurrent:fused_recurrent_gated_delta_rule_fwd_kernel[grid]",
+        fused_recurrent_gated_delta_rule_fwd_kernel,
+        grid,
         q=q,
         k=k,
         v=v,

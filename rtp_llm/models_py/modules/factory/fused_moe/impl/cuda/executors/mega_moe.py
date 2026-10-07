@@ -46,6 +46,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -226,7 +227,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
         # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+        (l1_w, l1_sf), (l2_w, l2_sf) = trace_call(
+            "mega_moe:deep_gemm.transform_weights_for_mega_moe",
+            deep_gemm.transform_weights_for_mega_moe,
             (w13, s13_int),
             (w2, s2_int),
         )
@@ -277,7 +280,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import deep_gemm
 
         return int(
-            deep_gemm.get_block_m_for_mega_moe(
+            trace_call(
+                "mega_moe:deep_gemm.get_block_m_for_mega_moe",
+                deep_gemm.get_block_m_for_mega_moe,
                 self.cfg.ep_size,
                 self.cfg.n_routed_experts,
                 self._mega_buf.num_max_tokens_per_rank,
@@ -328,7 +333,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
+        num_sms = int(
+            trace_call("mega_moe:deep_gemm.get_num_sms", deep_gemm.get_num_sms)
+        )
         token_counts = self._resolve_jit_warmup_token_counts(num_sms)
         if not token_counts:
             return
@@ -441,8 +448,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 for token_count in token_counts:
                     if not pack_only and dist.is_initialized():
                         dist.barrier(group=self._mega_group)
-                    self.forward(
-                        x[:token_count], weights[:token_count], indices[:token_count]
+                    trace_call(
+                        "mega_moe:self.forward",
+                        self.forward,
+                        x[:token_count],
+                        weights[:token_count],
+                        indices[:token_count],
                     )
                     if self.supports_gate_pack:
                         for payload in self._warmup_gate_payloads(
@@ -480,7 +491,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        trace_call(
+            "mega_moe:deep_gemm.fp8_fp4_mega_moe",
+            deep_gemm.fp8_fp4_mega_moe,
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),

@@ -10,6 +10,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        "//rtp_llm/models_py:utils",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
@@ -40,6 +41,7 @@ py_library(
     name = "user_buffers",
     srcs = ["user_buffers.py"],
     deps = [
+        "//rtp_llm/models_py:utils",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],

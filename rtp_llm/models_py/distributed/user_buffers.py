@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 import torch
 from torch.distributed import ProcessGroup
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import (
     allocate_shared_buffer,
     dispose_communicator,
@@ -73,13 +74,21 @@ class UserBufferCommunicator:
         # Create communication buffer
         self._buffer_ptrs, self._ipc_handles = self._create_buffers(buffer_size, group)
 
-        self._communicator_ptr = init_communicator(local_rank, world_size)
-
-        self._gpu_ptr_handle = register_buffer_to_communicator(
-            self._communicator_ptr, self._gpu_ptrs
+        self._communicator_ptr = trace_call(
+            "user_buffers:init_communicator", init_communicator, local_rank, world_size
         )
-        self._ub_handle = register_buffer_to_communicator(
-            self._communicator_ptr, self._buffer_ptrs
+
+        self._gpu_ptr_handle = trace_call(
+            "user_buffers:register_buffer_to_communicator",
+            register_buffer_to_communicator,
+            self._communicator_ptr,
+            self._gpu_ptrs,
+        )
+        self._ub_handle = trace_call(
+            "user_buffers:register_buffer_to_communicator",
+            register_buffer_to_communicator,
+            self._communicator_ptr,
+            self._buffer_ptrs,
         )
 
         logging.info(
@@ -102,7 +111,9 @@ class UserBufferCommunicator:
                 - buffer_address: GPU device pointer as int64_t
                 - ipc_handles: IPC memory handle tensor (64 bytes, uint8)
         """
-        buffer_addr, ipc_handle = allocate_shared_buffer(size_in_bytes)
+        buffer_addr, ipc_handle = trace_call(
+            "user_buffers:allocate_shared_buffer", allocate_shared_buffer, size_in_bytes
+        )
         handles = [None] * self.world_size
         # TODO: Serialize object needed?
         torch.distributed.all_gather_object(handles, ipc_handle, group=group)
@@ -112,7 +123,9 @@ class UserBufferCommunicator:
             if i == self.local_rank:
                 buffer_ptrs.append(buffer_addr)
             else:
-                buffer_ptrs.append(open_ipc_handle(h))
+                buffer_ptrs.append(
+                    trace_call("user_buffers:open_ipc_handle", open_ipc_handle, h)
+                )
         return buffer_ptrs, handles
 
     def _enable_p2p_access(self):
@@ -179,7 +192,9 @@ class UserBufferCommunicator:
             return False
 
         data_bytes = tensor.numel() * tensor.element_size()
-        userbuffers_send(
+        trace_call(
+            "user_buffers:userbuffers_send",
+            userbuffers_send,
             tensor,
             self._ub_handle,
             self._rank_offsets[self.local_rank],
@@ -213,7 +228,9 @@ class UserBufferCommunicator:
         if not self.can_handle_tensor(tensor):
             return False
 
-        userbuffers_recv(
+        trace_call(
+            "user_buffers:userbuffers_recv",
+            userbuffers_recv,
             tensor,
             self._ub_handle,
             self._rank_offsets[src],
@@ -249,7 +266,9 @@ class UserBufferCommunicator:
                 dtype=tensor.dtype,
             )
 
-        userbuffers_ring_all_gather(
+        trace_call(
+            "user_buffers:userbuffers_ring_all_gather",
+            userbuffers_ring_all_gather,
             output_tensor,
             tensor,
             self._ub_handle,
@@ -273,7 +292,11 @@ class UserBufferCommunicator:
     def cleanup(self):
         """Clean up resources."""
         self.synchronize()
-        dispose_communicator(self._communicator_ptr)
+        trace_call(
+            "user_buffers:dispose_communicator",
+            dispose_communicator,
+            self._communicator_ptr,
+        )
         self._send_streams.clear()
 
     def __del__(self):

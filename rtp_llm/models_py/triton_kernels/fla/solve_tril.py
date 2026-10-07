@@ -1,7 +1,3 @@
-# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/solve_tril.py
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
 from typing import Optional
 
 import torch
@@ -10,6 +6,11 @@ import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.utils import input_guard
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/solve_tril.py
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -426,7 +427,10 @@ def solve_tril(
         prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
     )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, 16)
-    solve_tril_16x16_kernel[NT, B * H](
+    trace_triton(
+        "solve_tril:solve_tril_16x16_kernel[NT, B * H]",
+        solve_tril_16x16_kernel,
+        (NT, B * H),
         A=A,
         Ad=Ad,
         cu_seqlens=cu_seqlens,
@@ -450,7 +454,10 @@ def solve_tril(
         prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
-    merge_fn[NT, B * H](
+    trace_triton(
+        "solve_tril:merge_fn[NT, B * H]",
+        merge_fn,
+        (NT, B * H),
         A=A,
         Ad=Ad,
         Ai=Ai,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 try:
     import triton
     import triton.language as tl
@@ -145,7 +147,10 @@ def quant_bf16_fp8_packed_ue8m0(
     finfo = torch.finfo(torch.float8_e4m3fn)
     block_m = 8
     grid = (expected_scale_cols, triton.cdiv(M, block_m))
-    _bf16_to_fp8_packed_ue8m0_kernel[grid](
+    trace_triton(
+        "shared_expert:_bf16_to_fp8_packed_ue8m0_kernel[grid]",
+        _bf16_to_fp8_packed_ue8m0_kernel,
+        grid,
         x,
         out_q,
         out_scale,
@@ -202,7 +207,10 @@ def fused_moe_epilogue(
         return out
     block = 1024
     n_elements = M * N
-    _add_cast_kernel[(triton.cdiv(n_elements, block),)](
+    trace_triton(
+        "shared_expert:_add_cast_kernel[triton.cdiv(n_elements, block),]",
+        _add_cast_kernel,
+        (triton.cdiv(n_elements, block),),
         routed,
         shared,
         out,

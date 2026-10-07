@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
@@ -163,4 +164,6 @@ class PureCpRouterFp8PerBlock(PureCpRouterBase):
                 scale_ue8m0=True,
             )
         else:
-            return trt_fp8_quantize_128(a1, False)
+            return trace_call(
+                "pure_cp_router:trt_fp8_quantize_128", trt_fp8_quantize_128, a1, False
+            )

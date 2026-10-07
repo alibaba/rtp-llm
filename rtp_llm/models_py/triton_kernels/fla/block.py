@@ -4,6 +4,7 @@ import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 @triton.jit(do_not_specialize=["block_map_stride_b"])
@@ -80,7 +81,10 @@ def load_initial_state_from_block_map(
     grid = (batch, head_num, triton.cdiv(v, block_v))
     token_stride_conv = conv_states.stride(0)
 
-    load_initial_state_from_block_map_kernel[grid](
+    trace_triton(
+        "block:load_initial_state_from_block_map_kernel[grid]",
+        load_initial_state_from_block_map_kernel,
+        grid,
         prefix_lengths,
         block_map,
         conv_states,
@@ -258,7 +262,10 @@ def store_ssm_state_to_block_map(
     block_map_stride_b = block_map.stride(0)
     grid = (chunk_num, head_num, triton.cdiv(v, block_v))
     token_stride_ssm_state = ssm_states.stride(0)
-    store_ssm_state_to_block_map_kernel[grid](
+    trace_triton(
+        "block:store_ssm_state_to_block_map_kernel[grid]",
+        store_ssm_state_to_block_map_kernel,
+        grid,
         chunk_indices,
         h,
         final_states,

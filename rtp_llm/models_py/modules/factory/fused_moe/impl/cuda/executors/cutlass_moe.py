@@ -33,6 +33,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     get_cutlass_moe_mm_without_permute_info,
     post_reorder_triton_kernel,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 from rtp_llm.utils.model_weight import W
 
 
@@ -276,7 +277,10 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         )
         del a2q
 
-        post_reorder_triton_kernel[(M,)](
+        trace_triton(
+            "cutlass_moe:post_reorder_triton_kernel[M,]",
+            post_reorder_triton_kernel,
+            (M,),
             down_output_ptr=c3,
             output_ptr=output,
             src2dst_ptr=src_2_dst,
@@ -448,7 +452,9 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
             (self.local_num_experts, 3), dtype=torch.int32, device=expert_x.device
         )
 
-        get_cutlass_batched_moe_mm_data(
+        trace_call(
+            "cutlass_moe:get_cutlass_batched_moe_mm_data",
+            get_cutlass_batched_moe_mm_data,
             expert_offsets,
             problem_sizes1,
             problem_sizes2,

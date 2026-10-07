@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
@@ -122,8 +123,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
-            tp_expert_ids, self.expert_num
+        ) = trace_call(
+            "deepep_normal_router:self.deepep_buffer_wrapper.buffer.get_dispatch_layout",
+            self.deepep_buffer_wrapper.buffer.get_dispatch_layout,
+            tp_expert_ids,
+            self.expert_num,
         )
 
         # dispatch
@@ -134,7 +138,9 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list,
             self.handle,
             _,
-        ) = self.deepep_buffer_wrapper.buffer.dispatch(
+        ) = trace_call(
+            "deepep_normal_router:self.deepep_buffer_wrapper.buffer.dispatch",
+            self.deepep_buffer_wrapper.buffer.dispatch,
             tp_expert_input,
             None,
             num_tokens_per_rank,
@@ -155,9 +161,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             if use_fp8:
-                raise ValueError(
-                    "FP8 DeepEP dispatch must return (activation, scale)"
-                )
+                raise ValueError("FP8 DeepEP dispatch must return (activation, scale)")
             expert_x = output
 
         expert_num_tokens = torch.tensor(
@@ -195,8 +199,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"
-        out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(
-            payload.fused_expert_output, self.handle
+        out_token, _, _ = trace_call(
+            "deepep_normal_router:self.deepep_buffer_wrapper.buffer.combine",
+            self.deepep_buffer_wrapper.buffer.combine,
+            payload.fused_expert_output,
+            self.handle,
         )
         self.handle = None
 
@@ -284,7 +291,12 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 scale_ue8m0=True,
             )
         else:
-            return trt_fp8_quantize_128(a1, False)
+            return trace_call(
+                "deepep_normal_router:trt_fp8_quantize_128",
+                trt_fp8_quantize_128,
+                a1,
+                False,
+            )
 
 
 class DeepepNormalRouterNoQuant(DeepepNormalRouterBase):

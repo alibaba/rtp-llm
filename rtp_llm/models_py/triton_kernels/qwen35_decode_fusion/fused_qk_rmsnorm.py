@@ -22,6 +22,7 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
     is_decode_fusion_enabled,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _MAX_HEAD_DIM = 4096
 _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
@@ -132,7 +133,10 @@ def fused_qk_rmsnorm(
         num_warps = 2
     if num_stages is None:
         num_stages = 2
-    _fused_qk_rmsnorm_kernel[(m, n_qk_heads)](
+    trace_triton(
+        "fused_qk_rmsnorm:_fused_qk_rmsnorm_kernel[m, n_qk_heads]",
+        _fused_qk_rmsnorm_kernel,
+        (m, n_qk_heads),
         hidden,
         q_weight,
         k_weight,

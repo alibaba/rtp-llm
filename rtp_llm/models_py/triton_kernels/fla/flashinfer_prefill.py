@@ -19,6 +19,7 @@ from rtp_llm.models_py.triton_kernels.fla.exact_qk_norm import (
     supports_exact_qk_norm,
 )
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 
 
 @lru_cache(maxsize=1)
@@ -77,7 +78,10 @@ def prepare_flashinfer_prefill_metadata(cu, total_tokens, checkpoint_interval=20
     cu32 = cu.to(dtype=torch.int32).contiguous()
     # Shape/interval are host-known; no device-to-host synchronization.
     starts = torch.empty_like(cu32)
-    _prepare_checkpoint_starts[(1,)](
+    trace_triton(
+        "flashinfer_prefill:_prepare_checkpoint_starts[1,]",
+        _prepare_checkpoint_starts,
+        (1,),
         cu32,
         starts,
         cu32.numel(),
@@ -192,7 +196,9 @@ def flashinfer_gdn_prefill(
         (cu.numel() - 1, v.shape[2], 128, 128), device=q.device, dtype=torch.float32
     )
     enabled = bool(checkpoints.shape[0])
-    kernel(
+    trace_call(
+        "flashinfer_prefill:kernel",
+        kernel,
         qn[0],
         kn[0],
         v[0].contiguous(),
@@ -285,13 +291,14 @@ def store_flashinfer_ssm_state(
         or ssm_states.stride(1) != final_state.shape[2] * final_state.shape[3]
     ):
         raise ValueError("Expected cache with contiguous per-block V-first states")
-    _store_flashinfer_checkpoints[
+    trace_triton(
+        "flashinfer_prefill:_store_flashinfer_checkpoints[final_state.shape[0], triton.cdiv(total_tokens, seq_size_per_block), triton.cdiv(state_size, 256)]",
+        _store_flashinfer_checkpoints,
         (
             final_state.shape[0],
             triton.cdiv(total_tokens, seq_size_per_block),
             triton.cdiv(state_size, 256),
-        )
-    ](
+        ),
         checkpoints,
         checkpoint_starts,
         final_state,

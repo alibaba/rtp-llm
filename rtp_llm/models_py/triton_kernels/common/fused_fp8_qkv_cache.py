@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 @triton.jit
@@ -338,7 +339,10 @@ def fused_fp8_qkv_cache(
     packed_dim = (num_q_heads + 2 * num_kv_heads) * head_dim
     batch_size = block_table.shape[0]
     grid_query_len = max(max_query_len, triton.cdiv(qkv.shape[0], batch_size))
-    _fused_fp8_qkv_cache_kernel[(grid_query_len, batch_size)](
+    trace_triton(
+        "fused_fp8_qkv_cache:_fused_fp8_qkv_cache_kernel[grid_query_len, batch_size]",
+        _fused_fp8_qkv_cache_kernel,
+        (grid_query_len, batch_size),
         qkv,
         out,
         kv_cache,
@@ -515,7 +519,10 @@ def quantize_fp8_query(
     if query.shape[0] == 0:
         return out
     q_dim = math.prod(query.shape[1:])
-    _quantize_fp8_query_kernel[(query.shape[0],)](
+    trace_triton(
+        "fused_fp8_qkv_cache:_quantize_fp8_query_kernel[query.shape[0],]",
+        _quantize_fp8_query_kernel,
+        (query.shape[0],),
         query,
         out,
         kv_cache if clear_tail else out,

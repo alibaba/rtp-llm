@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
+
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
@@ -505,7 +507,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
         else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
+            down_input_fp8, down_input_scale = trace_call(
+                "deepgemm_hybrid_executor:trt_fp8_quantize_128",
+                trt_fp8_quantize_128,
+                down_input,
+                False,
+            )
         del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)

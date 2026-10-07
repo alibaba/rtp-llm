@@ -3,6 +3,7 @@
 import torch
 
 from rtp_llm.models_py.modules.base.common.activation import SiluAndMulBase
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -21,5 +22,11 @@ class FusedSiluAndMul(SiluAndMulBase):
         output_shape = gate_up.shape[:-1] + (d,)
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
         stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
+        trace_call(
+            "activation:rtp_llm_ops.silu_and_mul",
+            rtp_llm_ops.silu_and_mul,
+            output,
+            gate_up,
+            stream_id,
+        )
         return output

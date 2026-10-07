@@ -15,6 +15,7 @@ from rtp_llm.models_py.triton_kernels.common.fused_fp8_qkv_cache import (
     quantize_fp8_query,
 )
 from rtp_llm.models_py.utils.arch import is_blackwell, is_sm10x, is_sm12x
+from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAType,
@@ -75,7 +76,13 @@ def _fused_fp8_prefill_query(impl, qkv: torch.Tensor, kv_cache: LayerKVCache):
         raise ValueError("Native FP8 Base RoPE positions were not prepared")
     # QKV-output mode only rotates; do not ask this RTP-Kernel mode to write
     # cache. Fuse all three conversions with the explicit paged-cache store.
-    rotated = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+    rotated = trace_call(
+        "trtllm_gen:impl.rope_kvcache_impl.forward",
+        impl.rope_kvcache_impl.forward,
+        qkv,
+        None,
+        impl.rope_params,
+    )
     paged_cache = common.reshape_paged_kv_cache(
         kv_cache.kv_cache_base,
         config.kv_head_num,
@@ -594,7 +601,9 @@ class FlashInferTRTLLMPrefillOp(object):
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
-        o = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+        o = trace_call(
+            "trtllm_gen:flashinfer.prefill.trtllm_batch_context_with_kv_cache",
+            flashinfer.prefill.trtllm_batch_context_with_kv_cache,
             query=q,
             kv_cache=kv_cache.kv_cache_base,
             workspace_buffer=self.workspace_buffer,
@@ -733,7 +742,9 @@ class FlashInferTRTLLMDecodeOp(object):
 
         # Call TRT-LLM kernel
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
-        o = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+        o = trace_call(
+            "trtllm_gen:flashinfer.decode.trtllm_batch_decode_with_kv_cache",
+            flashinfer.decode.trtllm_batch_decode_with_kv_cache,
             query=q,
             kv_cache=kv_cache.kv_cache_base,
             workspace_buffer=self.workspace_buffer,
@@ -777,8 +788,14 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         )
         self.rope_kvcache_impl = rope_op(attn_configs)
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "trtllm_gen:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
+        )
+        self.rope_params = trace_call(
+            "trtllm_gen:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_prefill_cg_params(
@@ -812,18 +829,33 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             assert kv_cache is not None
             fmha_input = _fused_fp8_prefill_query(self, qkv, kv_cache)
         elif self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            fmha_input = trace_call(
+                "trtllm_gen:self.rope_kvcache_impl.forward",
+                self.rope_kvcache_impl.forward,
+                qkv,
+                kv_cache,
+                self.rope_params,
+            )
         else:
             fmha_input = qkv
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return trace_call(
+            "trtllm_gen:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            fmha_input,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
-        _prepare_cg_prefill_kernel[p.grid](
+        trace_triton(
+            "trtllm_gen:_prepare_cg_prefill_kernel[p.grid]",
+            _prepare_cg_prefill_kernel,
+            p.grid,
             attn_inputs.input_lengths_device,
             attn_inputs.prefix_lengths_device,
             p.seq_lens,
@@ -861,8 +893,14 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         self.rope_kvcache_impl = rope_op(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "trtllm_gen:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
+        )
+        self.rope_params = trace_call(
+            "trtllm_gen:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_decode_cg_params(
@@ -892,19 +930,34 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             assert kv_cache is not None
             fmha_input = _fused_fp8_prefill_query(self, qkv, kv_cache)
         elif self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            fmha_input = trace_call(
+                "trtllm_gen:self.rope_kvcache_impl.forward",
+                self.rope_kvcache_impl.forward,
+                qkv,
+                kv_cache,
+                self.rope_params,
+            )
         else:
             fmha_input = qkv
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return trace_call(
+            "trtllm_gen:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            fmha_input,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         if not attn_inputs.is_prefill:
-            _prepare_cg_decode_kernel[p.grid](
+            trace_triton(
+                "trtllm_gen:_prepare_cg_decode_kernel[p.grid]",
+                _prepare_cg_decode_kernel,
+                p.grid,
                 attn_inputs.sequence_lengths_plus_1_device,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
@@ -915,7 +968,10 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
                 BLOCK_SIZE=p.BLOCK_SIZE,
             )
         else:
-            _prepare_cg_spec_decode_kernel[p.grid](
+            trace_triton(
+                "trtllm_gen:_prepare_cg_spec_decode_kernel[p.grid]",
+                _prepare_cg_spec_decode_kernel,
+                p.grid,
                 attn_inputs.prefix_lengths_device,
                 attn_inputs.input_lengths_device,
                 p.seq_lens,
@@ -944,8 +1000,14 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "trtllm_gen:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
+        )
+        self.rope_params = trace_call(
+            "trtllm_gen:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_decode_cg_params(
@@ -971,18 +1033,33 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            fmha_input = trace_call(
+                "trtllm_gen:self.rope_kvcache_impl.forward",
+                self.rope_kvcache_impl.forward,
+                qkv,
+                kv_cache,
+                self.rope_params,
+            )
         else:
             fmha_input = qkv
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return trace_call(
+            "trtllm_gen:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            fmha_input,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
-        _prepare_cg_decode_kernel[p.grid](
+        trace_triton(
+            "trtllm_gen:_prepare_cg_decode_kernel[p.grid]",
+            _prepare_cg_decode_kernel,
+            p.grid,
             attn_inputs.sequence_lengths_plus_1_device,
             p.seq_lens,
             attn_inputs.kv_cache_kernel_block_id_device,

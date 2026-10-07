@@ -75,6 +75,11 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.rmsnorm_gated_fp8_qua
     maybe_rmsnorm_gated_fp8_quant,
 )
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
+from rtp_llm.models_py.utils.prefill_input_log import (
+    prefill_input_snapshot,
+    prefill_stage,
+    trace_call,
+)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -147,7 +152,12 @@ def _write_cp_cache_store(
     cache_store_writer = attention_inputs.cache_store_writer
     if cache_store_inputs is None or cache_store_writer is None:
         return
-    cache_store_writer.write(cache_store_inputs, kv_cache)
+    trace_call(
+        "qwen3_next:cache_store_writer.write",
+        cache_store_writer.write,
+        cache_store_inputs,
+        kv_cache,
+    )
 
 
 def _maybe_write_cp_cache_store(
@@ -229,11 +239,19 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         raise NotImplementedError
 
     def _get_conv_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        conv_states = self.linear_cache_converter.get_conv_state_tensor(kv_cache_tensor)
+        conv_states = trace_call(
+            "qwen3_next:self.linear_cache_converter.get_conv_state_tensor",
+            self.linear_cache_converter.get_conv_state_tensor,
+            kv_cache_tensor,
+        )
         return conv_states
 
     def _get_ssm_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        ssm_states = self.linear_cache_converter.get_ssm_state_tensor(kv_cache_tensor)
+        ssm_states = trace_call(
+            "qwen3_next:self.linear_cache_converter.get_ssm_state_tensor",
+            self.linear_cache_converter.get_ssm_state_tensor,
+            kv_cache_tensor,
+        )
         return ssm_states
 
 
@@ -259,7 +277,11 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # ]
         cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
         conv_states = (
-            self._get_conv_states(kv_cache_tensor).transpose(1, 2)
+            trace_call(
+                "qwen3_next:self._get_conv_states",
+                self._get_conv_states,
+                kv_cache_tensor,
+            ).transpose(1, 2)
             if kv_cache_tensor is not None
             else None
         )
@@ -322,7 +344,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         else:
             g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
-            self._get_ssm_states(kv_cache_tensor)
+            trace_call(
+                "qwen3_next:self._get_ssm_states", self._get_ssm_states, kv_cache_tensor
+            )
             if kv_cache_tensor is not None
             else None
         )
@@ -487,7 +511,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 kv_cache.kv_cache_base.shape[0], -1
             )
             seq_size_per_block = kv_cache.seq_size_per_block
-        conv_output = self._conv1d(
+        conv_output = trace_call(
+            "qwen3_next:self._conv1d",
+            self._conv1d,
             mixed_qkv,
             kv_cache_tensor,
             seq_size_per_block,
@@ -506,7 +532,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                     attn_inputs.cu_seqlens_device, seq_size_per_block
                 )
             )
-        attn_out = self._fla(
+        attn_out = trace_call(
+            "qwen3_next:self._fla",
+            self._fla,
             mixed_qkv if isinstance(conv_output, tuple) else conv_output,
             b,
             a,
@@ -523,7 +551,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and cache_store_inputs is not None
             and cache_store_writer is not None
         ):
-            cache_store_writer.write(cache_store_inputs, kv_cache)
+            trace_call(
+                "qwen3_next:cache_store_writer.write",
+                cache_store_writer.write,
+                cache_store_inputs,
+                kv_cache,
+            )
         return attn_out
 
 
@@ -543,10 +576,16 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
     ) -> torch.Tensor:
-        conv_states = self._get_conv_states(kv_cache_tensor)
+        conv_states = trace_call(
+            "qwen3_next:self._get_conv_states", self._get_conv_states, kv_cache_tensor
+        )
         # (batch, dim) -> # (batch, dim, 1)
-        batch, seq = self._get_bs_from_attenion_input(
-            mixed_qkv, attn_inputs, is_target_verify
+        batch, seq = trace_call(
+            "qwen3_next:self._get_bs_from_attenion_input",
+            self._get_bs_from_attenion_input,
+            mixed_qkv,
+            attn_inputs,
+            is_target_verify,
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
@@ -576,8 +615,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         g: Optional[torch.Tensor] = None,
         beta: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        batch, seq = self._get_bs_from_attenion_input(
-            mixed_qkv, attn_inputs, is_target_verify
+        batch, seq = trace_call(
+            "qwen3_next:self._get_bs_from_attenion_input",
+            self._get_bs_from_attenion_input,
+            mixed_qkv,
+            attn_inputs,
+            is_target_verify,
         )
         # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
@@ -596,7 +639,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        ssm_states = self._get_ssm_states(kv_cache_tensor)
+        ssm_states = trace_call(
+            "qwen3_next:self._get_ssm_states", self._get_ssm_states, kv_cache_tensor
+        )
         if gdn_decode_backend() == "flashinfer" and not is_target_verify and seq == 1:
             core_attn_out = flashinfer_gdn_decode(
                 q=query,
@@ -607,7 +652,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 A_log=self.alog,
                 dt_bias=self.dt_bias,
                 initial_state=ssm_states,
-                block_map=self._get_fla_block_map(attn_inputs),
+                block_map=trace_call(
+                    "qwen3_next:self._get_fla_block_map",
+                    self._get_fla_block_map,
+                    attn_inputs,
+                ),
                 sequence_lengths_plus_1=attn_inputs.sequence_lengths_plus_1_device,
                 seq_size_per_block=seq_size_per_block,
             )
@@ -630,7 +679,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=self._get_fla_block_map(attn_inputs),
+            block_map=trace_call(
+                "qwen3_next:self._get_fla_block_map",
+                self._get_fla_block_map,
+                attn_inputs,
+            ),
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
             use_qk_l2norm_in_kernel=True,
@@ -661,11 +714,19 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         beta = None
         use_flashinfer = gdn_decode_backend() == "flashinfer" and not is_target_verify
         if not is_target_verify and not use_flashinfer:
-            batch, seq = self._get_bs_from_attenion_input(
-                mixed_qkv, attn_inputs, is_target_verify
+            batch, seq = trace_call(
+                "qwen3_next:self._get_bs_from_attenion_input",
+                self._get_bs_from_attenion_input,
+                mixed_qkv,
+                attn_inputs,
+                is_target_verify,
             )
             origin_shape = mixed_qkv.shape
-            conv_states = self._get_conv_states(kv_cache_tensor)
+            conv_states = trace_call(
+                "qwen3_next:self._get_conv_states",
+                self._get_conv_states,
+                kv_cache_tensor,
+            )
             x = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
             fused = maybe_fused_conv1d_update_gdn_gating(
                 x,
@@ -683,14 +744,18 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 mixed_qkv_out, g, beta = fused
                 mixed_qkv = mixed_qkv_out.transpose(1, 2).reshape(origin_shape)
         if g is None:
-            mixed_qkv = self._conv1d(
+            mixed_qkv = trace_call(
+                "qwen3_next:self._conv1d",
+                self._conv1d,
                 mixed_qkv,
                 kv_cache_tensor,
                 kv_cache.seq_size_per_block,
                 attn_inputs,
                 is_target_verify,
             )
-        attn_out = self._fla(
+        attn_out = trace_call(
+            "qwen3_next:self._fla",
+            self._fla,
             mixed_qkv,
             b,
             a,
@@ -765,9 +830,13 @@ class Qwen3NextAttention(CausalAttention):
     ) -> torch.Tensor:
         gate_linear = quantized_linear_for(self.gate)
         if quantized_input is not None and gate_linear is not None:
-            gate = gate_linear.forward_quantized(*quantized_input)
+            gate = trace_call(
+                "qwen3_next:gate_linear.forward_quantized",
+                gate_linear.forward_quantized,
+                *quantized_input,
+            )
         else:
-            gate = self.gate(hidden_states)
+            gate = trace_call("qwen3_next:self.gate", self.gate, hidden_states)
         attn_out = super().forward(
             hidden_states,
             fmha_impl,
@@ -934,8 +1003,17 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                     self.norm.activation,
                     scale_ue8m0=linear.scale_ue8m0,
                 )
-                return linear.forward_quantized(q, scale)
-        return self.out_proj(self.norm(x, z))
+                return trace_call(
+                    "qwen3_next:linear.forward_quantized",
+                    linear.forward_quantized,
+                    q,
+                    scale,
+                )
+        return trace_call(
+            "qwen3_next:self.out_proj",
+            self.out_proj,
+            trace_call("qwen3_next:self.norm", self.norm, x, z),
+        )
 
     def _input_project(
         self,
@@ -950,15 +1028,25 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         BA stays BF16. QKVZ may consume a shared FP8 hidden from group G.
         """
         if self._qkvz_ba_fused:
-            fused = self.in_proj_fused(hidden_states)
+            fused = trace_call(
+                "qwen3_next:self.in_proj_fused", self.in_proj_fused, hidden_states
+            )
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
         qkvz_linear = quantized_linear_for(self.in_proj_qkvz)
         if quantized_input is not None and qkvz_linear is not None:
             return (
-                qkvz_linear.forward_quantized(*quantized_input),
-                self.in_proj_ba(hidden_states),
+                trace_call(
+                    "qwen3_next:qkvz_linear.forward_quantized",
+                    qkvz_linear.forward_quantized,
+                    *quantized_input,
+                ),
+                trace_call(
+                    "qwen3_next:self.in_proj_ba", self.in_proj_ba, hidden_states
+                ),
             )
-        return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
+        return trace_call(
+            "qwen3_next:self.in_proj_qkvz", self.in_proj_qkvz, hidden_states
+        ), trace_call("qwen3_next:self.in_proj_ba", self.in_proj_ba, hidden_states)
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
     def fix_query_key_value_ordering(
@@ -1161,8 +1249,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
         # CP keeps its original epilogue; decode tuning must not select it.
-        return self._norm_output_project(
-            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
+        return trace_call(
+            "qwen3_next:self._norm_output_project",
+            self._norm_output_project,
+            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim),
+            z,
         )
 
     def _la_norm_out_proj(
@@ -1179,8 +1270,17 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         )
         if fused is not None and hasattr(self.out_proj, "forward_quantized"):
             _y, attn_fp8, attn_scale = fused
-            return self.out_proj.forward_quantized(attn_fp8, attn_scale)
-        return self.out_proj(self.norm(attn_2d, z))
+            return trace_call(
+                "qwen3_next:self.out_proj.forward_quantized",
+                self.out_proj.forward_quantized,
+                attn_fp8,
+                attn_scale,
+            )
+        return trace_call(
+            "qwen3_next:self.out_proj",
+            self.out_proj,
+            trace_call("qwen3_next:self.norm", self.norm, attn_2d, z),
+        )
 
     def forward(
         self,
@@ -1198,33 +1298,74 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz, projected_states_ba = self._input_project(
-            hidden_states, quantized_input=quantized_input
+        projected_states_qkvz, projected_states_ba = trace_call(
+            "qwen3_next:self._input_project",
+            self._input_project,
+            hidden_states,
+            quantized_input=quantized_input,
         )
-        mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
+        mixed_qkv, z, b, a = trace_call(
+            "qwen3_next:self.fix_query_key_value_ordering",
+            self.fix_query_key_value_ordering,
+            projected_states_qkvz,
+            projected_states_ba,
         )
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
-                return self._forward_cp_prefill(
-                    mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
+                return trace_call(
+                    "qwen3_next:self._forward_cp_prefill",
+                    self._forward_cp_prefill,
+                    mixed_qkv,
+                    z,
+                    b,
+                    a,
+                    attention_inputs,
+                    kv_cache,
+                    attn_meta,
                 )
-            attn_output = self.prefill_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+            attn_output = trace_call(
+                "qwen3_next:self.prefill_gdn",
+                self.prefill_gdn,
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
             )
         else:
-            attn_output = self.decode_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+            attn_output = trace_call(
+                "qwen3_next:self.decode_gdn",
+                self.decode_gdn,
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
             )
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
-            attn_output = self._norm_output_project(
+            attn_output = trace_call(
+                "qwen3_next:self._norm_output_project",
+                self._norm_output_project,
                 attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim),
                 z,
                 enable_fusion=True,
             )
         else:
-            attn_output = self._la_norm_out_proj(attn_output, z)
-        if self.parallelism_config.get_attn_tp_size() > 1:
+            attn_output = trace_call(
+                "qwen3_next:self._la_norm_out_proj",
+                self._la_norm_out_proj,
+                attn_output,
+                z,
+            )
+        if (
+            trace_call(
+                "qwen3_next:self.parallelism_config.get_attn_tp_size",
+                self.parallelism_config.get_attn_tp_size,
+            )
+            > 1
+        ):
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
 
@@ -1316,7 +1457,9 @@ class Qwen3NextDecoderLayer(nn.Module):
         with fusion_phase(is_prefill=is_prefill), prefill_fusion_scope(
             ordinary_prefill
         ):
-            return self._forward_with_phase(
+            return trace_call(
+                "qwen3_next:self._forward_with_phase",
+                self._forward_with_phase,
                 hidden_states,
                 residual,
                 fmha_impl,
@@ -1342,12 +1485,19 @@ class Qwen3NextDecoderLayer(nn.Module):
         )
         attn_quant = None
         if fused is None:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = trace_call(
+                "qwen3_next:self.input_layernorm",
+                self.input_layernorm,
+                hidden_states,
+                residual,
+            )
         else:
             hidden_states, residual, hidden_fp8, hidden_scale = fused
             attn_quant = (hidden_fp8, hidden_scale)
 
-        hidden_states = self.self_attn(
+        hidden_states = trace_call(
+            "qwen3_next:self.self_attn",
+            self.self_attn,
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
@@ -1356,9 +1506,14 @@ class Qwen3NextDecoderLayer(nn.Module):
             quantized_input=attn_quant,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = trace_call(
+            "qwen3_next:self.post_attention_layernorm",
+            self.post_attention_layernorm,
+            hidden_states,
+            residual,
+        )
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = trace_call("qwen3_next:self.mlp", self.mlp, hidden_states)
 
         return hidden_states, residual
 
@@ -1482,15 +1637,20 @@ class Qwen3NextModel(GptModelBase):
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
-        return self.embed_tokens(input_ids)
+        return trace_call("qwen3_next:self.embed_tokens", self.embed_tokens, input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        hidden_states = self.word_embedding(inputs)
+        hidden_states = trace_call(
+            "qwen3_next:self.word_embedding", self.word_embedding, inputs
+        )
 
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
-        is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
+        is_cp = trace_call(
+            "qwen3_next:self.parallelism_config.prefill_cp_config.is_enabled",
+            self.parallelism_config.prefill_cp_config.is_enabled,
+        )
 
         full_prefill_conv1d_meta = None
         full_prefill_cu_seqlens = None
@@ -1505,8 +1665,11 @@ class Qwen3NextModel(GptModelBase):
                     cp_restore_indices,
                     cp_local_extract_indices,
                     cp_local_valid_mask,
-                ) = self._build_cp_linear_attn_metadata(
-                    attention_inputs, hidden_states.device
+                ) = trace_call(
+                    "qwen3_next:self._build_cp_linear_attn_metadata",
+                    self._build_cp_linear_attn_metadata,
+                    attention_inputs,
+                    hidden_states.device,
                 )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
@@ -1561,7 +1724,9 @@ class Qwen3NextModel(GptModelBase):
                     )
 
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
+            fmha_impl = trace_call(
+                "qwen3_next:self.prepare_fmha_impl", self.prepare_fmha_impl, inputs
+            )
 
         residual = torch.zeros_like(hidden_states)
 
@@ -1579,20 +1744,33 @@ class Qwen3NextModel(GptModelBase):
                     if decoder_layer.layer_type == HybridAttentionType.LINEAR
                     else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
                 )
-                hidden_states, residual = decoder_layer(
-                    hidden_states,
-                    residual,
-                    layer_fmha_impl,
-                    kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                    attention_inputs=layer_attention_inputs,
-                    attn_meta=attn_meta,
-                )
+                with prefill_stage("decoder", i):
+                    hidden_states, residual = decoder_layer(
+                        hidden_states,
+                        residual,
+                        layer_fmha_impl,
+                        kv_cache=(
+                            self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                        ),
+                        attention_inputs=layer_attention_inputs,
+                        attn_meta=attn_meta,
+                    )
 
-        hidden_states, residual = self.norm(hidden_states, residual)
+        with prefill_stage("final_norm"):
+            hidden_states, residual = trace_call(
+                "qwen3_next:self.norm", self.norm, hidden_states, residual
+            )
         return PyModelOutputs(hidden_states)
 
 
 class Qwen35Model(Qwen3NextModel):
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        with prefill_input_snapshot(
+            attention_inputs.is_prefill and not attention_inputs.is_target_verify
+        ):
+            return trace_call("Qwen35Model.forward", super().forward, inputs, fmha_impl)
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1617,18 +1795,28 @@ class Qwen35Model(Qwen3NextModel):
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
-        input_ids: torch.Tensor = inputs.input_ids
+        with prefill_stage("embedding"):
+            input_ids: torch.Tensor = inputs.input_ids
 
-        position_ids = inputs.combo_position_ids
-        token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids
-        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
-        mm_features = inputs.multimodal_inputs.multimodal_features
-        mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
+            position_ids = inputs.combo_position_ids
+            token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids
+            text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+            mm_features = inputs.multimodal_inputs.multimodal_features
+            mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
 
-        inputs_embeds = self.embed_tokens(
-            input_ids, position_ids, token_type_ids, text_tokens_mask
-        )
-        hidden_states = self.multimodal_embedding_injector(
-            inputs_embeds, mm_features, mm_feature_locs
-        )
-        return hidden_states
+            inputs_embeds = trace_call(
+                "qwen3_next:self.embed_tokens",
+                self.embed_tokens,
+                input_ids,
+                position_ids,
+                token_type_ids,
+                text_tokens_mask,
+            )
+            hidden_states = trace_call(
+                "qwen3_next:self.multimodal_embedding_injector",
+                self.multimodal_embedding_injector,
+                inputs_embeds,
+                mm_features,
+                mm_feature_locs,
+            )
+            return hidden_states

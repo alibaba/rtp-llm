@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -148,8 +149,10 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
 
         # Dispatch tokens
-        expert_x, expert_num_tokens, self._handle, _, _ = (
-            self._buffer.low_latency_dispatch(**dispatch_args)
+        expert_x, expert_num_tokens, self._handle, _, _ = trace_call(
+            "deepep_low_latency_router:self._buffer.low_latency_dispatch",
+            self._buffer.low_latency_dispatch,
+            **dispatch_args,
         )
         if self._use_fp8_dispatch:
             assert isinstance(expert_x, tuple), "expert_x should be a tuple"
@@ -242,7 +245,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             combine_args (dict[str, Any]): Arguments for combining expert outputs.
         """
         # Normal finalize
-        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+        combined_x, _, _ = trace_call(
+            "deepep_low_latency_router:self._buffer.low_latency_combine",
+            self._buffer.low_latency_combine,
+            **combine_args,
+        )
 
         return combined_x
 

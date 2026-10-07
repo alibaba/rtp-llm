@@ -10,6 +10,7 @@ from triton.experimental.gluon import language as gl
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 @gluon.jit
@@ -133,7 +134,10 @@ def gated_rmsnorm_fp8(
     )
     m, n = x.shape
     if m:
-        _gated_rmsnorm_fp8_rows[(triton.cdiv(m * (n // 128), tile_rows),)](
+        trace_triton(
+            "gated_rmsnorm_fp8:_gated_rmsnorm_fp8_rows[triton.cdiv(m * (n // 128), tile_rows),]",
+            _gated_rmsnorm_fp8_rows,
+            (triton.cdiv(m * (n // 128), tile_rows),),
             x,
             gate,
             weight,

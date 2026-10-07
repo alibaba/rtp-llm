@@ -9,7 +9,7 @@ alias(
 py_library(
     name = "fla",
     srcs = glob(["fla/*.py"]),
-    deps = [":common"] + select({
+    deps = [":common", "//rtp_llm/models_py:utils"] + select({
         "@rtp_llm//:using_rocm": [
             requirement_gpu_rocm("aiter"),
             requirement_gpu_rocm("flydsl"),
@@ -32,6 +32,7 @@ py_library(
 
 py_library(
     name = "causal_conv1d",
+    deps = ["//rtp_llm/models_py:utils"],
     srcs = glob(["causal_conv1d/*.py"]),
     visibility = ["//visibility:public"]
 )
@@ -45,6 +46,7 @@ py_library(
 
 py_library(
     name = "common",
+    deps = ["//rtp_llm/models_py:utils"],
     srcs = glob(["common/*.py"]),
     visibility = ["//visibility:public"]
 )
@@ -82,4 +84,15 @@ py_library(
         ":sparse_mla",
     ],
     visibility = ["//visibility:public"]
+)
+
+filegroup(
+    name = "prefill_input_log_test_sources",
+    srcs = [
+        "common/offset.py",
+        "common/scatter_qkv.py",
+        "common/gated_rmsnorm_prefill.py",
+        "fla/gdn_gating_prefill.py",
+    ],
+    visibility = ["//visibility:public"],
 )

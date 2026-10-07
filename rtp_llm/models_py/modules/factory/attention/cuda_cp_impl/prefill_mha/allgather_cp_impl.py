@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -118,7 +119,9 @@ class PCPAllGatherAttnOp:
         self.q0_idx = torch.tensor(q0_idx, device=self.device)
         self.q1_idx = torch.tensor(q1_idx, device=self.device)
 
-        params = fill_mla_params(
+        params = trace_call(
+            "allgather_cp_impl:fill_mla_params",
+            fill_mla_params,
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
@@ -152,12 +155,16 @@ class PCPAllGatherAttnOp:
             "causal": True,
             "q_data_type": torch.bfloat16,
         }
-        self.prefill_wrappers["ragged"]["part0"].plan(
+        trace_call(
+            "allgather_cp_impl:self.prefill_wrappers['ragged']['part0'].plan",
+            self.prefill_wrappers["ragged"]["part0"].plan,
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr_part0,
             **common_params,
         )
-        self.prefill_wrappers["ragged"]["part1"].plan(
+        trace_call(
+            "allgather_cp_impl:self.prefill_wrappers['ragged']['part1'].plan",
+            self.prefill_wrappers["ragged"]["part1"].plan,
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr_part1,
             **common_params,
@@ -197,7 +204,9 @@ class PCPAllGatherAttnOp:
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
-        append_paged_kv_cache(
+        trace_call(
+            "allgather_cp_impl:append_paged_kv_cache",
+            append_paged_kv_cache,
             append_key=restore_k,
             append_value=restore_v,
             batch_indices=params.batch_indice_d,
@@ -217,23 +226,41 @@ class PCPAllGatherAttnOp:
         v0 = torch.index_select(all_values, 0, self.kv0_idx).contiguous()
         v1 = torch.index_select(all_values, 0, self.kv1_idx).contiguous()
         if self.has_prefix:
-            prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
-                q_reshaped, kv_cache_tensor, return_lse=True
+            prefix_out, prefix_lse = trace_call(
+                "allgather_cp_impl:self.prefill_wrappers['paged']['prefix'].run",
+                self.prefill_wrappers["paged"]["prefix"].run,
+                q_reshaped,
+                kv_cache_tensor,
+                return_lse=True,
             )
 
-            out0, lse0 = self.prefill_wrappers["ragged"]["part0"].run(
-                q0, k0, v0, return_lse=True
+            out0, lse0 = trace_call(
+                "allgather_cp_impl:self.prefill_wrappers['ragged']['part0'].run",
+                self.prefill_wrappers["ragged"]["part0"].run,
+                q0,
+                k0,
+                v0,
+                return_lse=True,
             )
-            out1, lse1 = self.prefill_wrappers["ragged"]["part1"].run(
-                q1, k1, v1, return_lse=True
+            out1, lse1 = trace_call(
+                "allgather_cp_impl:self.prefill_wrappers['ragged']['part1'].run",
+                self.prefill_wrappers["ragged"]["part1"].run,
+                q1,
+                k1,
+                v1,
+                return_lse=True,
             )
-            out0, _ = merge_state(
+            out0, _ = trace_call(
+                "allgather_cp_impl:merge_state",
+                merge_state,
                 v_a=prefix_out[self.q0_idx],
                 s_a=prefix_lse[self.q0_idx],
                 v_b=out0,
                 s_b=lse0,
             )
-            out1, _ = merge_state(
+            out1, _ = trace_call(
+                "allgather_cp_impl:merge_state",
+                merge_state,
                 v_a=prefix_out[self.q1_idx],
                 s_a=prefix_lse[self.q1_idx],
                 v_b=out1,
@@ -245,10 +272,18 @@ class PCPAllGatherAttnOp:
             return output
         else:
             output = torch.empty_like(q_reshaped)
-            output[self.q0_idx] = self.prefill_wrappers["ragged"]["part0"].run(
-                q0, k0, v0
+            output[self.q0_idx] = trace_call(
+                "allgather_cp_impl:self.prefill_wrappers['ragged']['part0'].run",
+                self.prefill_wrappers["ragged"]["part0"].run,
+                q0,
+                k0,
+                v0,
             )
-            output[self.q1_idx] = self.prefill_wrappers["ragged"]["part1"].run(
-                q1, k1, v1
+            output[self.q1_idx] = trace_call(
+                "allgather_cp_impl:self.prefill_wrappers['ragged']['part1'].run",
+                self.prefill_wrappers["ragged"]["part1"].run,
+                q1,
+                k1,
+                v1,
             )
             return output

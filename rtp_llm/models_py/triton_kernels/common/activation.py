@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit
 def _silu_and_mul_kernel(
@@ -57,7 +59,10 @@ def silu_and_mul(
     # Heuristic for block size
     BLOCK_SIZE_N = 1024 if N > 1024 else triton.next_power_of_2(N)
 
-    _silu_and_mul_kernel[grid](
+    trace_triton(
+        "activation:_silu_and_mul_kernel[grid]",
+        _silu_and_mul_kernel,
+        grid,
         output_tensor,
         input_tensor,
         N,
@@ -198,7 +203,10 @@ def silu_mul_fp8_quant_deep_gemm_masked(
     fp8_max = f_info.max
     fp8_min = f_info.min
 
-    _silu_mul_fp8_quant_deep_gemm_masked[grid](
+    trace_triton(
+        "activation:_silu_mul_fp8_quant_deep_gemm_masked[grid]",
+        _silu_mul_fp8_quant_deep_gemm_masked,
+        grid,
         y,
         y_q,
         y_s,
@@ -319,7 +327,10 @@ def silu_mul_bf16_deep_gemm_masked(
     # A loop inside the kernel handles the token dim
     grid = (E * G,)
 
-    _silu_mul_bf16_deep_gemm_masked[grid](
+    trace_triton(
+        "activation:_silu_mul_bf16_deep_gemm_masked[grid]",
+        _silu_mul_bf16_deep_gemm_masked,
+        grid,
         y,
         y_o,
         tokens_per_expert,
@@ -465,7 +476,10 @@ def silu_mul_fp8_per_token_quant_batched(
     grid = (E, T)
     BLOCK_SIZE = 1024
 
-    _silu_mul_fp8_per_token_quant_batched[grid](
+    trace_triton(
+        "activation:_silu_mul_fp8_per_token_quant_batched[grid]",
+        _silu_mul_fp8_per_token_quant_batched,
+        grid,
         y,
         y_q,
         y_s,
@@ -620,7 +634,10 @@ def silu_and_mul_masked_post_quant_fwd(
     fp8_max = finfo.max
     fp8_min = -fp8_max
 
-    _silu_and_mul_post_quant_kernel[grid](
+    trace_triton(
+        "activation:_silu_and_mul_post_quant_kernel[grid]",
+        _silu_and_mul_post_quant_kernel,
+        grid,
         input,
         *input.stride(),
         output,
@@ -867,7 +884,10 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     fp8_max = finfo.max
     fp8_min = -fp8_max
 
-    _silu_and_mul_post_quant_packed_kernel[grid](
+    trace_triton(
+        "activation:_silu_and_mul_post_quant_packed_kernel[grid]",
+        _silu_and_mul_post_quant_packed_kernel,
+        grid,
         input,
         *input.stride(),
         output,
@@ -1100,7 +1120,10 @@ def silu_mul_masked_fp8_post_quant_fwd(
     fp8_max = finfo.max
     fp8_min = -fp8_max
 
-    _silu_mul_masked_fp8_post_quant_fwd[grid](
+    trace_triton(
+        "activation:_silu_mul_masked_fp8_post_quant_fwd[grid]",
+        _silu_mul_masked_fp8_post_quant_fwd,
+        grid,
         input,
         *input.stride(),
         output,
@@ -1220,7 +1243,10 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
         expert_num,
     )
 
-    _silu_mul_masked_bf16_no_post_quant_fwd[grid](
+    trace_triton(
+        "activation:_silu_mul_masked_bf16_no_post_quant_fwd[grid]",
+        _silu_mul_masked_bf16_no_post_quant_fwd,
+        grid,
         input,
         *input.stride(),
         output,

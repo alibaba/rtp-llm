@@ -1,10 +1,11 @@
-# adpated from vllm: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_next.py
-
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# adpated from vllm: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_next.py
 
 
 @triton.jit
@@ -88,7 +89,10 @@ def fused_gdn_gating(
     # original dtype (bf16), so we preserve it to avoid breaking the contract.
     beta_dtype = torch.float32 if is_amd else b.dtype
     beta_output = torch.empty(1, batch, num_heads, dtype=beta_dtype, device=b.device)
-    fused_gdn_gating_kernel[grid](
+    trace_triton(
+        "gdn_gating:fused_gdn_gating_kernel[grid]",
+        fused_gdn_gating_kernel,
+        grid,
         g,
         beta_output,
         A_log,

@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit(do_not_specialize=["N"])
 def _gate_sqrtsoftplus_topk_kernel(
@@ -187,7 +189,10 @@ def fused_sqrtsoftplus_gate(
         return out_w, out_idx
 
     grid = (N,)
-    _gate_sqrtsoftplus_topk_kernel[grid](
+    trace_triton(
+        "gate_fused:_gate_sqrtsoftplus_topk_kernel[grid]",
+        _gate_sqrtsoftplus_topk_kernel,
+        grid,
         scores,
         bias,
         out_idx,
@@ -231,7 +236,10 @@ def fused_sqrtsoftplus_hash_gate(
     if N == 0:
         return out_w, out_idx
 
-    _gate_sqrtsoftplus_hash_kernel[(N,)](
+    trace_triton(
+        "gate_fused:_gate_sqrtsoftplus_hash_kernel[N,]",
+        _gate_sqrtsoftplus_hash_kernel,
+        (N,),
         scores,
         input_ids,
         tid2eid,

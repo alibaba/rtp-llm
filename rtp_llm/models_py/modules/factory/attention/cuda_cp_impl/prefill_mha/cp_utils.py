@@ -1,6 +1,8 @@
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
+
 
 def plan_prefix_paged_attention(
     wrapper: BatchPrefillWithPagedKVCacheWrapper,
@@ -46,7 +48,9 @@ def plan_prefix_paged_attention(
 
     last_page_len = torch.where(prefix_pages > 0, page_size, 0).to(torch.int32)
 
-    wrapper.plan(
+    trace_call(
+        "cp_utils:wrapper.plan",
+        wrapper.plan,
         qo_indptr=qo_indptr,
         paged_kv_indptr=page_indptr.to(device),
         paged_kv_indices=prefix_page_indices,

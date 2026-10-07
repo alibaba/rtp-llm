@@ -1,10 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-# Copyright (c) 2024, Tri Dao.
-# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
-# Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
-
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -12,6 +5,16 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Copyright (c) 2024, Tri Dao.
+# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
+# Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+
 
 PAD_SLOT_ID = -1
 BLOCK_M = 8
@@ -658,7 +661,10 @@ def causal_conv1d_fn(
 
     block_n = 512 if fused_qkv_heads is not None and hq % 4 == hv % 4 == 0 else BLOCK_N
     grid = (grid_x, triton.cdiv(dim, block_n))
-    _causal_conv1d_fwd_kernel[grid](
+    trace_triton(
+        "causal_conv1d:_causal_conv1d_fwd_kernel[grid]",
+        _causal_conv1d_fwd_kernel,
+        grid,
         # Pointers to matrices
         x,
         weight,
@@ -1146,7 +1152,10 @@ def causal_conv1d_update(
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 
-    _causal_conv1d_update_kernel[grid](
+    trace_triton(
+        "causal_conv1d:_causal_conv1d_update_kernel[grid]",
+        _causal_conv1d_update_kernel,
+        grid,
         # Pointers to matrices
         x,
         weight,

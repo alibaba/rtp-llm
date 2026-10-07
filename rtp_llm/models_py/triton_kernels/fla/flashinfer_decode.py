@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
+
 GDN_DECODE_BACKEND_ENV = "RTP_QWEN35_GDN_DECODE_BACKEND"
 _VALID_BACKENDS = ("native", "flashinfer")
 
@@ -96,7 +98,9 @@ def fill_paged_decode_indices(
     sequence_lengths_plus_1: torch.Tensor,
     seq_size_per_block: int,
     A_log: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> (
+    tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """Map RTP ``block_map`` + ``sequence_lengths_plus_1`` to FI pool indices.
 
     Matches fused_recurrent: read ``(L-2)//S``, write ``(L-1)//S``. Slot ids
@@ -125,9 +129,10 @@ def fill_paged_decode_indices(
         alog_out = A_log
         hv = A_log.numel()
         alog_stride = A_log.stride(-1)
-    _fill_paged_decode_indices_kernel[
-        (triton.cdiv(max(batch, hv), 256),)
-    ](
+    trace_triton(
+        "flashinfer_decode:_fill_paged_decode_indices_kernel[triton.cdiv(max(batch, hv), 256),]",
+        _fill_paged_decode_indices_kernel,
+        (triton.cdiv(max(batch, hv), 256),),
         sequence_lengths_plus_1,
         block_map,
         read_idx,
@@ -188,9 +193,7 @@ def flashinfer_gdn_decode(
     if k.shape != q.shape or v.shape[:2] != q.shape[:2]:
         raise ValueError("Q/K/V batch and sequence dims must match")
     if initial_state.shape[1] != hv:
-        raise ValueError(
-            f"SSM HV {initial_state.shape[1]} does not match V heads {hv}"
-        )
+        raise ValueError(f"SSM HV {initial_state.shape[1]} does not match V heads {hv}")
     if sequence_lengths_plus_1.shape[0] != batch or block_map.shape[0] != batch:
         raise ValueError("block_map and sequence_lengths_plus_1 must be length B")
 
@@ -199,7 +202,9 @@ def flashinfer_gdn_decode(
     read_idx, write_idx, alog = fill_paged_decode_indices(
         block_map, sequence_lengths_plus_1, seq_size_per_block, A_log=A_log
     )
-    output, _ = gated_delta_rule_decode_pretranspose(
+    output, _ = trace_call(
+        "flashinfer_decode:gated_delta_rule_decode_pretranspose",
+        gated_delta_rule_decode_pretranspose,
         q=q,
         k=k,
         v=v,

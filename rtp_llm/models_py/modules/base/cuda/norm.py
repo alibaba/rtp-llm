@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseNorm,
     BaseResNorm,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -22,8 +23,14 @@ class RMSNorm(BaseNorm):
         stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
+        trace_call(
+            "norm:rtp_llm_ops.rmsnorm",
+            rtp_llm_ops.rmsnorm,
+            output,
+            hidden_states,
+            self.weight.data,
+            self.variance_epsilon,
+            stream_id,
         )
         return output
 
@@ -36,8 +43,14 @@ class RMSResNorm(BaseResNorm):
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
+        trace_call(
+            "norm:rtp_llm_ops.fused_add_rmsnorm",
+            rtp_llm_ops.fused_add_rmsnorm,
+            hidden_states,
+            residual,
+            self.weight.data,
+            self.variance_epsilon,
+            stream_id,
         )
         return hidden_states, residual
 
@@ -125,11 +138,23 @@ class FusedQKRMSNorm(nn.Module):
         )
         q = qkv[:, : self.head_num, :]
         k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(
-            q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl
+        trace_call(
+            "norm:flashinfer.norm.rmsnorm",
+            flashinfer.norm.rmsnorm,
+            q,
+            self.q_weight,
+            eps=self.eps,
+            out=q,
+            enable_pdl=self.enable_pdl,
         )
-        flashinfer.norm.rmsnorm(
-            k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl
+        trace_call(
+            "norm:flashinfer.norm.rmsnorm",
+            flashinfer.norm.rmsnorm,
+            k,
+            self.k_weight,
+            eps=self.eps,
+            out=k,
+            enable_pdl=self.enable_pdl,
         )
         return qkv.reshape(m, n)
 
@@ -141,7 +166,9 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
     ):
-        rtp_llm_ops.fused_add_layernorm(
+        trace_call(
+            "norm:rtp_llm_ops.fused_add_layernorm",
+            rtp_llm_ops.fused_add_layernorm,
             hidden_states,
             residual,
             bias,

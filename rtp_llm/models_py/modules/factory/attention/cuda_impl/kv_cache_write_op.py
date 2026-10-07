@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 
@@ -73,7 +74,9 @@ class KVCacheWriteOp:
             positions = self.params.positions_d.narrow(0, 0, nnz)
 
             # Append K and V to paged cache using HND layout
-            page.append_paged_kv_cache(  # type: ignore
+            trace_call(
+                "kv_cache_write_op:page.append_paged_kv_cache",
+                page.append_paged_kv_cache,  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]
                 value,  # append_value: [total_tokens, num_kv_heads, head_dim]
                 batch_indices,
@@ -118,7 +121,9 @@ class KVCacheWriteOp:
             )
 
             # Append K and V to paged cache using HND layout
-            page.append_paged_kv_cache(  # type: ignore
+            trace_call(
+                "kv_cache_write_op:page.append_paged_kv_cache",
+                page.append_paged_kv_cache,  # type: ignore
                 key,
                 value,
                 batch_indices,

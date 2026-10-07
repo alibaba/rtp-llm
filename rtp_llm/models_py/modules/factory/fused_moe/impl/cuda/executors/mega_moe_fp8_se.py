@@ -40,6 +40,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_input_packer 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
     ensure_shared_gate_capacity,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.utils.model_weight import W
 
 
@@ -167,7 +168,9 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             raise ValueError(
                 "Gated MegaMoE requires one shared expert with matching intermediate width"
             )
-        self.shared_l1, self.shared_l2 = mega_fp8.transform_weights_for_mega_moe_fp8(
+        self.shared_l1, self.shared_l2 = trace_call(
+            "mega_moe_fp8_se:mega_fp8.transform_weights_for_mega_moe_fp8",
+            mega_fp8.transform_weights_for_mega_moe_fp8,
             (up.weight, expand_fp8_scale(up.weight_scales, 2 * inter, hidden)),
             (down.weight, expand_fp8_scale(down.weight_scales, hidden, inter)),
         )
@@ -189,7 +192,9 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
 
         buf = self._mega_buf
         return int(
-            mega_fp8.get_block_m_for_mega_moe_fp8(
+            trace_call(
+                "mega_moe_fp8_se:mega_fp8.get_block_m_for_mega_moe_fp8",
+                mega_fp8.get_block_m_for_mega_moe_fp8,
                 self.config.ep_size,
                 self.config.expert_num,
                 buf.num_max_tokens_per_rank,
@@ -355,8 +360,13 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         return CombineForwardPayload(
             fused_expert_output=self._restore_output_dtype(
                 payload,
-                self.forward(
-                    payload.expert_x, topk_weights, topk_ids, extra_expert_args
+                trace_call(
+                    "mega_moe_fp8_se:self.forward",
+                    self.forward,
+                    payload.expert_x,
+                    topk_weights,
+                    topk_ids,
+                    extra_expert_args,
                 ),
             )
         )

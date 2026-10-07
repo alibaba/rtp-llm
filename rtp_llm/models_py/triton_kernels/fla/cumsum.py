@@ -1,7 +1,3 @@
-# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/cumsum.py
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
 from typing import Optional
 
 import torch
@@ -11,6 +7,12 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.common.decorators import cuda_autotune
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.utils import check_shared_mem, input_guard
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/cumsum.py
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -191,7 +193,10 @@ def chunk_local_cumsum_scalar(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
-    chunk_local_cumsum_scalar_kernel[grid](
+    trace_triton(
+        "cumsum:chunk_local_cumsum_scalar_kernel[grid]",
+        chunk_local_cumsum_scalar_kernel,
+        grid,
         s=g_org,
         o=g,
         scale=scale,
@@ -241,7 +246,10 @@ def chunk_local_cumsum_vector(
     # keep cumulative normalizer in fp32
     # this kernel is equivalent to
     # g = g.view(B, H, NT, BT, -1).cumsum(-2).view(B, H, T, -1)
-    chunk_local_cumsum_vector_kernel[grid](
+    trace_triton(
+        "cumsum:chunk_local_cumsum_vector_kernel[grid]",
+        chunk_local_cumsum_vector_kernel,
+        grid,
         s=g_org,
         o=g,
         scale=scale,

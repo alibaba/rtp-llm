@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 try:
     import triton
     import triton.language as tl
@@ -107,7 +109,10 @@ def stage_mega_moe_se_shared_l1_scales(
     destination[:active_rows].zero_()
     block_rows = 128
     grid = (triton.cdiv(tokens, block_rows), source.size(1))
-    _stage_shared_l1_scales_kernel[grid](
+    trace_triton(
+        "mega_moe_se_input_pack:_stage_shared_l1_scales_kernel[grid]",
+        _stage_shared_l1_scales_kernel,
+        grid,
         source,
         destination,
         tokens,

@@ -44,6 +44,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_kernel(
@@ -280,7 +282,10 @@ def silu_mul_fp8_quant_packed(
     num_stages = 2
 
     has_clamp = clamp_limit > 0
-    _silu_mul_fp8_quant_packed_kernel[grid](
+    trace_triton(
+        "silu_mul_fp8_quant:_silu_mul_fp8_quant_packed_kernel[grid]",
+        _silu_mul_fp8_quant_packed_kernel,
+        grid,
         gate_up,
         output_q,
         output_scale_packed,
@@ -355,7 +360,10 @@ def silu_mul_fp8_quant_packed_from_parts(
     BLOCK_M = 8
     grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
     has_clamp = clamp_limit > 0
-    _silu_mul_fp8_quant_packed_split_kernel[grid](
+    trace_triton(
+        "silu_mul_fp8_quant:_silu_mul_fp8_quant_packed_split_kernel[grid]",
+        _silu_mul_fp8_quant_packed_split_kernel,
+        grid,
         gate,
         up,
         output_q,

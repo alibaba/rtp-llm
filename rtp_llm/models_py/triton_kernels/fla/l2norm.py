@@ -1,7 +1,3 @@
-# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/l2norm.py
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
 from typing import Optional
 
 import torch
@@ -10,6 +6,12 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.utils import input_guard
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/l2norm.py
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 
 BT_LIST = [8, 16, 32, 64, 128]
 
@@ -161,7 +163,10 @@ def l2norm_fwd(
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_fwd_kernel[grid](
+        trace_triton(
+            "l2norm:l2norm_fwd_kernel[grid]",
+            l2norm_fwd_kernel,
+            grid,
             x,
             y,
             eps,
@@ -174,7 +179,10 @@ def l2norm_fwd(
             num_stages=3,
         )
     else:
-        l2norm_fwd_kernel1[(T,)](
+        trace_triton(
+            "l2norm:l2norm_fwd_kernel1[T,]",
+            l2norm_fwd_kernel1,
+            (T,),
             x,
             y,
             eps=eps,
@@ -222,7 +230,10 @@ def fused_l2norm_qk(
     # per-row path uses 512 threads to process hidden_dim<=512 elements (under-utilized).
     if hidden_dim <= 512:
         BT = 8
-        fused_l2norm_qk_kernel_small[(triton.cdiv(tokens, BT),)](
+        trace_triton(
+            "l2norm:fused_l2norm_qk_kernel_small[triton.cdiv(tokens, BT),]",
+            fused_l2norm_qk_kernel_small,
+            (triton.cdiv(tokens, BT),),
             q_flat,
             k_flat,
             q_out,
@@ -236,7 +247,10 @@ def fused_l2norm_qk(
             num_stages=1,
         )
     else:
-        fused_l2norm_qk_kernel[(tokens,)](
+        trace_triton(
+            "l2norm:fused_l2norm_qk_kernel[tokens,]",
+            fused_l2norm_qk_kernel,
+            (tokens,),
             q_flat,
             k_flat,
             q_out,

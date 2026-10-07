@@ -2,6 +2,8 @@ from typing import NamedTuple, Optional
 
 import torch
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
+
 try:
     from flashinfer.prefill import trtllm_fmha_v2_prefill
 except (ImportError, AttributeError):
@@ -194,7 +196,9 @@ class TRTLLMFMHAv2PagedPrefillOp:
                 f"Q and paged KV cache must use the same dtype, got "
                 f"Q={compute_dtype} and KV={kv_cache_5d.dtype}"
             )
-        o = trtllm_fmha_v2_prefill(
+        o = trace_call(
+            "trt:trtllm_fmha_v2_prefill",
+            trtllm_fmha_v2_prefill,
             qkv=(q, kv_cache_5d),
             input_layout="Q_PAGED_KV_HND",
             workspace_buffer=self.workspace_buffer,
@@ -303,7 +307,9 @@ class TRTLLMFMHAv2PrefillOp:
             )
             fmha_input = (q, kv)
             input_layout = "CONTIGUOUS_Q_KV"
-        o = trtllm_fmha_v2_prefill(
+        o = trace_call(
+            "trt:trtllm_fmha_v2_prefill",
+            trtllm_fmha_v2_prefill,
             qkv=fmha_input,
             input_layout=input_layout,
             workspace_buffer=self.workspace_buffer,
@@ -332,8 +338,14 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
         self.fmha_impl = TRTLLMFMHAv2PagedPrefillOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "trt:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
+        )
+        self.rope_params = trace_call(
+            "trt:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -348,16 +360,30 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int,
     ) -> torch.Tensor:
-        fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        fmha_input = trace_call(
+            "trt:self.rope_kvcache_impl.forward",
+            self.rope_kvcache_impl.forward,
+            qkv,
+            kv_cache,
+            self.rope_params,
+        )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return trace_call(
+            "trt:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            fmha_input,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)
-        new_kv_cache_offset = self.rope_kvcache_impl.prepare(
-            attn_inputs
+        new_kv_cache_offset = trace_call(
+            "trt:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
         ).kv_cache_offset
         if new_kv_cache_offset is not None:
             common.copy_kv_cache_offset(
@@ -378,8 +404,14 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         self.fmha_impl = TRTLLMFMHAv2PrefillOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "trt:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
+        )
+        self.rope_params = trace_call(
+            "trt:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -395,19 +427,33 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         layer_idx: Optional[int] = 0,
     ) -> torch.Tensor:
         fmha_input = (
-            self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            trace_call(
+                "trt:self.rope_kvcache_impl.forward",
+                self.rope_kvcache_impl.forward,
+                qkv,
+                kv_cache,
+                self.rope_params,
+            )
             if self.need_rope or kv_cache is not None
             else qkv
         )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return trace_call(
+            "trt:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            fmha_input,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)
-        new_kv_cache_offset = self.rope_kvcache_impl.prepare(
-            attn_inputs
+        new_kv_cache_offset = trace_call(
+            "trt:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
         ).kv_cache_offset
         assert (self.rope_params.kv_cache_offset is None) == (
             new_kv_cache_offset is None

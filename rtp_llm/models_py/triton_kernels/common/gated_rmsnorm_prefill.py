@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit
 def _gated_rmsnorm_rows(
@@ -80,7 +82,10 @@ def gated_rmsnorm_prefill(
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     rows = m * (n // d)
     if rows:
-        _gated_rmsnorm_rows[(triton.cdiv(rows, tile_rows),)](
+        trace_triton(
+            "gated_rmsnorm_prefill:_gated_rmsnorm_rows[triton.cdiv(rows, tile_rows),]",
+            _gated_rmsnorm_rows,
+            (triton.cdiv(rows, tile_rows),),
             x,
             gate,
             weight,

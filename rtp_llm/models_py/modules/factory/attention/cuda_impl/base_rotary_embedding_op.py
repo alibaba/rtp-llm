@@ -13,6 +13,7 @@ import flashinfer.rope as rope
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import RopeConfig, get_rope_cache_once
 
 
@@ -90,7 +91,9 @@ class BaseRotaryEmbeddingOp(ABC):
         pos_ids = rope_params.positions_d.narrow(0, 0, nnz)
 
         if self.cos_sin_cache is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(  # type: ignore
+            trace_call(
+                "base_rotary_embedding_op:rope._apply_rope_pos_ids_cos_sin_cache",
+                rope._apply_rope_pos_ids_cos_sin_cache,  # type: ignore
                 q=query,
                 k=key,
                 q_rope=query,
@@ -103,8 +106,13 @@ class BaseRotaryEmbeddingOp(ABC):
             rope_theta = (
                 self.rope_config.base if self.rope_config is not None else 10000
             )
-            flashinfer.apply_rope_pos_ids_inplace(
-                query, key, pos_ids, rope_theta=rope_theta
+            trace_call(
+                "base_rotary_embedding_op:flashinfer.apply_rope_pos_ids_inplace",
+                flashinfer.apply_rope_pos_ids_inplace,
+                query,
+                key,
+                pos_ids,
+                rope_theta=rope_theta,
             )
 
     def _prepare_warmup_cache_indices(
@@ -163,9 +171,17 @@ class BaseRotaryEmbeddingOp(ABC):
             device=device,
         )
 
-        batch_indices, positions = get_batch_indices_positions(
+        batch_indices, positions = trace_call(
+            "base_rotary_embedding_op:get_batch_indices_positions",
+            get_batch_indices_positions,
             kv_append_indptr,
-            get_seq_lens(kv_page_indptr, kv_last_page_len, self.token_per_block),
+            trace_call(
+                "base_rotary_embedding_op:get_seq_lens",
+                get_seq_lens,
+                kv_page_indptr,
+                kv_last_page_len,
+                self.token_per_block,
+            ),
             num_tokens,
         )
 

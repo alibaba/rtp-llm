@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -202,7 +203,11 @@ def init_distributed_environment(
         # device_id=torch.device(f"cuda:{local_rank}"), # https://github.com/pytorch/pytorch/pull/149144
         timeout=infinite_timeout,
     )
-    torch.distributed.barrier(group=torch.distributed.group.WORLD)
+    trace_call(
+        "collective_torch:torch.distributed.barrier",
+        torch.distributed.barrier,
+        group=torch.distributed.group.WORLD,
+    )
     _group_map[Group.DP_AND_TP] = torch.distributed.group.WORLD
     logging.info(
         f"[rank: {world_rank}] Created DP_AND_TP group {torch.distributed.group.WORLD} with ranks: {list(range(world_size))}"
@@ -260,7 +265,10 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored DP group with key: {group_key} {dp_group} with ranks: {dp_ranks}"
                     )
                 # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                trace_call(
+                    "collective_torch:torch.distributed.barrier",
+                    torch.distributed.barrier,
+                )
 
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
@@ -288,7 +296,10 @@ def _create_process_groups(
                 _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                trace_call(
+                    "collective_torch:torch.distributed.barrier",
+                    torch.distributed.barrier,
+                )
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
@@ -384,7 +395,13 @@ def _register_process_groups_to_cpp():
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, global_root, group=pg)
+            trace_call(
+                "collective_torch:torch.distributed.broadcast",
+                torch.distributed.broadcast,
+                gpu_t,
+                global_root,
+                group=pg,
+            )
             if was_cpu:
                 t.copy_(gpu_t)
 
@@ -417,8 +434,12 @@ def _register_process_groups_to_cpp():
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        torch.distributed.all_reduce(
-            gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+        trace_call(
+            "collective_torch:torch.distributed.all_reduce",
+            torch.distributed.all_reduce,
+            gpu_t,
+            op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
+            group=pg,
         )
         if was_cpu:
             target.copy_(gpu_t)
@@ -459,8 +480,12 @@ def _register_process_groups_to_cpp():
                     # Fast path for C++ explicit-send allgather: keep the 2D
                     # output shape so c10d can launch directly without local
                     # rank-slice packing or Python-side CUDA promotion.
-                    torch.distributed.all_gather_into_tensor(
-                        recv_buf, send_tensor, group=pg
+                    trace_call(
+                        "collective_torch:torch.distributed.all_gather_into_tensor",
+                        torch.distributed.all_gather_into_tensor,
+                        recv_buf,
+                        send_tensor,
+                        group=pg,
                     )
                     continue
 
@@ -478,8 +503,12 @@ def _register_process_groups_to_cpp():
                 ).contiguous()
             else:
                 send_tensor, _ = _ensure_cuda(send_tensor, device_id)
-            torch.distributed.all_gather_into_tensor(
-                gpu_recv_flat, send_tensor, group=pg
+            trace_call(
+                "collective_torch:torch.distributed.all_gather_into_tensor",
+                torch.distributed.all_gather_into_tensor,
+                gpu_recv_flat,
+                send_tensor,
+                group=pg,
             )
             if recv_on_cpu:
                 recv_buf.copy_(gpu_recv)
@@ -660,7 +689,13 @@ def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
         group: Process group to use
     """
     process_group = _get_group(group)
-    torch.distributed.send(tensor, dst, group=process_group)
+    trace_call(
+        "collective_torch:torch.distributed.send",
+        torch.distributed.send,
+        tensor,
+        dst,
+        group=process_group,
+    )
 
 
 def recv(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
@@ -675,7 +710,13 @@ def recv(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
         Received tensor (same as input tensor)
     """
     process_group = _get_group(group)
-    torch.distributed.recv(tensor, src, group=process_group)
+    trace_call(
+        "collective_torch:torch.distributed.recv",
+        torch.distributed.recv,
+        tensor,
+        src,
+        group=process_group,
+    )
     return tensor
 
 
@@ -688,10 +729,18 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
         group: Process group to use
     """
     process_group = _get_group(group)
-    torch.distributed.broadcast(tensor, src, group=process_group)
+    trace_call(
+        "collective_torch:torch.distributed.broadcast",
+        torch.distributed.broadcast,
+        tensor,
+        src,
+        group=process_group,
+    )
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -716,8 +765,12 @@ def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> 
             return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
 
     process_group = _get_group(group)
-    torch.distributed.all_reduce(
-        tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+    trace_call(
+        "collective_torch:torch.distributed.all_reduce",
+        torch.distributed.all_reduce,
+        tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return tensor
 
@@ -760,7 +813,13 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         device=tensor.device,
         dtype=tensor.dtype,
     )
-    torch.distributed.all_gather_into_tensor(tensor_list, tensor, group=process_group)
+    trace_call(
+        "collective_torch:torch.distributed.all_gather_into_tensor",
+        torch.distributed.all_gather_into_tensor,
+        tensor_list,
+        tensor,
+        group=process_group,
+    )
     return tensor_list
 
     # reference old implementation
@@ -796,8 +855,13 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         device=input_tensor.device,
         dtype=input_tensor.dtype,
     )
-    torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+    trace_call(
+        "collective_torch:torch.distributed.reduce_scatter_tensor",
+        torch.distributed.reduce_scatter_tensor,
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
@@ -809,7 +873,11 @@ def barrier(group: Group) -> None:
         group: Process group to use
     """
     process_group = _get_group(group)
-    torch.distributed.barrier(group=process_group)
+    trace_call(
+        "collective_torch:torch.distributed.barrier",
+        torch.distributed.barrier,
+        group=process_group,
+    )
 
 
 __all__ = [

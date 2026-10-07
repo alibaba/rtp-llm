@@ -53,26 +53,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.utils.model_weight import W
 
 
 def _input_metadata(value):
-    """Describe tensor inputs without reading device data or synchronizing CUDA."""
-    if isinstance(value, torch.Tensor):
-        return {
-            "shape": tuple(value.shape),
-            "dtype": str(value.dtype),
-            "device": str(value.device),
-            "stride": tuple(value.stride()),
-            "contiguous": value.is_contiguous(),
-        }
-    if isinstance(value, (tuple, list)):
-        return [_input_metadata(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _input_metadata(item) for key, item in value.items()}
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    return repr(value)
+    from rtp_llm.models_py.utils.prefill_input_log import describe_inputs
+
+    return describe_inputs(value, typed_scalars=False)
 
 
 def mega_moe_fp8_available():
@@ -136,7 +124,9 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         from deep_gemm import mega_fp8
 
         return int(
-            mega_fp8.get_block_m_for_mega_moe_fp8(
+            trace_call(
+                "mega_moe_fp8:mega_fp8.get_block_m_for_mega_moe_fp8",
+                mega_fp8.get_block_m_for_mega_moe_fp8,
                 self.cfg.ep_size,
                 self.cfg.n_routed_experts,
                 self._mega_buf.num_max_tokens_per_rank,
@@ -310,13 +300,17 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         )
         with configure_mega_moe_fp8_num_sms(deep_gemm, device):
             buffer_num_sms = getattr(self._mega_buf, "_rtp_fp8_num_sms", None)
-            if buffer_num_sms is not None and buffer_num_sms != deep_gemm.get_num_sms():
+            if buffer_num_sms is not None and buffer_num_sms != trace_call(
+                "mega_moe_fp8:deep_gemm.get_num_sms", deep_gemm.get_num_sms
+            ):
                 raise RuntimeError(
                     "MegaMoE FP8 SM budget changed after buffer allocation; "
                     "restart with a consistent MEGA_MOE_FP8_RESERVE_SM setting "
                     "and DeepGEMM SM budget"
                 )
-            mega_fp8.fp8_fp8_mega_moe(
+            trace_call(
+                "mega_moe_fp8:mega_fp8.fp8_fp8_mega_moe",
+                mega_fp8.fp8_fp8_mega_moe,
                 y,
                 self.l1,
                 self.l2,

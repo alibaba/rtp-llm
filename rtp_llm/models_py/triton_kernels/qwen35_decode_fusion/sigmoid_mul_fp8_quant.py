@@ -35,6 +35,7 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _GROUP_SIZE = 128
 _CLAMP_EPS = 1.0e-4
@@ -221,7 +222,10 @@ def sigmoid_mul_fp8_quant(
     if num_stages is None:
         num_stages = 2
     grid = (num_packed, triton.cdiv(m, block_m))
-    _sigmoid_mul_fp8_quant_kernel[grid](
+    trace_triton(
+        "sigmoid_mul_fp8_quant:_sigmoid_mul_fp8_quant_kernel[grid]",
+        _sigmoid_mul_fp8_quant_kernel,
+        grid,
         attn,
         gate,
         out_q,

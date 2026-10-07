@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 # ---------------------------------------------------------------------------
 # Configuration constants
 # ---------------------------------------------------------------------------
@@ -128,7 +130,10 @@ def sigmoid_gate_scale_add_triton(
     T, H = shared.shape
     BLOCK_H = _select_block_h(T, H)
     grid = (T, triton.cdiv(H, BLOCK_H))
-    _SigmoidGateScaleAdd_kernel[grid](
+    trace_triton(
+        "moe_gating:_SigmoidGateScaleAdd_kernel[grid]",
+        _SigmoidGateScaleAdd_kernel,
+        grid,
         gate,
         shared,
         experts,

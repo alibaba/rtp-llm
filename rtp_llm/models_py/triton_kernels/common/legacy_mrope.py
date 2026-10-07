@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
 
 @triton.jit
 def _apply_mrope_qk_inplace(
@@ -87,7 +89,10 @@ def apply_mrope_qk_inplace(
     if rope_config.base <= 0 or rope_config.scale <= 0:
         raise ValueError("mRoPE base and scale must be positive")
     positions = position_ids.to(device=qkv.device, non_blocking=True).reshape(-1, 3)
-    _apply_mrope_qk_inplace[(qkv.size(0), head_num + kv_head_num)](
+    trace_triton(
+        "legacy_mrope:_apply_mrope_qk_inplace[qkv.size(0), head_num + kv_head_num]",
+        _apply_mrope_qk_inplace,
+        (qkv.size(0), head_num + kv_head_num),
         qkv,
         positions,
         qkv.stride(0),

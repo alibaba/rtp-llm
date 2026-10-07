@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
+from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -66,8 +67,13 @@ def quantize_to_fp8_if_needed(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
     output = torch.empty_like(tensor, dtype=target_dtype)
-    rtp_llm_ops.per_tensor_quant_fp8(
-        tensor, output, _get_fp8_unit_scale_tensor(tensor.device), True
+    trace_call(
+        "py_flashinfer_mha:rtp_llm_ops.per_tensor_quant_fp8",
+        rtp_llm_ops.per_tensor_quant_fp8,
+        tensor,
+        output,
+        _get_fp8_unit_scale_tensor(tensor.device),
+        True,
     )
     return output
 
@@ -161,7 +167,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.q_dtype = attn_q_dtype(attn_configs)
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
@@ -202,7 +211,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
         # switching paths between capture and replay forces a (forbidden)
         # reallocation during graph replay.
         if attn_inputs.input_lengths.is_cuda:
-            self.fmha_params.fill_params_mha_device(
+            trace_call(
+                "py_flashinfer_mha:self.fmha_params.fill_params_mha_device",
+                self.fmha_params.fill_params_mha_device,
                 _device_or(
                     attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
                 ),
@@ -216,7 +227,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 forbid_realloc,
             )
         else:
-            self.fmha_params.fill_params(
+            trace_call(
+                "py_flashinfer_mha:self.fmha_params.fill_params",
+                self.fmha_params.fill_params,
                 _host_i32(attn_inputs.prefix_lengths),
                 _host_i32(attn_inputs.sequence_lengths),
                 _host_i32(attn_inputs.input_lengths),
@@ -281,7 +294,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
-        self.prefill_wrapper.plan(
+        trace_call(
+            "py_flashinfer_mha:self.prefill_wrapper.plan",
+            self.prefill_wrapper.plan,
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
             self.fmha_params.page_indice_d,
@@ -367,7 +382,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self._aligned_q_buf.zero_()
 
             # Copy small to large (compact -> aligned)
-            cuda_graph_copy_small2large(
+            trace_call(
+                "py_flashinfer_mha:cuda_graph_copy_small2large",
+                cuda_graph_copy_small2large,
                 q_2d,
                 self._aligned_q_buf,
                 self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
@@ -392,7 +409,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
                         dtype=self.q_dtype,
                         device=q_aligned.device,
                     )
-                rtp_llm_ops.per_tensor_quant_fp8(
+                trace_call(
+                    "py_flashinfer_mha:rtp_llm_ops.per_tensor_quant_fp8",
+                    rtp_llm_ops.per_tensor_quant_fp8,
                     q_aligned,
                     self._aligned_q_cast_buf,
                     _get_fp8_unit_scale_tensor(q_aligned.device),
@@ -401,14 +420,21 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 q_aligned = self._aligned_q_cast_buf
 
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
+            result = trace_call(
+                "py_flashinfer_mha:self.prefill_wrapper.run",
+                self.prefill_wrapper.run,
+                q_aligned,
+                paged_kv_cache,
+            )
 
             # Reshape result to 2D for copy back (ensure contiguous)
             result_2d = result.view(total_len, hidden_size).contiguous()
             self._compact_out_buf.zero_()
 
             # Copy large to small (aligned -> compact)
-            cuda_graph_copy_large2small(
+            trace_call(
+                "py_flashinfer_mha:cuda_graph_copy_large2small",
+                cuda_graph_copy_large2small,
                 result_2d,
                 self._compact_out_buf,
                 self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
@@ -424,8 +450,11 @@ class PyFlashinferPrefillPagedAttnOp(object):
         else:
             # No CUDA graph copy, direct execution
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(
-                quantize_to_fp8_if_needed(q, self.q_dtype), paged_kv_cache
+            result = trace_call(
+                "py_flashinfer_mha:self.prefill_wrapper.run",
+                self.prefill_wrapper.run,
+                quantize_to_fp8_if_needed(q, self.q_dtype),
+                paged_kv_cache,
             )
 
         return result
@@ -452,11 +481,12 @@ class PyFlashinferPrefillAttnOp(object):
         )
         self.dtype = attn_configs.dtype
         self.q_dtype = attn_q_dtype(attn_configs)
-        self.kv_dtype = (
-            attn_kv_dtype(attn_configs) if kv_dtype is None else kv_dtype
-        )
+        self.kv_dtype = attn_kv_dtype(attn_configs) if kv_dtype is None else kv_dtype
         self.is_causal = attn_configs.is_causal
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -483,7 +513,9 @@ class PyFlashinferPrefillAttnOp(object):
         if kv_block_id is None:
             kv_block_id = torch.empty(0, dtype=torch.int32)
 
-        self.fmha_params.fill_params(
+        trace_call(
+            "py_flashinfer_mha:self.fmha_params.fill_params",
+            self.fmha_params.fill_params,
             _host_i32(attn_inputs.prefix_lengths),
             _host_i32(attn_inputs.sequence_lengths),
             _host_i32(attn_inputs.input_lengths),
@@ -491,7 +523,9 @@ class PyFlashinferPrefillAttnOp(object):
             self.page_size,
         )
 
-        self.prefill_wrapper.plan(
+        trace_call(
+            "py_flashinfer_mha:self.prefill_wrapper.plan",
+            self.prefill_wrapper.plan,
             cu_seqlens,
             cu_seqlens,
             self.local_head_num,
@@ -527,7 +561,9 @@ class PyFlashinferPrefillAttnOp(object):
             out = torch.empty(
                 q.shape[:-1] + v.shape[-1:], dtype=self.dtype, device=q.device
             )
-            return self.prefill_wrapper.run(
+            return trace_call(
+                "py_flashinfer_mha:self.prefill_wrapper.run",
+                self.prefill_wrapper.run,
                 q,
                 k,
                 v,
@@ -536,7 +572,13 @@ class PyFlashinferPrefillAttnOp(object):
                 FP8_UNIT_SCALE,
                 out=out,
             )
-        return self.prefill_wrapper.run(q, k, v)
+        return trace_call(
+            "py_flashinfer_mha:self.prefill_wrapper.run",
+            self.prefill_wrapper.run,
+            q,
+            k,
+            v,
+        )
 
 
 class PyFlashinferHybridPrefillAttnOp(object):
@@ -563,7 +605,10 @@ class PyFlashinferHybridPrefillAttnOp(object):
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.q_dtype = attn_q_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
         # The serial ragged/write/paged flow can share one workspace buffer.
         self.ragged_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
@@ -594,7 +639,9 @@ class PyFlashinferHybridPrefillAttnOp(object):
         assert (
             block_table is not None and block_table.numel() > 0
         ), "hybrid prefill requires a non-empty kv_cache_kernel_block_id"
-        self.fmha_params.fill_params(
+        trace_call(
+            "py_flashinfer_mha:self.fmha_params.fill_params",
+            self.fmha_params.fill_params,
             _host_i32(attn_inputs.prefix_lengths),
             _host_i32(attn_inputs.sequence_lengths),
             _host_i32(attn_inputs.input_lengths),
@@ -606,7 +653,9 @@ class PyFlashinferHybridPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         qo_indptr = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
-        self.ragged_wrapper.plan(
+        trace_call(
+            "py_flashinfer_mha:self.ragged_wrapper.plan",
+            self.ragged_wrapper.plan,
             qo_indptr,
             qo_indptr,
             self.local_head_num,
@@ -636,7 +685,9 @@ class PyFlashinferHybridPrefillAttnOp(object):
         prefix_paged_kv_indptr[-1] = self.fmha_params.reuse_cache_page_indice_h.numel()
         prefix_paged_kv_last_page_len = (prefix_lengths - 1) % self.page_size + 1
 
-        self.prefix_paged_wrapper.plan(
+        trace_call(
+            "py_flashinfer_mha:self.prefix_paged_wrapper.plan",
+            self.prefix_paged_wrapper.plan,
             qo_indptr,
             prefix_paged_kv_indptr,
             self.fmha_params.reuse_cache_page_indice_d,
@@ -689,7 +740,9 @@ class PyFlashinferHybridPrefillAttnOp(object):
             out = torch.empty(
                 q.shape[:-1] + v.shape[-1:], dtype=self.dtype, device=q.device
             )
-            new_out, new_lse = self.ragged_wrapper.run(
+            new_out, new_lse = trace_call(
+                "py_flashinfer_mha:self.ragged_wrapper.run",
+                self.ragged_wrapper.run,
                 q,
                 k,
                 v,
@@ -700,16 +753,40 @@ class PyFlashinferHybridPrefillAttnOp(object):
                 return_lse=True,
             )
         else:
-            new_out, new_lse = self.ragged_wrapper.run(q, k, v, return_lse=True)
+            new_out, new_lse = trace_call(
+                "py_flashinfer_mha:self.ragged_wrapper.run",
+                self.ragged_wrapper.run,
+                q,
+                k,
+                v,
+                return_lse=True,
+            )
 
         if kv_cache_write_op is not None:
-            kv_cache_write_op.forward(k, v, kv_cache)
+            trace_call(
+                "py_flashinfer_mha:kv_cache_write_op.forward",
+                kv_cache_write_op.forward,
+                k,
+                v,
+                kv_cache,
+            )
 
         # Paged FP8 defaults to unit scales and the output dtype from plan().
-        prefix_out, prefix_lse = self.prefix_paged_wrapper.run(
-            q, paged_kv_cache, return_lse=True
+        prefix_out, prefix_lse = trace_call(
+            "py_flashinfer_mha:self.prefix_paged_wrapper.run",
+            self.prefix_paged_wrapper.run,
+            q,
+            paged_kv_cache,
+            return_lse=True,
         )
-        merge_state_in_place(new_out, new_lse, prefix_out, prefix_lse)
+        trace_call(
+            "py_flashinfer_mha:merge_state_in_place",
+            merge_state_in_place,
+            new_out,
+            new_lse,
+            prefix_out,
+            prefix_lse,
+        )
         return new_out
 
 
@@ -742,11 +819,20 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
             token_per_block=attn_configs.kernel_tokens_per_block,
         )
         self.create_params(attn_inputs)
-        self.fmha_impl.prepare(attn_inputs)
+        trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
+        trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+            forbid_realloc=True,
+        )
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FlashInfer MLA attention parameters.
@@ -754,7 +840,10 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         Similar to MLA implementation, this creates and initializes the params
         that will be used for both FMHA and RoPE operations.
         """
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
         self.rope_params = self.fmha_params
         # Pass the shared params to all ops
         self.fmha_impl.set_params(self.fmha_params)
@@ -813,7 +902,9 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
         if self.need_rope_kv_cache and self.rope_impl is not None:
-            query, key, value = self.rope_impl.forward(qkv)
+            query, key, value = trace_call(
+                "py_flashinfer_mha:self.rope_impl.forward", self.rope_impl.forward, qkv
+            )
         else:
             query, key, value = self._split_qkv(qkv)
 
@@ -824,7 +915,13 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         value = quantize_to_fp8_if_needed(value, kv_dtype)
 
         if self.need_rope_kv_cache:
-            self.kv_cache_write_op.forward(key, value, kv_cache)
+            trace_call(
+                "py_flashinfer_mha:self.kv_cache_write_op.forward",
+                self.kv_cache_write_op.forward,
+                key,
+                value,
+                kv_cache,
+            )
 
         fmha_inputs = self._prepare_fmha_input(query, key, value)
 
@@ -834,7 +931,12 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         )
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(*fmha_inputs, kv_cache)
+        return trace_call(
+            "py_flashinfer_mha:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            *fmha_inputs,
+            kv_cache,
+        )
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -907,8 +1009,16 @@ class PyFlashinferMropePagedPrefillImpl(FMHAImplBase):
         self.fmha_impl = PyFlashinferPrefillPagedAttnOp(attn_configs, attn_inputs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_inputs = attn_inputs
-        self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+        )
+        self.rope_params = trace_call(
+            "py_flashinfer_mha:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -927,15 +1037,35 @@ class PyFlashinferMropePagedPrefillImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        query = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        query = trace_call(
+            "py_flashinfer_mha:self.rope_kvcache_impl.forward",
+            self.rope_kvcache_impl.forward,
+            qkv,
+            kv_cache,
+            self.rope_params,
+        )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(query, kv_cache)
+        return trace_call(
+            "py_flashinfer_mha:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            query,
+            kv_cache,
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
-        self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+            forbid_realloc=True,
+        )
+        new_rope_params = trace_call(
+            "py_flashinfer_mha:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         if new_rope_params.kv_cache_offset is not None:
             assert self.rope_params.kv_cache_offset is not None
             common.copy_kv_cache_offset(
@@ -972,9 +1102,17 @@ class PyFlashinferMropeRaggedPrefillImpl(PyFlashinferPrefillImplBase):
             head_size=attn_configs.size_per_head,
             token_per_block=attn_configs.kernel_tokens_per_block,
         )
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+        )
         self.kv_cache_write_op.set_params(self.fmha_params)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.rope_params = trace_call(
+            "py_flashinfer_mha:self.rope_kvcache_impl.prepare",
+            self.rope_kvcache_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -997,16 +1135,35 @@ class PyFlashinferMropeRaggedPrefillImpl(PyFlashinferPrefillImplBase):
         # CUDA13 rtp-kernel wheel.  Asking the fused op to do both returns the
         # expected BF16 Q/K/V but leaves the cache untouched.  Rotate first,
         # then use the same explicit writer as the regular FlashInfer path.
-        rotated_qkv = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
+        rotated_qkv = trace_call(
+            "py_flashinfer_mha:self.rope_kvcache_impl.forward",
+            self.rope_kvcache_impl.forward,
+            qkv,
+            None,
+            self.rope_params,
+        )
         query, key, value = self._split_qkv(rotated_qkv)
         kv_dtype = attn_kv_dtype(self.attn_configs)
         cache_key = quantize_to_fp8_if_needed(key, kv_dtype)
         cache_value = quantize_to_fp8_if_needed(value, kv_dtype)
-        self.kv_cache_write_op.forward(cache_key, cache_value, kv_cache)
+        trace_call(
+            "py_flashinfer_mha:self.kv_cache_write_op.forward",
+            self.kv_cache_write_op.forward,
+            cache_key,
+            cache_value,
+            kv_cache,
+        )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(query, key, value, kv_cache)
+        return trace_call(
+            "py_flashinfer_mha:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            query,
+            key,
+            value,
+            kv_cache,
+        )
 
     def support_cuda_graph(self) -> bool:
         return False
@@ -1042,7 +1199,9 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         # Single-stream flow: RoPE -> ragged attention -> KV write -> paged attention.
         # Hybrid always needs the new K/V for its ragged half.
         if self.need_rope_kv_cache and self.rope_impl is not None:
-            query, key, value = self.rope_impl.forward(qkv)
+            query, key, value = trace_call(
+                "py_flashinfer_mha:self.rope_impl.forward", self.rope_impl.forward, qkv
+            )
         else:
             query, key, value = self._split_qkv(qkv)
 
@@ -1053,7 +1212,9 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
 
         # Write new K/V after ragged attention and before paged attention.
         kv_cache_write_op = self.kv_cache_write_op if self.need_rope_kv_cache else None
-        result = self.fmha_impl.forward(
+        result = trace_call(
+            "py_flashinfer_mha:self.fmha_impl.forward",
+            self.fmha_impl.forward,
             query,
             key,
             value,
@@ -1158,7 +1319,10 @@ class PyFlashinferDecodeAttnOp(object):
             attn_q_dtype(attn_configs) if self.use_tensor_core else self.dtype
         )
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -1183,7 +1347,9 @@ class PyFlashinferDecodeAttnOp(object):
             last_page_len = self.fmha_params.paged_kv_last_page_len_d
             plan_kwargs = {}
 
-        self.decode_wrapper.plan(
+        trace_call(
+            "py_flashinfer_mha:self.decode_wrapper.plan",
+            self.decode_wrapper.plan,
             page_indptr,
             page_indice,
             last_page_len,
@@ -1213,7 +1379,9 @@ class PyFlashinferDecodeAttnOp(object):
         # their stale capacity sizes (MIN_CACHE_BATCH_SIZE), which corrupts
         # plan's batch size. Route tensor-core through the host fill.
         if attn_inputs.input_lengths.is_cuda and not self.use_tensor_core:
-            self.fmha_params.fill_params_mha_device(
+            trace_call(
+                "py_flashinfer_mha:self.fmha_params.fill_params_mha_device",
+                self.fmha_params.fill_params_mha_device,
                 _device_or(
                     attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
                 ),
@@ -1230,7 +1398,9 @@ class PyFlashinferDecodeAttnOp(object):
             block_id_host = attn_inputs.kv_cache_kernel_block_id
             if block_id_host is None or block_id_host.numel() == 0:
                 block_id_host = attn_inputs.kv_cache_kernel_block_id_device
-            self.fmha_params.fill_params(
+            trace_call(
+                "py_flashinfer_mha:self.fmha_params.fill_params",
+                self.fmha_params.fill_params,
                 _host_i32(attn_inputs.prefix_lengths),
                 _host_i32(attn_inputs.sequence_lengths),
                 _host_i32(attn_inputs.input_lengths),
@@ -1270,7 +1440,9 @@ class PyFlashinferDecodeAttnOp(object):
             block_id_host = attn_inputs.kv_cache_kernel_block_id
             if block_id_host is None or block_id_host.numel() == 0:
                 block_id_host = attn_inputs.kv_cache_kernel_block_id_device
-            self.fmha_params.fill_params(
+            trace_call(
+                "py_flashinfer_mha:self.fmha_params.fill_params",
+                self.fmha_params.fill_params,
                 _host_i32(attn_inputs.prefix_lengths),
                 _host_i32(attn_inputs.sequence_lengths),
                 _host_i32(attn_inputs.input_lengths),
@@ -1318,7 +1490,12 @@ class PyFlashinferDecodeAttnOp(object):
                 self.head_dim_qk,
             )
         # Decode FP8 defaults to unit scales and the output dtype from plan().
-        return self.decode_wrapper.run(q, paged_kv_cache)
+        return trace_call(
+            "py_flashinfer_mha:self.decode_wrapper.run",
+            self.decode_wrapper.run,
+            q,
+            paged_kv_cache,
+        )
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
@@ -1337,17 +1514,32 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
 
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_params = trace_call(
+            "py_flashinfer_mha:rtp_llm_ops.FlashInferMlaAttnParams",
+            rtp_llm_ops.FlashInferMlaAttnParams,
+        )
         self.fmha_impl.set_params(self.fmha_params)
-        self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_impl.prepare(attn_inputs)
+        trace_call(
+            "py_flashinfer_mha:self.fmha_impl.prepare",
+            self.fmha_impl.prepare,
+            attn_inputs,
+        )
+        self.rope_params = trace_call(
+            "py_flashinfer_mha:self.rope_impl.prepare",
+            self.rope_impl.prepare,
+            attn_inputs,
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
         # Update rope params for correct position encoding during cuda graph replay
-        new_rope_params = self.rope_impl.prepare(attn_inputs)
+        new_rope_params = trace_call(
+            "py_flashinfer_mha:self.rope_impl.prepare",
+            self.rope_impl.prepare,
+            attn_inputs,
+        )
         common.copy_kv_cache_offset(
             self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
         )
@@ -1369,7 +1561,13 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
-            qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+            qkv = trace_call(
+                "py_flashinfer_mha:self.rope_impl.forward",
+                self.rope_impl.forward,
+                qkv,
+                kv_cache,
+                self.rope_params,
+            )
 
         # Apply write cache store if needed
         common.apply_write_cache_store(
@@ -1377,4 +1575,10 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         )
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+        return trace_call(
+            "py_flashinfer_mha:self.fmha_impl.forward",
+            self.fmha_impl.forward,
+            qkv,
+            kv_cache,
+            self.fmha_params,
+        )

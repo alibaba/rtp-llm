@@ -36,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _GROUP_SIZE = 128
 _NORM_EPS = 1.0e-6
@@ -356,7 +357,9 @@ def rmsnorm_gated_fp8_quant(
     if out_q is None:
         out_q = torch.empty((m, n), device=x.device, dtype=_FP8_DTYPE)
     if out_scale is None:
-        out_scale = make_ue8m0_scale_like(x.shape, device=x.device, group_size=group_size)
+        out_scale = make_ue8m0_scale_like(
+            x.shape, device=x.device, group_size=group_size
+        )
     if m == 0:
         return out_y, out_q, out_scale
 
@@ -407,7 +410,10 @@ def rmsnorm_gated_fp8_quant(
         out_scale.stride(1),
     )
     if variant == "tile":
-        _rmsnorm_gated_fp8_quant_tile_kernel[(m,)](
+        trace_triton(
+            "rmsnorm_gated_fp8_quant:_rmsnorm_gated_fp8_quant_tile_kernel[m,]",
+            _rmsnorm_gated_fp8_quant_tile_kernel,
+            (m,),
             x,
             z,
             weight,
@@ -430,7 +436,10 @@ def rmsnorm_gated_fp8_quant(
             **common,
         )
     else:
-        _rmsnorm_gated_fp8_quant_kernel[(num_packed, triton.cdiv(m, block_m))](
+        trace_triton(
+            "rmsnorm_gated_fp8_quant:_rmsnorm_gated_fp8_quant_kernel[num_packed, triton.cdiv(m, block_m)]",
+            _rmsnorm_gated_fp8_quant_kernel,
+            (num_packed, triton.cdiv(m, block_m)),
             *args,
             N=n,
             NUM_GROUPS=num_groups,

@@ -42,3 +42,20 @@ py_test (
     env = {"GPU_COUNT": "1"},
     exec_properties = {'gpu':'A10', 'gpu_count':'1'},
 )
+
+# Metadata tests need no RTP native extension or model weights.
+py_test(
+    name = "prefill_input_log_test",
+    srcs = ["prefill_input_log_test.py"],
+    data = ["//rtp_llm/models_py:prefill_input_log_test_sources"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "prefill_input_log_gpu_test",
+    srcs = ["prefill_input_log_gpu_test.py"],
+    data = ["//rtp_llm/models_py:prefill_input_log_test_sources"],
+    deps = ["//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)

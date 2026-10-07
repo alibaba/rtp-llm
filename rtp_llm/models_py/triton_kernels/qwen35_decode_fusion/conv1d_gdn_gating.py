@@ -32,6 +32,7 @@ from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
     is_decode_fusion_enabled,
 )
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Match causal_conv1d_update decode tile.
 _BLOCK_N = 256
@@ -462,7 +463,9 @@ def fused_conv1d_update_gdn_gating(
         g = g_out
     beta_dtype = torch.float32 if is_amd else b.dtype
     if beta_out is None:
-        beta_output = torch.empty(1, batch, num_heads, dtype=beta_dtype, device=b.device)
+        beta_output = torch.empty(
+            1, batch, num_heads, dtype=beta_dtype, device=b.device
+        )
     else:
         beta_output = beta_out
     if num_warps is None:
@@ -481,7 +484,10 @@ def fused_conv1d_update_gdn_gating(
     def grid(meta):
         return (batch, triton.cdiv(dim, meta["BLOCK_N"]))
 
-    _fused_conv1d_update_gdn_gating_kernel[grid](
+    trace_triton(
+        "conv1d_gdn_gating:_fused_conv1d_update_gdn_gating_kernel[grid]",
+        _fused_conv1d_update_gdn_gating_kernel,
+        grid,
         x,
         weight,
         conv_state,

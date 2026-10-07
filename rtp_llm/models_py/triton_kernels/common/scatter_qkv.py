@@ -1,9 +1,3 @@
-# Adapted from SGLang `gdn_fused_proj.py:_scatter_fused_proj_kernel`.
-# Splits a packed [Q|K|V] tensor into three contiguous buffers shaped as
-# (1, M, n_heads, head_dim), avoiding the .view() -> .contiguous() copy that
-# torch.split + view triggers when the slice stride doesn't match the target
-# contig stride.
-
 from typing import Tuple
 
 import torch
@@ -11,6 +5,13 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
+from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+
+# Adapted from SGLang `gdn_fused_proj.py:_scatter_fused_proj_kernel`.
+# Splits a packed [Q|K|V] tensor into three contiguous buffers shaped as
+# (1, M, n_heads, head_dim), avoiding the .view() -> .contiguous() copy that
+# torch.split + view triggers when the slice stride doesn't match the target
+# contig stride.
 
 
 @triton.jit
@@ -84,7 +85,10 @@ def scatter_qkv(
 
     BLK_QK = triton.next_power_of_2(k_dim)
     BLK_V = triton.next_power_of_2(v_dim)
-    _scatter_qkv_kernel[(M,)](
+    trace_triton(
+        "scatter_qkv:_scatter_qkv_kernel[M,]",
+        _scatter_qkv_kernel,
+        (M,),
         mixed_qkv,
         q,
         k,
