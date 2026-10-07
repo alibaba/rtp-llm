@@ -27,11 +27,25 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcForwarder {
-
     static final int MAX_FORWARD_HOPS = 1;
+
+    /**
+     * In-flight forward byte budget (case55 master direct-buffer OOM root cause,
+     * diagnostic 92752, 2026-10-08): forwardScheduleToMaster re-serializes the FULL
+     * inbound Schedule payload (up to 512MiB) into Netty direct buffers on the
+     * flexlb-grpc-executor thread. Under the case55 ramp the follower forwards
+     * saturated 8.58GB of pinned serialized payloads with no bound (the dispatch
+     * byte budget only covers the master->engine EnqueueBatch path). This budget
+     * bounds total concurrently-forwarded wire bytes; overflow returns a typed
+     * failure instead of exhausting MaxDirectMemorySize. Default 4 GiB, override
+     * via -Dflexlb.forward.max-inflight-bytes.
+     */
+    private final long maxForwardInflightBytes;
+    private final AtomicLong forwardInflightBytes = new AtomicLong(0L);
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final ConfigService configService;
@@ -51,6 +65,13 @@ public class FlexlbGrpcForwarder {
         this.engineHealthReporter = engineHealthReporter;
         this.eventLoopGroup = eventLoopGroup;
         this.executor = executor;
+        this.maxForwardInflightBytes = resolveMaxForwardInflightBytes();
+        Logger.info("FlexLB forwarder in-flight byte budget: {} bytes", maxForwardInflightBytes);
+    }
+
+    private static long resolveMaxForwardInflightBytes() {
+        long configured = Long.getLong("flexlb.forward.max-inflight-bytes", 0L);
+        return configured > 0L ? configured : 4L * 1024 * 1024 * 1024;
     }
 
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
@@ -71,6 +92,21 @@ public class FlexlbGrpcForwarder {
             return CompletableFuture.completedFuture(MasterForwardResult.noMaster());
         }
 
+        // Byte-budget admission BEFORE any re-serialization: the forwarded
+        // Schedule re-serializes the full inbound payload into direct buffers;
+        // without this bound the follower pinned ~8.58GB under the case55 ramp
+        // (diagnostic 92752). getSerializedSize is protobuf-cached (O(1)).
+        long forwardBytes = request.getSerializedSize();
+        if (!tryChargeForwardBytes(forwardBytes)) {
+            Logger.warn(
+                    "event=flexlb_forward_budget_exhausted request_id={} bytes={} budget={} inflight={}",
+                    request.getRequestId(), forwardBytes, maxForwardInflightBytes,
+                    forwardInflightBytes.get());
+            reportForwardResult(ipOf(masterHostIpPort), "FORWARD_BUDGET_EXHAUSTED");
+            return CompletableFuture.completedFuture(MasterForwardResult.failed(
+                    "FORWARD_BUDGET_EXHAUSTED", masterHostIpPort));
+        }
+
         String masterIp = ipOf(masterHostIpPort);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB forwardedRequest =
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
@@ -80,6 +116,7 @@ public class FlexlbGrpcForwarder {
             rpcFuture = FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort))
                     .schedule(forwardedRequest);
         } catch (RuntimeException error) {
+            releaseForwardBytes(forwardBytes);
             return CompletableFuture.completedFuture(forwardFailure(
                     request.getRequestId(), guard, error));
         }
@@ -91,6 +128,7 @@ public class FlexlbGrpcForwarder {
                         @Override
                         public void onSuccess(
                                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+                            releaseForwardBytes(forwardBytes);
                             if (response == null) {
                                 result.complete(MasterForwardResult.failed(
                                         "MISSING_RESPONSE", masterHostIpPort));
@@ -103,12 +141,14 @@ public class FlexlbGrpcForwarder {
 
                         @Override
                         public void onFailure(Throwable error) {
+                            releaseForwardBytes(forwardBytes);
                             result.complete(forwardFailure(
                                     request.getRequestId(), guard, error));
                         }
                     },
                     Runnable::run);
         } catch (RuntimeException callbackRegistrationError) {
+            releaseForwardBytes(forwardBytes);
             rpcFuture.cancel(true);
             result.complete(forwardFailure(
                     request.getRequestId(), guard, callbackRegistrationError));
@@ -123,6 +163,23 @@ public class FlexlbGrpcForwarder {
             }
         });
         return result;
+    }
+
+    private boolean tryChargeForwardBytes(long bytes) {
+        long current;
+        long next;
+        do {
+            current = forwardInflightBytes.get();
+            next = current + bytes;
+            if (next > maxForwardInflightBytes) {
+                return false;
+            }
+        } while (!forwardInflightBytes.compareAndSet(current, next));
+        return true;
+    }
+
+    private void releaseForwardBytes(long bytes) {
+        forwardInflightBytes.addAndGet(-bytes);
     }
 
     /**

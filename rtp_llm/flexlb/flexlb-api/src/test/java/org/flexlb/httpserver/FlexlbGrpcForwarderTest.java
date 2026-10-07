@@ -410,6 +410,66 @@ class FlexlbGrpcForwarderTest {
         assertEquals(1, reparsed.getForwardHop());
     }
 
+    /**
+     * case55 diagnostic 92752: the follower's forwardScheduleToMaster re-serializes
+     * the full inbound Schedule payload into Netty direct buffers with no bound —
+     * 8.58GB pinned, master JVM direct OOM. The in-flight forward byte budget must
+     * (a) reject an oversize forward BEFORE any RPC/serialization, (b) return a
+     * typed failure the caller maps to a capacity response, and (c) leave no
+     * budget residue (charge fully released on every terminal path).
+     */
+    @Test
+    void forwardByteBudgetRejectsOversizeForwardBeforeRpcAndReleasesFully()
+            throws Exception {
+        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
+        // Shrink the budget below the serialized request size via reflection
+        // (the production default is 4GiB; the constructor path is not injectable
+        // without widening the API, and this test only needs the guard math).
+        java.lang.reflect.Field budget =
+                FlexlbGrpcForwarder.class.getDeclaredField("maxForwardInflightBytes");
+        budget.setAccessible(true);
+        budget.setLong(forwarder, 8L);
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB big =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(21L)
+                        // any non-trivial payload larger than the 8-byte budget
+                        .setVitOnly(false)
+                        .build();
+        assertTrue(big.getSerializedSize() > 8,
+                "request must exceed the shrunken budget; got " + big.getSerializedSize());
+
+        FlexlbGrpcForwarder.MasterForwardResult rejected =
+                await(forwarder.forwardScheduleToMaster(big));
+        assertTrue(rejected.masterFound());
+        assertEquals("FORWARD_BUDGET_EXHAUSTED", rejected.failure());
+        assertTrue(channels(forwarder).isEmpty(),
+                "no channel/RPC may be created for a budget-rejected forward");
+        verify(reporter).reportForwardToMasterResult("10.0.0.2", "FORWARD_BUDGET_EXHAUSTED");
+
+        // Charge release: a failed RPC (channel throws) must return the budget
+        // so a later small forward is admitted.
+        ManagedChannel channel = mock(ManagedChannel.class);
+        when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class)))
+                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        channels(forwarder).put("10.0.0.2:7003", channel);
+        FlexlbGrpcForwarder.MasterForwardResult failed =
+                await(forwarder.forwardScheduleToMaster(request(23L)));
+        assertTrue(failed.masterFound());
+        assertEquals("GRPC_FAILED", failed.failure());
+
+        java.lang.reflect.Field inflight =
+                FlexlbGrpcForwarder.class.getDeclaredField("forwardInflightBytes");
+        inflight.setAccessible(true);
+        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong) inflight.get(forwarder)).get(),
+                "budget must be fully released after terminal forward outcomes");
+
+        forwarder.shutdown();
+    }
+
     private static FlexlbGrpcForwarder forwarder(
             LBStatusConsistencyService consistency,
             EngineHealthReporter reporter) {
