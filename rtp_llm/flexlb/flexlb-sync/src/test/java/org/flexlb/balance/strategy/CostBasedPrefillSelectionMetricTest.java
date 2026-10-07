@@ -138,7 +138,7 @@ class CostBasedPrefillSelectionMetricTest {
             verify(reporter).reportCacheHitMetrics(
                     RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
             verify(reporter).reportKvcmSelectedMatch(
-                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L, true);
+                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L);
         }
     }
 

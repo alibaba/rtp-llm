@@ -8,7 +8,10 @@ import org.flexlb.discovery.ServiceDiscoveryType;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -203,6 +206,36 @@ class OptimizerAddressResolverTest {
         resolver.shutdown();
         resolver.start();
         verify(serviceDiscovery, never()).shutdown();
+    }
+
+    @Test
+    void concurrentStartsScheduleOnePollAndShutdownPreventsRestart() throws Exception {
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        OptimizerAddressResolver resolver = new OptimizerAddressResolver(
+                discovery, endpoint(ServiceDiscoveryType.VIPSERVER), PORT, POLL_INTERVAL_MS);
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ReflectionTestUtils.setField(resolver, "refreshScheduler", scheduler);
+        try (var executor = Executors.newFixedThreadPool(4)) {
+            List<Future<?>> starts = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                starts.add(executor.submit(resolver::start));
+            }
+            for (var start : starts) {
+                start.get(2, TimeUnit.SECONDS);
+            }
+            verify(scheduler).scheduleWithFixedDelay(
+                    any(Runnable.class), eq(0L), eq(POLL_INTERVAL_MS), eq(TimeUnit.MILLISECONDS));
+
+            resolver.shutdown();
+            resolver.start();
+
+            verify(scheduler).scheduleWithFixedDelay(
+                    any(Runnable.class), eq(0L), eq(POLL_INTERVAL_MS), eq(TimeUnit.MILLISECONDS));
+            verify(scheduler).shutdownNow();
+            verifyNoInteractions(discovery);
+        } finally {
+            resolver.shutdown();
+        }
     }
 
     @Test

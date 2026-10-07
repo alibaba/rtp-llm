@@ -233,6 +233,9 @@ public class CacheMetricsReporter {
                                         long localMatchTokens,
                                         long globalMatchTokens,
                                         long inputTokens) {
+        if (roleType == null) {
+            return;
+        }
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
         if (inputTokens > 0L) {
             monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);

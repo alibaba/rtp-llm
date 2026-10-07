@@ -264,10 +264,8 @@ final class DecodeState {
         String requestId = reservation.requestId();
         DecodeRequestState current = requestState(requestId);
         boolean exact = isExactReservation(current, reservation);
-        if (exact && current.returnedPreemptionToken != 0L) {
-            rollbackReturnedPreemptionLocked(current);
-        }
         boolean protectedOwner = hasExactIncomingAttemptLocked(reservation)
+                && (!exact || current.returnedPreemptionToken == 0L)
                 || exact && (current.confirmed() || current.waitingForWorkerFinishedReport
                         || current.engineLifecycleOwned || current.hasProtocolOwner());
         if (protectedOwner) {
@@ -282,6 +280,11 @@ final class DecodeState {
             if (reason == ReleaseReason.LOCAL_ROLLBACK) {
                 throw localReleaseInvariant(reservation, "dispatch permit belongs to another reservation");
             }
+            return false;
+        }
+        if (reason == ReleaseReason.LOCAL_ROLLBACK && current.returnedPreemptionToken != 0L) {
+            rollbackReturnedPreemptionLocked(current);
+        } else if (current.returnedPreemptionToken != 0L) {
             return false;
         }
         if (!removeShadowExactLocked(requestId, current)) {
@@ -650,11 +653,7 @@ final class DecodeState {
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
                 permit.reservation.engineLifecycleOwned = true;
-                if (permit.reservation.returnedPreemptionToken != 0L) {
-                    preemptionAttempts.remove(
-                            permit.reservation.returnedPreemptionToken);
-                    permit.reservation.returnedPreemptionToken = 0L;
-                }
+                clearReturnedPreemptionAttemptLocked(permit.reservation);
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }
@@ -1033,6 +1032,13 @@ final class DecodeState {
         admissionVersion.incrementAndGet();
     }
 
+    private void clearReturnedPreemptionAttemptLocked(DecodeRequestState incoming) {
+        if (incoming.returnedPreemptionToken != 0L) {
+            preemptionAttempts.remove(incoming.returnedPreemptionToken);
+            incoming.returnedPreemptionToken = 0L;
+        }
+    }
+
     boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
         java.util.Objects.requireNonNull(update, "update");
         admissionLock.lock();
@@ -1372,11 +1378,11 @@ final class DecodeState {
                     "Status observation belongs to another Decode generation");
         }
         List<WorkerStatusFact> facts = new ArrayList<>(
-                observation.runningTasks().size());
+                observation.activeTasks().size());
         admissionLock.lock();
         try {
             for (WorkerStatus.TaskObservation task
-                    : observation.runningTasks().values()) {
+                    : observation.activeTasks().values()) {
                 ReservationHandle active = workerStatusHandleLocked(
                         task.requestId());
                 if (active != null) {
@@ -1468,6 +1474,9 @@ final class DecodeState {
             if (current != null && current.settledAtMs != 0L) {
                 continue;
             }
+            if (current != null) {
+                clearReturnedPreemptionAttemptLocked(current);
+            }
             ReservationHandle terminal = workerStatusHandleLocked(requestId);
             confirmedNow.remove(requestId);
             PreemptionClaim claim = preemptionClaim(requestId);
@@ -1546,6 +1555,9 @@ final class DecodeState {
                 ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING
                 : DecodeTaskPhase.RUNNING;
         DecodeRequestState tracked = requestState(task.requestId());
+        if (tracked != null) {
+            clearReturnedPreemptionAttemptLocked(tracked);
+        }
         if (tracked == null) {
             decodeRequests.put(task.requestId(),
                     DecodeRequestState.untrackedConfirmed(

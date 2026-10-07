@@ -296,7 +296,9 @@ public final class RequestSlot {
             }
         }
         if (!finished) { expirationTimer.attachInactivityDeadline(this); }
-        terminalCleanup.submitTerminal(action);
+        if (action != null) {
+            terminalCleanup.submitTerminal(action);
+        }
     }
 
     void recordEncoderRetirement(EncoderEndpoint source) {

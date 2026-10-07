@@ -47,14 +47,14 @@ class RoleAddrProtocolCompatibilityTest {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
         for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             EngineRpcService.RoleAddrPB payload = EngineRpcService.RoleAddrPB.newBuilder()
-                    .setRole(RoleTypeProtoConverter.toLegacyProto(role))
+                    .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
                     .setRoleStr(role.getCode())
                     .setIp("127.0.0.1")
                     .setGrpcPort(9000)
                     .build();
 
             DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
-            assertEquals(RoleTypeProtoConverter.toLegacyProto(role).getNumber(),
+            assertEquals(RoleTypeProtoConverter.toRoleAddrProto(role).getNumber(),
                     ((Descriptors.EnumValueDescriptor) oldReader.getField(
                     legacy.findFieldByNumber(1))).getNumber());
         }
@@ -69,7 +69,7 @@ class RoleAddrProtocolCompatibilityTest {
         assertEquals(4, EngineRpcService.RoleAddrPB.RoleType.FRONTEND.getNumber());
 
         EngineRpcService.RoleAddrPB addr = EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(RoleType.ENCODER))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(RoleType.ENCODER))
                 .setRoleStr("ENCODER")
                 .build();
 
@@ -87,7 +87,7 @@ class RoleAddrProtocolCompatibilityTest {
             DynamicMessage oldWriter = DynamicMessage.newBuilder(legacy)
                     .setField(legacy.findFieldByNumber(1),
                             legacy.findEnumTypeByName("RoleType")
-                                    .findValueByNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()))
+                                    .findValueByNumber(RoleTypeProtoConverter.toRoleAddrProto(role).getNumber()))
                     .build();
             EngineRpcService.RoleAddrPB parsed =
                     EngineRpcService.RoleAddrPB.parseFrom(oldWriter.toByteArray());
@@ -240,7 +240,7 @@ class RoleAddrProtocolCompatibilityTest {
         for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             builder.addValue(DescriptorProtos.EnumValueDescriptorProto.newBuilder()
                     .setName(prefix + role.name())
-                    .setNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()));
+                    .setNumber(RoleTypeProtoConverter.toRoleAddrProto(role).getNumber()));
         }
         return builder.build();
     }

@@ -9,7 +9,8 @@ import org.slf4j.LoggerFactory;
  */
 public final class Logger {
 
-    private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
+    public static final String LOGGER_NAME = "flexlbLogger";
+    private static final org.slf4j.Logger log = LoggerFactory.getLogger(LOGGER_NAME);
 
     private Logger() {
     }
@@ -54,6 +55,26 @@ public final class Logger {
 
     public static void trace(String message, Throwable throwable) {
         log.trace(message, throwable);
+    }
+
+    public static void trace(String format, Object... arguments) {
+        log.trace(format, arguments);
+    }
+
+    public static void debug(String format, Object... arguments) {
+        log.debug(format, arguments);
+    }
+
+    public static void info(String format, Object... arguments) {
+        log.info(format, arguments);
+    }
+
+    public static void warn(String format, Object... arguments) {
+        log.warn(format, arguments);
+    }
+
+    public static void error(String format, Object... arguments) {
+        log.error(format, arguments);
     }
 
     public static void debug(String message) {

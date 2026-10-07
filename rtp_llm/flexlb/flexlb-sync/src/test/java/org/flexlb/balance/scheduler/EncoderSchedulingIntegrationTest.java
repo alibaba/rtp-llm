@@ -102,7 +102,7 @@ class EncoderSchedulingIntegrationTest {
         WorkerStatus.StatusObservation observation = mock(WorkerStatus.StatusObservation.class);
         when(prepared.observation()).thenReturn(observation);
         when(observation.alive()).thenReturn(true);
-        when(observation.runningTasks()).thenReturn(Map.of());
+        when(observation.activeTasks()).thenReturn(Map.of());
         when(observation.finishedTasks()).thenReturn(Map.of("1", finished));
         first.applyPreparedStatus(status, prepared).run();
 
@@ -145,7 +145,7 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningQueryLen()).thenReturn(0L);
         WorkerStatus.StatusObservation observation = mock(WorkerStatus.StatusObservation.class);
         when(observation.owner()).thenReturn(status);
-        when(observation.runningTasks()).thenReturn(Map.of());
+        when(observation.activeTasks()).thenReturn(Map.of());
         encoder.observeStatusHeartbeat(status, observation).run();
 
         assertEquals("encoder", waiting.get(2, TimeUnit.SECONDS)
@@ -284,7 +284,7 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningQueryLen()).thenReturn(1L);
         WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
         when(running.owner()).thenReturn(status);
-        when(running.runningTasks()).thenReturn(Map.of("7", actual));
+        when(running.activeTasks()).thenReturn(Map.of("7", actual));
         encoder.observeStatusHeartbeat(status, running).run();
 
         assertEquals(0, encoder.pendingEncoderRequestCount());

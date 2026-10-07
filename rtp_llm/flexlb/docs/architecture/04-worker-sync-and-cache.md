@@ -22,6 +22,12 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
+BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
+并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
+越界或不一致的 ID 返回 INVALID_REQUEST。整数兼容读取仍保留，大于 JS 精确整数范围的 ID
+通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
+NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
+对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。
 
 ### 调度拓扑
 
@@ -41,8 +47,19 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
 完成，也不会更新快照。成功的非空结果替换快照，允许正常的部分缩容与节点更换。
 
-`EngineAddressResolver` 的定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
-避免关闭现有 channel 或清除已有 worker cache。真实 worker 失效 由健康探测处理。
+`EngineAddressResolver` 在构造阶段同步查询所有 Endpoint。每个查询必须成功且返回非空机器列表，
+全部检查通过后才发布初始地址并注册地址监听；任一查询失败或返回空/null 时抛出异常，阻止 Master 启动。
+定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
+避免关闭现有 channel 或清除已有 worker cache。无论空列表持续多久，都不把它作为撤销通知；
+真实 worker 失效由健康探测处理。
+
+Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不覆盖旧地址。
+
+`OptimizerClient` 保留可显式调用的 trace 接口，当前调度链路没有调用该接口。初始化仅注册指标，
+首次具备 block keys 与有效 namespace 的 `traceQuery` 才启动 `OptimizerAddressResolver`；
+重复调用复用同一发现任务。动态发现由后台轮询更新地址快照，首次快照尚未就绪时跳过本次 trace。
+关闭后不再启动发现；关闭仅停止自有任务，不关闭共享的 `ServiceDiscovery`。trace 启动或发送
+失败仅记录日志和指标，不改变调度结果。
 
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
 统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
@@ -66,7 +83,7 @@ worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，�
 | raw engine index | `engineIndex` | 逻辑引擎序号 |
 | physical IP-port | `ip:port` | 共享 frontend 身份、发现侧 cache 退役匹配 |
 | logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
-| metric IP-port | N=1 为 `ip:port`；N>1 为 `ip:port@index` | 可从 `WorkerStatus` / `ServerStatus` 归属的 `engineIp` 指标标签 |
+| metric IP-port | N=1 为 `ip:port`；N>1 为 `ip:port@index` | Encoder、step、阶段耗时与缓存预测对照的 `engineIp` 标签 |
 
 `WorkerHost` 在服务发现展开时持有该 identity；N=1 的内部 logical identity 仍保留 `@0`。仅在
 metrics 边界通过 `WorkerStatus.getMetricIpPort()`（或 `ServerStatus` 对应方法）选择兼容地址，
@@ -81,11 +98,13 @@ Encoder 使用常规 `GetWorkerStatus`，角色字符串为 `ENCODER`，`RoleTyp
 任务使本地待观察并发与引擎并发对账，完成任务中的错误码决定完成或失败。当前
 PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `WorkerStatusPB` 由 `EngineStatusConverter.convertToStatusObservation` 转成不可变的
-`WorkerStatus.StatusObservation`。其中 `runningTasks` 对应引擎的 `running_task_info`，
+`WorkerStatus.StatusObservation`。其中 `activeTasks` 对应引擎的 `running_task_info`，
 保存所有尚未完成的任务，包括 `PENDING`、`RECEIVED`、`KV_ALLOCATED` 和 `RUNNING` 阶段；
 `finishedTasks` 单独保存完成上报。任务按字符串 request ID 索引，并保留各自的 `phase`。
-纯运行任务需按 `phase == RUNNING` 筛选，不能用 `runningTasks.size()` 代替；
+纯运行任务需按 `phase == RUNNING` 筛选，不能用 `activeTasks.size()` 代替；
 `runningQueryLen` 与 `waitingQueryLen` 则直接保留引擎上报的数量。
+`TaskTelemetry` 保留可选的 `completed_prefill_tokens`、`remaining_prefill_tokens` 和
+`last_completed_prefill_step_id`；未上报时为 `null`，与明确上报的 `0` 区分。
 其余字段包括 `alive`、`available_concurrency`、`status_version`、`step_latency_ms`、
 `iterate_count`、dp/tp size、KV cache 容量、`block_size`、`block_hash_lookahead_tokens`、
 `cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
@@ -102,22 +121,19 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 ### WorkerStatus 的本地预测与对账
 
-`WorkerStatus`（flexlb-common）的原子性是**字段级**（AtomicLong/AtomicBoolean +
-ConcurrentHashMap），不是快照级：
+`WorkerStatus` 将引擎字段与已确认的两个版本游标保存在不可变的
+`CommittedWorkerStatus` 中，状态事务完成后一次发布。读取同一快照不会混用不同轮次的任务表和游标。
 
-- 路由选中 → `putLocalTask()`：任务记为 IN_TRANSIT，`runningQueueTime` 加上估算 prefill
-  时间，`availableKvCacheTokens`/`usedKvCacheTokens` 预扣 `inputLength − prefixLength`；
-- 引擎状态到达 → `updateTaskStates()` 状态机对账：IN_TRANSIT→CONFIRMED→RUNNING→FINISHED，
-  超时未确认判 LOST；`updateKvCacheTokens()` 在 `getAndSet` 引擎值前**加回在途任务的
-  cache-miss 部分**，避免双重计数。
-- 状态转变耗时：`updateTaskStates()` 顺带产出 `TaskStateUpdateResult` 里的延迟列表——
-  FlexLB 观测值（dispatch→waiting confirm、waiting confirm→running）与引擎侧真实值
-  （received→waiting、waiting→running，取自 TaskInfoPB 的 `request_received_time_ms`/
-  `waiting_entered_time_ms`/`running_entered_time_ms`，`0` 视为未知跳过），由
-  `GrpcWorkerStatusRunner` 分别上报供对账。
-- `ExpirationCleaner`（`@Scheduled(fixedRate=3000)`）：移除 `statusLastUpdateTime` 超过
-  3s 的 worker；按 `taskConfirmTimeoutMs`（默认 300,000ms）清理确认超时/LOST 任务并出
-  pv 日志。
+本地预留由 `PrefillState` / `DecodeState` 管理，与引擎快照分开：路由先登记请求与预留资源，
+派发后等待引擎确认；有效 WorkerStatus 把同一请求预留转换为引擎已接收状态，避免重复计入容量。
+完成上报按请求与 endpoint generation 归属交给调度器清理。Decode RETURN 抢占的 incoming
+在引擎确认或首次 Finished 上报后清除本地可回滚记录，victim 的声明与 KV hold 继续等待其完成证据。
+
+`EngineHealthReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
+及执行时间；时间戳 `0` 表示未知并跳过，但合法耗时 `0` 可以上报。
+阶段耗时取 WorkerStatus 携带的引擎时间戳，不使用 Master 首次探测到状态的时间。
+即使轮询跳过中间阶段，完成任务包含完整时间戳时仍能计算该阶段耗时。
+请求超时与清理由请求生命周期和 endpoint 状态管理，见 [请求生命周期](02-queue-scheduling.md)。
 
 ## Cache 状态同步（LOCAL_SYNC 路径，仅 KVCM 关闭时）
 
@@ -165,11 +181,17 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   映射到 PB 的 `enable_p2p = 8`（bool）。PB 与已部署 KVCM 的
   `alibaba/tair-kvcache@f9196aaff4f0dad3520b9523ae55721eb4955b2f` 保持一致。
   PB 不再声明 `p2p_host_count`、`p2p_1_fetch`、`p2p_1_total_match`；返回结果只消费 `local/global`。
-  查询失败重试至 `maxQueryRetryCount`。
+  查询失败重试至 `maxQueryRetryCount`。一次主查询及其所有重试共享同一个绝对 gRPC Deadline，
+  总等待预算为 `requestTimeoutMs`（默认 500ms），重试不重新增加完整超时；预算耗尽后直接进入
+  查询失败/本地兜底路径。主查询仍同步等待应答，异步改造不包含在这一预算限制中。
+  `KvcmGrpcClient` 与 `KvcmMetaServiceClient` 各自关闭自己的后台任务和通道，前者不负责关闭注入的后者。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
-  `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；
-  预热期（warmup）失败忽略。健康变化通知监听者。
+  `queryFailureThreshold(10)` 判不健康。连续 `recoverySuccessThreshold(3)` 次心跳成功或查询
+  成功均可恢复，两种成功计数独立，不混合累加；失败会重置恢复成功计数。
+  心跳与查询并发更新使用原子计数和状态 CAS，不做串行化；并发完成时允许计数和健康判断
+  短暂偏差，后续查询或心跳继续更新，周期心跳持续通知最新健康状态。
+  降级后没有查询流量时仍依赖心跳恢复。预热期（warmup）失败忽略。健康变化通知监听者。
 - 参数热更新：`CacheMatchConfiguration` 注册 `ConfigService` 更新监听器，用 volatile 字段发布
   最新的 `KvcmCacheMatchingConfig`；`KvcmGrpcClient` 与 `KvcmLeaderResolver` 不再缓存构造期快照，
   因此 `requestTimeoutMs`、`maxQueryRetryCount`、健康阈值与三个查询参数在更新后即时生效。
@@ -186,8 +208,13 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
   `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
   `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
-  达到上限拒绝新映射；daemon 清理线程每 10s 增量扫描。
+  达到上限拒绝新映射。启动时要求 `0 < minimumTtlMs <= ttlMs`，压力比例为 `[0, 1]`
+  内的有限值；比例为 1 时，仅在达到容量上限后使用最小 TTL。
+  daemon 清理线程每 10s 检查用量并分批清理，用量达到 90% 时改为全量扫描；请求写入
+  也可异步触发高水位扫描，但两次全量扫描至少间隔 10s。关闭索引时中断清理线程，
+  扫描循环检测关闭和中断状态。
 - 匹配时对每个 worker 的命中块数**减去其 `cacheMatchRollbackBlocks`**（下限 0）。
+- 主路由和故障降级直接查内存索引；KVCM 影子对照使用异步查询，不让主路由等待影子任务的队列。
 - `LocalStandbyComparisonService`：KVCM 为主时持续影子预测，与引擎实际命中
   （`CacheHitFeedback`）对比出 delta 指标——failover 前即可评估兜底质量。
 
@@ -198,7 +225,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 1. KVCM 关闭 → LOCAL_SYNC。
 2. KVCM 开启：`CacheMatchFailoverManager.activeSource()` 为 LOCAL_STANDBY → 查兜底
    （指标 `standby_fallback{active_source}`）。
-3. 否则查 KVCM；成功时同步做一次 standby 影子预测记录；**内部重试耗尽后查询抛异常时当前请求同步降级
+3. 否则查 KVCM；成功时异步做 standby 影子预测；**内部重试耗尽后查询抛异常时当前请求同步降级
    查 standby，但 active source 保持 KVCM**（`standby_fallback{kvcm_query_failure}`）。KVCM gRPC client 同时报告
    `app.cache.kvcm.query.failure.qps`。
    Local Standby 的结果登记为预测；预测结果与选定 Worker 齐备时由 Local Standby 组件上报该 Worker 的预测命中值。有效的 engine feedback

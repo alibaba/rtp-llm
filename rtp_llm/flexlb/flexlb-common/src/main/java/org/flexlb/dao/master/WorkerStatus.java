@@ -121,11 +121,17 @@ public class WorkerStatus {
                             task.getLastPrefillStepId(),
                             task.getPrefillStepCount(),
                             task.getPrefillNonfinalChunkTokensMin(),
-                            task.getPrefillNonfinalChunkTokensMax()));
+                            task.getPrefillNonfinalChunkTokensMax(),
+                            task.getCompletedPrefillTokens(),
+                            task.getRemainingPrefillTokens() < 0 ? null : task.getRemainingPrefillTokens(),
+                            task.getLastCompletedPrefillStepId()));
         }
     }
 
-    /** Immutable request telemetry retained from the Engine status RPC. */
+    /**
+     * Immutable request telemetry retained from the Engine status RPC.
+     * Nullable prefill progress values preserve omitted protobuf fields.
+     */
     public record TaskTelemetry(boolean prefixLengthValid,
                                 long requestReceivedTimeMs,
                                 long inputQueueEnqueueTimeMs,
@@ -140,7 +146,32 @@ public class WorkerStatus {
                                 long lastPrefillStepId,
                                 long prefillStepCount,
                                 long prefillNonfinalChunkTokensMin,
-                                long prefillNonfinalChunkTokensMax) {
+                                long prefillNonfinalChunkTokensMax,
+                                Long completedPrefillTokens,
+                                Long remainingPrefillTokens,
+                                Long lastCompletedPrefillStepId) {
+
+        public TaskTelemetry(boolean prefixLengthValid,
+                             long requestReceivedTimeMs,
+                             long inputQueueEnqueueTimeMs,
+                             long inputQueueDrainTimeMs,
+                             long waitingEnteredTimeMs,
+                             long runningEnteredTimeMs,
+                             long remoteKvWaitMs,
+                             long firstTokenTimeMs,
+                             long hbmLocalMatchTokens,
+                             long remoteKvAddedMatchTokens,
+                             long firstPrefillStepId,
+                             long lastPrefillStepId,
+                             long prefillStepCount,
+                             long prefillNonfinalChunkTokensMin,
+                             long prefillNonfinalChunkTokensMax) {
+            this(prefixLengthValid, requestReceivedTimeMs, inputQueueEnqueueTimeMs, inputQueueDrainTimeMs,
+                    waitingEnteredTimeMs, runningEnteredTimeMs, remoteKvWaitMs, firstTokenTimeMs,
+                    hbmLocalMatchTokens, remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId,
+                    prefillStepCount, prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax,
+                    null, null, null);
+        }
     }
 
     public record StepMetrics(long stepId, long completedTimeMs, long totalScheduledTokens,
@@ -307,7 +338,10 @@ public class WorkerStatus {
             return latestFinishedVersion;
         }
 
-        public Map<String, TaskObservation> runningTasks() {
+        /**
+         * Returns all active task phases reported in running_task_info.
+         */
+        public Map<String, TaskObservation> activeTasks() {
             return engine.runningTaskList();
         }
 

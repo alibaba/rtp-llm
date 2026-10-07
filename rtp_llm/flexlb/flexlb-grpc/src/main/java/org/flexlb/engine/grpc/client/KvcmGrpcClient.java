@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
+import io.grpc.Deadline;
 import io.grpc.StatusRuntimeException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -59,6 +60,7 @@ public class KvcmGrpcClient {
     private final AtomicInteger consecutiveHeartbeatFailures = new AtomicInteger();
     private final AtomicInteger consecutiveHeartbeatSuccesses = new AtomicInteger();
     private final AtomicInteger consecutiveQueryFailures = new AtomicInteger();
+    private final AtomicInteger consecutiveQuerySuccesses = new AtomicInteger();
     private final AtomicLong lastHeartbeatSuccessTimeMs = new AtomicLong();
     private final AtomicLong lastHeartbeatFailureTimeMs = new AtomicLong();
     private final AtomicReference<String> lastStateChangeReason =
@@ -141,15 +143,19 @@ public class KvcmGrpcClient {
         // One snapshot per query keeps the wire parameters of every attempt consistent.
         KvcmCacheMatchingConfig config = configuration.getKvcmRuntimeConfig();
         int maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
-        for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
+        Deadline queryDeadline = Deadline.after(config.getRequestTimeoutMs(), TimeUnit.MILLISECONDS);
+        for (int attemptIndex = 0; ; attemptIndex++) {
             try {
+                if (queryDeadline.isExpired()) {
+                    throw new KvcmQueryException("KVCM cache query timed out");
+                }
                 Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
-                        config, requestId, blockCacheKeys, namespace, queryType,
+                        config, queryDeadline, requestId, blockCacheKeys, namespace, queryType,
                         roleType, group, attemptIndex > 0);
                 recordQuerySuccess();
                 return result;
             } catch (RuntimeException failure) {
-                if (attemptIndex == maxQueryRetryCount) {
+                if (attemptIndex == maxQueryRetryCount || queryDeadline.isExpired()) {
                     recordQueryFailure();
                     metricsReporter.reportQueryFailure();
                     throw failure;
@@ -160,11 +166,11 @@ public class KvcmGrpcClient {
                         requestId, attemptIndex + 1, maxQueryRetryCount, failure);
             }
         }
-        throw new IllegalStateException("KVCM query retry loop completed without a result");
     }
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryOnce(
             KvcmCacheMatchingConfig config,
+            Deadline queryDeadline,
             String requestId,
             List<Long> blockCacheKeys,
             String namespace,
@@ -188,29 +194,33 @@ public class KvcmGrpcClient {
                 .setEnableP2P(config.isEnableP2p())
                 .build();
 
+        long startTimeNanos = System.nanoTime();
+        int responseBytes = 0;
+        GetHostCacheStateResponse response;
         try {
-            long startTimeNanos = System.nanoTime();
-            GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
-                    currentLeader, request, config.getRequestTimeoutMs());
-            grpcReporter.reportCallMetrics(
-                    "KVCM_GET_HOST_CACHE_STATE",
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
-                    response.getSerializedSize(),
-                    retry);
-            ErrorCode code = response.getHeader().getStatus().getCode();
-            if (code != ErrorCode.OK) {
-                requestImmediateRefresh();
-                throw new KvcmQueryException(
-                        "KVCM GetHostCacheState failed, code=" + code
-                                + ", message="
-                                + response.getHeader().getStatus().getMessage());
-            }
-            return toMatchesByHost(response.getHostsList());
+            response = metaServiceClient.getHostCacheState(
+                    currentLeader, request, queryDeadline);
+            responseBytes = response.getSerializedSize();
         } catch (StatusRuntimeException error) {
             requestImmediateRefresh();
             throw new KvcmQueryException(
                     "KVCM GetHostCacheState gRPC request failed", error);
+        } finally {
+            grpcReporter.reportCallMetrics(
+                    "KVCM_GET_HOST_CACHE_STATE",
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
+                    responseBytes,
+                    retry);
         }
+        ErrorCode code = response.getHeader().getStatus().getCode();
+        if (code != ErrorCode.OK) {
+            requestImmediateRefresh();
+            throw new KvcmQueryException(
+                    "KVCM GetHostCacheState failed, code=" + code
+                            + ", message="
+                            + response.getHeader().getStatus().getMessage());
+        }
+        return toMatchesByHost(response.getHostsList());
     }
 
     void refreshKvcmServiceStateSafely() {
@@ -267,6 +277,7 @@ public class KvcmGrpcClient {
         if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
                 && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
             consecutiveQueryFailures.set(0);
+            consecutiveQuerySuccesses.set(0);
             recordHealthTransition("heartbeat recovery threshold reached");
         }
     }
@@ -274,6 +285,7 @@ public class KvcmGrpcClient {
     private void recordHeartbeatFailure(long currentTimeMs) {
         lastHeartbeatFailureTimeMs.set(currentTimeMs);
         consecutiveHeartbeatSuccesses.set(0);
+        consecutiveQuerySuccesses.set(0);
         int failures = consecutiveHeartbeatFailures.incrementAndGet();
         if (failures >= configuration.getKvcmRuntimeConfig().getHeartbeatFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
@@ -283,16 +295,30 @@ public class KvcmGrpcClient {
 
     private void recordQuerySuccess() {
         consecutiveQueryFailures.set(0);
+        if (!applicationWarmupState.isWarmupFinished()
+                || healthState.get() == KvcmHealthState.HEALTHY) {
+            consecutiveQuerySuccesses.set(0);
+            return;
+        }
+        int successes = consecutiveQuerySuccesses.incrementAndGet();
+        if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
+                && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
+            consecutiveHeartbeatFailures.set(0);
+            consecutiveHeartbeatSuccesses.set(0);
+            recordHealthTransition("cache query recovery threshold reached");
+            notifyHealthSnapshotListener();
+        }
     }
 
     private void recordQueryFailure() {
+        consecutiveQuerySuccesses.set(0);
         if (!applicationWarmupState.isWarmupFinished()) {
             return;
         }
+        consecutiveHeartbeatSuccesses.set(0);
         int failures = consecutiveQueryFailures.incrementAndGet();
         if (failures >= configuration.getKvcmRuntimeConfig().getQueryFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
-            consecutiveHeartbeatSuccesses.set(0);
             recordHealthTransition("cache query failure threshold reached");
             notifyHealthSnapshotListener();
         }
@@ -302,8 +328,8 @@ public class KvcmGrpcClient {
         lastStateChangeReason.set(reason);
         KvcmHealthSnapshot snapshot = healthSnapshot();
         if (snapshot.isHealthy()) {
-            log.info("KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}",
-                    reason, snapshot.consecutiveHeartbeatSuccesses());
+            log.info("KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
+                    reason, snapshot.consecutiveHeartbeatSuccesses(), consecutiveQuerySuccesses.get());
         } else {
             log.warn("KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
                             + "consecutiveQueryFailures={}",
@@ -329,11 +355,15 @@ public class KvcmGrpcClient {
             if (StringUtils.isBlank(match.getHostIpPort())) {
                 continue;
             }
-            result.put(
+            org.flexlb.dao.cache.HostCacheMatch previous = result.put(
                     match.getHostIpPort(),
                     new org.flexlb.dao.cache.HostCacheMatch(
                             match.getLocal(),
                             match.getGlobal()));
+            if (previous != null) {
+                log.warn("KVCM returned duplicate cache matches for host {}; keeping the last record",
+                        match.getHostIpPort());
+            }
         }
         return result;
     }
@@ -362,6 +392,5 @@ public class KvcmGrpcClient {
         if (refreshExecutor != null) {
             refreshExecutor.shutdown();
         }
-        metaServiceClient.shutdown();
     }
 }

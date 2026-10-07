@@ -143,7 +143,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void encoderOnlyUsesDirectDecisionEvenWhenGenerationIsQueued() {
+    void encoderOnlyUsesEncoderQueueWhenQueueingIsEnabled() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
         BalanceContext context = context(703L);
         context.setRequestedRoles(Set.of(RoleType.ENCODER));
@@ -158,7 +158,13 @@ class DefaultRouterTest {
                     return true;
                 });
 
-        Response response = scheduler(router(), context).submit(context).join();
+        RequestScheduler scheduler = scheduler(router(), context);
+        Response response;
+        try {
+            response = scheduler.submit(context).join();
+        } finally {
+            scheduler.closePlacement();
+        }
 
         assertTrue(response.isSuccess());
         assertEquals(RequestPhase.ENCODER, context.getRequestPhase());

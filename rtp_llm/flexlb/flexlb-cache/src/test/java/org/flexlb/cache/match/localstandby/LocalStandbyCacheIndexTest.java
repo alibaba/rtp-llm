@@ -1,18 +1,162 @@
 package org.flexlb.cache.match.localstandby;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LocalStandbyCacheIndexTest {
+
+    @Test
+    void rejectsInvalidTtlConfigurationBeforeStartingCleanup() {
+        assertThrows(IllegalArgumentException.class, () -> cacheIndex(10, 20, 0.8, 10));
+        assertThrows(IllegalArgumentException.class, () -> cacheIndex(0, 0, 0.8, 10));
+        assertThrows(IllegalArgumentException.class, () -> cacheIndex(10, 0, 0.8, 10));
+        for (double ratio : List.of(-0.1, 1.1, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertThrows(IllegalArgumentException.class, () -> cacheIndex(20, 10, ratio, 10));
+        }
+    }
+
+    @Test
+    void appliesMinimumTtlAtCapacityWhenReductionStartsAtOne() {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 1.0, 10);
+        try {
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080",
+                    IntStream.range(0, 9).mapToObj(value -> (long) value).toList());
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(60_000), cacheIndex.effectiveTtlNanos());
+
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(9L));
+
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(20_000), cacheIndex.effectiveTtlNanos());
+        } finally {
+            cacheIndex.shutdown();
+        }
+    }
+
+    @Test
+    void highWatermarkRefreshesDoNotQueueFullScansDuringCooldown() throws Exception {
+        AtomicInteger cleanupChecks = new AtomicInteger();
+        LocalStandbyCacheIndex cacheIndex = new LocalStandbyCacheIndex(60_000, 20_000, 0.8, 10, true) {
+            @Override
+            void runCleanupCheck() {
+                cleanupChecks.incrementAndGet();
+                super.runCleanupCheck();
+            }
+        };
+        ScheduledExecutorService cleanupExecutor = cleanupExecutor(cacheIndex);
+        try {
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080",
+                    IntStream.range(0, 9).mapToObj(value -> (long) value).toList());
+            cleanupExecutor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+            assertEquals(1, cleanupChecks.get());
+
+            for (int request = 0; request < 1_000; request++) {
+                cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(0L));
+            }
+            cleanupExecutor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+            assertEquals(1, cleanupChecks.get());
+            assertEquals(9, cacheIndex.mappingCount());
+
+            ReflectionTestUtils.setField(cacheIndex, "nextHighWatermarkScanTimeNanos", System.nanoTime() - 1);
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(0L));
+            cleanupExecutor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+            assertEquals(2, cleanupChecks.get());
+        } finally {
+            cacheIndex.shutdown();
+        }
+    }
+
+    @Test
+    void scheduledChecksAlsoRespectFullScanCooldown() {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 0.8, 10);
+        try {
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080",
+                    IntStream.range(0, 9).mapToObj(value -> (long) value).toList());
+            cacheIndex.runCleanupCheck();
+            long now = System.nanoTime();
+            for (long block = 0; block < 9; block++) {
+                Map<String, Long> workers = cacheIndex.getUnexpiredEnginesForBlock(block, now);
+                workers.replaceAll((worker, timestamp) -> now - TimeUnit.MINUTES.toNanos(1));
+            }
+
+            cacheIndex.runCleanupCheck();
+
+            assertEquals(9, cacheIndex.mappingCount());
+            ReflectionTestUtils.setField(cacheIndex, "nextHighWatermarkScanTimeNanos", System.nanoTime() - 1);
+            cacheIndex.runCleanupCheck();
+            assertEquals(0, cacheIndex.mappingCount());
+        } finally {
+            cacheIndex.shutdown();
+        }
+    }
+
+    @Test
+    void shutdownInterruptsActiveBackgroundCleanup() throws Exception {
+        CountDownLatch cleanupStarted = new CountDownLatch(1);
+        CountDownLatch cleanupStopped = new CountDownLatch(1);
+        AtomicBoolean interrupted = new AtomicBoolean();
+        LocalStandbyCacheIndex cacheIndex = new LocalStandbyCacheIndex(60_000, 20_000, 0.8, 10, true) {
+            @Override
+            void runCleanupCheck() {
+                cleanupStarted.countDown();
+                try {
+                    new CountDownLatch(1).await();
+                } catch (InterruptedException exception) {
+                    interrupted.set(true);
+                    Thread.currentThread().interrupt();
+                } finally {
+                    cleanupStopped.countDown();
+                }
+            }
+        };
+        try {
+            cacheIndex.addWorkerBlockMappings("10.0.0.1:8080",
+                    IntStream.range(0, 9).mapToObj(value -> (long) value).toList());
+            assertTrue(cleanupStarted.await(2, TimeUnit.SECONDS));
+
+            cacheIndex.shutdown();
+
+            assertTrue(cleanupStopped.await(2, TimeUnit.SECONDS));
+            assertTrue(interrupted.get());
+            assertTrue(cleanupExecutor(cacheIndex).awaitTermination(2, TimeUnit.SECONDS));
+        } finally {
+            cacheIndex.shutdown();
+        }
+    }
+
+    @Test
+    void cleanupStopsWhenInterruptedOrClosed() throws InterruptedException {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 10);
+        cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(11L));
+        Thread.sleep(5);
+        try {
+            Thread.currentThread().interrupt();
+            cacheIndex.runHighWatermarkFullScan();
+            cacheIndex.removeExpiredMappingsBatch();
+        } finally {
+            Thread.interrupted();
+        }
+        assertEquals(1, cacheIndex.mappingCount());
+
+        cacheIndex.shutdown();
+        cacheIndex.runCleanupCheck();
+        cacheIndex.runHighWatermarkFullScan();
+        cacheIndex.removeExpiredMappingsBatch();
+
+        assertEquals(1, cacheIndex.mappingCount());
+    }
 
     @Test
     void backgroundCleanupRemovesExpiredMappingsAndEmptyBlocks() throws InterruptedException {
@@ -227,6 +371,10 @@ class LocalStandbyCacheIndexTest {
                 ttlReductionStartRatio,
                 maximumEntries,
                 false);
+    }
+
+    private static ScheduledExecutorService cleanupExecutor(LocalStandbyCacheIndex cacheIndex) {
+        return (ScheduledExecutorService) ReflectionTestUtils.getField(cacheIndex, "cleanupExecutor");
     }
 
 }

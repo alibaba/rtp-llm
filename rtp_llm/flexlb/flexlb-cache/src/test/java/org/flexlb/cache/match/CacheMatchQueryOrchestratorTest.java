@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.doThrow;
@@ -87,18 +86,22 @@ class CacheMatchQueryOrchestratorTest {
                 Map.of("10.0.0.3:8080", HostCacheMatch.local(1)),
                 CacheMatchSource.LOCAL_STANDBY,
                 10,
-                4096);
+                standbyQuery.blockSize());
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
-        when(localStandbyProvider.asyncLocalStandbyMatch(standbyQuery))
-                .thenReturn(CompletableFuture.completedFuture(standbyResult));
+        when(localStandbyProvider.findMatchingEngines(
+                standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
+                standbyQuery.roleType(), standbyQuery.group()))
+                .thenReturn(standbyResult.hostMatches());
 
         CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         verify(comparisonService)
-                .trackResolvedLocalStandbyPrediction(standbyQuery, standbyResult);
+                .trackResolvedLocalStandbyPrediction(standbyQuery, result);
         verify(cacheMetricsReporter).reportStandbyFallback("active_source");
+        verify(localStandbyProvider, never()).asyncLocalStandbyMatch(standbyQuery);
+        assertEquals(standbyQuery.blockSize(), result.blockSize());
     }
 
     @Test
@@ -108,7 +111,7 @@ class CacheMatchQueryOrchestratorTest {
                 Map.of("10.0.0.3:8080", HostCacheMatch.local(1)),
                 CacheMatchSource.LOCAL_STANDBY,
                 10,
-                4096);
+                standbyQuery.blockSize());
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
         when(kvcmProvider.findMatchingEngines(
@@ -118,14 +121,16 @@ class CacheMatchQueryOrchestratorTest {
                 standbyQuery.roleType(),
                 standbyQuery.group()))
                 .thenThrow(new IllegalStateException("KVCM unavailable"));
-        when(localStandbyProvider.asyncLocalStandbyMatch(standbyQuery))
-                .thenReturn(CompletableFuture.completedFuture(standbyResult));
+        when(localStandbyProvider.findMatchingEngines(
+                standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
+                standbyQuery.roleType(), standbyQuery.group()))
+                .thenReturn(standbyResult.hostMatches());
 
         CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         verify(comparisonService)
-                .trackResolvedLocalStandbyPrediction(standbyQuery, standbyResult);
+                .trackResolvedLocalStandbyPrediction(standbyQuery, result);
         verify(cacheMetricsReporter).reportStandbyFallback("kvcm_query_failure");
     }
 
@@ -156,14 +161,17 @@ class CacheMatchQueryOrchestratorTest {
                 Map.of("10.0.0.3:8080", HostCacheMatch.local(1)),
                 CacheMatchSource.LOCAL_STANDBY,
                 10,
-                4096);
+                standbyQuery.blockSize());
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
-        when(localStandbyProvider.asyncLocalStandbyMatch(standbyQuery))
-                .thenReturn(CompletableFuture.completedFuture(standbyResult));
+        when(localStandbyProvider.findMatchingEngines(
+                standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
+                standbyQuery.roleType(), standbyQuery.group()))
+                .thenReturn(standbyResult.hostMatches());
         doThrow(new IllegalStateException("comparison unavailable"))
                 .when(comparisonService)
-                .trackResolvedLocalStandbyPrediction(standbyQuery, standbyResult);
+                .trackResolvedLocalStandbyPrediction(org.mockito.ArgumentMatchers.eq(standbyQuery),
+                        org.mockito.ArgumentMatchers.any());
 
         CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
 
@@ -182,12 +190,40 @@ class CacheMatchQueryOrchestratorTest {
 
         assertEquals(CacheMatchSource.KVCM, result.source());
         assertEquals(Map.of(), result.hostMatches());
+        assertEquals(empty.blockSize(), result.blockSize());
         verify(kvcmProvider, never()).findMatchingEngines(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void retainsBlockSizeForEmptyLocalSyncQuery() {
+        CacheMatchQuery empty = new CacheMatchQuery(
+                "request-empty", List.of(), 2192L, RoleType.PREFILL, "default");
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(empty);
+
+        assertEquals(CacheMatchSource.LOCAL_SYNC, result.source());
+        assertEquals(Map.of(), result.hostMatches());
+        assertEquals(empty.blockSize(), result.blockSize());
+    }
+
+    @Test
+    void retainsBlockSizeForEmptyLocalStandbyQuery() {
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        CacheMatchQuery empty = new CacheMatchQuery(
+                "request-empty", List.of(), 2192L, RoleType.PREFILL, "default");
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(empty);
+
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+        assertEquals(Map.of(), result.hostMatches());
+        assertEquals(empty.blockSize(), result.blockSize());
+        verify(localStandbyProvider, never()).asyncLocalStandbyMatch(empty);
     }
 
     private CacheMatchQueryOrchestrator orchestrator() {

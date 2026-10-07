@@ -52,6 +52,7 @@ class RequestRegistryTest {
 
     private FlexlbConfig config;
     private RequestRegistry lifecycle;
+    private RequestSchedulerReporter requestReporter;
 
     @BeforeEach
     void setUp() {
@@ -59,10 +60,11 @@ class RequestRegistryTest {
         SchedulingTestConfig.usePriorityQueue(config);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
+        requestReporter = mock(RequestSchedulerReporter.class);
         lifecycle = new RequestRegistry(
                 configService,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+                requestReporter);
     }
 
     @AfterEach
@@ -96,6 +98,19 @@ class RequestRegistryTest {
                     lifecycle.getRequestState(requestId, 0L).state());
         }
         assertEquals(0, lifecycle.trackedRequestCount());
+    }
+
+    @Test
+    void reportsUnexpectedRegistrationFailureWithoutRegisteringTheRequest() {
+        BalanceContext context = context(101L);
+        config.getRequestLifecycle().setRequest(null);
+
+        Response response = lifecycle.register(context).join();
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(0, lifecycle.trackedRequestCount());
+        verify(requestReporter).reportLifecycleFailure("registration");
     }
 
     @Test
@@ -191,7 +206,7 @@ class RequestRegistryTest {
         when(task.requestId()).thenReturn("107");
         WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
         when(running.owner()).thenReturn(worker);
-        when(running.runningTasks()).thenReturn(Map.of("107", task));
+        when(running.activeTasks()).thenReturn(Map.of("107", task));
         endpoint.observeStatusHeartbeat(worker, running).run();
 
         assertEquals(0, endpoint.pendingEncoderRequestCount());
@@ -200,7 +215,7 @@ class RequestRegistryTest {
 
         WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
         when(finished.alive()).thenReturn(true);
-        when(finished.runningTasks()).thenReturn(Map.of());
+        when(finished.activeTasks()).thenReturn(Map.of());
         when(finished.finishedTasks()).thenReturn(Map.of("107", task));
         WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
         when(prepared.observation()).thenReturn(finished);
@@ -239,7 +254,7 @@ class RequestRegistryTest {
         when(engine.runningTaskList()).thenReturn(Map.of("109", task));
         WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
         when(running.owner()).thenReturn(worker);
-        when(running.runningTasks()).thenReturn(Map.of("109", task));
+        when(running.activeTasks()).thenReturn(Map.of("109", task));
         endpoint.observeStatusHeartbeat(worker, running).run();
 
         assertEquals(400L, endpoint.inflightUncachedTokenEstimate());
@@ -275,7 +290,7 @@ class RequestRegistryTest {
         when(task.inputLength()).thenReturn(40L);
         WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
         when(finished.alive()).thenReturn(true);
-        when(finished.runningTasks()).thenReturn(Map.of());
+        when(finished.activeTasks()).thenReturn(Map.of());
         when(finished.finishedTasks()).thenReturn(Map.of("110", task));
         WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
         when(prepared.observation()).thenReturn(finished);
@@ -326,7 +341,7 @@ class RequestRegistryTest {
                 when(task.requestId()).thenReturn(requestId);
                 WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
                 when(status.owner()).thenReturn(worker);
-                when(status.runningTasks()).thenReturn(Map.of(requestId, task));
+                when(status.activeTasks()).thenReturn(Map.of(requestId, task));
                 CountDownLatch start = new CountDownLatch(1);
                 Future<?> observed = executor.submit(() -> {
                     start.await();
@@ -391,7 +406,7 @@ class RequestRegistryTest {
         when(failedTask.errorCode()).thenReturn(7L);
         WorkerStatus.StatusObservation failed = mock(WorkerStatus.StatusObservation.class);
         when(failed.alive()).thenReturn(true);
-        when(failed.runningTasks()).thenReturn(Map.of());
+        when(failed.activeTasks()).thenReturn(Map.of());
         when(failed.finishedTasks()).thenReturn(Map.of("109", failedTask));
         WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
         when(prepared.observation()).thenReturn(failed);

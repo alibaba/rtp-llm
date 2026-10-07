@@ -168,7 +168,7 @@ JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 MASTER_METRIC_WHITELIST="flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_tracked_request_count,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count"
 BIZ_NAME="${BIZ_NAME:-flexlb_eval}"
-DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-test}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-${RUN_ID}-$$}"
 ZONE_NAME="${ZONE_NAME:-master}"
 
 # Benchmark workload values below are examples, not Java defaults. Override with
@@ -897,7 +897,7 @@ envs = payload.get("zone_process_setting", {}).get("process_info", {}).get("envs
 for item in envs:
     if not isinstance(item, list) or len(item) != 2:
         continue
-    if item[0] in {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG", "FLEXLB_SYNC_CONSISTENCY_CONFIG", "LOG_LEVEL", "HIPPO_ROLE"}:
+    if item[0] in {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG", "HIPPO_ROLE"}:
         sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
 PY
   )

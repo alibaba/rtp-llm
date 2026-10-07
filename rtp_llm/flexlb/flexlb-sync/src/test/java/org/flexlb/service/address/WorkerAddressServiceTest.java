@@ -1,5 +1,9 @@
 package org.flexlb.service.address;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
@@ -16,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
@@ -27,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -94,6 +100,22 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         verify(engineHealthReporter).reportStatusCheckerFail(
                 BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter, never()).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+    }
+
+    @Test
+    void reportsRawEmptyDiscoveryEvenWhenCachedHostsRemainAvailable() {
+        Endpoint endpoint = endpoint("vip");
+        configure(endpoint);
+        List<WorkerHost> hosts = List.of(WorkerHost.of("10.0.0.1", 8080));
+        when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts, List.of());
+
+        assertEquals(hosts, refresh());
+        assertEquals(hosts, refresh());
+
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
     }
 
     @Test
@@ -201,6 +223,8 @@ class WorkerAddressServiceTest {
 
         assertEquals(List.of(a, b), refresh());
         assertEquals(List.of(a, c), refresh());
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
     }
 
     @Test
@@ -218,6 +242,53 @@ class WorkerAddressServiceTest {
 
         assertEquals(List.of(a, b), refresh());
         assertEquals(List.of(a, b), refresh());
+    }
+
+    @Test
+    void sameAddressWithDifferentEndpointConfigurationHasSeparateAvailabilityWarnings() {
+        Endpoint first = endpoint("shared-vip");
+        first.setGroup("group-a");
+        Endpoint second = endpoint("shared-vip");
+        second.setGroup("group-b");
+        second.setWorkerStatusPort(18002);
+        configure(first, second);
+        WorkerHost a = new WorkerHost("10.0.0.1", 8080, 8081, 8085, "site", "group-a");
+        WorkerHost b = new WorkerHost("10.0.0.1", 8080, 8081, 8085, 18002, "site", "group-b", "");
+        when(serviceDiscovery.getHosts(first)).thenReturn(List.of(), List.of(), List.of(), List.of(a));
+        when(serviceDiscovery.getHosts(second)).thenReturn(List.of(), List.of(b));
+
+        Logger logger = (Logger) LoggerFactory.getLogger("syncLogger");
+        Level originalLevel = logger.getLevel();
+        ListAppender<ILoggingEvent> events = new ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        logger.setLevel(Level.INFO);
+        try {
+            assertTrue(refresh().isEmpty());
+            assertEquals(List.of("group-a", "group-b"), events.list.stream()
+                    .filter(event -> event.getLevel() == Level.WARN)
+                    .map(event -> event.getArgumentArray()[2])
+                    .toList());
+
+            assertEquals(List.of(b), refresh());
+            assertEquals(List.of(b), refresh());
+            assertEquals(2L, events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
+                    "recovering another endpoint must not reset an empty endpoint's warning deadline");
+            assertEquals(List.of("group-b"), events.list.stream()
+                    .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
+                    .map(event -> event.getArgumentArray()[2])
+                    .toList());
+
+            assertEquals(List.of(a, b), refresh());
+            assertEquals(List.of("group-b", "group-a"), events.list.stream()
+                    .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
+                    .map(event -> event.getArgumentArray()[2])
+                    .toList());
+        } finally {
+            logger.detachAppender(events);
+            logger.setLevel(originalLevel);
+            events.stop();
+        }
     }
 
     @Test

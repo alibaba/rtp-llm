@@ -4,14 +4,17 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,7 +40,7 @@ public class EngineAddressResolver {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceEndpoints = initServiceEndpoints(modelMetaConfig);
         log.info("EngineAddressResolver start subscribe endpoints:{} ", serviceEndpoints);
-        fetchAllDomainsHosts();
+        initializeDomainHosts();
         setupListeners(serviceDiscovery, serviceEndpoints);
     }
 
@@ -52,6 +55,25 @@ public class EngineAddressResolver {
             ServiceHostListener addressListener = hosts -> updateEndpointHosts(endpoint, hosts);
             serviceDiscovery.listen(endpoint, addressListener);
         }
+    }
+
+    private void initializeDomainHosts() {
+        Map<Endpoint, List<WorkerHost>> initialHosts = new LinkedHashMap<>();
+        for (Endpoint endpoint : serviceEndpoints) {
+            List<WorkerHost> hosts;
+            try {
+                hosts = serviceDiscovery.getHosts(endpoint);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "Failed to fetch initial engine hosts for endpoint: " + endpoint.getAddress(), e);
+            }
+            if (hosts == null || hosts.isEmpty()) {
+                throw new IllegalStateException(
+                        "No initial engine hosts discovered for endpoint: " + endpoint.getAddress());
+            }
+            initialHosts.put(endpoint, List.copyOf(hosts));
+        }
+        initialHosts.forEach(this::updateEndpointHosts);
     }
 
     private void fetchAllDomainsHosts() {
@@ -69,14 +91,32 @@ public class EngineAddressResolver {
     }
 
     private List<Endpoint> initServiceEndpoints(ModelMetaConfig modelMetaConfig) {
-        List<Endpoint> endpoints = modelMetaConfig.getServiceRoutes().stream()
+        Map<AddressSource, Endpoint> uniqueSources = new LinkedHashMap<>();
+        modelMetaConfig.getServiceRoutes().stream()
                 .flatMap(serviceRoute -> serviceRoute.getAllEndpoints().stream())
-                .distinct()
-                .toList();
+                .forEach(endpoint -> uniqueSources.putIfAbsent(AddressSource.from(endpoint), endpoint));
+        List<Endpoint> endpoints = List.copyOf(uniqueSources.values());
         if (CollectionUtils.isEmpty(endpoints)) {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
         return endpoints;
+    }
+
+    private record DiscoverySource(ServiceDiscoveryType type, String baseUrl, List<String> hosts) {
+        private static DiscoverySource from(DiscoveryConfig discovery) {
+            return discovery == null ? null : new DiscoverySource(
+                    discovery.getType(), discovery.getBaseUrl(),
+                    discovery.getHosts() == null ? List.of() : List.copyOf(discovery.getHosts()));
+        }
+    }
+
+    private record AddressSource(String address, String protocol, String path,
+                                 Integer workerStatusPort, int multiEngineNum, DiscoverySource discovery) {
+        private static AddressSource from(Endpoint endpoint) {
+            return new AddressSource(endpoint.getAddress(), endpoint.getProtocol(), endpoint.getPath(),
+                    endpoint.getWorkerStatusPort(), endpoint.getMultiEngineNum(),
+                    DiscoverySource.from(endpoint.getDiscovery()));
+        }
     }
 
     public void subscribe(Listener listener) {

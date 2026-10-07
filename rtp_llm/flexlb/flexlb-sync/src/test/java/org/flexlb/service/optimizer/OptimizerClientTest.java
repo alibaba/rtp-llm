@@ -9,8 +9,11 @@ import org.flexlb.dao.optimizer.CommonResponseHeader;
 import org.flexlb.dao.optimizer.OptimizerErrorCode;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryRequest;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
+import org.flexlb.dao.route.DiscoveryConfig;
+import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
@@ -24,11 +27,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.constant.MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS;
 import static org.flexlb.constant.MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS;
@@ -42,6 +48,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -108,10 +115,54 @@ class OptimizerClientTest {
     }
 
     @Test
-    void startsAddressResolverDuringInitialization() {
+    void initializationDoesNotStartAddressResolver() {
         client.init();
 
-        verify(addressResolver).start();
+        verify(addressResolver, never()).start();
+    }
+
+    @Test
+    void firstValidQueryStartsPollingOnceAndRepeatedQueriesReuseIt() {
+        DiscoveryConfig discoveryConfig = new DiscoveryConfig();
+        discoveryConfig.setType(ServiceDiscoveryType.VIPSERVER);
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress("optimizer-service");
+        endpoint.setDiscovery(discoveryConfig);
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        OptimizerAddressResolver resolver = new OptimizerAddressResolver(discovery, endpoint, 8082, 1000L);
+        var scheduler = mock(ScheduledExecutorService.class);
+        ReflectionTestUtils.setField(resolver, "refreshScheduler", scheduler);
+        client = new OptimizerClient(httpService, resolver, workerMetadataResolver, "", monitor);
+        resolvesTestInstanceId();
+        client.init();
+        verify(scheduler, never()).scheduleWithFixedDelay(any(), anyLong(), anyLong(), any());
+
+        client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
+        client.traceQuery(traceRequest(List.of(2L)), selectedWorker());
+
+        verify(scheduler).scheduleWithFixedDelay(any(), eq(0L), eq(1000L),
+                eq(TimeUnit.MILLISECONDS));
+        client.shutdown();
+        client.traceQuery(traceRequest(List.of(3L)), selectedWorker());
+        verify(scheduler).scheduleWithFixedDelay(any(), eq(0L), eq(1000L),
+                eq(TimeUnit.MILLISECONDS));
+        verify(scheduler).shutdownNow();
+        verify(discovery, never()).shutdown();
+    }
+
+    @Test
+    void resolverStartFailureDoesNotEscapeAndNextQueryCanRetry() {
+        resolvesTestInstanceId();
+        doThrow(new IllegalStateException("start unavailable")).doNothing()
+                .when(addressResolver).start();
+
+        assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
+        assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(2L)), selectedWorker()));
+
+        verify(addressResolver, times(2)).start();
+        verify(httpService, never()).request(any(), any(URI.class), any(), any());
+        verify(monitor).report(OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                FlexMetricTags.of("reason", "dispatch_error"), 1.0);
     }
 
     @Test
@@ -123,6 +174,7 @@ class OptimizerClientTest {
                 OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "empty_block_keys"),
                 1.0);
+        verify(addressResolver, never()).start();
     }
 
     @Test
@@ -166,6 +218,7 @@ class OptimizerClientTest {
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(workerMetadataResolver, never()).resolveNamespace(any(), anyString(), anyLong());
+        verify(addressResolver, never()).start();
         verify(monitor).report(
                 OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "shutdown"),

@@ -104,7 +104,7 @@ class EndpointCleanupDeadlockTest {
             RequestRegistry registry = mock(RequestRegistry.class);
             ExpirationTimer timer = new ExpirationTimer(registry, service);
             RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RequestLifecycleTestSupport.context(config, 992L),
-                    timer, new RequestTerminalCleanup(timer), () -> { });
+                    timer, new RequestTerminalCleanup(timer, mock(org.flexlb.service.monitor.RequestSchedulerReporter.class)), () -> { });
             CountDownLatch slotHeld = new CountDownLatch(1);
             CountDownLatch closeReachesSlots = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();

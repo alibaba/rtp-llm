@@ -14,6 +14,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -377,7 +378,9 @@ class FlexlbForwardHopGuardNettyTest {
                     invocation -> masterAddress.get());
 
             ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+            var routingConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+            routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+            when(configService.loadBalanceConfig()).thenReturn(routingConfig);
             routeService = mock(RouteService.class);
             Response local = new Response();
             local.setSuccess(true);

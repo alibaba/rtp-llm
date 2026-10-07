@@ -63,7 +63,7 @@ public class OptimizerAddressResolver {
         this.pollIntervalMs = pollIntervalMs;
     }
 
-    public void start() {
+    public synchronized void start() {
         if (shutdown.get()) {
             log.info("OptimizerAddressResolver already shutdown, skip start, address={}", address);
             return;
@@ -142,7 +142,7 @@ public class OptimizerAddressResolver {
         return resolvedAddresses;
     }
 
-    public void shutdown() {
+    public synchronized void shutdown() {
         shutdown.set(true);
         refreshScheduler.shutdownNow();
     }

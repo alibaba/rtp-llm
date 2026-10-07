@@ -36,6 +36,16 @@ class RequestIdTest {
     }
 
     @Test
+    void engineCancellationAcceptsCanonicalInt64StringsWithoutLosingPrecision() {
+        for (long id : new long[]{0, 7, 9007199254740993L, Long.MIN_VALUE, Long.MAX_VALUE}) {
+            assertEquals(id, RequestId.toEngineRequestId(Long.toString(id)));
+        }
+        for (String id : List.of("007", "+7", "-0", "request-a", "9223372036854775808")) {
+            assertThrows(IllegalArgumentException.class, () -> RequestId.toEngineRequestId(id));
+        }
+    }
+
+    @Test
     void readsOldIntegerEncodingForScheduleCancelAndState() throws Exception {
         for (long id : new long[]{123, Long.MAX_VALUE, Long.MIN_VALUE, 0}) {
             byte[] wire = oldIntegerId(id);

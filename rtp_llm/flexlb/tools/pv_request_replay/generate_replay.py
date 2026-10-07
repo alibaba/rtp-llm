@@ -15,7 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from build_html import build_html
-from build_workbook import build_workbook
+from build_workbook import PvSource, _instance_from_path, build_workbook
 from collect_pv_log import collect_logs
 
 
@@ -111,27 +111,29 @@ def collect_manifest_path(input_path: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def snapshot_sources(input_path: Path) -> tuple[list[Path], dict[str, Any] | None]:
+def snapshot_sources(input_path: Path) -> tuple[list[PvSource], dict[str, Any] | None]:
     manifest_path = collect_manifest_path(input_path)
     if manifest_path is None:
         if not input_path.is_file():
             raise FileNotFoundError(
                 f"{input_path} is neither a PV log file nor a collection directory"
             )
-        return [input_path], None
+        return [PvSource(input_path.resolve(), _instance_from_path(input_path))], None
 
     manifest = load_json(manifest_path)
-    sources: list[Path] = []
+    sources: list[PvSource] = []
     for entry in manifest.get("snapshots", []):
         if not isinstance(entry, dict) or not entry.get("path"):
             continue
         path = Path(entry["path"])
         if not path.is_absolute():
             path = manifest_path.parent / path
-        sources.append(path)
+        instance = (entry.get("instance") or entry.get("pod")
+                    or entry.get("instance_id") or _instance_from_path(path))
+        sources.append(PvSource(path.resolve(), str(instance)))
     if not sources:
         raise ValueError(f"no snapshots recorded in {manifest_path}")
-    missing = [str(source) for source in sources if not source.is_file()]
+    missing = [str(source.path) for source in sources if not source.path.is_file()]
     if missing:
         raise FileNotFoundError("snapshot files are missing: " + ", ".join(missing))
     return sources, manifest
@@ -191,7 +193,7 @@ def run_build(
     workbook_path = output_dir / "analysis.xlsx"
     html_path = output_dir / "replay.html"
     workbook_summary = build_workbook(
-        sources=input_path,
+        sources=sources,
         destination=workbook_path,
         start=start,
         end=end,
@@ -231,7 +233,7 @@ def run_build(
         "requested_window": {"start": time_text(start), "end": time_text(end)},
         "input": {
             "collection_manifest": str(collect_manifest_path(input_path) or ""),
-            "snapshots": [str(source) for source in sources],
+            "snapshots": [str(source.path) for source in sources],
         },
         "collection": collection_summary,
         "join": {

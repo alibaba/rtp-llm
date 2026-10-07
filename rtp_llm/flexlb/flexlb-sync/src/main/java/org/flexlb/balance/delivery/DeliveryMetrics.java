@@ -1,13 +1,16 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.List;
 import java.util.Objects;
 
-/** No-throw metrics emitted after a delivery decision has committed. */
+/**
+ * No-throw metrics emitted after a delivery decision has committed.
+ */
 public final class DeliveryMetrics {
 
     private final BatchSchedulerReporter reporter;
@@ -16,14 +19,14 @@ public final class DeliveryMetrics {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
-    public void routesDelivered( int remainingQueueDepth, List<ScheduledRequest> exactItems) {
+    public void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
             ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
-            String role = head.prefillEp().getStatus().getRole().name();
+            String role = prefillRole(head);
             var decisionGroup = head.ctx().getDecisionGroup();
             if (decisionGroup != null) {
                 reporter.reportDispatchReason(role, engineIp, decisionGroup.reason());
@@ -57,7 +60,7 @@ public final class DeliveryMetrics {
             }
             ScheduledRequest head = dispatched.get(0);
             String engineIp = prefillIp(head);
-            String role = head.prefillEp().getStatus().getRole().name();
+            String role = prefillRole(head);
             reporter.reportDispatchReason(
                     role, engineIp, decisionReason);
             reporter.reportBatcherQueueSize(
@@ -88,8 +91,15 @@ public final class DeliveryMetrics {
         }
     }
 
+    private static String prefillRole(ScheduledRequest item) {
+        var status = item.prefillEp().getStatus();
+        RoleType role = status == null ? null : status.getRole();
+        return role == null ? RoleType.PREFILL.name() : role.name();
+    }
+
     private static String prefillIp(ScheduledRequest item) {
-        return item.prefillEp().getStatus().getMetricIpPort();
+        var status = item.prefillEp().getStatus();
+        return status == null ? "" : status.getMetricIpPort();
     }
 
     private static long saturatedAdd(long left, long right) {

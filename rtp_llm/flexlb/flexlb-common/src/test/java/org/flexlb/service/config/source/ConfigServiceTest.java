@@ -3,12 +3,15 @@ package org.flexlb.service.config.source;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalSyncCacheMatchingConfig;
+import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.config.ConfigSource;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.AfterEach;
@@ -265,6 +268,87 @@ class ConfigServiceTest {
                 .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_REQUEST_TIMEOUT_MS);
         assertThat(replaced.getLeaderRefreshIntervalMs())
                 .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS);
+    }
+
+    @Test
+    void ordinaryTypeChangesKeepConfiguredSiblingFields() {
+        FlexlbConfig base = FlexlbConfigMerger.mergeWithDefaults("""
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":7,"fetchAttachTimeoutMs":1500}}
+                """);
+
+        FlexlbConfig merged = FlexlbConfigMerger.merge(base,
+                "{\"dispatcher\":{\"type\":\"NON_BATCH\"}}", "test");
+
+        assertThat(merged.isBatchDispatch()).isFalse();
+        assertThat(merged.getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
+        assertThat(merged.getDispatcher().getFetchAttachTimeoutMs()).isEqualTo(1500);
+    }
+
+    @Test
+    void laterInitialSourceCanReplacePriorityOrderingWithFifo() {
+        EnvironmentConfigSource environment = environmentSource(Map.of("FLEXLB_CONFIG", """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "scheduler":{"queueTimeoutMs":5000,"ordering":{"type":"PRIORITY","defaultPriority":70}},
+                 "dispatcher":{"maxInflightPerPrefillWorker":7}}
+                """));
+        FakeConfigSource nacos = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"scheduler":{"ordering":{"type":"FIFO"}}}
+                """);
+
+        ConfigService service = createService(List.of(environment, nacos));
+
+        assertThat(service.loadBalanceConfig().getScheduler().getOrdering().getType())
+                .isEqualTo(QueueOrderingConfig.Type.FIFO);
+        assertThat(service.loadBalanceConfig().getScheduler().getOrdering().getPreemption()).isNull();
+        assertThat(service.loadBalanceConfig().getScheduler().getQueueTimeoutMs()).isEqualTo(5000);
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
+    }
+
+    @Test
+    void laterInitialSourceCanReplaceConfiguredWindowWithSingleDecision() {
+        EnvironmentConfigSource environment = environmentSource(Map.of("FLEXLB_CONFIG", """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "scheduler":{"decision":{"type":"FIXED_WINDOW","maxRequests":32,
+                                          "maxCollectionWaitMs":75,"maxPredictedExecutionMs":500}},
+                 "dispatcher":{"maxInflightPerPrefillWorker":7}}
+                """));
+        FakeConfigSource nacos = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"scheduler":{"decision":{"type":"SINGLE"}}}
+                """);
+
+        ConfigService service = createService(List.of(environment, nacos));
+
+        DecisionPolicyConfig decision = service.loadBalanceConfig().getScheduler().getDecision();
+        assertThat(decision.getType()).isEqualTo(DecisionPolicyConfig.Type.SINGLE);
+        assertThat(decision.getMaxRequests()).isEqualTo(DecisionPolicyConfig.DEFAULT_MAX_REQUESTS);
+        assertThat(decision.getMaxCollectionWaitMs())
+                .isEqualTo(DecisionPolicyConfig.DEFAULT_MAX_COLLECTION_WAIT_MS);
+        assertThat(decision.getMaxPredictedExecutionMs()).isNull();
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
+    }
+
+    @Test
+    void runtimeUpdatesKeepStartupModesAndApplyNumericFields() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "scheduler":{"type":"QUEUE"},
+                 "dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":7,"fetchAttachTimeoutMs":1500}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+
+        source.emit("""
+                {"schemaVersion":3,"scheduler":{"type":"DIRECT"},
+                 "dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":9}}
+                """);
+
+        assertThat(service.loadBalanceConfig().isQueue()).isTrue();
+        assertThat(service.loadBalanceConfig().isBatchDispatch()).isTrue();
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(9);
+        assertThat(service.loadBalanceConfig().getDispatcher().getFetchAttachTimeoutMs()).isEqualTo(1500);
+        FlexlbConfig previous = service.loadBalanceConfig();
+        source.emit("{\"schemaVersion\":3,\"dispatcher\":{\"type\":\"INVALID\"}}");
+        assertThat(service.loadBalanceConfig()).isSameAs(previous);
     }
 
     @Test

@@ -29,8 +29,11 @@ public final class RoleTypeProtoConverter {
         };
     }
 
-    /** Convert the domain role to the RoleAddrPB field-1 enum. */
-    public static EngineRpcService.RoleAddrPB.RoleType toLegacyProto(RoleType role) {
+    /**
+     * Convert the domain role to the RoleAddrPB field-1 enum, including Encoder.
+     * Readers that predate Encoder cannot consume its appended value.
+     */
+    public static EngineRpcService.RoleAddrPB.RoleType toRoleAddrProto(RoleType role) {
         return switch (role) {
             case PDFUSION -> EngineRpcService.RoleAddrPB.RoleType.PDFUSION;
             case PREFILL -> EngineRpcService.RoleAddrPB.RoleType.PREFILL;
@@ -49,7 +52,7 @@ public final class RoleTypeProtoConverter {
                     "role_str='" + addr.getRoleStr() + "'");
         }
         if (addr.getRole() != EngineRpcService.RoleAddrPB.RoleType.PDFUSION) {
-            resolved = merge(resolved, fromLegacyProto(addr.getRole()), "role=" + addr.getRole());
+            resolved = merge(resolved, fromRoleAddrProto(addr.getRole()), "role=" + addr.getRole());
         }
         // The original proto3 enum omitted PDFUSION=0 from the wire.
         return resolved != null ? resolved : RoleType.PDFUSION;
@@ -87,7 +90,7 @@ public final class RoleTypeProtoConverter {
         return candidate;
     }
 
-    private static RoleType fromLegacyProto(EngineRpcService.RoleAddrPB.RoleType role) {
+    private static RoleType fromRoleAddrProto(EngineRpcService.RoleAddrPB.RoleType role) {
         return switch (role) {
             case PDFUSION -> RoleType.PDFUSION;
             case PREFILL -> RoleType.PREFILL;
@@ -95,7 +98,7 @@ public final class RoleTypeProtoConverter {
             case VIT -> RoleType.VIT;
             case FRONTEND -> RoleType.FRONTEND;
             case ENCODER -> RoleType.ENCODER;
-            case UNRECOGNIZED -> throw new IllegalArgumentException("unknown legacy RoleAddrPB role: " + role);
+            case UNRECOGNIZED -> throw new IllegalArgumentException("unknown RoleAddrPB role: " + role);
         };
     }
 }

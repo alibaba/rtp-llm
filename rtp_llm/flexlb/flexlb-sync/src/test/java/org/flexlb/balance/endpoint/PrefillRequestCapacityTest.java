@@ -256,7 +256,7 @@ class PrefillRequestCapacityTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
-        when(observation.runningTasks()).thenReturn(tasks);
+        when(observation.activeTasks()).thenReturn(tasks);
         state.reconcileHeartbeat(observation);
     }
 

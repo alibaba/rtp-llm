@@ -32,7 +32,7 @@ class GenerateReplayTest(unittest.TestCase):
                 mock.patch.object(
                     GENERATE,
                     "snapshot_sources",
-                    return_value=([source], None),
+                    return_value=([GENERATE.PvSource(source, "source")], None),
                 ),
                 mock.patch.object(
                     GENERATE,
@@ -73,7 +73,7 @@ class GenerateReplayTest(unittest.TestCase):
                 mock.patch.object(
                     GENERATE,
                     "snapshot_sources",
-                    return_value=([source], None),
+                    return_value=([GENERATE.PvSource(source, "source")], None),
                 ),
                 mock.patch.object(
                     GENERATE,
@@ -98,6 +98,32 @@ class GenerateReplayTest(unittest.TestCase):
             html_builder.assert_not_called()
             stored = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", stored["status"])
+
+    def test_build_uses_recorded_snapshots_and_preserves_instance_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            recorded = root / "recorded.log"
+            other = root / "other.log"
+            recorded.touch()
+            other.touch()
+            (root / "collect_manifest.json").write_text(json.dumps({
+                "status": "complete",
+                "snapshots": [{"path": "recorded.log", "instance": "master-7"}],
+                "sources": [{"path": "other.log", "instance": "other-master"}],
+            }), encoding="utf-8")
+            with (
+                mock.patch.object(GENERATE, "build_workbook", return_value={
+                    "request_count": 1, "complete_request_count": 1,
+                }) as workbook_builder,
+                mock.patch.object(GENERATE, "build_html", return_value={}),
+            ):
+                manifest = GENERATE.run_build(
+                    root, root / "output", datetime(2026, 8, 11, 1),
+                    datetime(2026, 8, 11, 2), TOOL_DIR / "replay_template.html",
+                )
+            self.assertEqual([GENERATE.PvSource(recorded.resolve(), "master-7")],
+                             workbook_builder.call_args.kwargs["sources"])
+            self.assertEqual([str(recorded.resolve())], manifest["input"]["snapshots"])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,11 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
 import com.google.protobuf.UnknownFieldSet;
 
+/**
+ * Writes Engine request IDs for this module's tests.
+ * API, sync and mock-engine retain module-local fixtures because their test classes
+ * are not shared dependencies. The copies use the same integer/string wire rules.
+ */
 public final class RequestIdFixtures {
     private RequestIdFixtures() {
     }

@@ -35,29 +35,35 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      * Returns false if the worker is retiring or already tracks this request.
      */
     public boolean trackSelectedRequest(String requestId, long estimatedUncachedTokens) {
-        if (isGenerationRetiringOrRetired()) { return false; }
-        AtomicBoolean added = new AtomicBoolean();
-        requestObservations.compute(requestId, (id, current) -> {
-            if (current != null) { return current; }
-            pendingRequestCount.incrementAndGet();
-            added.set(true);
-            return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
-        });
-        return added.get();
+        try (EndpointGenerationLifecycle.HandoffPermit handoff = tryAcquireGenerationHandoff()) {
+            if (handoff == null) { return false; }
+            AtomicBoolean added = new AtomicBoolean();
+            requestObservations.compute(requestId, (id, current) -> {
+                if (current != null) { return current; }
+                pendingRequestCount.incrementAndGet();
+                added.set(true);
+                return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
+            });
+            return added.get();
+        }
     }
 
     /**
      * Remove a request after its lifecycle ends, including local pending load.
      */
     public void forgetRequest(String requestId) {
-        RequestObservation removed = requestObservations.remove(requestId);
-        if (removed == null) {
-            return;
+        if (removeRequestObservation(requestId)) {
+            endpointEvents.onEncoderCapacityChanged();
         }
+    }
+
+    private boolean removeRequestObservation(String requestId) {
+        RequestObservation removed = requestObservations.remove(requestId);
+        if (removed == null) { return false; }
         if (!removed.seenInWorker()) {
             pendingRequestCount.decrementAndGet();
         }
-        endpointEvents.onEncoderCapacityChanged();
+        return true;
     }
 
     /**
@@ -110,7 +116,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     private Runnable projectStatus(WorkerStatus.StatusObservation observation, boolean includeFinished) {
         List<WorkerStatus.TaskObservation> running = new ArrayList<>();
         List<WorkerStatus.TaskObservation> finished = new ArrayList<>();
-        for (WorkerStatus.TaskObservation task : observation.runningTasks().values()) {
+        for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
             if (markObserved(task.requestId())) {
                 running.add(task);
             }
@@ -138,7 +144,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     protected void closeEndpoint() {
         List<String> requestIds = List.copyOf(requestObservations.keySet());
         for (String requestId : requestIds) {
-            forgetRequest(requestId);
+            removeRequestObservation(requestId);
         }
         endpointEvents.onEncoderGenerationRetired(this, requestIds);
         endpointEvents.onEncoderCapacityChanged();
