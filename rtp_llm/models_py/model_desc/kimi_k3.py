@@ -3,8 +3,10 @@
 from collections.abc import Mapping
 from functools import partial
 from math import gcd
+import json
 import logging
 import os
+import time
 
 import torch
 from torch import nn
@@ -465,6 +467,20 @@ class KimiK3Model(GptModelBase):
                 raise ValueError("K3 full SP input row count does not match physical tokens")
             hidden = hidden.narrow(0, self.tp_rank * local_rows, local_rows).contiguous()
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
+        if (os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1"
+                and primary.is_prefill and not primary.is_target_verify):
+            cache_store = getattr(primary, "cache_store_inputs", None)
+            request_ids = (
+                cache_store.request_id.tolist()
+                if cache_store is not None and cache_store.request_id is not None
+                else []
+            )
+            logging.info("[K3_SMOKE_EVENT] %s", json.dumps({
+                "kind": "target_prefill_forward", "request_ids": request_ids,
+                "actual_batch": len(request_ids), "physical_tokens": physical_rows,
+                "local_tokens": local_rows, "tp_rank": self.tp_rank,
+                "time_ns": time.time_ns(),
+            }, sort_keys=True))
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.
         valid_mask = getattr(primary, "valid_token_mask", None)

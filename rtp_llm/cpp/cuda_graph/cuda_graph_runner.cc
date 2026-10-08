@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -1175,6 +1176,21 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
         }
+        static const bool smoke_prefill_evidence = [] {
+            const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+            return value != nullptr && std::strcmp(value, "1") == 0;
+        }();
+        if (smoke_prefill_evidence && role_ == CudaGraphRole::MTP_DRAFT_PREFILL) {
+            RTP_LLM_LOG_INFO(
+                "[K3_SMOKE_EVENT] {\"event\":\"cuda_graph_replay\",\"role\":%d,"
+                "\"real_batch\":%d,\"bucket\":%d,\"real_tokens\":%d,"
+                "\"padding_rows\":%d,\"time_ns\":%ld}",
+                static_cast<int>(role_), state.current_batch_size,
+                state.current_real_graph_seq_len, state.current_seq_len,
+                state.current_real_graph_seq_len - state.current_seq_len,
+                static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()));
+        }
         if (isGenerationPrefillCudaGraph()) {
             const uint64_t replay_count =
                 generation_prefill_cuda_graph_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1199,6 +1215,22 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 "cuda_graph.forward(replayDecode,B=%d,capture=%d,Q=%d,T=%d,fake=0)",
                 state.current_batch_size, state.current_real_graph_bs, num_tokens_per_bs_, state.seq_len_sum);
             replayDecode(state.current_real_graph_bs);
+        }
+        static const bool smoke_evidence = [] {
+            const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+            return value != nullptr && std::strcmp(value, "1") == 0;
+        }();
+        if (smoke_evidence) {
+            RTP_LLM_LOG_INFO(
+                "[K3_SMOKE_EVENT] {\"event\":\"cuda_graph_replay\",\"role\":%d,"
+                "\"real_batch\":%d,\"bucket\":%d,\"padding_rows\":%d,\"token_rows\":%d,\"time_ns\":%ld}",
+                static_cast<int>(role_),
+                state.current_batch_size,
+                state.current_real_graph_bs,
+                state.current_real_graph_bs - state.current_batch_size,
+                state.seq_len_sum,
+                static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()));
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(

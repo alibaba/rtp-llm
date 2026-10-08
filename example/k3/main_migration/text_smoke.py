@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""RTP main text-only smoke, adapted from K3 dev 64c6aff3666402228950f1f09031e228c3734277.
+"""Four-layer preflight or complete 93-layer K3 PD smoke, selected by checkpoint.
 
+Adapted from K3 dev 64c6aff3666402228950f1f09031e228c3734277.
 This is not the original dev all suite. Runtime evidence is a separate gate.
 """
 
@@ -10,10 +11,10 @@ import argparse
 import gzip
 import hashlib
 import json
-import math
 import pathlib
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -21,20 +22,6 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-
-try:
-    from .long_prefix_case import (
-        DEFAULT_TARGET_TOKENS,
-        LongPrefixCase,
-        expanded_bytes_per_token,
-    )
-except ImportError:  # Direct script entry from the role launcher.
-    from long_prefix_case import (
-        DEFAULT_TARGET_TOKENS,
-        LongPrefixCase,
-        expanded_bytes_per_token,
-    )
-
 
 @dataclass(frozen=True)
 class Case:
@@ -55,6 +42,10 @@ class Case:
     cache_block_boundary: int | None = None
     cache_block_phase: str | None = None
     decode_crossings: tuple[int, ...] = ()
+    expected_cache_tier: str | None = None
+    allow_long_history: bool = False
+    preparation_only: bool = False
+    thinking_disabled: bool = False
 
 
 class SmokeFailure(RuntimeError):
@@ -67,6 +58,23 @@ class TransportFailure(SmokeFailure):
 
 class SmokeDeadline(SmokeFailure):
     """A formal request reached the user's five-minute wall-clock limit."""
+
+
+def prefill_cache_tiers(aux: dict[str, Any]) -> dict[str, int]:
+    """Use Prefill counters; generic local reuse includes lower tiers."""
+    keys = ("prefill_total_reuse_len", "prefill_local_reuse_len",
+            "prefill_memory_reuse_len", "prefill_disk_reuse_len")
+    if any(key not in aux for key in keys):
+        raise SmokeFailure("response lacks Prefill cache-tier counters")
+    total, local, memory, disk = (int(aux[key]) for key in keys)
+    device = local - memory - disk
+    if min(total, local, memory, disk, device) < 0 or local > total:
+        raise SmokeFailure(
+            f"inconsistent Prefill cache-tier counters: "
+            f"total={total} local={local} memory={memory} disk={disk}"
+        )
+    return {"total": total, "local": local, "device": device,
+            "memory": memory, "disk": disk}
 
 
 def reject_duplicate_keys(pairs):
@@ -121,19 +129,15 @@ def parse_args() -> argparse.Namespace:
             "repeat once per DP rank"
         ),
     )
-    parser.add_argument(
-        "--decode-dp-size",
-        type=int,
-        default=1,
-        choices=(1,),
-        help="number of Decode DP owners; TP-only uses 1",
-    )
     parser.add_argument("--output", required=True, type=pathlib.Path)
-    parser.add_argument(
-        "--suite",
-        choices=("flow", "main-text", "main-text-64k", "main-text-64k-capped"),
-        default="main-text",
-    )
+    parser.add_argument("--prefill-event-dir", type=pathlib.Path,
+                        help="Local Prefill LOG_PATH for the Host-load cancellation trigger")
+    parser.add_argument("--prefill-engine-log", type=pathlib.Path,
+                        help="Local Prefill C++ engine log for Host-load events")
+    parser.add_argument("--prefill-rpc-runfiles", type=pathlib.Path,
+                        help="Local Prefill Bazel runfiles for the PD-aware grouped cache case")
+    parser.add_argument("--prefill-grpc-port", type=int,
+                        help="Local Prefill group RPC port")
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--block-size", type=int, required=True)
@@ -148,11 +152,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--identity-max-tokens", type=int, default=256)
     parser.add_argument("--single-exact-max-tokens", type=int, default=128)
     parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
-    parser.add_argument(
-        "--require-mtp",
-        action="store_true",
-        help="include the native MTP draft-acceptance case",
-    )
     parser.add_argument(
         "--rdma-prewarm-attempts",
         type=int,
@@ -170,15 +169,39 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rdma-prewarm-backoff-s", type=float, default=5.0)
     parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
-    parser.add_argument("--long-prefix-checkpoint", type=pathlib.Path, required=True)
-    parser.add_argument("--long-prefix-tp-size", type=int, default=8)
-    parser.add_argument(
-        "--long-prefix-target-tokens", type=int, default=DEFAULT_TARGET_TOKENS
-    )
-    parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
-    parser.add_argument("--expanded-kv-budget-gib", type=float, default=6.0)
+    parser.add_argument("--checkpoint", "--long-prefix-checkpoint",
+                        dest="long_prefix_checkpoint", type=pathlib.Path, required=True)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
+    # The checkpoint chooses one of two fixed runs; phases and MTP cannot be
+    # disabled from the command line.
+    config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
+    text_config = config.get("text_config", config)
+    layers = text_config.get("num_hidden_layers")
+    if layers not in (4, 93):
+        parser.error("smoke requires a four-layer or 93-layer checkpoint")
+    args.suite = "orthogonal-flow" if layers == 4 else "main-text-64k-capped"
+    args.run_kind = "four-layer" if layers == 4 else "full-93"
+    args.require_mtp = True
+    args.orthogonal_phases = ("cache", "cancel", "page", "chunk", "decode")
+    if (
+        args.prefill_event_dir is None or not args.prefill_event_dir.is_dir()
+    ):
+        parser.error("orthogonal smoke needs an existing local --prefill-event-dir")
+    if (
+        args.prefill_engine_log is None or not args.prefill_engine_log.is_file()
+    ):
+        parser.error("orthogonal smoke needs an existing local --prefill-engine-log")
+    if (
+        args.prefill_rpc_runfiles is None or
+        not (args.prefill_rpc_runfiles / "rtp_llm" / "rtp_llm" / "cpp" /
+             "model_rpc" / "proto" / "model_rpc_service_pb2.py").is_file()
+    ):
+        parser.error("orthogonal smoke needs the local --prefill-rpc-runfiles")
+    if (
+        args.prefill_grpc_port is None or not 1 <= args.prefill_grpc_port <= 65535
+    ):
+        parser.error("orthogonal smoke needs --prefill-grpc-port")
     if args.batch_size < 4:
         parser.error(
             "--batch-size must be at least 4 to cover hit/partial-hit/miss mixing"
@@ -191,52 +214,23 @@ def parse_args() -> argparse.Namespace:
         "single_exact_max_tokens",
         "mtp_chunk_max_tokens",
         "timeout",
-        "long_prefix_tp_size",
-        "long_prefix_target_tokens",
-        "long_prefix_kernel_page_size",
         "rdma_prewarm_timeout",
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
-    if args.suite == "main-text" and (
-        not math.isfinite(args.expanded_kv_budget_gib)
-        or args.expanded_kv_budget_gib <= 0
-    ):
-        parser.error(
-            "all suite needs a positive expansion budget for the long prefix case"
-        )
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
-    if args.decode_dp_size is not None and args.decode_dp_size <= 0:
-        parser.error("--decode-dp-size must be positive")
-    expected_owners = (
-        (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
-    )
-    if args.suite in ("main-text", "main-text-64k", "main-text-64k-capped") and len(args.decode_role_addrs) not in expected_owners:
-        parser.error(
-            f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
-        )
+    if len(args.decode_role_addrs) not in (1, 2):
+        parser.error("smoke requires one or two ordered Decode owner addresses")
+    args.decode_dp_size = len(args.decode_role_addrs)
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
-    if args.suite in ("main-text", "main-text-64k", "main-text-64k-capped"):
-        config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
-        config = config.get("text_config", config)
-        if config.get("num_hidden_layers") != 93:
-            parser.error(
-                "main-text requires the full 93-layer checkpoint; use flow only for preflight"
-            )
-        if not args.require_mtp:
-            parser.error("main-text requires --require-mtp (real acceptance)")
-        if args.suite == "main-text" and args.long_prefix_target_tokens < DEFAULT_TARGET_TOKENS:
-            parser.error("main-text cannot reduce the 110K long-prefix gate")
-        if args.chunk_tokens < 65536:
-            parser.error("main-text requires a chunk budget of at least 65536")
-        if args.suite in ("main-text-64k", "main-text-64k-capped") and args.chunk_tokens != 65536:
-            parser.error("main-text-64k requires a 65536-token single-prefill budget")
-        if args.suite == "main-text-64k-capped" and args.block_size != 4096:
-            parser.error("the capped PD427 subset requires 4096-token cache blocks")
-    args.case_deadline_s = 300 if args.suite in ("flow", "main-text-64k-capped") else None
+    if args.chunk_tokens != 65536:
+        parser.error("smoke requires a 65536-token single-prefill budget")
+    if args.block_size != 4096:
+        parser.error("smoke requires 4096-token cache blocks")
+    args.case_deadline_s = 300
     if args.reuse_unit_tokens and (
         args.reuse_unit_tokens < args.block_size
         or args.reuse_unit_tokens % args.block_size
@@ -348,9 +342,15 @@ class Runner:
 
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
+            "run_kind": getattr(self.args, "run_kind", "four-layer" if self.args.suite ==
+                                "orthogonal-flow" else "full-93"),
             "suite": self.args.suite,
+            "case_profile": "compact-64k-v1" if self.args.suite in
+            ("main-text-64k-capped", "orthogonal-flow") else None,
+            "orthogonal_phases": list(self.args.orthogonal_phases),
             "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
-            "profile": "tp8-ep8-sp-no-dcp-text",
+            "profile": "orthogonal-pd-page-rr" if self.args.suite in
+            ("main-text-64k-capped", "orthogonal-flow") else "tp8-ep8-sp-no-dcp-text",
             "deferred_by_user": (
                 ["chunk prefill", "over-64K inputs", "chunk budget +1/+7", "110K seed and append"]
                 if self.args.suite in ("main-text-64k", "main-text-64k-capped") else []
@@ -358,15 +358,12 @@ class Runner:
             "single_prefill_input_limit": 65536 if self.args.suite in ("main-text-64k", "main-text-64k-capped") else None,
             "formal_request_deadline_s": self.args.case_deadline_s,
             "full_original_suite_passed": self.args.suite == "main-text" and passed and not self.skipped_cases,
-            "not_applicable": [
-                "DCP",
-                "PageRR owner",
-                "DP multi-owner",
-                "multimodal",
-                "KTP",
-                "EAGLE3/DSpark",
-            ],
-            "runtime_evidence_gate": "separate; this result alone does not certify RDMA, graph replay or precision",
+            "not_applicable": (
+                ["multimodal", "KTP", "EAGLE3/DSpark"]
+                if self.args.suite in ("main-text-64k-capped", "orthogonal-flow")
+                else ["DCP", "PageRR owner", "DP multi-owner", "multimodal", "KTP", "EAGLE3/DSpark"]
+            ),
+            "runtime_evidence_gate": "separate all-rank audit required; HTTP results alone do not certify runtime paths",
             "formal_request_retries": 0,
             "namespace": self.args.namespace,
             "passed": passed,
@@ -463,12 +460,14 @@ class Runner:
             "name": case.name,
             "owner": case.decode_owner_rank,
             "passed": False,
-            "phase": "prewarm" if case.name.startswith("rdma_prewarm_") else "formal",
+            "phase": "preparation" if case.preparation_only else
+                     "prewarm" if case.name.startswith("rdma_prewarm_") else "formal",
             "expected": {
                 "regex": case.expected_regex,
                 "json": case.expected_json,
                 "input_len": case.expected_input_len,
                 "reuse_len": case.expected_reuse_len,
+                "cache_tier": case.expected_cache_tier,
             },
         }
 
@@ -480,9 +479,7 @@ class Runner:
 
         try:
             result = self._request(case, barrier, audit=audit, persist=persist)
-            result["phase"] = (
-                "prewarm" if case.name.startswith("rdma_prewarm_") else "formal"
-            )
+            result["phase"] = audit["phase"]
             audit.update(passed=True, result=result)
             with self._record_lock:
                 self.records.append(result)
@@ -498,6 +495,8 @@ class Runner:
                 )
             raise
         except Exception as exc:
+            if barrier is not None:
+                barrier.abort()
             audit["error"] = f"{type(exc).__name__}: {exc}"
             with self._record_lock:
                 self.failures.append(
@@ -521,9 +520,7 @@ class Runner:
         audit: dict,
         persist: Callable,
     ) -> dict[str, Any]:
-        if barrier is not None:
-            barrier.wait(timeout=30)
-        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
+        if self.args.suite in ("orthogonal-flow", "main-text-64k", "main-text-64k-capped") and not case.allow_long_history:
             if not isinstance(case.prompt, str):
                 raise SmokeFailure("64K profile requires a text prompt")
             input_ids = self.tokenize(case.prompt)
@@ -532,6 +529,8 @@ class Runner:
             persist()
             if len(input_ids) > 65536 or case.require_chunk:
                 raise SmokeFailure(f"{case.name}: outside the non-chunk 64K profile")
+        elif case.allow_long_history and case.require_chunk:
+            raise SmokeFailure(f"{case.name}: model-level chunking is outside this profile")
         request_max_tokens = case.max_tokens or self.args.max_tokens
         payload = {
             "model": "kimi-k3",
@@ -544,6 +543,8 @@ class Runner:
             "stream": False,
             "debug_info": True,
         }
+        if case.preparation_only or case.thinking_disabled:
+            payload["enable_thinking"] = False
         if self.decode_role_addrs:
             if not 0 <= case.decode_owner_rank < len(self.decode_role_addrs):
                 raise SmokeFailure(
@@ -561,6 +562,10 @@ class Runner:
         audit["request"] = payload
         persist()
         wire_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        if barrier is not None:
+            # Token fixture construction can serialize on /tokenize. Release
+            # the HTTP requests together only after every caller is ready.
+            barrier.wait(timeout=max(30, self.args.timeout))
         started = time.time()
         request_timeout = case.timeout_s or self.args.timeout
         if self.args.case_deadline_s is not None:
@@ -568,7 +573,9 @@ class Runner:
             deadline = self.args.case_deadline_s
             command = ["curl", "--silent", "--show-error", "--noproxy", "*",
                        "--max-time", str(deadline), "--request", "POST",
-                       "--header", "Content-Type: application/json", "--data-binary", "@-",
+                       "--header", "Content-Type: application/json",
+                       "--header", f"X-K3-Smoke-Case: {case.name}",
+                       "--data-binary", "@-",
                        "--write-out", marker.decode() + "%{http_code}", self.endpoint]
             try:
                 response = subprocess.run(command, input=wire_payload, capture_output=True,
@@ -588,7 +595,9 @@ class Runner:
             status = int(status_bytes)
         else:
             request = urllib.request.Request(
-                self.endpoint, data=wire_payload, headers={"Content-Type": "application/json"}, method="POST"
+                self.endpoint, data=wire_payload,
+                headers={"Content-Type": "application/json", "X-K3-Smoke-Case": case.name},
+                method="POST"
             )
             try:
                 with self.opener.open(request, timeout=request_timeout) as response:
@@ -641,9 +650,10 @@ class Runner:
         output_ids = debug_info.get("output_ids")
         if not isinstance(content, str) or not isinstance(reasoning_content, str):
             raise SmokeFailure(f"{case.name}: malformed model response")
-        if "\ufffd" in content or "\ufffd" in reasoning_content:
+        diagnostic = case.preparation_only or self.args.suite in ("flow", "orthogonal-flow")
+        if not diagnostic and ("\ufffd" in content or "\ufffd" in reasoning_content):
             raise SmokeFailure(f"{case.name}: Unicode replacement in model response")
-        if self.args.suite != "flow" and finish_reason in ("length", "content_filter"):
+        if not diagnostic and finish_reason in ("length", "content_filter"):
             raise SmokeFailure(
                 f"{case.name}: incomplete model response finish_reason={finish_reason}"
             )
@@ -652,7 +662,7 @@ class Runner:
         # in reasoning_content. Keep full-model semantic checks pinned to the
         # final answer, but accept either non-empty channel for flow coverage.
         answer_text = content
-        if self.args.suite == "flow" and not answer_text.strip():
+        if diagnostic and not answer_text.strip():
             answer_text = reasoning_content
         if not answer_text.strip():
             raise SmokeFailure(f"{case.name}: empty model response")
@@ -691,6 +701,30 @@ class Runner:
         effective_reuse = (
             int(prefill_reuse_value) if prefill_reuse_value is not None else raw_reuse
         )
+        tier_lengths = (
+            prefill_cache_tiers(aux)
+            if all(key in aux for key in (
+                "prefill_total_reuse_len", "prefill_local_reuse_len",
+                "prefill_memory_reuse_len", "prefill_disk_reuse_len"))
+            else None
+        )
+        if case.expected_cache_tier is not None:
+            if tier_lengths is None:
+                raise SmokeFailure(f"{case.name}: missing Prefill cache-tier counters")
+            tier = case.expected_cache_tier
+            if tier not in ("miss", "device", "memory", "disk"):
+                raise SmokeFailure(f"{case.name}: invalid expected cache tier {tier!r}")
+            if tier == "miss":
+                tier_ok = tier_lengths["total"] == 0
+            else:
+                tier_ok = tier_lengths[tier] > 0 and all(
+                    tier_lengths[other] == 0
+                    for other in ("device", "memory", "disk") if other != tier
+                )
+            if not tier_ok:
+                raise SmokeFailure(
+                    f"{case.name}: expected {tier} Prefill cache tier, got {tier_lengths}"
+                )
         if case.expected_input_len is not None and input_len != case.expected_input_len:
             raise SmokeFailure(
                 f"{case.name}: tokenized input changed: {input_len} != {case.expected_input_len}"
@@ -707,6 +741,11 @@ class Runner:
         if effective_reuse < 0 or effective_reuse > input_len:
             raise SmokeFailure(
                 f"{case.name}: invalid reuse {effective_reuse} for input_len {input_len}"
+            )
+        if case.allow_long_history and input_len - effective_reuse > 65536:
+            raise SmokeFailure(
+                f"{case.name}: historical-KV request has {input_len - effective_reuse} "
+                "uncached Q tokens, exceeding 65536"
             )
         if effective_reuse and effective_reuse % self.args.block_size:
             raise SmokeFailure(
@@ -781,6 +820,9 @@ class Runner:
             "effective_reuse_len": effective_reuse,
             "reuse_len": raw_reuse,
             "prefill_total_reuse_len": prefill_reuse_value,
+            "prefill_cache_tiers": tier_lengths,
+            "expected_cache_tier": case.expected_cache_tier,
+            "allow_long_history": case.allow_long_history,
             "input_len": input_len,
             "output_len": output_len,
             "iter_count": iter_count,
@@ -789,6 +831,7 @@ class Runner:
             "require_mtp": case.require_mtp,
             "require_mtp_draft": case.require_mtp_draft,
             "expected_json": case.expected_json,
+            "expected_regex": case.expected_regex,
             "expected_input_len": case.expected_input_len,
             "expected_reuse_len": case.expected_reuse_len,
             "cache_block_boundary": case.cache_block_boundary,
@@ -812,12 +855,25 @@ class Runner:
         }
 
     def request_cases(
-        self, cases: list[Case], concurrent: bool
+        self, cases: list[Case], concurrent: bool,
+        admission_wave_size: int | None = None,
+        admission_gap_s: float = 0,
     ) -> list[dict[str, Any]]:
         if concurrent:
-            barrier = threading.Barrier(len(cases))
+            # Decode boundary tests keep the requests active together while
+            # limiting the number of new PD/RDMA connections opened at once.
+            # The all-rank audit still requires the full *actual* Decode batch.
+            barrier = None if admission_wave_size else threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-                futures = [pool.submit(self.request, case, barrier) for case in cases]
+                futures = []
+                if admission_wave_size:
+                    for begin in range(0, len(cases), admission_wave_size):
+                        futures.extend(pool.submit(self.request, case) for case in
+                                       cases[begin:begin + admission_wave_size])
+                        if begin + admission_wave_size < len(cases):
+                            time.sleep(admission_gap_s)
+                else:
+                    futures = [pool.submit(self.request, case, barrier) for case in cases]
                 results, errors = [], []
                 for future in futures:
                     try:
@@ -833,6 +889,174 @@ class Runner:
                     raise fatal
                 return results
         return [self.request(case) for case in cases]
+
+    def request_cases_group(self, cases: list[Case]) -> dict[str, int]:
+        """Use the existing PD-aware group RPC to prove one target forward.
+
+        The group RPC batches admitted requests before FetchResponse performs
+        the normal P-to-D handoff. Its request IDs are saved with the raw RPC
+        evidence so the all-rank auditor can correlate the exact four members.
+        """
+        runfiles = self.args.prefill_rpc_runfiles
+        roots = [runfiles / "rtp_llm", *sorted(runfiles.glob("pip*/site-packages"))]
+        sys.path[:0] = [str(root) for root in roots]
+        try:
+            import grpc
+            import torch
+            from transformers import AutoTokenizer
+            from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+            from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+                CancelRequestPB, EnqueueGroupRequestPB, FetchRequestPB,
+            )
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+            from rtp_llm.ops import RoleType
+            from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+            from rtp_llm.utils.grpc_util import trans_tensor
+        except ImportError as exc:
+            raise SmokeFailure(f"PD group RPC dependencies are missing from {runfiles}: {exc}") from exc
+
+        group_id = time.time_ns() % (2 ** 62)
+        group = EnqueueGroupRequestPB(batch_id=group_id, dp_rank=0,
+                                      fetch_attach_timeout_ms=300000)
+        inputs: dict[int, tuple[Case, list[int], dict[str, Any]]] = {}
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.args.long_prefix_checkpoint, trust_remote_code=True)
+        stop_ids = [tokenizer.encode(marker, add_special_tokens=False) for marker in
+                    ("<|end_of_msg|>", "<|close|>response<|sep|>")]
+        for index, case in enumerate(cases):
+            if not isinstance(case.prompt, str):
+                raise SmokeFailure("PD group cache smoke requires text prompts")
+            role = self.decode_role_addrs[case.decode_owner_rank]
+            token_ids = self.tokenize(case.prompt)
+            if len(token_ids) > 65536:
+                raise SmokeFailure(f"{case.name}: grouped input exceeds 64K")
+            request_id = group_id + index
+            config = GenerateConfig(
+                max_new_tokens=case.max_tokens or self.args.max_tokens,
+                do_sample=False, top_k=1, top_p=0.95,
+                timeout_ms=300000, aux_info=True, random_seed=0,
+                thinking_mode=ThinkingMode.DISABLED, max_thinking_tokens=0,
+                stop_words_list=stop_ids,
+                role_addrs=[RoleAddr(role=RoleType.DECODE, ip=role["ip"],
+                                     http_port=role["http_port"],
+                                     grpc_port=role["grpc_port"])],
+            )
+            input_py = GenerateInput(
+                request_id=request_id,
+                token_ids=torch.tensor(token_ids, dtype=torch.int32),
+                mm_inputs=[], generate_config=config,
+                request_info=RequestInfo(request_id=case.name),
+            )
+            group.requests.add().input.CopyFrom(trans_input(input_py))
+            payload = {
+                "model": "kimi-k3", "messages": [{"role": "user", "content": case.prompt}],
+                "max_tokens": config.max_new_tokens, "temperature": 0,
+                "top_k": 1, "top_p": 0.95, "enable_thinking": False,
+                "extra_configs": {"role_addrs": [role]},
+            }
+            inputs[request_id] = (case, token_ids, payload)
+
+        address = f"127.0.0.1:{self.args.prefill_grpc_port}"
+        started = time.time()
+        with grpc.insecure_channel(address) as channel:
+            stub = RpcServiceStub(channel)
+            try:
+                ack = stub.EnqueueGroup(group, timeout=300)
+            except grpc.RpcError as exc:
+                raise SmokeFailure(f"PD group enqueue failed: {exc}") from exc
+            accepted = {item.request_id for item in ack.successes}
+            errors = {item.request_id: str(item.error_info) for item in ack.errors}
+            if accepted != set(inputs) or errors:
+                for request_id in accepted:
+                    try:
+                        stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
+                    except grpc.RpcError:
+                        pass
+                raise SmokeFailure(f"PD group admitted {len(accepted)}/{len(cases)}; errors={errors}")
+
+            def fetch(request_id: int) -> tuple[int, list[int], Any]:
+                output_ids: list[int] = []
+                final_aux = None
+                finished = False
+                for frame in stub.FetchResponse(
+                    FetchRequestPB(request_id=request_id), timeout=300
+                ):
+                    flat = frame.flatten_output
+                    if flat.HasField("output_ids"):
+                        output_ids.extend(trans_tensor(flat.output_ids).reshape(-1).tolist())
+                    if flat.aux_info:
+                        final_aux = flat.aux_info[0]
+                    finished = bool(flat.finished and flat.finished[0])
+                if not finished or final_aux is None or not output_ids:
+                    raise SmokeFailure(f"PD group request {request_id} did not finish")
+                return request_id, output_ids, final_aux
+
+            try:
+                with ThreadPoolExecutor(max_workers=len(cases)) as pool:
+                    results = list(pool.map(fetch, inputs))
+            except Exception:
+                for request_id in accepted:
+                    try:
+                        stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
+                    except grpc.RpcError:
+                        pass
+                raise
+
+        for request_id, output_ids, aux in results:
+            case, _, payload = inputs[request_id]
+            visible_ids = output_ids
+            for stop in sorted(stop_ids, key=len, reverse=True):
+                if stop and visible_ids[-len(stop):] == stop:
+                    visible_ids = visible_ids[:-len(stop)]
+                    break
+            decoded = tokenizer.decode(visible_ids, skip_special_tokens=True)
+            role = self.decode_role_addrs[case.decode_owner_rank]
+            auxiliary = {
+                "pd_sep": bool(aux.pd_sep), "input_len": int(aux.input_len),
+                "output_len": int(aux.output_len), "iter_count": int(aux.iter_count),
+                "reuse_len": int(aux.total_reuse_len),
+                "prefill_total_reuse_len": int(aux.prefill_total_reuse_len),
+                "prefill_local_reuse_len": int(aux.prefill_local_reuse_len),
+                "prefill_memory_reuse_len": int(aux.prefill_memory_reuse_len),
+                "prefill_disk_reuse_len": int(aux.prefill_disk_reuse_len),
+                "speculative_draft_rounds": int(aux.speculative_draft_rounds),
+                "role_addrs": [role],
+            }
+            response = {
+                "choices": [{"message": {"content": decoded, "reasoning_content": ""},
+                             "finish_reason": "stop" if len(output_ids) < payload["max_tokens"]
+                             else "length"}],
+                "aux_info": auxiliary,
+                "debug_info": {"output_ids": [output_ids]},
+            }
+            artifact = {
+                "name": case.name, "owner": case.decode_owner_rank,
+                "request_id": request_id, "transport": "pd_group_rpc",
+                "rpc_status": "OK", "passed": False,
+                "phase": "preparation" if case.preparation_only else "formal",
+                "request": payload,
+                "response_body": json.dumps(response, ensure_ascii=False),
+            }
+            with self._record_lock:
+                self._artifact_counter += 1
+                number = self._artifact_counter
+            directory = self.args.output.parent / "requests"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{number:04d}-{hashlib.sha256(case.name.encode()).hexdigest()[:12]}.json"
+            try:
+                row = self.validate(case, response, time.time() - started,
+                                    payload["max_tokens"])
+                row["phase"] = artifact["phase"]
+                artifact.update(passed=True, result=row)
+                with self._record_lock:
+                    self.records.append(row)
+            except Exception as exc:
+                artifact["error"] = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n")
+        return {case.name: request_id for request_id, (case, _, _) in inputs.items()}
 
     def prewarm_rdma_pool(self) -> None:
         if self.args.rdma_prewarm_attempts == 0:
@@ -902,22 +1126,32 @@ class Runner:
                 time.sleep(self.args.rdma_prewarm_settle_s)
             return
 
-    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False) -> None:
+    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False,
+                  grouped_pd: bool = False, admission_wave_size: int | None = None,
+                  admission_gap_s: float = 0) -> None:
         self.health(name)
         started = time.time()
         stage = {
             "name": name,
+            "start_time_ns": time.time_ns(),
             "concurrent": concurrent,
             "passed": False,
             "case_names": [case.name for case in cases],
             "decode_owner_ranks": [case.decode_owner_rank for case in cases],
+            "transport": "pd_group_rpc" if grouped_pd else "http",
         }
+        if admission_wave_size:
+            stage["admission_wave_size"] = admission_wave_size
+            stage["admission_gap_s"] = admission_gap_s
         self.stages.append(stage)
         try:
-            if name == "rolling_refill":
+            if grouped_pd:
+                stage["request_ids"] = self.request_cases_group(cases)
+            elif name == "rolling_refill":
                 self.request_refill(cases)
             else:
-                self.request_cases(cases, concurrent)
+                self.request_cases(cases, concurrent, admission_wave_size,
+                                   admission_gap_s)
             stage["passed"] = True
         except SmokeDeadline as exc:
             if self.args.case_deadline_s is None:
@@ -933,6 +1167,7 @@ class Runner:
             raise
         finally:
             stage["elapsed_s"] = round(time.time() - started, 3)
+            stage["end_time_ns"] = time.time_ns()
         print(f"stage={name} passed={str(stage['passed']).lower()} "
               f"skipped={stage.get('skipped', False)} owners={stage['decode_owner_ranks']}")
 
@@ -1404,19 +1639,20 @@ class Runner:
             )
 
     def run_flow(self) -> None:
-        # Four layers only check flow, chunk boundaries and cache reuse.
+        # The four-layer preflight checks PD, uneven batches, reuse and MTP
+        # before the same orthogonal phases. Model-level chunking is excluded.
         prompt, tokens = self.fit_prompt(
-            f"流程 {self.args.namespace}/chunk。\n",
+            f"流程 {self.args.namespace}/short。\n",
             "\n请回复任意一个非空字符。",
-            self.args.chunk_tokens + 1,
+            self.reuse_unit_tokens + 1,
         )
         seed = Case(
-            "chunkwise_rdma_flow_miss",
+            "four_layer_pd_flow_miss",
             prompt,
             r".",
             "miss",
-            require_chunk=True,
             expected_input_len=len(tokens),
+            max_tokens=8,
         )
         self.run_stage(seed.name, [seed])
         owners = max(1, len(self.decode_role_addrs))
@@ -1450,6 +1686,7 @@ class Runner:
                     "miss",
                     decode_owner_rank=owner,
                     expected_input_len=len(tokens),
+                    max_tokens=8,
                 )
             )
         self.run_stage("flow_uneven_miss", batch, concurrent=True)
@@ -1660,97 +1897,472 @@ class Runner:
             concurrent=True,
         )
 
-        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
-            self.run_single_prefill_64k()
-            self.run_prefix_branches()
-            self.run_cache_block_boundaries()
-            return
-
-        single_prompt = make_whole_chunk_prompt(
-            self.args.namespace, "whole-chunk-single", 61
-        )
-        self.run_stage(
-            "whole_chunk_single_miss",
-            [
-                Case(
-                    "whole_chunk_single_miss",
-                    single_prompt,
-                    numbered_answer_pattern(3721),
-                    "miss",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                )
-            ],
-        )
-        self.run_stage(
-            "whole_chunk_single_hit",
-            [
-                Case(
-                    "whole_chunk_single_hit",
-                    single_prompt,
-                    numbered_answer_pattern(3721),
-                    "hit",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                )
-            ],
-        )
-
-        chunk_batch_size = min(2, self.args.batch_size)
-        chunk_prompts = [
-            make_whole_chunk_prompt(
-                self.args.namespace, f"whole-chunk-batch-{idx}", 70 + idx
-            )
-            for idx in range(chunk_batch_size)
-        ]
-        self.run_stage(
-            "whole_chunk_batch_miss",
-            [
-                Case(
-                    f"whole_chunk_batch_miss_{idx}",
-                    prompt,
-                    numbered_answer_pattern((70 + idx) ** 2),
-                    "miss",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
-                )
-                for idx, prompt in enumerate(chunk_prompts)
-            ],
-            concurrent=True,
-        )
-        self.run_stage(
-            "whole_chunk_batch_hit",
-            [
-                Case(
-                    f"whole_chunk_batch_hit_{idx}",
-                    prompt,
-                    numbered_answer_pattern((70 + idx) ** 2),
-                    "hit",
-                    require_chunk=True,
-                    require_mtp=getattr(self.args, "require_mtp", False),
-                    max_tokens=max(
-                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
-                    ),
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
-                )
-                for idx, prompt in enumerate(chunk_prompts)
-            ],
-            concurrent=True,
-        )
+        self.run_single_prefill_64k()
         self.run_prefix_branches()
-        self.run_padding_boundaries()
         self.run_cache_block_boundaries()
-        self.run_long_prefix_case()
+
+    def _orthogonal_answer(self, name: str, prompt: str, value: str, reuse: str,
+                           **kwargs) -> Case:
+        diagnostic = self.args.suite == "orthogonal-flow"
+        return Case(name, prompt, r".", reuse,
+                    expected_json=None if diagnostic else {"value": value},
+                    max_tokens=8 if diagnostic else 256,
+                    require_mtp_draft=not diagnostic,
+                    thinking_disabled=True, **kwargs)
+
+    def _required_stage(self, name: str, cases: list[Case], concurrent=False,
+                        grouped_pd=False, admission_wave_size=None,
+                        admission_gap_s=0) -> None:
+        self.run_stage(name, cases, concurrent=concurrent, grouped_pd=grouped_pd,
+                       admission_wave_size=admission_wave_size,
+                       admission_gap_s=admission_gap_s)
+        if not self.stages[-1]["passed"]:
+            raise SmokeFailure(f"{name}: required orthogonal stage was skipped")
+
+    def _orthogonal_device_blocks(self) -> int | None:
+        engine_log = getattr(self.args, "prefill_engine_log", None)
+        if engine_log is None:
+            return None
+        with pathlib.Path(engine_log).open(encoding="utf-8", errors="replace") as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 16 * 1024 * 1024))
+            tail = stream.read()
+        matches = re.findall(r"kvc raw pool\[DEVICE/full\]:[^\n]*?\btotal=(\d+)", tail)
+        if not matches:
+            raise SmokeFailure("Prefill Device/full pool capacity is missing from engine log")
+        return int(matches[-1])
+
+    def _orthogonal_cache_seed(self) -> None:
+        unit = self.reuse_unit_tokens
+        # KDA state is reusable only after a complete 32768-token checkpoint;
+        # a shorter MLA-only prefix can hit Decode while Prefill still misses.
+        target = max(32769, unit + 1)
+        if target > 65536:
+            raise SmokeFailure("cache-tier smoke seed exceeds the 64K Q budget")
+        self._memory_candidates = []
+        for attempt in range(3):
+            tag = f"{self.args.namespace}-tier-{attempt}"
+            memory_value = f"MEM-{attempt}"
+            memory_tail = f'\n只输出 JSON {{"value":"{memory_value}"}}。'
+            memory_prompt, _ = self.fit_prompt(f"CACHE:{tag}:memory\n", memory_tail, target)
+            memory_seed = self._orthogonal_answer(
+                f"tier-memory-seed-{attempt}", memory_prompt, memory_value, "miss")
+            self._required_stage(memory_seed.name, [memory_seed])
+            self._memory_candidates.append((tag, memory_seed, memory_value))
+            if attempt == 0:
+                device_probe = replace(memory_seed, name="tier-device-probe-0",
+                                       reuse="any", expected_cache_tier=None,
+                                       preparation_only=True,
+                                       max_tokens=8 if self.args.suite == "orthogonal-flow" else 64)
+                self._required_stage(device_probe.name, [device_probe])
+                tier = self.records[-1].get("prefill_cache_tiers") or {}
+                if tier.get("device", 0) <= 0 or tier.get("memory", 0) != 0:
+                    raise SmokeFailure("immediate Device cache reuse was not observed")
+        # Later smoke traffic, including long-KV preparation, supplies cache
+        # pressure. This witness is newer than all three Memory candidates.
+        witness_value = "WIT"
+        witness_tail = f'\n只输出 JSON {{"value":"{witness_value}"}}。'
+        witness_prompt, _ = self.fit_prompt(
+            f"CACHE:{self.args.namespace}:witness\n", witness_tail, target)
+        self._memory_witness = self._orthogonal_answer(
+            "tier-witness-seed", witness_prompt, witness_value, "miss")
+        self._required_stage(self._memory_witness.name, [self._memory_witness])
+        if "cancel" in getattr(self.args, "orthogonal_phases", ()):
+            self._cancel_host_candidates = self._seed_cancel_candidates()
+
+    def _orthogonal_cache(self) -> None:
+        if not hasattr(self, "_memory_candidates"):
+            raise SmokeFailure("cache seeds must precede the traffic used for demotion")
+        probe = replace(self._memory_witness, name="tier-memory-probe",
+                        reuse="any", expected_cache_tier=None,
+                        preparation_only=True,
+                        max_tokens=8 if self.args.suite == "orthogonal-flow" else 64)
+        self._required_stage(probe.name, [probe])
+        tier = self.records[-1].get("prefill_cache_tiers") or {}
+        if not (tier.get("memory", 0) > 0 and tier.get("device", 0) == 0):
+            raise SmokeFailure("ordinary smoke traffic did not demote the witness prefix to Memory")
+        owner_count = max(1, len(self.decode_role_addrs))
+        device_blocks = self._orthogonal_device_blocks()
+        target = max(32769, self.reuse_unit_tokens + 1)
+        for attempt, (tag, memory_seed, memory_value) in enumerate(self._memory_candidates):
+            memory_prompt = memory_seed.prompt
+            device_value = f"DEV-{attempt}"
+            device_tail = f'\n只输出 JSON {{"value":"{device_value}"}}。'
+            device_prompt, _ = self.fit_prompt(f"CACHE:{tag}:device\n", device_tail, target)
+            self._required_stage(f"tier-device-seed-{attempt}", [
+                self._orthogonal_answer(f"tier-device-seed-{attempt}",
+                                        device_prompt, device_value, "miss")])
+            partial_seed_value, partial_value = f"SEED-{attempt}", f"PART-{attempt}"
+            seed_tail = f'\n只输出 JSON {{"value":"{partial_seed_value}"}}。'
+            query_tail = f'\n只输出 JSON {{"value":"{partial_value}"}}。'
+            partial_seed_prompt, seed_ids = self.fit_prompt(
+                f"CACHE:{tag}:partial\n", seed_tail, target + 256)
+            partial_prompt = partial_seed_prompt[:-len(seed_tail)] + query_tail
+            query_ids = self.tokenize(partial_prompt)
+            common = next((index for index, pair in enumerate(zip(seed_ids, query_ids))
+                           if pair[0] != pair[1]), min(len(seed_ids), len(query_ids)))
+            if common < 32768 or len(query_ids) > 65536:
+                raise SmokeFailure("partial cache prompt does not retain the KDA checkpoint")
+            self._required_stage(f"tier-partial-seed-{attempt}", [
+                self._orthogonal_answer(f"tier-partial-seed-{attempt}",
+                                        partial_seed_prompt, partial_seed_value, "miss")])
+            miss_value = f"MISS-{attempt}"
+            miss_tail = f'\n只输出 JSON {{"value":"{miss_value}"}}。'
+            miss_prompt, _ = self.fit_prompt(f"CACHE:{tag}:cold\n", miss_tail, target)
+            mixed = [
+                self._orthogonal_answer(f"tier-mixed-{attempt}-device", device_prompt,
+                                        device_value, "any", decode_owner_rank=0),
+                self._orthogonal_answer(f"tier-mixed-{attempt}-memory", memory_prompt,
+                                        memory_value, "any", decode_owner_rank=1 % owner_count),
+                self._orthogonal_answer(f"tier-mixed-{attempt}-partial", partial_prompt,
+                                        partial_value, "any", decode_owner_rank=2 % owner_count),
+                self._orthogonal_answer(f"tier-mixed-{attempt}-miss", miss_prompt,
+                                        miss_value, "any", decode_owner_rank=3 % owner_count),
+            ]
+            stage_name = f"orthogonal_cache_mixed_{attempt}"
+            self._required_stage(stage_name, mixed, concurrent=True, grouped_pd=True)
+            records = {row["name"]: row for row in self.records
+                       if row["name"] in {case.name for case in mixed}}
+            kinds = ("device", "memory", "partial", "miss")
+            checks = {}
+            for kind in kinds:
+                row = records[f"tier-mixed-{attempt}-{kind}"]
+                tier = row.get("prefill_cache_tiers") or {}
+                if kind == "miss":
+                    checks[kind] = tier.get("total") == 0
+                elif kind == "partial":
+                    checks[kind] = (0 < row["effective_reuse_len"] < row["input_len"]
+                                    and tier.get("device", 0) > 0)
+                else:
+                    checks[kind] = (tier.get(kind, 0) > 0 and
+                                    all(tier.get(other, 0) == 0 for other in
+                                        ("device", "memory", "disk") if other != kind))
+            stage = self.stages[-1]
+            stage["cache_tier_checks"] = checks
+            stage["device_pool_blocks"] = device_blocks
+            stage["cache_pressure_requests"] = getattr(self, "_cache_pressure_requests", 0)
+            stage["current_q_total"] = sum(
+                row["input_len"] - row["effective_reuse_len"] for row in records.values())
+            stage["same_forward_passed"] = self._orthogonal_shared_prefill_forward(
+                stage, {case.name for case in mixed})
+            stage["path_passed"] = (all(checks.values()) and
+                                     stage["current_q_total"] <= 65536 and
+                                     stage["same_forward_passed"])
+            if stage["path_passed"]:
+                return
+        raise SmokeFailure("mixed Prefill cache tiers were not triggered in three attempts")
+
+    def _orthogonal_bounded_cache_pressure(self) -> None:
+        # The long-KV chain retains roughly 20 KDA checkpoint blocks. A small
+        # number of distinct prefixes finishes Device-to-Host demotion when
+        # the bounded Device pool has room for those blocks plus recent cases.
+        pool_blocks = self._orthogonal_device_blocks()
+        if pool_blocks is None:
+            raise SmokeFailure("Prefill Device/full pool capacity is missing")
+        # Four-layer traffic has fewer ordinary cases before this stage, so
+        # allow more probes to fill its Device pool. The full smoke keeps its
+        # smaller cap because preceding correctness cases add pressure.
+        limit = 50 if self.args.suite == "orthogonal-flow" else 24
+        pressure_count = max(0, min(limit, pool_blocks - 20))
+        self._cache_pressure_requests = pressure_count
+        for index in range(pressure_count):
+            prompt, _ = self.fit_prompt(
+                f"CACHE-PRESSURE:{self.args.namespace}:{index}\n",
+                "\nReply 1.", 32769,
+            )
+            case = Case(
+                f"tier-pressure-{index:02d}", prompt, r".", "miss",
+                max_tokens=8, preparation_only=True,
+            )
+            self._required_stage(case.name, [case])
+
+    def _orthogonal_decode_batches(self) -> None:
+        owner_count = max(1, len(self.decode_role_addrs))
+        diagnostic = self.args.suite == "orthogonal-flow"
+        sizes = (1, 4, 8, 63, 64)
+        for stage_index, size in enumerate(sizes):
+            name = f"orthogonal_decode_{stage_index:02d}_batch_{size}"
+            cases = []
+            for index in range(size):
+                case = self.record_case(f"{name}_{index:02d}",
+                                        index % owner_count,
+                                        words=(112 if size == 63 and not diagnostic else
+                                               56 if size >= 64 and not diagnostic else 12))
+                if diagnostic:
+                    case = replace(case, expected_json=None, expected_regex=r".",
+                                   max_tokens=512)
+                else:
+                    # Keep all 32 rows of the larger DP owner alive while
+                    # the other owner's 31 rows join the same Verify step.
+                    case = replace(case,
+                                   max_tokens=(2560 if size == 63 else
+                                               1280 if size >= 64 else 256),
+                                   require_mtp_draft=True, thinking_disabled=True)
+                cases.append(case)
+            # A PD group admits the large boundary batch in one Prefill
+            # forward. The longer exact answer keeps all Decode rows alive
+            # until both owners reach their intended Graph buckets.
+            self._required_stage(name, cases, concurrent=size > 1,
+                                 grouped_pd=(size > 1 if diagnostic else size >= 63))
+
+    def _orthogonal_page_boundaries(self) -> None:
+        owners = max(1, len(self.decode_role_addrs))
+        for boundary in (4096, 32768):
+            for delta in (-1, 0, 1):
+                target = boundary + delta
+                value = f"PAGE-{boundary}-{delta:+d}"
+                tail = f'\n只输出 JSON {{"value":"{value}"}}。'
+                prompt, ids = self.fit_prompt(
+                    f"PAGE:{self.args.namespace}:{value}\n", tail, target)
+                case = self._orthogonal_answer(
+                    f"orthogonal_page_{boundary}_{delta:+d}", prompt,
+                    value, "miss", expected_input_len=len(ids),
+                    decode_owner_rank=(delta + 1) % owners)
+                self._required_stage(case.name, [case])
+
+    def _orthogonal_chunk_kv(self) -> None:
+        base = f"Long KV pressure test {self.args.namespace}. "
+        overhead = len(self.tokenize(base))
+        if len(self.tokenize(base + " x" * 16)) - overhead != 16:
+            raise SmokeFailure("long-KV seed filler is not one token per repeat")
+        # 589824 cached tokens exceed the 6 GiB FP8 MLA expansion budget's
+        # 557056-token aligned launch cap, while every seed adds <= 65536 Q.
+        seed_end, step = 655_360, 32_740
+        targets = list(range(65_504, seed_end, step))
+        if targets[-1] != seed_end:
+            targets.append(seed_end)
+        for index, target in enumerate(targets):
+            case = Case(
+                f"orthogonal_kv_seed_{index:02d}",
+                base + " x" * (target - overhead), r".",
+                "miss" if index == 0 else "hit",
+                allow_long_history=True, preparation_only=True,
+                max_tokens=4,
+            )
+            self._required_stage(case.name, [case])
+            row = self.records[-1]
+            if abs(row["input_len"] - target) > 32:
+                raise SmokeFailure(f"{case.name}: observed token count differs from seed target")
+        value = f"KV-{hashlib.sha256(self.args.namespace.encode()).hexdigest()[:10]}"
+        tail = f'\n唯一有效答案是 {value}。只输出 JSON {{"value":"{value}"}}。'
+        shared = 589_856 - overhead
+        suffix = 65_300
+        prompt = base + " x" * shared + " z" * suffix + tail
+        case = self._orthogonal_answer(
+            "orthogonal_kv_final", prompt, value, "hit",
+            allow_long_history=True)
+        self._required_stage(case.name, [case])
+        row = self.records[-1]
+        if row["effective_reuse_len"] < 589_824:
+            raise SmokeFailure("589824-token historical KV reuse frontier was not reached")
+        self.stages[-1]["historical_kv_tokens"] = row["effective_reuse_len"]
+        self.stages[-1]["current_q_tokens"] = row["input_len"] - row["effective_reuse_len"]
+
+    def _new_log_events(self, directory: pathlib.Path,
+                        offsets: dict[pathlib.Path, int]) -> list[dict[str, Any]]:
+        events = []
+        paths = list(directory.glob("main_[0-9]*.log"))
+        engine_log = getattr(self.args, "prefill_engine_log", None)
+        if engine_log is not None:
+            paths.append(engine_log)
+        for path in paths:
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                size = path.stat().st_size
+                old = offsets.get(path, 0)
+                if old > size:
+                    old = 0
+                handle.seek(old)
+                for line in handle:
+                    marker = "[K3_SMOKE_EVENT] "
+                    if marker not in line:
+                        continue
+                    try:
+                        event = json.loads(line.split(marker, 1)[1])
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict):
+                        events.append(event)
+                offsets[path] = handle.tell()
+        return events
+
+    def _orthogonal_shared_prefill_forward(self, stage: dict[str, Any],
+                                           case_names: set[str]) -> bool:
+        rank_logs = sorted(self.args.prefill_event_dir.glob("main_[0-9]*.log"))
+        if not rank_logs:
+            return False
+        start, end = stage["start_time_ns"], stage["end_time_ns"]
+        events = [event for event in self._new_log_events(
+            self.args.prefill_event_dir, {})
+            if start <= event.get("time_ns", -1) <= end]
+        if stage.get("transport") == "pd_group_rpc":
+            ids = stage.get("request_ids", {})
+        else:
+            ids = {event["case"]: event["request_id"] for event in events
+                   if event.get("event") == "frontend_request"
+                   and event.get("case") in case_names
+                   and isinstance(event.get("request_id"), int)}
+        if len(ids) != len(case_names) or len(set(ids.values())) != len(case_names):
+            return False
+        expected_ids = set(ids.values())
+        return all(any(
+            event.get("kind") == "target_prefill_forward"
+            and event.get("tp_rank") == rank
+            and event.get("actual_batch") == len(case_names)
+            and set(event.get("request_ids", [])) == expected_ids
+            for event in events)
+            for rank in range(len(rank_logs)))
+
+    def _seed_cancel_candidates(self) -> list[Case]:
+        seeds = []
+        for attempt in range(3):
+            value = f"CANCEL-RECOVER-{attempt}"
+            tail = f'\n只输出 JSON {{"value":"{value}"}}。'
+            prompt, _ = self.fit_prompt(
+                f"CACHE:{self.args.namespace}:cancel:{attempt}\n", tail, 32769)
+            seed = self._orthogonal_answer(
+                f"cancel-memory-seed-{attempt}", prompt, value, "miss")
+            self._required_stage(seed.name, [seed])
+            seeds.append(seed)
+        return seeds
+
+    def _orthogonal_cancel_recovery(self) -> None:
+        if not hasattr(self, "_memory_candidates"):
+            raise SmokeFailure("Host cache demotion was not established before cancel test")
+        seeds = getattr(self, "_cancel_host_candidates", None)
+        if seeds is None:
+            raise SmokeFailure("cancel candidates must be seeded before cache pressure")
+        offsets: dict[pathlib.Path, int] = {}
+        self._new_log_events(self.args.prefill_event_dir, offsets)
+        attempts = []
+        recovery_seed = None
+        for attempt, seed in enumerate(seeds):
+            item = self._cancel_host_load_by_group_rpc(seed, attempt, offsets)
+            attempts.append(item)
+            if item["path_passed"]:
+                recovery_seed = seed
+                break
+        else:
+            raise SmokeFailure("three attempts did not cancel during Prefill Host cache load")
+        assert recovery_seed is not None
+        recovery = replace(recovery_seed, name="cancel-same-prefix-recovery", reuse="any")
+        independent_value = "CANCEL-INDEPENDENT"
+        independent_tail = f'\n只输出 JSON {{"value":"{independent_value}"}}。'
+        independent_prompt, _ = self.fit_prompt(
+            f"CACHE:{self.args.namespace}:independent\n", independent_tail, 8193)
+        independent = self._orthogonal_answer(
+            "cancel-independent-recovery", independent_prompt,
+            independent_value, "miss")
+        self._required_stage("orthogonal_cancel_recovery", [recovery, independent],
+                             concurrent=True)
+        self.stages[-1]["cancel_attempts"] = attempts
+        self.stages[-1]["path_passed"] = True
+
+    def _cancel_host_load_by_group_rpc(self, seed: Case, attempt: int,
+                                       offsets: dict[pathlib.Path, int]) -> dict[str, Any]:
+        """Cancel an admitted request while Host cache is loading.
+
+        HTTP stream disconnect is polled after the load window. The existing
+        Prefill batch RPC acknowledges Cancel synchronously and fences Fetch.
+        No model output from this deliberately cancelled request counts as a
+        successful answer.
+        """
+        runfiles = self.args.prefill_rpc_runfiles
+        sys.path[:0] = [str(runfiles / "rtp_llm"),
+                        *(str(path) for path in sorted(runfiles.glob("pip*/site-packages")))]
+        try:
+            import grpc
+            import torch
+            from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+            from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+                CancelRequestPB, EnqueueGroupRequestPB, FetchRequestPB,
+            )
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+            from rtp_llm.ops import RoleType
+            from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+        except ImportError as exc:
+            raise SmokeFailure(f"PD Cancel RPC dependencies missing: {exc}") from exc
+
+        request_id = time.time_ns() % (2 ** 62)
+        role = self.decode_role_addrs[0]
+        config = GenerateConfig(
+            max_new_tokens=64, do_sample=False, top_k=1, top_p=0.95,
+            timeout_ms=300000, aux_info=True, random_seed=0,
+            thinking_mode=ThinkingMode.DISABLED, max_thinking_tokens=0,
+            role_addrs=[RoleAddr(role=RoleType.DECODE, ip=role["ip"],
+                                 http_port=role["http_port"],
+                                 grpc_port=role["grpc_port"])],
+        )
+        request = GenerateInput(
+            request_id=request_id,
+            token_ids=torch.tensor(self.tokenize(seed.prompt), dtype=torch.int32),
+            mm_inputs=[], generate_config=config,
+            request_info=RequestInfo(request_id=f"cancel-during-host-load-{attempt}"),
+        )
+        group = EnqueueGroupRequestPB(batch_id=request_id, dp_rank=0,
+                                      fetch_attach_timeout_ms=300000)
+        group.requests.add().input.CopyFrom(trans_input(request))
+        self._new_log_events(self.args.prefill_event_dir, offsets)
+        with grpc.insecure_channel(f"127.0.0.1:{self.args.prefill_grpc_port}") as channel:
+            stub = RpcServiceStub(channel)
+            ack = stub.EnqueueGroup(group, timeout=300)
+            if ([item.request_id for item in ack.successes] != [request_id]
+                    or ack.errors):
+                raise SmokeFailure(f"Host-load cancel enqueue rejected: {ack}")
+            cancel = stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
+            try:
+                frames = list(stub.FetchResponse(
+                    FetchRequestPB(request_id=request_id), timeout=5))
+                fetch = {"finished": any(
+                    frame.flatten_output.finished and frame.flatten_output.finished[0]
+                    for frame in frames)}
+            except grpc.RpcError as exc:
+                fetch = {"code": str(exc.code()), "details": exc.details()}
+
+        deadline = time.monotonic() + 5
+        observed = []
+        while time.monotonic() < deadline:
+            observed.extend(event for event in self._new_log_events(
+                self.args.prefill_event_dir, offsets)
+                if event.get("request_id") == request_id)
+            if any(event.get("event") == "prefill_priority_cancel_accepted"
+                   for event in observed):
+                break
+            time.sleep(0.01)
+        events = {event.get("event"): event for event in observed}
+        started = events.get("host_cache_load_started")
+        cancelled = events.get("prefill_priority_cancel_accepted")
+        done = events.get("host_cache_load_done")
+        path_passed = bool(
+            int(cancel.status) == 1 and fetch.get("code") == "StatusCode.RESOURCE_EXHAUSTED"
+            and "preempted" in fetch.get("details", "")
+            and started and cancelled
+            and started["time_ns"] <= cancelled["time_ns"]
+            and (done is None or cancelled["time_ns"] < done["time_ns"])
+        )
+        return {"case": f"cancel-during-host-load-{attempt}",
+                "request_id": request_id, "cancel_status": int(cancel.status),
+                "fetch": fetch, "load_started": started, "cancelled": cancelled,
+                "load_done": done, "path_passed": path_passed}
+
+    def run_orthogonal_boundaries(self) -> None:
+        phases = self.args.orthogonal_phases
+        if "cache" in phases or "cancel" in phases:
+            self._orthogonal_cache_seed()
+        if "page" in phases:
+            self._orthogonal_page_boundaries()
+        if "chunk" in phases:
+            self._orthogonal_chunk_kv()
+        if "cache" in phases:
+            self._orthogonal_bounded_cache_pressure()
+        if "cache" in phases:
+            self._orthogonal_cache()
+        if "cancel" in phases:
+            self._orthogonal_cancel_recovery()
+        if "decode" in phases:
+            self._orthogonal_decode_batches()
 
     def run_single_prefill_64k(self) -> None:
         # Exact rendered-token count, including the serving chat template.
@@ -1771,58 +2383,43 @@ class Runner:
                     max_tokens=max(self.args.max_tokens, self.args.mtp_chunk_max_tokens),
                 ))
             self.run_stage(f"prefill_64k_{label}_cold", cases, concurrent=count > 1)
-            self.run_stage(f"prefill_64k_{label}_reuse", [
+            reuse_cases = [
                 replace(case, name=case.name.replace("_cold", "_reuse"), reuse="hit",
                         expected_reuse_len=65535 // self.reuse_unit_tokens * self.reuse_unit_tokens)
                 for case in cases
-            ], concurrent=count > 1)
-
-    def run_long_prefix_case(self) -> None:
-        self.health("long_prefix_cached_dialog")
-        stage = dict(name="long_prefix_cached_dialog", concurrent=False, passed=False)
-        self.stages.append(stage)
-        case = LongPrefixCase(
-            self.args.base_url,
-            self.args.output.parent / "long-prefix",
-            self.args.namespace,
-            timeout=self.args.timeout,
-            budget=int(self.args.expanded_kv_budget_gib * 1024**3),
-            page_size=self.args.block_size,
-            kernel_page_size=self.args.long_prefix_kernel_page_size,
-            bytes_per_token=expanded_bytes_per_token(
-                self.args.long_prefix_checkpoint, self.args.long_prefix_tp_size
-            ),
-            target_tokens=self.args.long_prefix_target_tokens,
-            reuse_unit_tokens=self.reuse_unit_tokens,
-            decode_role_addrs=self.decode_role_addrs,
-        )
-        try:
-            result = case.run()
-            stage.update(
-                passed=True,
-                case_names=[row["name"] for row in result["cases"]],
-                planned_prefix_blocks=result["planned_prefix_blocks"],
-                evidence=str(case.output / "RESULT.json"),
-            )
-        finally:
-            self.records.extend(case.records)
-        self.health("long_prefix_cached_dialog")
-
+            ]
+            reuse_stage = f"prefill_64k_{label}_reuse"
+            if label == "single" and len(self.decode_role_addrs) == 2:
+                # Reuse the existing request budget: cold state goes to DP0,
+                # the same cached Prefill state then crosses to DP1.
+                reuse_stage = "decode_dp_cross_owner_cached_64k"
+                reuse_cases[0] = replace(reuse_cases[0], name=reuse_stage,
+                                         decode_owner_rank=1)
+            self.run_stage(reuse_stage, reuse_cases, concurrent=count > 1)
 
 def main() -> int:
     args = parse_args()
     runner = Runner(args)
     try:
-        suites: dict[str, Callable[[], None]] = {
-            "flow": runner.run_flow,
-            "main-text": runner.run_main_text,
-            "main-text-64k": runner.run_main_text,
-            "main-text-64k-capped": runner.run_main_text,
-        }
-        suites[args.suite]()
+        if args.run_kind == "full-93":
+            runner.run_main_text()
+            # Seed after the broad correctness suite. On the 93-layer model,
+            # its traffic can evict an early witness from Host as well as
+            # Device; the PageRR and long-KV stages provide bounded pressure.
+            runner._orthogonal_cache_seed()
+            for phase in (runner._orthogonal_page_boundaries,
+                          runner._orthogonal_chunk_kv,
+                          runner._orthogonal_bounded_cache_pressure,
+                          runner._orthogonal_cache,
+                          runner._orthogonal_cancel_recovery,
+                          runner._orthogonal_decode_batches):
+                phase()
+        else:
+            runner.run_flow()
+            runner.run_orthogonal_boundaries()
         runner.save(passed=True)
         print(
-            f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}"
+            f"PASS: run={args.run_kind} cases={len(runner.records)} artifacts={args.output}"
         )
         return 0
     except Exception as exc:

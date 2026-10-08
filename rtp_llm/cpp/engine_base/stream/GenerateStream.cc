@@ -2,6 +2,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
@@ -801,6 +803,18 @@ bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& 
     const bool successful_completion_pending =
         hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock();
     if (!successful_completion_pending) {
+        const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        if (smoke_evidence != nullptr && std::strcmp(smoke_evidence, "1") == 0
+            && getStatus() == StreamState::LOADING_CACHE
+            && streamCacheResource().pendingHostReuseTokens() > 0) {
+            const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            RTP_LLM_LOG_INFO(
+                "[K3_SMOKE_EVENT] {\"event\":\"host_cache_cancelled_during_load\","
+                "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                static_cast<long>(streamId()), streamCacheResource().pendingHostReuseTokens(),
+                static_cast<long>(time_ns));
+        }
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
     }
 

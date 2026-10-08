@@ -150,7 +150,7 @@ def launch_config(args):
         "reuse_cache": int(not orthogonal_smoke or args.role == "PREFILL"),
         "enable_device_cache": 1,
         "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
-        "moe_strategy": args.moe_strategy,
+        "moe_strategy": getattr(args, "moe_strategy", "mega_moe"),
         "enable_cuda_graph": int(args.role == "DECODE"),
         "cache_store_rdma_mode": 1,
         "cache_store_rdma_connect_timeout_ms": 30000,

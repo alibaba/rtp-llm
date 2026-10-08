@@ -46,6 +46,9 @@ public:
     void                        releaseResource();
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
+    // Planned Host reuse is available before an asynchronous load completes;
+    // published stream reuse lengths are deliberately updated only afterwards.
+    size_t                      pendingHostReuseTokens() const;
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
