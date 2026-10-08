@@ -38,6 +38,7 @@ def run_rank(rank, port, config):
         {
             "NCCL_P2P_DISABLE": "1",
             "DSV41_ENGRAM_HOST_BYTES": str(2**20),
+            "DSV41_ENGRAM_CACHE_DIR": str(Path(config["checkpoint_path"]) / "cache"),
             "DSV4_MOE_STRATEGY": "auto",
             "DSV4_MOE_CHUNK_PREFILL": "1",
             "DSV4_MOE_CHUNK_TOKENS": "4",
@@ -60,6 +61,17 @@ def run_rank(rank, port, config):
     try:
         with torch.inference_mode():
             model, reference = make_workers(rank, config)
+            table_paths = [table._path for table in model._engram_tables.values()]
+            assert len(table_paths) == 2
+            assert all(path.parent == model._engram_cache_dir for path in table_paths)
+            identities = torch.tensor(
+                [[path.stat().st_dev, path.stat().st_ino] for path in table_paths],
+                device="cuda",
+                dtype=torch.int64,
+            )
+            peers = torch.empty((16, 2), device="cuda", dtype=torch.int64)
+            dist.all_gather_into_tensor(peers, identities)
+            assert bool((peers.reshape(8, 2, 2) == identities).all())
             torch.manual_seed(41950)
             head = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
             bridge_calls = {"stage": 0, "phase": 0}
@@ -190,6 +202,8 @@ def run_rank(rank, port, config):
             model.close()
             dist.barrier(group=control)
             if rank == 0:
+                assert all(not path.exists() for path in table_paths)
+                assert not list(model._engram_cache_dir.glob("*.lease.*"))
                 print("V4.1 40-layer native DP8 NormalEngine prefill PASS", flush=True)
     except BaseException:
         traceback.print_exc()
@@ -211,6 +225,7 @@ class V41NativeEngineSM120Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
             config = checkpoint(Path(root), full_schedule=True)
+            (Path(root) / "cache").mkdir()
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             sock.close()

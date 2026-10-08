@@ -76,6 +76,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._engram_layers = ()
         self._engram_tables = {}
         self._engram_sources = {}
+        self._engram_cache_dir = Path(
+            os.environ.get("DSV41_ENGRAM_CACHE_DIR", "/dev/shm")
+        ).resolve()
         self._worker_lock = threading.RLock()
         self._worker_pid = os.getpid()
         self._worker_state = "new"
@@ -122,7 +125,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 )
             }
             digest = hashlib.sha256(
-                json.dumps((phase, config, options), sort_keys=True).encode()
+                json.dumps(
+                    (phase, config, options, str(self._engram_cache_dir)),
+                    sort_keys=True,
+                ).encode()
             ).digest()
             signature = torch.tensor(
                 [int(error is None), *digest], dtype=torch.uint8, device=device
@@ -173,11 +179,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
         return sources
 
     def _check_engram_capacity(self):
+        if not self._engram_sources:
+            return
+        directory = self._engram_cache_dir
+        if not directory.is_dir():
+            raise ValueError(f"Engram cache directory does not exist: {directory}")
         needed = 0
         for source in self._engram_sources.values():
             source.check_sources()
             table = source.table
-            path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{table.key}"
+            path = directory / f"rtp_llm_engram_{os.getuid()}_{table.key}"
             ready = Path(str(path) + ".json")
             if not (
                 path.exists()
@@ -186,9 +197,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 and ready.read_bytes() == table.manifest
             ):
                 needed += table.nbytes
-        if needed > shutil.disk_usage("/dev/shm").free:
+        if needed > shutil.disk_usage(directory).free:
             raise RuntimeError(
-                f"Engram combined tables need {needed} additional /dev/shm bytes"
+                f"Engram combined tables need {needed} additional bytes in {directory}"
             )
 
     def _initialize_impl(self, init_resource):
@@ -262,7 +273,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
         with _locked(lock):
             self._check_engram_capacity()
             for layer_id, source in self._engram_sources.items():
-                table = _PinnedSharedTable(source.table, max_bytes=source.table.nbytes)
+                table = _PinnedSharedTable(
+                    source.table,
+                    max_bytes=source.table.nbytes,
+                    directory=self._engram_cache_dir,
+                )
                 self._engram_tables[layer_id] = table
                 table.register_cuda(device)
                 tensors = load_engram_weights(

@@ -95,6 +95,20 @@ def make_workers(rank, config, gen_num_per_cycle=0):
             raise AssertionError("a peer's failed host admission was ignored")
     assert hasattr(model, "weight") and model.v4 is None
     assert not model._engram_tables
+    directory = (
+        Path(config["checkpoint_path"]).resolve()
+        if rank == 0
+        else model._engram_cache_dir
+    )
+    with patch.object(model, "_engram_cache_dir", directory):
+        try:
+            model.initialize(resources())
+        except RuntimeError as error:
+            assert "peer rejected" in str(error)
+        else:
+            raise AssertionError("mismatched Engram cache directories were admitted")
+    assert hasattr(model, "weight") and model.v4 is None
+    assert not model._engram_tables
     model.initialize(resources())
     model.initialize(resources(tagged_cache(model)))
     local = ParallelismConfig()

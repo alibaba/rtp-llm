@@ -186,6 +186,7 @@ class V41WorkerSM120Test(unittest.TestCase):
             os.environ,
             {
                 "DSV41_ENGRAM_HOST_BYTES": str(2**20),
+                "DSV41_ENGRAM_CACHE_DIR": "/dev/shm",
                 "DSV4_MOE_STRATEGY": "auto",
                 "MOEDBG": "0",
             },
@@ -431,6 +432,66 @@ class V41WorkerSM120Test(unittest.TestCase):
         )
         second.close()
         self.assertFalse(path.exists())
+
+    def test_file_backed_tables_capacity_sharing_and_frozen_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root).resolve()
+            alias = directory / "alias"
+            alias.symlink_to(directory, target_is_directory=True)
+            torch.manual_seed(41960)
+            with patch.dict(os.environ, {"DSV41_ENGRAM_CACHE_DIR": str(alias)}):
+                first = self.worker(initialize=False)
+            self.assertEqual(first._engram_cache_dir, directory)
+            with patch(
+                "rtp_llm.models_py.model_desc.deepseek_v41_model.shutil.disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ) as usage:
+                with self.assertRaisesRegex(RuntimeError, "combined tables"):
+                    first.initialize(resources())
+                usage.assert_called_once_with(directory)
+            self.assertIsNone(first.v4)
+            self.assertTrue(hasattr(first, "weight"))
+            first.initialize(resources())
+            first.initialize(resources(tagged_cache(first)))
+            table = first._engram_tables[1]
+            self.assertEqual(table._path.parent, directory)
+            torch.manual_seed(41960)
+            with patch.dict(os.environ, {"DSV41_ENGRAM_CACHE_DIR": str(directory)}):
+                second = self.worker(initialize=False)
+            # A ready table consumes no additional storage, even at zero free bytes.
+            with patch(
+                "rtp_llm.models_py.model_desc.deepseek_v41_model.shutil.disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ):
+                second.initialize(resources())
+            second.initialize(resources(tagged_cache(second)))
+            self.assertEqual(table._path, second._engram_tables[1]._path)
+            self.assertEqual(
+                table._path.stat().st_ino,
+                second._engram_tables[1]._path.stat().st_ino,
+            )
+            expected = first.forward(inputs(first.kv_cache)).hidden_states.clone()
+            first.close()
+            self.assertTrue(table._path.exists())
+            actual = second.forward(inputs(second.kv_cache)).hidden_states
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            second.close()
+            self.assertFalse(table._path.exists())
+            self.assertFalse(table._ready_path.exists())
+            self.assertEqual(list(directory.glob("*.lease.*")), [])
+
+    def test_missing_file_backing_directory_preserves_weights(self):
+        directory = Path(self.config["checkpoint_path"]) / "missing-cache"
+        with patch.dict(os.environ, {"DSV41_ENGRAM_CACHE_DIR": str(directory)}):
+            model = self.worker(initialize=False)
+        weights = model.weight
+        with self.assertRaisesRegex(ValueError, "cache directory does not exist"):
+            model.initialize(resources())
+        self.assertIs(model.weight, weights)
+        self.assertIsNone(model.v4)
+        self.assertFalse(directory.exists())
+        directory.mkdir()
+        self.assertTrue(model.initialize(resources()))
 
     def test_no_owned_engram_does_not_open_checkpoint(self):
         cfg = {
