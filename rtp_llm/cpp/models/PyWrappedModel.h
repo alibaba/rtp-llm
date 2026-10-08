@@ -91,7 +91,9 @@ public:
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       prepareAttentionInputs(const GptModelInputs& inputs,
+                                                       bool skip_forward_event_sync,
+                                                       const GptModelInputs* publication_inputs = nullptr);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -108,6 +110,7 @@ private:
 
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    void                            finalizeLinearReplay(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
@@ -239,7 +242,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
     c10::InferenceMode inference_guard(true);
-
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
     if (owns_generation_prefill_cuda_graph_) {
@@ -344,6 +346,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (params.kv_cache_layer_layout.has_value()) {
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        if (cache_manager_ && !params.mtp_cache_config_index.has_value()) {
+            init_resources.kv_cache->setLinearReplayByTag(cache_manager_->linearReplayByTag());
+        }
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
@@ -418,6 +423,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+        }
+        if (cache_manager_ && cache_manager_->cacheConfig().linear_replay.enabled()) {
+            graph_params.linear_replay_group_count = static_cast<int>(graph_params.kv_cache_group_tags.size());
+            RTP_LLM_CHECK_WITH_INFO(graph_params.linear_replay_group_count > 0,
+                                    "LINEAR replay CUDA graph requires cache group tags");
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);

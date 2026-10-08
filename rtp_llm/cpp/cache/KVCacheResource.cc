@@ -93,6 +93,8 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, 
     group_block_ids.rows_.swap(candidate.rows_);
     layer_group_tags_.swap(layer_tags);
     topology_ = materialize_layer_views ? nullptr : std::move(topology);
+    linear_replay_prefix_limits_.clear();
+    linear_replay_active_begins_.clear();
 }
 
 size_t BlockIds::blocksNum() const {

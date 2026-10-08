@@ -741,6 +741,10 @@ TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool
         EXPECT_EQ(processor.model_input_gatherer_config_.seq_size_per_block, 256u);
         EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 0u);
         EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block, 2u);
+        EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_tags,
+                  (std::vector<std::string>{"attention", "state"}));
+        EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_types,
+                  (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::SWA}));
 
         const auto topology = cache_config.topologyPtr();
         EXPECT_EQ(CudaGraphRunner::captureKernelBlockTableWidth(*topology, 513, 0), 6);
@@ -751,8 +755,8 @@ TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool
 TEST_F(NormalBatchStreamProcessorTest, testCacheMetadataWithoutBlockCapacity) {
     NormalModelInputGathererConfig config;
     config.kv_cache_group_nums  = 2;
-    config.kv_cache_group_tags  = {"swa", "full"};
-    config.kv_cache_group_types = {CacheGroupType::SWA, CacheGroupType::FULL};
+    config.kv_cache_group_tags  = {"full", "swa"};
+    config.kv_cache_group_types = {CacheGroupType::FULL, CacheGroupType::SWA};
     StreamGroups             groups(std::list<GenerateStreamPtr>{});
     TensorHolder             holder;
     NormalModelInputGatherer gatherer(config);
@@ -761,22 +765,21 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheMetadataWithoutBlockCapacity) {
     EXPECT_EQ(inputs->kv_cache_group_tags, config.kv_cache_group_tags);
     EXPECT_EQ(
         toVec<int32_t>(inputs->kv_cache_group_types),
-        (std::vector<int32_t>{static_cast<int32_t>(CacheGroupType::SWA), static_cast<int32_t>(CacheGroupType::FULL)}));
+        (std::vector<int32_t>{static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::SWA)}));
     EXPECT_FALSE(inputs->kv_cache_block_id.defined());
     EXPECT_FALSE(inputs->kv_cache_kernel_block_id.defined());
     auto kernel = gatherer.gatherKvCacheKernelBlockId(groups, {"full", "swa"}, holder);
     ASSERT_TRUE(kernel.ok());
     EXPECT_FALSE(kernel->defined());
 
-    for (const auto& tags : std::vector<std::vector<std::string>>{{}, {"full"}, {"full", "full"}, {"full", ""}}) {
+    for (const auto& tags :
+         std::vector<std::vector<std::string>>{{}, {"full"}, {"full", "full"}, {"full", ""}, {"swa", "full"}}) {
         auto invalid_config                = config;
         invalid_config.kv_cache_group_tags = tags;
-        NormalModelInputGatherer invalid(invalid_config);
-        EXPECT_ANY_THROW((void)invalid.gather(groups, holder));
+        EXPECT_ANY_THROW({ NormalModelInputGatherer invalid(invalid_config); });
     }
     config.kv_cache_group_types.pop_back();
-    NormalModelInputGatherer invalid_types(config);
-    EXPECT_ANY_THROW((void)invalid_types.gather(groups, holder));
+    EXPECT_ANY_THROW({ NormalModelInputGatherer invalid_types(config); });
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testDistinctKernelPagesRemainGroupLocal) {
@@ -829,8 +832,9 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
             cache_config.layer_num = 2;
             auto      full         = std::make_shared<MHAKVCacheSpec>("full", 128, 128 / full_bpk, 1);
             auto      swa          = std::make_shared<MHAKVCacheSpec>("swa", 128, 128, 1);
-            const int full_gid     = full_first ? 0 : 1;
-            const int swa_gid      = 1 - full_gid;
+            // Topology and payload tags are canonical for either input order.
+            const int full_gid = 0;
+            const int swa_gid  = 1;
             if (full_first) {
                 cache_config.fromGroupedSpecs(
                     {full, swa}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"});

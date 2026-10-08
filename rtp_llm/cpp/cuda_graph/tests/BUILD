@@ -99,6 +99,24 @@ cc_test(
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
+cc_test(
+    name = "cuda_graph_prepare_fill_cuda_test",
+    srcs = ["cuda_graph_prepare_fill_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+    target_compatible_with = select({
+        "@//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
@@ -317,4 +335,11 @@ py_test(
     },
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+cc_test(
+    name = "mtp_draft_prefill_capacity_test",
+    srcs = ["mtp_draft_prefill_capacity_test.cc"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/cuda_graph:mtp_draft_prefill_capacity"],
 )

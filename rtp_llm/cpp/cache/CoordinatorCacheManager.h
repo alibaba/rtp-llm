@@ -97,6 +97,10 @@ public:
                                     int                            target_batch_size) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
+    // Caller has completed the GPU round ending at completed_seq_len. Preserve
+    // capacity reserved beyond that point for later, possibly in-flight rounds.
+    void
+    pruneKVCache(const BatchKVCacheResourcePtr& resource, int completed_seq_len, int reserve_step, bool reuse_cache);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);

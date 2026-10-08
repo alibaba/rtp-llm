@@ -517,8 +517,10 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     ASSERT_TRUE(cache_manager->init());
     const auto initial_free_blocks = cache_manager->freeBlocksNum();
     ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 2u);
-    auto       other_pool        = cache_manager->coordinator_manager_->groupBlockPools().front();
-    auto       pool              = cache_manager->coordinator_manager_->groupBlockPools().back();
+    const auto& pools = cache_manager->coordinator_manager_->groupBlockPools();
+    auto other_pool = pools.at(config.topology().groupIdForTag("unrelated"));
+    auto pool       = pools.at(config.topology().groupIdForTag("stored"));
+    ASSERT_NE(pool, other_pool);
     const auto other_free_before = other_pool->freeBlocksNum();
     auto       allocated         = pool->malloc(1);
     ASSERT_TRUE(allocated.has_value());
