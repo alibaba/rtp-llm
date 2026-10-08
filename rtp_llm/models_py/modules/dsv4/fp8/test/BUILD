@@ -26,6 +26,21 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_test(
+    name = "test_v41_sparse_selection_sm120",
+    srcs = [
+        "test_v41_sparse_selection_sm120.py",
+        "test_dsv4_top_k_per_row_prefill.py",
+        "test_topk_v3.py",
+        "test_v41_prefill_index_plan.py",
+        "test_v41_prefill_topk.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 _DSV4_FP8_TESTS = [
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",

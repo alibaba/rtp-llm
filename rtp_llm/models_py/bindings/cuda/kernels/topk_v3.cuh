@@ -169,6 +169,13 @@ SGL_DEVICE int32_t page_to_indices(const int32_t* __restrict__ page_table, uint3
   return (page_table[i >> page_bits] << page_bits) | (i & mask);
 }
 
+// Optional state owned only by the candidate CTA wrapper; default layouts stay unchanged.
+struct CandidateContext {
+  int32_t status;
+  uint32_t expected_above;
+  uint32_t expected_equal;
+};
+
 /// One batch element's worth of work. `emit(pos, raw_idx)` writes the selected raw
 /// index to output slot `pos`; `transform_output` then applies the page-table
 /// transform in a separate pass (and records the raw index in `raw_out` if set).
@@ -234,6 +241,8 @@ struct TopKConfig {
   /// than the fixed shared-memory tie buffer can hold. Re-scan only that
   /// coarse value interval and skip any FP32 key bytes shared by both interval
   /// endpoints. Values above the interval have already been emitted.
+  /// kWholeRow repairs an oversubscribed above-bin collect at a rounded boundary.
+  template <bool kStableTies = false, bool kWholeRow = false>
   SGL_DEVICE static void exact_boundary_scan_topk(
       const TopKProblem& problem,
       TieHandleSmem* smem,
@@ -248,7 +257,7 @@ struct TopKConfig {
       uint32_t prefix = 0;
       uint32_t first_round = 0;
 #pragma unroll
-      for (uint32_t round = 0; round < 4; ++round) {
+      for (uint32_t round = 0; round < (kWholeRow ? 0u : 4u); ++round) {
         const uint32_t shift = 24u - round * 8u;
         const uint32_t lo_byte = (lo_key >> shift) & 0xffu;
         const uint32_t hi_byte = (hi_key >> shift) & 0xffu;
@@ -274,7 +283,7 @@ struct TopKConfig {
       for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
         const float value = problem.in[idx];
         const uint32_t key = extract_exact_bin(value);
-        if (value >= v_lo && value < v_hi && (key & mask) == prefix) {
+        if ((kWholeRow || (value >= v_lo && value < v_hi)) && (key & mask) == prefix) {
           atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
         }
       }
@@ -321,20 +330,44 @@ struct TopKConfig {
     __syncthreads();
     for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
       const float value = problem.in[idx];
-      if (value >= v_lo && value < v_hi &&
+      if ((kWholeRow || (value >= v_lo && value < v_hi)) &&
           extract_exact_bin(value) > pivot) {
         const uint32_t pos = atomicAdd(&smem->counter, 1u);
         problem.emit(output_base + pos, idx);
       }
     }
     __syncthreads();
-    for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-      const float value = problem.in[idx];
-      if (value >= v_lo && value < v_hi &&
-          extract_exact_bin(value) == pivot) {
-        const uint32_t pos = atomicAdd(&smem->counter, 1u);
-        if (output_base + pos < problem.topk) {
-          problem.emit(output_base + pos, idx);
+    if constexpr (kStableTies) {
+      const uint32_t lane = tx % kWarpSize;
+      const uint32_t warp_id = tx / kWarpSize;
+      const uint32_t tie_base = output_base + smem->counter;
+      const uint32_t needed = problem.topk - tie_base;
+      uint32_t seen = 0;
+      // Raw-index tiles and warp/lane prefixes choose the lowest tied indices.
+      for (uint32_t start = 0; start < problem.seq_len && seen < needed; start += kBlockSize) {
+        const uint32_t idx = start + tx;
+        const float value = idx < problem.seq_len ? problem.in[idx] : 0.0f;
+        const bool equal = idx < problem.seq_len &&
+            (kWholeRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot;
+        const uint32_t ballot = __ballot_sync(0xffffffffu, equal);
+        if (lane == 0) smem->warp_sum[warp_id] = __popc(ballot);
+        __syncthreads();
+        const uint32_t warp_prefix = warp::reduce_sum(lane < warp_id ? smem->warp_sum[lane] : 0u);
+        const uint32_t tile_count = warp::reduce_sum(smem->warp_sum[lane]);
+        const uint32_t rank = seen + warp_prefix + __popc(ballot & ((1u << lane) - 1u));
+        if (equal && rank < needed) problem.emit(tie_base + rank, idx);
+        __syncthreads();
+        seen += tile_count;
+      }
+    } else {
+      for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
+        const float value = problem.in[idx];
+        if (value >= v_lo && value < v_hi &&
+            extract_exact_bin(value) == pivot) {
+          const uint32_t pos = atomicAdd(&smem->counter, 1u);
+          if (output_base + pos < problem.topk) {
+            problem.emit(output_base + pos, idx);
+          }
         }
       }
     }
@@ -344,14 +377,20 @@ struct TopKConfig {
   /// Resolve the threshold bin's ties exactly. `base` is the number of strictly
   /// "above" elements already emitted (final output starts at slot `base`);
   /// `topk` here is the number of remaining slots to fill (== global_topk - base).
+  template <bool kCandidate = false, bool kStableTies = false>
   SGL_DEVICE static void handle_tie(  //
       const TieValue* tie_buffer,
       const TopKProblem& problem,
       const uint32_t base,
       const uint32_t num_ties,
       const uint32_t topk,
-      TieHandleSmem* smem) {
+      TieHandleSmem* smem,
+      CandidateContext* candidate = nullptr) {
     constexpr auto is_greater = [](const TieValue& a, const TieValue& b) {
+      if constexpr (kCandidate || kStableTies) {
+        const uint32_t ka = extract_exact_bin(a.value), kb = extract_exact_bin(b.value);
+        return ka > kb || (ka == kb && a.idx < b.idx);
+      }
       return (a.value > b.value) || (a.value == b.value && a.idx < b.idx);
     };
     const auto tx = threadIdx.x;
@@ -360,6 +399,7 @@ struct TopKConfig {
     static_assert(kNumWarps == kWarpSize);
 
     if (num_ties <= topk) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 1;
       for (uint32_t t = tx; t < num_ties; t += kBlockSize) {
         problem.emit(base + t, tie_buffer[t].idx);
       }
@@ -367,6 +407,7 @@ struct TopKConfig {
         problem.emit(base + t, base + t);
       }
     } else if (num_ties <= kWarpSize) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 2;
       if (lane_id >= num_ties || warp_id >= num_ties) return;  // some threads are idle
       /// NOTE: use long long to avoid mask overflow when num_tie == 32
       const uint32_t mask = (1ull << num_ties) - 1u;
@@ -375,6 +416,7 @@ struct TopKConfig {
       const auto rank = warp_sum_bool(is_greater(tie, target), mask);
       if (lane_id == 0 && rank < topk) problem.emit(base + rank, target.idx);
     } else if (num_ties <= kWarpSize * 2) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 3;
       // 64 x 64 topk implementation: each thread takes 2 elements
       const auto warp_id_0 = warp_id;
       const auto warp_id_1 = warp_id + kWarpSize;
@@ -397,6 +439,7 @@ struct TopKConfig {
         if (lane_id == 0 && rank < topk) problem.emit(base + rank, target_1.idx);
       }
     } else if (num_ties <= kWarpSize * 4) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 4;
       // 128 x 128 topk implementation: each thread takes 4 elements and does local sort + merge
       const auto invalid = TieValue::invalid();
       const TieValue tie[] = {
@@ -423,29 +466,31 @@ struct TopKConfig {
       }
     } else if (num_ties <= kBlockSize) {
       // Common case: one candidate per thread.
-      radix_tie_select<1>(tie_buffer, problem, base, num_ties, topk, smem);
+      radix_tie_select<1, kCandidate, kStableTies>(tie_buffer, problem, base, num_ties, topk, smem, candidate);
     } else {
       // Rare overflow case (kBlockSize < num_ties <= kMaxNumTie), kept out of
       // the common path so it alone pays the multi-item register cost.
-      radix_tie_select<kTieItems>(tie_buffer, problem, base, num_ties, topk, smem);
+      radix_tie_select<kTieItems, kCandidate, kStableTies>(tie_buffer, problem, base, num_ties, topk, smem, candidate);
     }
   }
 
   /// Exact radix select over the tie candidates: each thread owns kItems
   /// strided elements (inactive beyond num_ties). Requires
   /// num_ties <= kItems * kBlockSize.
-  template <uint32_t kItems>
+  template <uint32_t kItems, bool kCandidate = false, bool kStableTies = false>
   SGL_DEVICE static void radix_tie_select(  //
       const TieValue* tie_buffer,
       const TopKProblem& problem,
       const uint32_t base,
       const uint32_t num_ties,
       const uint32_t topk,
-      TieHandleSmem* smem) {
+      TieHandleSmem* smem,
+      CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     const auto lane_id = tx % kWarpSize;
     const auto warp_id = tx / kWarpSize;
 
+    if constexpr (kCandidate) if (tx == 0) candidate->status = 5;
     bool active[kItems];
     uint32_t key[kItems];
     uint32_t idx[kItems];
@@ -466,16 +511,17 @@ struct TopKConfig {
     uint32_t total_active = num_ties;
 
 #pragma unroll
-    for (int round = 0; round < 4; round++) {
-      const uint32_t shift = 24 - round * 8;
+    for (int round = 0; round < (kStableTies ? 8 : 4); round++) {
+      const uint32_t shift = 24 - (round % 4) * 8;
       const auto hist_idx = round % 2;
       const auto histogram = smem->histogram[hist_idx];
 
 #pragma unroll
       for (uint32_t i = 0; i < kItems; ++i) {
-        if (active[i]) atomicAdd(&histogram[(key[i] >> shift) & 0xFFu], 1);
+        const uint32_t radix_key = round < 4 ? key[i] : ~idx[i];
+        if (active[i]) atomicAdd(&histogram[(radix_key >> shift) & 0xFFu], 1);
       }
-      if (round < 3 && tx < kRadixSize) {
+      if (round < (kStableTies ? 7 : 3) && tx < kRadixSize) {
         smem->histogram[hist_idx ^ 1][tx] = 0;
       }
       __syncthreads();
@@ -500,26 +546,39 @@ struct TopKConfig {
       __syncthreads();
 
       const auto [threshold_bin, above_count, equal_count, __] = smem->match;
-      if (round < 3) total_active = equal_count;
+      total_active = equal_count;
       topk_remain -= above_count;
+      // An exact score tie continues through complemented raw-index bytes.
+      // Stop as soon as every member of the surviving bucket is required.
+      const bool final_round = round == (kStableTies ? 7 : 3) ||
+          (kStableTies && round >= 3 && equal_count == topk_remain);
+
+      // Only the final full FP32 key can establish ambiguous cutoff membership.
+      if constexpr (kCandidate) {
+        if (round == 3 && equal_count > topk_remain) {
+          if (tx == 0) candidate->status = -3;
+          return;
+        }
+      }
 
       // 4. Scatter
 #pragma unroll
       for (uint32_t i = 0; i < kItems; ++i) {
         if (!active[i]) continue;
-        const uint32_t bin = (key[i] >> shift) & 0xFFu;
+        const uint32_t radix_key = round < 4 ? key[i] : ~idx[i];
+        const uint32_t bin = (radix_key >> shift) & 0xFFu;
         if (bin > threshold_bin) {
           write_pos[i] = atomicAdd(&smem->counter, 1);
           active[i] = false;
         } else if (bin < threshold_bin) {
           active[i] = false;
-        } else if (round == 3) {
+        } else if (final_round) {
           write_pos[i] = topk - topk_remain + atomicAdd(&smem->counter_final, 1);
         }
-        // my_bin == thr && round < 3: stay active for next round
+        // The threshold bucket remains active until its membership is unique.
       }
 
-      if (round == 3 || topk_remain == 0) break;
+      if (final_round || topk_remain == 0) break;
     }
 
 #pragma unroll
@@ -605,7 +664,9 @@ struct TopKRadixBase : TopKConfig {
     }
   }
 
-  SGL_DEVICE static void find_threshold(const uint32_t topk, const uint32_t seq_len, Smem* smem) {
+  template <bool kCandidate = false>
+  SGL_DEVICE static void find_threshold(const uint32_t topk, const uint32_t seq_len, Smem* smem,
+                                        CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     constexpr uint32_t kItems = kHistSize / kBlockSize;
     uint32_t orig[kItems];
@@ -636,6 +697,10 @@ struct TopKRadixBase : TopKConfig {
       const auto above = seq_len - prefix_sum;
       if (above < topk && above + orig[i] >= topk) {
         smem->threshold_bin = tx * kItems + i;
+        if constexpr (kCandidate) {
+          candidate->expected_above = above;
+          candidate->expected_equal = orig[i];
+        }
       }
     }
     __syncthreads();
@@ -655,8 +720,9 @@ struct TopKRegister : TopKRadixBase<12> {
   static constexpr uint32_t kMaxSeqLen = kBlockSize * kVecSize * kLocalVecs;
   using Smem = typename TopKRadixBase<12>::Smem;
 
-  template <bool kUsePDL, bool kAlignedInput>
-  SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
+  template <bool kUsePDL, bool kAlignedInput, bool kCandidate = false, bool kStableTies = false>
+  SGL_DEVICE static void forward(const TopKProblem problem, void* _smem,
+                                  CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
 
@@ -709,14 +775,77 @@ struct TopKRegister : TopKRadixBase<12> {
     __syncthreads();
 
     // Phase 2: Find the threshold bin
-    find_threshold(problem.topk, problem.seq_len, smem);
+    find_threshold<kCandidate>(problem.topk, problem.seq_len, smem, candidate);
 
     // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
     const auto topk = problem.topk;
     const auto threshold_bin = smem->threshold_bin;
+    if constexpr (kCandidate) {
+      // Exact FP16 ordered-key buckets containing +/-zero, infinity/saturation or NaN.
+      if (threshold_bin <= (0x03ffu >> 4) || threshold_bin >= (0xfc00u >> 4) ||
+          threshold_bin == (0x7fffu >> 4) || threshold_bin == (0x8000u >> 4)) {
+        // Count exact ordered keys, including every NaN, before publishing.
+        // A saturated negative finite value shares the half -inf bucket but
+        // still has an FP32 key strictly greater than key(-inf).
+        constexpr uint32_t kNegInfKey = 0x007fffffu;
+        uint32_t local_count = 0;
+#pragma unroll
+        for (uint32_t i = 0; i < kLocalVecs; ++i) {
+          const auto vi = tx + kBlockSize * i;
+          if (vi >= num_full) break;
+#pragma unroll
+          for (uint32_t j = 0; j < kVecSize; ++j)
+            local_count += extract_exact_bin(local_vecs[i][j]) > kNegInfKey;
+        }
+        if (tx >= kBlockSize - tail) {
+          const uint32_t idx = tail_start + tx - (kBlockSize - tail);
+          local_count += extract_exact_bin(problem.in[idx]) > kNegInfKey;
+        }
+        const auto lane = tx % kWarpSize;
+        const auto warp_count = warp::reduce_sum(local_count);
+        if (lane == 0) smem->warp_sum[tx / kWarpSize] = warp_count;
+        __syncthreads();
+        const auto exact_count = warp::reduce_sum(smem->warp_sum[lane]);
+        if (exact_count <= topk) {
+          const auto emit_finite_or_posinf = [&](float value, uint32_t idx) {
+            if (value > -std::numeric_limits<float>::infinity()) {
+              const auto pos = atomicAdd(&smem->count_gt, 1u);
+              problem.emit(pos, idx);
+            }
+          };
+#pragma unroll
+          for (uint32_t i = 0; i < kLocalVecs; ++i) {
+            const auto vi = tx + kBlockSize * i;
+            if (vi >= num_full) break;
+#pragma unroll
+            for (uint32_t j = 0; j < kVecSize; ++j)
+              emit_finite_or_posinf(local_vecs[i][j], vi * kVecSize + j);
+          }
+          if (tx >= kBlockSize - tail) {
+            const uint32_t idx = tail_start + tx - (kBlockSize - tail);
+            emit_finite_or_posinf(problem.in[idx], idx);
+          }
+          if (tx == 0) candidate->status = 7;
+          return;
+        }
+        if (tx == 0) candidate->status = -1;
+        return;
+      }
+    }
     const auto v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const auto v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto collect = [&](float val, uint32_t idx) {
+      if constexpr (kCandidate) {
+        const uint32_t key = extract_coarse_bin<kHistBits>(val);
+        if (key > threshold_bin) {
+          const auto pos = atomicAdd(&smem->count_gt, 1u);
+          if (pos < topk) problem.emit(pos, idx);
+        } else if (key == threshold_bin) {
+          const auto pos = atomicAdd(&smem->count_eq, 1u);
+          if (pos < kMaxNumTie) smem->tie.values[pos] = {val, idx};
+        }
+        return;
+      }
       if (is_nan(val) || val >= v_hi) {
         const auto pos = atomicAdd(&smem->count_gt, 1);
         if (pos < topk) [[likely]]
@@ -745,19 +874,40 @@ struct TopKRegister : TopKRadixBase<12> {
     __syncthreads();
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;
+    if constexpr (kStableTies) {
+      if (above_count > topk) {
+        // Coarse-boundary rounding can put the cutoff tie in the above collector.
+        exact_boundary_scan_topk<true, true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+        return;
+      }
+    }
+    if constexpr (kCandidate) {
+      if (above_count != candidate->expected_above || equal_count != candidate->expected_equal ||
+          above_count >= topk || above_count + equal_count < topk) {
+        if (tx == 0) candidate->status = -4;
+        return;
+      }
+      if (equal_count > kMaxNumTie) {
+        if (tx == 0) candidate->status = -2;
+        return;
+      }
+      handle_tie<true>(smem->tie.values, problem, above_count, equal_count,
+                       topk - above_count, &smem->tie.handle, candidate);
+      return;
+    }
     if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
       // A negative FP16 midpoint can make the FP32 collect count reach topk.
       // In that case the output is already complete; do not underflow the
       // exact scan's topk - output_base calculation.
       if (above_count < topk) {
-        exact_boundary_scan_topk(
+        exact_boundary_scan_topk<kStableTies>(
             problem, &smem->tie.handle, v_lo, v_hi, above_count);
       }
       return;
     }
     const auto remain_topk = above_count < topk ? topk - above_count : 0;
     const auto tie_count = min(equal_count, kMaxNumTie);
-    handle_tie(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
+    handle_tie<false, kStableTies>(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
   }
 };
 
@@ -769,7 +919,7 @@ struct TopKStreaming : TopKRegister<2> {
  public:
   static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
 
-  template <bool kUsePDL, bool kAlignedInput>
+  template <bool kUsePDL, bool kAlignedInput, bool kStableTies = false>
   SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
@@ -828,16 +978,22 @@ struct TopKStreaming : TopKRegister<2> {
     __syncthreads();
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;
+    if constexpr (kStableTies) {
+      if (above_count > topk) {
+        exact_boundary_scan_topk<true, true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+        return;
+      }
+    }
     if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
       if (above_count < topk) {
-        exact_boundary_scan_topk(
+        exact_boundary_scan_topk<kStableTies>(
             problem, &smem->tie.handle, v_lo, v_hi, above_count);
       }
       return;
     }
     const auto remain_topk = above_count < topk ? topk - above_count : 0;
     const auto tie_count = min(equal_count, kMaxNumTie);
-    handle_tie(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
+    handle_tie<false, kStableTies>(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
   }
 };
 
@@ -861,13 +1017,13 @@ struct TopKCluster : TopKRadixBase<10> {
   // Process one batch element per cluster. There is no trailing barrier, so
   // the kernel performs cluster.sync() after each forward(). Writes raw indices
   // to out; the kernel's transform pass applies the page-table transform.
-  template <bool kUsePDL, bool kAlignedInput>
+  template <bool kUsePDL, bool kAlignedInput, bool kStableTies = false>
   SGL_DEVICE static void forward(TopKProblem problem, void* _smem) {
-    forward_impl<kUsePDL, kAlignedInput>(problem, _smem);
+    forward_impl<kUsePDL, kAlignedInput, kStableTies>(problem, _smem);
   }
 
  private:
-  template <bool kUsePDL, bool kAlignedInput>
+  template <bool kUsePDL, bool kAlignedInput, bool kStableTies = false>
   SGL_DEVICE static void forward_impl(TopKProblem problem, void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
@@ -979,6 +1135,16 @@ struct TopKCluster : TopKRadixBase<10> {
     }
 
     cluster.sync();
+    if constexpr (kStableTies) {
+      const auto primary_smem = cluster.map_shared_rank(smem, 0);
+      if (primary_smem->count_gt > topk) {
+        // All CTAs skip their original writes before the primary replaces the row.
+        if (is_primary) {
+          exact_boundary_scan_topk<true, true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+        }
+        return;
+      }
+    }
     if (!is_primary) {
 #pragma unroll
       for (uint32_t i = 0; i < kTopKItems; ++i) {
@@ -992,12 +1158,12 @@ struct TopKCluster : TopKRadixBase<10> {
       const auto equal_count = smem->count_eq;
       if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
         if (above_count < topk) {
-          exact_boundary_scan_topk(
+          exact_boundary_scan_topk<kStableTies>(
               problem, &smem->tie.handle, v_lo, v_hi, above_count);
         }
       } else {
         const auto remain_topk = above_count < topk ? topk - above_count : 0;
-        handle_tie(
+        handle_tie<false, kStableTies>(
             smem->tie.values,
             problem,
             above_count,

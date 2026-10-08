@@ -275,6 +275,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    rtp_ops_m.def("dsv41_topk_v3_finite",
+                  &dsv41_topk_v3_finite,
+                  "DeepSeek V4.1 prefill TopK with finite output filtering",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
