@@ -28,10 +28,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     model_config,
     tagged_cache,
 )
-from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 
 
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, initialize_model):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     os.environ.update(
@@ -60,18 +60,10 @@ def run_rank(rank, port, config):
     stop_boundary = threading.Event()
     try:
         with torch.inference_mode():
-            model, reference = make_workers(rank, config)
-            table_paths = [table._path for table in model._engram_tables.values()]
-            assert len(table_paths) == 2
-            assert all(path.parent == model._engram_cache_dir for path in table_paths)
-            identities = torch.tensor(
-                [[path.stat().st_dev, path.stat().st_ino] for path in table_paths],
-                device="cuda",
-                dtype=torch.int64,
+            model, reference = make_workers(
+                rank, config, initialize_model=initialize_model
             )
-            peers = torch.empty((16, 2), device="cuda", dtype=torch.int64)
-            dist.all_gather_into_tensor(peers, identities)
-            assert bool((peers.reshape(8, 2, 2) == identities).all())
+            assert model._materialized == initialize_model
             torch.manual_seed(41950)
             head = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
             bridge_calls = {"stage": 0, "phase": 0}
@@ -109,8 +101,16 @@ def run_rank(rank, port, config):
             ):
                 collective._register_process_groups_to_cpp()
             forward = model.forward
+            initialize = model.initialize
+            initialization_calls = []
             expected_tokens = {}
             calls = {"idle": 0, "active": 0}
+
+            def checked_initialize(resource):
+                assert isinstance(resource, PyModelInitResources)
+                assert resource.kv_cache is not None
+                initialization_calls.append(model._materialized)
+                return initialize(resource)
 
             def checked_forward(request, fmha_impl=None):
                 try:
@@ -160,13 +160,28 @@ def run_rank(rank, port, config):
                     traceback.print_exc()
                     raise
 
-            with patch.object(model, "forward", checked_forward):
+            with patch.object(model, "forward", checked_forward), patch.object(
+                model, "initialize", checked_initialize
+            ):
                 engine = native_ops.NativeEngine(
                     model,
                     model_config(model._v4_args, config),
                     model.parallelism_config,
                     head,
                 )
+                assert initialization_calls == [initialize_model]
+                assert model._materialized and not hasattr(model, "weight")
+                table_paths = [table._path for table in model._engram_tables.values()]
+                assert len(table_paths) == 2
+                assert all(
+                    path.parent == model._engram_cache_dir for path in table_paths
+                )
+                identities = [
+                    (path.stat().st_dev, path.stat().st_ino) for path in table_paths
+                ]
+                peers = [None] * 8
+                dist.all_gather_object(peers, identities, group=control)
+                assert all(peer == identities for peer in peers)
                 for phase, lengths in enumerate(
                     (
                         (3, 2) if rank == 0 else (),
@@ -204,7 +219,11 @@ def run_rank(rank, port, config):
             if rank == 0:
                 assert all(not path.exists() for path in table_paths)
                 assert not list(model._engram_cache_dir.glob("*.lease.*"))
-                print("V4.1 40-layer native DP8 NormalEngine prefill PASS", flush=True)
+                print(
+                    "V4.1 40-layer native DP8 NormalEngine prefill "
+                    f"prematerialized={initialize_model} PASS",
+                    flush=True,
+                )
     except BaseException:
         traceback.print_exc()
         raise
@@ -220,7 +239,7 @@ def run_rank(rank, port, config):
 
 
 class V41NativeEngineSM120Test(unittest.TestCase):
-    def test_eight_rank_scheduler_loop(self):
+    def run_engine(self, initialize_model):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
@@ -229,7 +248,15 @@ class V41NativeEngineSM120Test(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             sock.close()
-            mp.spawn(run_rank, args=(port, config), nprocs=8, join=True)
+            mp.spawn(
+                run_rank, args=(port, config, initialize_model), nprocs=8, join=True
+            )
+
+    def test_eight_rank_scheduler_loop(self):
+        self.run_engine(initialize_model=True)
+
+    def test_engine_materializes_workers(self):
+        self.run_engine(initialize_model=False)
 
 
 if __name__ == "__main__":

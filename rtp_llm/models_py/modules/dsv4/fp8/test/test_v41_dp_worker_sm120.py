@@ -58,7 +58,7 @@ def assert_released(model):
         assert layer.attn._prefill_meta_shared is None
 
 
-def make_workers(rank, config, gen_num_per_cycle=0):
+def make_workers(rank, config, gen_num_per_cycle=0, *, initialize_model=True):
     torch.manual_seed(41901)
     args, full = fixture(experts=16, full_schedule=config["num_hidden_layers"] == 40)
     shard = SimpleNamespace(
@@ -84,33 +84,36 @@ def make_workers(rank, config, gen_num_per_cycle=0):
     model = DeepSeekV41Model(
         model_config(args, config, gen_num_per_cycle), parallelism, shard, None, 2
     )
-    with patch.dict(
-        os.environ, {"DSV41_ENGRAM_HOST_BYTES": "0" if rank == 0 else str(2**20)}
-    ):
-        try:
-            model.initialize(resources())
-        except (ValueError, RuntimeError):
-            pass
-        else:
-            raise AssertionError("a peer's failed host admission was ignored")
-    assert hasattr(model, "weight") and model.v4 is None
-    assert not model._engram_tables
-    directory = (
-        Path(config["checkpoint_path"]).resolve()
-        if rank == 0
-        else model._engram_cache_dir
-    )
-    with patch.object(model, "_engram_cache_dir", directory):
-        try:
-            model.initialize(resources())
-        except RuntimeError as error:
-            assert "peer rejected" in str(error)
-        else:
-            raise AssertionError("mismatched Engram cache directories were admitted")
-    assert hasattr(model, "weight") and model.v4 is None
-    assert not model._engram_tables
-    model.initialize(resources())
-    model.initialize(resources(tagged_cache(model)))
+    if initialize_model:
+        with patch.dict(
+            os.environ, {"DSV41_ENGRAM_HOST_BYTES": "0" if rank == 0 else str(2**20)}
+        ):
+            try:
+                model.initialize(resources())
+            except (ValueError, RuntimeError):
+                pass
+            else:
+                raise AssertionError("a peer's failed host admission was ignored")
+        assert hasattr(model, "weight") and model.v4 is None
+        assert not model._engram_tables
+        directory = (
+            Path(config["checkpoint_path"]).resolve()
+            if rank == 0
+            else model._engram_cache_dir
+        )
+        with patch.object(model, "_engram_cache_dir", directory):
+            try:
+                model.initialize(resources())
+            except RuntimeError as error:
+                assert "peer rejected" in str(error)
+            else:
+                raise AssertionError(
+                    "mismatched Engram cache directories were admitted"
+                )
+        assert hasattr(model, "weight") and model.v4 is None
+        assert not model._engram_tables
+        model.initialize(resources())
+        model.initialize(resources(tagged_cache(model)))
     local = ParallelismConfig()
     local.role_type = RoleType.PREFILL
     reference = DeepSeekV41Model(
