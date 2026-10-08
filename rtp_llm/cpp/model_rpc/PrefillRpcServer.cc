@@ -6,6 +6,8 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -402,6 +404,32 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
                                 alloc_request.peer_addrs_size(),
                                 tp_size);
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(tp_size));
+    }
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto& mla_config = maga_init_params_.model_config_.attn_config;
+    alloc_request.set_prefill_seq_size_per_block(static_cast<int32_t>(cache_config.seq_size_per_block));
+    for (const auto& group : cache_config.groups()) {
+        if (dynamic_cast<const MLAKVCacheSpec*>(group.spec.get()) != nullptr) {
+            alloc_request.set_prefill_kernel_seq_size_per_block(
+                static_cast<int32_t>(group.spec->kernel_seq_size_per_block));
+            break;
+        }
+    }
+    alloc_request.set_prefill_attention_tp_size(
+        static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
+    alloc_request.set_prefill_cache_dtype(static_cast<int32_t>(cache_config.dtype));
+    alloc_request.set_prefill_mla_fp8_format(mla_config.mla_fp8_compute ? 1 : 0);
+    if (mla_config.mla_fp8_compute) {
+        alloc_request.set_prefill_mla_fp8_q_scale(mla_config.mla_fp8_q_scale);
+        alloc_request.set_prefill_mla_fp8_kv_scale(mla_config.mla_fp8_kv_scale);
+    }
+    for (const auto& group : cache_config.topology().groups()) {
+        const auto* linear = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
+        if (linear != nullptr) {
+            alloc_request.set_prefill_ssm_state_dtype(static_cast<int32_t>(linear->ssmStateDType()));
+            alloc_request.set_prefill_conv_state_dtype(static_cast<int32_t>(linear->convStateDType()));
+            break;
+        }
     }
     return alloc_request;
 }

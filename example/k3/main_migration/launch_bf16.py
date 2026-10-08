@@ -26,6 +26,20 @@ def launch_config(args):
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
     debug_four_layer = getattr(args, "debug_four_layer", False)
+    orthogonal_smoke = bool(getattr(args, "orthogonal_smoke", False))
+    tp_size = int(getattr(args, "tp_size", 8))
+    dp_size = int(getattr(args, "dp_size", 1))
+    ep_size = int(getattr(args, "ep_size", tp_size * dp_size))
+    world_size = tp_size * dp_size
+    source_tp_size = int(getattr(args, "prefill_source_tp_size", 8))
+    if tp_size < 1 or dp_size < 1 or ep_size != world_size or source_tp_size < 1:
+        raise ValueError("PD topology requires positive TP/DP and EP=TP×DP")
+    if orthogonal_smoke and args.role == "PREFILL" and dp_size != 1:
+        raise ValueError("Orthogonal Prefill profile requires DP1")
+    if orthogonal_smoke and args.role == "DECODE" and (
+        source_tp_size % tp_size and tp_size % source_tp_size
+    ):
+        raise ValueError("PageRR PD attention TP sizes must divide one another")
     expected_layers = 4 if debug_four_layer else 93
     if text.get("num_hidden_layers") != expected_layers:
         raise ValueError(f"Selected BF16 profile requires {expected_layers} target layers")
@@ -36,11 +50,23 @@ def launch_config(args):
         if text.get("attn_res_block_size") != 12:
             raise ValueError("Four-layer debug profile must preserve the original AttnRes block size")
     for port in (args.start_port, args.peer_port):
-        if port < 1024 or port + 8 * 9 > 65535:
-            raise ValueError("Invalid eight-rank service port range")
+        if port < 1024 or port + world_size * 9 > 65535:
+            raise ValueError("Invalid service port range")
     reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", 14336)
     if reserve_runtime_mem_mb <= 0:
         raise ValueError("Runtime memory reserve must be positive")
+    kv_cache_mem_mb = getattr(args, "kv_cache_mem_mb", None)
+    if kv_cache_mem_mb is None and getattr(args, "orthogonal_smoke", False):
+        if args.role == "PREFILL":
+            # A bounded Device pool permits Host demotion while retaining room
+            # for the long-KV seed and two 64K requests.
+            kv_cache_mem_mb = 256 if getattr(args, "debug_four_layer", False) else 4096
+        else:
+            # At 30000 MiB, the reserve watermark postponed one of 64 PD
+            # arrivals until another Decode stream finished.
+            kv_cache_mem_mb = 34000
+    if kv_cache_mem_mb is not None and kv_cache_mem_mb <= 0:
+        raise ValueError("Explicit KV cache capacity must be positive")
     socket.inet_aton(args.peer_ip)
     route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -73,8 +99,8 @@ def launch_config(args):
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),
         "MEGA_MOE_INPUT_PACKER_IMPL": packer_impl,
         "START_PORT": str(args.start_port),
-        "LOCAL_WORLD_SIZE": "8",
-        "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+        "LOCAL_WORLD_SIZE": str(world_size),
+        "CUDA_VISIBLE_DEVICES": ",".join(str(index) for index in range(world_size)),
         "PYTHONUNBUFFERED": "1",
         "PYTHONFAULTHANDLER": "1",
         "FRONTEND_SERVER_COUNT": "1",
@@ -84,34 +110,46 @@ def launch_config(args):
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
     }
+    if orthogonal_smoke:
+        environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
+        environment["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"] = "6.0"
+        if args.role == "DECODE":
+            # NCCL graph registration hangs on the SM103 DCP collective path
+            # at the 64-request capture bucket; the fixed feat smoke uses 0.
+            environment["NCCL_GRAPH_REGISTER"] = "0"
+            environment["NCCL_MAX_CTAS"] = "8"
     if getattr(args, "allow_hf3fs_root", None):
         # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
         # target and draft checkpoints; nogds failed during MoE scale conversion.
         environment["FASTSAFETENSORS_NOGDS"] = "0"
     options = {
         "role_type": args.role,
-        "tp_size": 8,
-        "ep_size": 8,
-        "dp_size": 1,
-        "ffn_sp_size": 8,
-        "world_size": 8,
-        "local_world_size": 8,
+        "tp_size": tp_size,
+        "ep_size": ep_size,
+        "dp_size": dp_size,
+        "ffn_sp_size": tp_size,
+        "world_size": world_size,
+        "local_world_size": world_size,
         "world_rank": 0,
-        "prefill_cp_kv_cache_sharded": 0,
-        "prefill_cp_size": 1,
+        "prefill_cp_kv_cache_sharded": int(orthogonal_smoke),
+        "prefill_cp_size": source_tp_size if orthogonal_smoke and args.role == "DECODE" else 1,
         "remote_server_port": args.peer_port,
         "use_local": 1,
-        "max_seq_len": 262144,
-        "max_context_batch_size": 16,
-        "max_batch_tokens_size": 65536,
-        "concurrency_limit": 16,
+        "max_seq_len": 2097152 if orthogonal_smoke else 262144,
+        "max_context_batch_size": 64 if orthogonal_smoke and args.role == "PREFILL" else 16,
+        "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
+        **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
+        "concurrency_limit": 64 if orthogonal_smoke else 16,
         "seq_size_per_block": 4096,
         "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
         "fp8_kv_cache": int(fp8_kv_cache),
-        "reuse_cache": 1,
+        # In the orthogonal PD profile, Decode receives the Prefill state
+        # through transfer and must not reuse its own previous prefix.
+        "reuse_cache": int(not orthogonal_smoke or args.role == "PREFILL"),
         "enable_device_cache": 1,
+        "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
         "moe_strategy": "mega_moe",
         "enable_cuda_graph": int(args.role == "DECODE"),
         "cache_store_rdma_mode": 1,
@@ -124,8 +162,15 @@ def launch_config(args):
         "warm_up": 0,
         "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
     }
+    if orthogonal_smoke and args.role == "PREFILL":
+        options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)
+    if kv_cache_mem_mb is not None:
+        options["kv_cache_mem_mb"] = kv_cache_mem_mb
     if args.role == "DECODE":
-        options["decode_capture_config"] = "1,2,3,4,7,8,9,16"
+        options["decode_capture_config"] = (
+            "1,2,4,8,16,32" if orthogonal_smoke and dp_size > 1 else
+            "1,2,4,8,16,32,64" if orthogonal_smoke else "1,2,3,4,7,8,9,16"
+        )
     command = [str(Path(args.server).resolve(strict=True))]
     for key, value in options.items():
         command.extend(["--" + key, str(value)])
@@ -234,8 +279,8 @@ def rdma_hca_environment(run, value):
     return {"ACCL_USE_NICS": selected}
 
 
-def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
-    """Record a final TP8 capacity snapshot; shared runs prove correctness only.
+def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250, gpu_count=8):
+    """Record a final selected-GPU capacity snapshot; shared runs prove correctness only.
 
     Host-side fleet selection must also record owners: container PID namespaces
     can hide the owners of nvidia-smi's host PIDs.
@@ -261,11 +306,12 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
     rows = list(csv.reader(gpu_text.splitlines(), skipinitialspace=True))
     selected = {int(row[0]): float(row[2]) for row in rows if len(row) == 3}
     if any(i not in selected or not math.isfinite(selected[i]) or
-           selected[i] < min_free_gib * 1024 for i in range(8)):
-        raise RuntimeError("Insufficient free GPU memory for the complete TP8 profile; reselect hosts")
-    selected_uuids = {row[1].strip() for row in rows if int(row[0]) in range(8)}
+           selected[i] < min_free_gib * 1024 for i in range(gpu_count)):
+        raise RuntimeError("Insufficient free GPU memory for the selected profile; reselect hosts")
+    selected_uuids = {row[1].strip() for row in rows if int(row[0]) in range(gpu_count)}
     occupied = [row for row in csv.reader(process_text.splitlines(), skipinitialspace=True)
-                if row and row[0].strip() in selected_uuids]
+                if len(row) >= 2 and row[0].strip() in selected_uuids
+                and row[1].strip().isdigit()]
     if occupied and not allow_shared_accuracy:
         raise RuntimeError("GPUs occupied; reselect hosts or explicitly allow shared accuracy validation")
 
@@ -273,6 +319,12 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
+    parser.add_argument("--tp-size", type=int, default=8)
+    parser.add_argument("--dp-size", type=int, default=1)
+    parser.add_argument("--ep-size", type=int,
+                        help="Defaults to TP×DP")
+    parser.add_argument("--prefill-source-tp-size", type=int, default=8,
+                        help="Physical Prefill attention TP / PageRR shard count for Decode")
     parser.add_argument("--debug-four-layer", action="store_true",
                         help="Use a four-layer diagnostic checkpoint; never counts as full-model acceptance")
     parser.add_argument("--checkpoint", required=True)
@@ -293,11 +345,19 @@ def main():
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
     parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
+    parser.add_argument("--orthogonal-smoke", action="store_true",
+                        help="Enable the complete 64K PageRR, Host cache, DCP and Graph smoke profile")
+    parser.add_argument("--memory-cache-size-mb", type=int, default=32768,
+                        help="Per-rank Prefill Host cache capacity in the orthogonal profile")
+    parser.add_argument("--kv-cache-mem-mb", type=int,
+                        help="Explicit per-rank Device KV cache capacity for bounded smoke profiles")
     parser.add_argument("--allow-shared-accuracy", action="store_true",
                         help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
     parser.add_argument("--min-free-gib", type=float, default=250,
-                        help="Required free memory on each of GPUs 0-7 (default: 250 GiB)")
+                        help="Required free memory on each selected GPU (default: 250 GiB)")
     args = parser.parse_args()
+    if args.ep_size is None:
+        args.ep_size = args.tp_size * args.dp_size
     environment, command = launch_config(args)
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
@@ -342,7 +402,8 @@ def main():
         ("draft", args.draft_checkpoint),
     ):
         require_checkpoint_source(checkpoint, args.allow_hf3fs_root)
-        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint]
+        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint,
+                         "--load-method", "fastsafetensors"]
         if args.allow_hf3fs_root:
             guard_command.extend(["--allow-hf3fs-root", args.allow_hf3fs_root])
         else:
@@ -356,10 +417,11 @@ def main():
                 check=True,
             )
     # This is an additional final check, not a replacement for fleet selection.
-    require_gpu_capacity(run, args.allow_shared_accuracy, args.min_free_gib)
+    require_gpu_capacity(run, args.allow_shared_accuracy, args.min_free_gib,
+                         args.tp_size * args.dp_size)
     ports = []
     try:
-        for port in range(args.start_port, args.start_port + 8 * 9):
+        for port in range(args.start_port, args.start_port + args.tp_size * args.dp_size * 9):
             sock = socket.socket()
             ports.append(sock)
             sock.bind(("0.0.0.0", port))
@@ -371,7 +433,8 @@ def main():
             {
                 "profile": (
                     f"{'fp8' if args.fp8_kv_cache or args.fp8_gemm else 'bf16'}-"
-                    f"{'debug4' if args.debug_four_layer else 'full93'}-tp8-ep8-sp-mtp3-rdma"
+                    f"{'debug4' if args.debug_four_layer else 'full93'}-"
+                    f"dp{args.dp_size}-tp{args.tp_size}-ep{args.ep_size}-sp-mtp3-rdma"
                 ),
                 "full_model_acceptance_eligible": not args.debug_four_layer,
                 "environment": environment,
