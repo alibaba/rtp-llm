@@ -122,6 +122,10 @@ def launch_config(args):
         # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
         # target and draft checkpoints; nogds failed during MoE scale conversion.
         environment["FASTSAFETENSORS_NOGDS"] = "0"
+    decode_capture_batches = (
+        [1, 2, 4, 8, 16, 32] if orthogonal_smoke and dp_size > 1 else
+        [1, 2, 4, 8, 16, 32, 64] if orthogonal_smoke else [1, 2, 3, 4, 7, 8, 9, 16]
+    )
     options = {
         "role_type": args.role,
         "tp_size": tp_size,
@@ -136,7 +140,10 @@ def launch_config(args):
         "remote_server_port": args.peer_port,
         "use_local": 1,
         "max_seq_len": 2097152 if orthogonal_smoke else 262144,
-        "max_context_batch_size": 64 if orthogonal_smoke and args.role == "PREFILL" else 16,
+        # MTP update capture uses this request capacity independently of the
+        # Decode runner. It must cover every configured proposal/Verify bucket.
+        "max_context_batch_size": (64 if orthogonal_smoke and args.role == "PREFILL"
+                                   else max(decode_capture_batches)),
         "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
         **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
         "concurrency_limit": 64 if orthogonal_smoke else 16,
@@ -167,10 +174,7 @@ def launch_config(args):
     if kv_cache_mem_mb is not None:
         options["kv_cache_mem_mb"] = kv_cache_mem_mb
     if args.role == "DECODE":
-        options["decode_capture_config"] = (
-            "1,2,4,8,16,32" if orthogonal_smoke and dp_size > 1 else
-            "1,2,4,8,16,32,64" if orthogonal_smoke else "1,2,3,4,7,8,9,16"
-        )
+        options["decode_capture_config"] = ",".join(map(str, decode_capture_batches))
     command = [str(Path(args.server).resolve(strict=True))]
     for key, value in options.items():
         command.extend(["--" + key, str(value)])
