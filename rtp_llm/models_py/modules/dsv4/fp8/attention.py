@@ -899,6 +899,7 @@ class PrefillMeta(NamedTuple):
     # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
     # ``PrefillWorkspace``; non-None for every production prefill call.
     workspace: Optional[PrefillWorkspace] = None
+    request_row_slices: Optional[Tuple[slice, ...]] = None
 
 
 class PrefillQKV(NamedTuple):
