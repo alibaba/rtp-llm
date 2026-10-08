@@ -11,6 +11,7 @@ import torch
 
 from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     _ckpt_base_matches_quant_exclude,
+    _ckpt_base_matches_regex_exclude,
     _identity_ensure_2d,
 )
 
@@ -127,3 +128,66 @@ class CkptBaseMatchesQuantExcludeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
+    """The ``re:`` ignore entries describe which weight *templates* are excluded.
+
+    The probe used to be the template with ``{i}`` replaced by a literal ``0``
+    and the pattern was applied with ``re.search``, so a pattern naming layer 0
+    matched every layer while a pattern naming layer 7 matched none - a
+    layer-scoped ignore silently de-quantized the wrong layers, or silently did
+    nothing, depending on which layer number was written.
+    """
+
+    TEMPLATE = "model.layers.{i}.mlp"
+
+    def test_pattern_naming_layer_zero_does_not_match_the_template(self):
+        excludes = {r"re:^model\.layers\.0\.mlp$"}
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+        self.assertFalse(
+            _ckpt_base_matches_regex_exclude(self.TEMPLATE, excludes)
+        )
+
+    def test_pattern_naming_another_layer_does_not_match_the_template(self):
+        excludes = {r"re:^model\.layers\.7\.mlp$"}
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+
+    def test_pattern_covering_any_layer_matches_the_template(self):
+        excludes = {r"re:^model\.layers\.\d+\.mlp$"}
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+        self.assertTrue(
+            _ckpt_base_matches_regex_exclude(self.TEMPLATE, excludes)
+        )
+
+    def test_pattern_without_a_trailing_anchor_still_matches(self):
+        excludes = {r"re:^model\.layers\.\d+\.mlp"}
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+
+    def test_pattern_for_another_submodule_does_not_match(self):
+        excludes = {r"re:^model\.layers\.\d+\.self_attn\.q_proj$"}
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+
+    def test_invalid_regex_still_raises(self):
+        with self.assertRaises(ValueError):
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, {"re:["})
+
+    def test_non_regex_entries_are_untouched(self):
+        # A concrete path in the exclude list keeps working as before.
+        excludes = {"model.layers.5.mlp"}
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
+        )
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, {"model.layers.5.moe"})
+        )
