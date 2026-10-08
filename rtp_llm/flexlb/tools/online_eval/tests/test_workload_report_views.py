@@ -58,7 +58,13 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][3]["points"]])
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
-            self.assertTrue(all(not curve["points"] for curve in panels["prefill_balance"]["series"]))
+            balance = panels["prefill_balance"]["series"]
+            self.assertTrue(all(not curve["points"] for curve in balance[:3]))
+            self.assertEqual(["A · HTTP 可回读", "B · HTTP 可回读"],
+                             [curve["name"] for curve in balance[3:]])
+            self.assertEqual([1, 0], [point["y"] for point in balance[3]["points"]])
+            self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
+            self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
                                 and panel["events"] for panel in panels.values()))
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])

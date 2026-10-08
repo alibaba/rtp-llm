@@ -17,5 +17,5 @@ panels:
   caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
 - id: prefill_balance
   title: Prefill 5 秒滚动分配均衡性
-  fields: [prefill_peak_qps, prefill_mean_qps, prefill_skew]
-  caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数；竖线标出 Master 事件。
+  fields: [prefill_peak_qps, prefill_mean_qps, prefill_skew, http_up]
+  caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数。此短窗指标仅作观测，不作强制门禁。A/B HTTP 可回读使用独立 0/1 轴，不代表 gRPC 已恢复；竖线标出 Master 事件。

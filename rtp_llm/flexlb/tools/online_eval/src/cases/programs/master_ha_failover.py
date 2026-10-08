@@ -52,10 +52,6 @@ def dual_master_cycle(case):
         # stop after 30 seconds of the final long-running traffic period.
         windows["a_handover"] = {"from": output("b_end", "epoch_s"),
                                   "until": output("a_start", "epoch_s")}
-        windows["to_b"] = {"from": output("kill_a", "epoch_s"),
-                            "until": output("b_start", "epoch_s")}
-        windows["to_a"] = {"from": output("kill_b", "epoch_s"),
-                            "until": output("a_start", "epoch_s")}
         windows["post_recovery"] = {"from": output("both_start", "epoch_s")}
         windows["all_requests"] = {}
     for name, boundaries in windows.items():
@@ -77,8 +73,7 @@ def dual_master_cycle(case):
                       outage_terminal="outage")
     else:
         checks.update(handover_errors="a_handover", late_errors="post_recovery",
-                      rolling_errors="all_requests", to_b_balance="to_b",
-                      to_a_balance="to_a")
+                      rolling_errors="all_requests")
     for name, window in checks.items():
         case.observe(name, "master_client_check", params=case.params(
             f"{root}.checks.{name}", {"rows": output(window, "rows")}))

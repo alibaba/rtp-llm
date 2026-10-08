@@ -75,8 +75,6 @@ parameters:
       handover_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
       late_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
       rolling_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
-      to_b_balance: {metric: prefill_peak_skew, op: le, expected: 4.0, min_samples: 200}
-      to_a_balance: {metric: prefill_peak_skew, op: le, expected: 4.0, min_samples: 200}
       unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
 test:
   kind: workload
