@@ -177,8 +177,9 @@ def inputs(cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=No
     )
 
 
-def decode_inputs(cache, ids, starts, history, order=None):
+def decode_inputs(cache, ids, starts, history, order=None, prompt_lengths=None):
     order = list(range(len(ids))) if order is None else order
+    prompt_lengths = starts if prompt_lengths is None else prompt_lengths
     request = inputs(
         cache,
         [ids[i] for i in order],
@@ -188,6 +189,9 @@ def decode_inputs(cache, ids, starts, history, order=None):
     )
     for attn in request.attention_inputs.values():
         attn.is_prefill = False
+        attn.input_lengths = torch.tensor(
+            [prompt_lengths[i] for i in order], dtype=torch.int32
+        )
         attn.sequence_lengths = torch.tensor(
             [starts[i] for i in order], dtype=torch.int32
         )
@@ -347,7 +351,9 @@ class V41WorkerSM120Test(unittest.TestCase):
             for step in range(8):
                 ids = [8 + step, 24 + step]
                 order = [1, 0] if reverse and step % 2 == 0 else [0, 1]
-                request = decode_inputs(model.kv_cache, ids, starts, history, order)
+                request = decode_inputs(
+                    model.kv_cache, ids, starts, history, order, prompt_lengths=[3, 2]
+                )
                 output = model.forward(request).hidden_states
                 self.assertEqual(output.shape, (2, 512))
                 self.assertTrue(bool(torch.isfinite(output).all()))
@@ -381,7 +387,8 @@ class V41WorkerSM120Test(unittest.TestCase):
             ("sequence_lengths", [-1, 2]),
             ("sequence_lengths", [0, 2]),
             ("sequence_lengths", [3]),
-            ("input_lengths", [2, 1]),
+            ("input_lengths", [4, 1]),
+            ("input_lengths", [0, 1]),
             ("combo_position_ids", [4, 2]),
         ):
             bad = request()

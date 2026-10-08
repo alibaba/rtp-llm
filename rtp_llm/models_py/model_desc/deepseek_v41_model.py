@@ -2,7 +2,8 @@
 
 Adapted from e4a9162f6f. Serving registration remains gated while this worker
 is qualified incrementally; eager short PP1/CP1/TP1 prefill admits DP1/EP1
-or a single eight-rank DP8/EP8 NCCL group. Single-token decode admits EP1.
+or a single eight-rank DP8/EP8 NCCL group. Single-token decode uses the same
+topologies with uniform prefill/decode phase agreement across DP peers.
 """
 
 from __future__ import annotations
@@ -404,21 +405,24 @@ class DeepSeekV41Model(DeepSeekV4Model):
             build_paged_pool_specs,
         )
 
-        if self._dp_group is not None:
-            raise NotImplementedError("V4.1 DP8 worker decode is not integrated")
         lengths, starts = attn.input_lengths, attn.sequence_lengths
         batch = inputs.input_ids.numel()
         if (
-            not 1 <= batch <= self._max_generate_batch_size
+            not (0 if self._dp_group is not None else 1)
+            <= batch
+            <= self._max_generate_batch_size
             or lengths is None
             or starts is None
             or lengths.shape != (batch,)
             or starts.shape != (batch,)
             or lengths.dtype not in (torch.int32, torch.int64)
             or starts.dtype not in (torch.int32, torch.int64)
-            or bool((lengths != 1).any())
         ):
             raise ValueError("V4.1 decode requires one token per request")
+        # Native decode input_lengths retain the original prompt lengths.
+        # Token count and sequence_lengths determine the one-token batch.
+        if bool(((lengths.cpu() <= 0) | (lengths.cpu() > starts.cpu())).any()):
+            raise ValueError("V4.1 decode requires valid original prompt lengths")
         if bool(((starts < 1) | (starts >= min(256, self._v4_args.max_seq_len))).any()):
             raise ValueError(
                 "V4.1 decode requires prompt positions within the first page"
@@ -433,6 +437,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
             )
         ):
             raise ValueError("V4.1 decode positions disagree with requests")
+        if batch == 0:
+            return
         specs = build_paged_pool_specs(
             self.kv_cache, self.v4, self._v4_args.max_seq_len
         )
@@ -500,7 +506,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         else:
             self._validate_decode(inputs, attn)
         if ids.numel():
-            if self._dp_group is not None:
+            if self._dp_group is not None and attn.is_prefill:
                 tables = build_block_tables_batched(
                     self.kv_cache, inputs.attention_inputs
                 )
@@ -521,6 +527,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
             and inputs.engram_token_windows.numel()
         ):
             raise ValueError("V4.1 idle DP rank cannot carry token history")
+        return bool(attn.is_prefill)
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
@@ -530,14 +537,15 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 raise RuntimeError("V4.1 worker is not initialized")
             try:
                 error = None
+                prefill = None
                 try:
-                    self._validate_forward(inputs, fmha_impl)
+                    prefill = self._validate_forward(inputs, fmha_impl)
                 except Exception as exc:
                     error = exc
                 with torch.cuda.stream(self._worker_stream):
                     self._agree_dp(
                         error,
-                        ("forward", self.kv_cache is not None),
+                        ("forward", self.kv_cache is not None, prefill),
                         self._weight_device(),
                     )
                 try:
