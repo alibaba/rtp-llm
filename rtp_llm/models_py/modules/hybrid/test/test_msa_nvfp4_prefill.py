@@ -73,6 +73,35 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn('index_score_plan["_fp4_host_metadata"]', text)
         self.assertIn("flash_prefill_topk_to_block_tables_fp4(", text)
 
+    def test_cp_host_planning_waits_for_metadata_not_projection(self):
+        method = self.methods["_forward_cp_prefill"]
+        calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+        record = next(
+            call for call in calls if ast.unparse(call.func) == "metadata_ready.record"
+        )
+        projection = next(
+            call for call in calls if ast.unparse(call.func) == "self._project_qkv_idx"
+        )
+        wait = next(
+            call
+            for call in calls
+            if ast.unparse(call.func) == "metadata_ready.synchronize"
+        )
+        copies = [call for call in calls if ast.unparse(call.func).endswith(".copy_")]
+        self.assertTrue(copies)
+        self.assertLess(max(call.lineno for call in copies), record.lineno)
+        self.assertLess(record.lineno, projection.lineno)
+        self.assertLess(projection.lineno, wait.lineno)
+        self.assertFalse(
+            any(
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "synchronize"
+                and isinstance(call.func.value, ast.Call)
+                and ast.unparse(call.func.value.func) == "torch.cuda.current_stream"
+                for call in calls
+            )
+        )
+
     def test_native_only_and_explicit_physical_addressing(self):
         text = ast.get_source_segment(self.text, self.methods["_forward_nvfp4_prefill"])
         self.assertNotIn("all_gather(", text)

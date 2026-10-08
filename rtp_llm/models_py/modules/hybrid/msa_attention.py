@@ -2935,6 +2935,31 @@ class MSAAttention(nn.Module):
             )
             if prefetched is not None:
                 prefix_values, prefix_side, _ = prefetched
+            elif self._kv_sharded:
+                from rtp_llm.models_py.triton_kernels.common.nvfp4_prefix_pack import (
+                    pack_prefix_pools,
+                )
+
+                block_table = self._physical_block_table(attn_inputs)
+                if (
+                    prefix_gather_plan is None
+                    or prefix_gather_plan.cp_size != self._cp_size
+                    or prefix_gather_plan.batch_size != len(prefix_cpu_list)
+                    or prefix_gather_plan.block_table_data_ptr != block_table.data_ptr()
+                    or prefix_gather_plan.total_logical_blocks
+                    != prefix_dst_pages.numel()
+                ):
+                    raise ValueError(
+                        "M3.1 prefix gather plan does not match this forward"
+                    )
+                local_values, local_side = pack_prefix_pools(
+                    kv_cache.kv_cache_base,
+                    kv_cache.kv_scale_base,
+                    prefix_gather_plan.packed_block_ids,
+                )
+                # Preserve the two-collective schedule on every CP rank.
+                prefix_values = all_gather(local_values, group=Group.TP)
+                prefix_side = all_gather(local_side, group=Group.TP)
             else:
                 prefix_values = self._gather_cp_compact_prefix_pool(
                     kv_cache.kv_cache_base,
@@ -3533,13 +3558,25 @@ class MSAAttention(nn.Module):
         if idx_scale_gathered is not None:
             idx_scale_gathered.record_stream(stream)
         with torch.cuda.stream(stream):
+            if self.nvfp4_kv_cache:
+                from rtp_llm.models_py.triton_kernels.common.nvfp4_prefix_pack import (
+                    pack_prefix_pools,
+                )
+
+                local_main, local_idx = pack_prefix_pools(
+                    main_pool, idx_pool, plan.packed_block_ids
+                )
+            else:
+                local_main = main_pool.index_select(0, plan.packed_block_ids)
             all_gather(
-                main_pool.index_select(0, plan.packed_block_ids),
+                local_main,
                 group=Group.TP_PREFETCH,
                 out=main_gathered,
             )
+            if not self.nvfp4_kv_cache:
+                local_idx = idx_pool.index_select(0, plan.packed_block_ids)
             all_gather(
-                idx_pool.index_select(0, plan.packed_block_ids),
+                local_idx,
                 group=Group.TP_PREFETCH,
                 out=idx_gathered,
             )
@@ -4225,6 +4262,11 @@ class MSAAttention(nn.Module):
                     cp_info.prefill_shuffle_indices.detach().to(torch.int64),
                     non_blocking=True,
                 )
+            # Host planning needs these copies, not the following QKV/RMS
+            # kernels. Record their completion before enqueueing projection so
+            # CPU metadata preparation can overlap that GPU work.
+            metadata_ready = torch.cuda.Event()
+            metadata_ready.record(torch.cuda.current_stream(device))
             need_build_new_meta = True
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
@@ -4243,7 +4285,7 @@ class MSAAttention(nn.Module):
             )
 
         if need_build_new_meta:
-            torch.cuda.current_stream().synchronize()
+            metadata_ready.synchronize()
             chunk_lengths_cpu = packed_pinned[:n_chunks].tolist()
             prefix_cpu = packed_pinned[n_chunks:]
             prefix_cpu_list = prefix_cpu.tolist()
@@ -5009,6 +5051,7 @@ class MSAAttention(nn.Module):
             )
             if self.nvfp4_kv_cache:
                 from rtp_llm.models_py.triton_kernels.sparse_msa.decode.q8kv4_decode import (
+                    _q8kv4_paged_sparse_decode_mxfp8,
                     q8kv4_paged_sparse_decode,
                 )
 
@@ -5019,7 +5062,12 @@ class MSAAttention(nn.Module):
                     self.physical_page_size,
                     self.head_dim,
                 )
-                q8kv4 = q8kv4_paged_sparse_decode(
+                decode_fn = (
+                    _q8kv4_paged_sparse_decode_mxfp8
+                    if self._use_q8kv4_mxfp8_output(q, layout)
+                    else q8kv4_paged_sparse_decode
+                )
+                q8kv4 = decode_fn(
                     q,
                     idx_q,
                     layout,
@@ -5035,8 +5083,7 @@ class MSAAttention(nn.Module):
                     fuse_bf16_query_rounding=fuse_bf16_query_rounding,
                     max_seq_len=self._cuda_graph_max_seq_len,
                 )
-                attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
-                output = self.o_proj(attn_output)
+                output = self._project_q8kv4_output(q8kv4, input_shape)
                 if self.tp_size > 1:
                     output = all_reduce(output, group=Group.TP)
                 return output
@@ -5073,6 +5120,33 @@ class MSAAttention(nn.Module):
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def _use_q8kv4_mxfp8_output(self, q, layout) -> bool:
+        # Static producer/consumer capability only: no tensor readback or flag.
+        return (
+            type(self.o_proj) is CudaMxfp8Linear
+            and self.o_proj.K == 8192
+            and q.is_cuda
+            and 0 < q.shape[0] <= 100
+            and tuple(q.shape[1:]) == (64, 128)
+            and layout.num_heads == 4
+            and layout.head_dim == 128
+            and layout.page_size == 128
+            and self.topk_blocks == 16
+            and torch.cuda.get_device_capability(q.device) == (10, 3)
+        )
+
+    def _project_q8kv4_output(self, result, input_shape):
+        from rtp_llm.models_py.triton_kernels.sparse_msa.decode.q8kv4_decode import (
+            Q8KV4Mxfp8DecodeResult,
+        )
+
+        if isinstance(result, Q8KV4Mxfp8DecodeResult):
+            return self.o_proj(
+                result.output_fp8.reshape(*input_shape, -1),
+                input_scales=result.output_scales_packed,
+            )
+        return self.o_proj(result.output.reshape(*input_shape, -1).contiguous())
 
     def _forward_target_verify(
         self,
@@ -5213,6 +5287,7 @@ class MSAAttention(nn.Module):
             )
             if self.nvfp4_kv_cache:
                 from rtp_llm.models_py.triton_kernels.sparse_msa.decode.q8kv4_decode import (
+                    _q8kv4_paged_sparse_decode_mxfp8,
                     q8kv4_paged_sparse_decode,
                 )
 
@@ -5223,7 +5298,12 @@ class MSAAttention(nn.Module):
                     self.physical_page_size,
                     self.head_dim,
                 )
-                q8kv4 = q8kv4_paged_sparse_decode(
+                decode_fn = (
+                    _q8kv4_paged_sparse_decode_mxfp8
+                    if self._use_q8kv4_mxfp8_output(q, layout)
+                    else q8kv4_paged_sparse_decode
+                )
+                q8kv4 = decode_fn(
                     q,
                     idx_q,
                     layout,
@@ -5249,8 +5329,7 @@ class MSAAttention(nn.Module):
                     valid_token_mask=valid_token_mask,
                     max_seq_len=self._cuda_graph_max_seq_len,
                 )
-                attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
-                output = self.o_proj(attn_output)
+                output = self._project_q8kv4_output(q8kv4, input_shape)
                 output = torch.where(
                     valid_token_mask[:, None], output, torch.zeros_like(output)
                 )

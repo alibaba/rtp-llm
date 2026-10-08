@@ -14,7 +14,7 @@ class DSparkSWALaunchConfigTest(unittest.TestCase):
         measured = [16, 7, 64, 4, 128, 4095, True, 10]
         self.assertEqual(_swa_launch_config(*measured), (64, 128, 8))
         alternatives = {
-            0: (1, 3, 8, 15, 17, 32),
+            0: (0, 6, 8, 15, 17, 32),
             1: (1, 4, 5, 6, 8, 16),
             2: (32, 128),
             3: (2, 8),
@@ -31,6 +31,59 @@ class DSparkSWALaunchConfigTest(unittest.TestCase):
                     rows = args[1] * args[2] // args[3]
                     tile = min(32, max(16, 1 << (rows - 1).bit_length()))
                     self.assertEqual(_swa_launch_config(*args), (tile, 64, 4))
+
+    def test_small_batch_preserves_history_tile_and_fallbacks(self):
+        measured = [5, 7, 64, 4, 128, 4095, True, 10]
+        for batch in range(1, 6):
+            self.assertEqual(_swa_launch_config(batch, *measured[1:]), (16, 64, 4))
+        alternatives = {
+            0: (0, 6, 8, 15, 17, 32),
+            1: (1, 4, 5, 6, 8, 16),
+            2: (32, 128),
+            3: (2, 8),
+            4: (64, 256),
+            5: (0, 127, 4096),
+            6: (False,),
+            7: (8, 9, 12),
+        }
+        for index, values in alternatives.items():
+            for value in values:
+                args = measured.copy()
+                args[index] = value
+                with self.subTest(args=args):
+                    rows = args[1] * args[2] // args[3]
+                    tile = min(32, max(16, 1 << (rows - 1).bit_length()))
+                    self.assertEqual(_swa_launch_config(*args), (tile, 64, 4))
+
+    def test_noncausal_small_batch_uses_only_measured_sm103_shape(self):
+        for batch in (1, 3, 4, 5):
+            self.assertEqual(
+                _swa_launch_config(batch, 7, 64, 4, 128, 4095, False, 10, 3),
+                (16, 64, 4),
+            )
+        for batch in (6, 8, 12, 16, 20):
+            self.assertEqual(
+                _swa_launch_config(batch, 7, 64, 4, 128, 4095, False, 10, 3),
+                (32, 64, 4),
+            )
+        for major, minor in ((9, 0), (10, 0), (10, 1), (10, None), (12, 3)):
+            self.assertEqual(
+                _swa_launch_config(4, 7, 64, 4, 128, 4095, False, major, minor),
+                (32, 64, 4),
+            )
+        for width, heads, kv_heads, page, window in (
+            (6, 64, 4, 128, 4095),
+            (7, 32, 4, 128, 4095),
+            (7, 64, 8, 128, 4095),
+            (7, 64, 4, 64, 4095),
+            (7, 64, 4, 128, 127),
+        ):
+            self.assertEqual(
+                _swa_launch_config(
+                    4, width, heads, kv_heads, page, window, False, 10, 3
+                ),
+                (32, 64, 4),
+            )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")

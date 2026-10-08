@@ -82,6 +82,27 @@ class NativeIndexHostTest(unittest.TestCase):
         self.assertTrue(self.supported((c,), pages=largest_pages))
         self.assertFalse(self.supported((c,), pages=largest_pages + 1))
 
+    def test_compact_admission_bounds_without_reading_page_contents(self):
+        c = chunk(rows=16384, length=90000)
+        args = ((c,), 28160, 4, 16384, 16384, 704)
+        self.assertFalse(op.supported_native_index_workspace(*args))
+        with patch.object(
+            torch.Tensor, "cpu", side_effect=AssertionError("sync")
+        ), patch.object(torch.Tensor, "tolist", side_effect=AssertionError("sync")):
+            self.assertTrue(op.supported_native_index_workspace(*args, compact=True))
+        self.assertLess(
+            op.native_index_workspace_bytes((c,), 28160, 4, compact=True),
+            op._WORKSPACE_LIMIT,
+        )
+        # Compaction changes staging capacity only, never expands the planner's
+        # validated logical-page/long-context geometry.
+        c = chunk(rows=16384, length=1048576)
+        self.assertFalse(
+            op.supported_native_index_workspace(
+                (c,), 8192, 4, 16384, 16384, 8192, compact=True
+            )
+        )
+
     def test_largest_accepted_chunk_and_logical_page_limits(self):
         c = chunk(16384, 131072)
         self.assertTrue(
@@ -160,6 +181,7 @@ class NativeIndexHostTest(unittest.TestCase):
         workspace._geometry = (op._chunk_geometry(c),)
         workspace.device = torch.device("cpu")
         workspace.pages, workspace.heads = 1, 4
+        workspace.compact = False
         workspace.plans = ({"max_k_tiles": 128},)
         workspace.native_score = torch.empty(4 * 128 * 2, dtype=torch.float32)
         workspace.staged = torch.zeros((2, 1, 128, 128), dtype=torch.uint8).view(
@@ -230,7 +252,7 @@ class NativeIndexHostTest(unittest.TestCase):
         del old
         created = []
 
-        def construct(*args):
+        def construct(*args, **kwargs):
             self.assertIsNone(old_ref(), "old epoch still retained during allocation")
             value = Workspace()
             created.append(value)

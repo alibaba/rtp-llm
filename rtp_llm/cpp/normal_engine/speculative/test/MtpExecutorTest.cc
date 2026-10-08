@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -1023,6 +1026,282 @@ TEST_F(MtpExecutorTest, AcceptMetricsReportCurrentRoundWithoutPendingTail) {
     }
 }
 
+// Real dispatchDecodeOutput tests: no model forward, mirrored scheduler helper,
+// production callback or runtime flag. Async flag is cached before main().
+struct DSparkDispatchMetricsCase {
+    GenerateStreamPtr                     stream;
+    speculative::SpeculativeSamplerOutput output;
+};
+
+static DSparkDispatchMetricsCase makeDSparkDispatchMetricsCase(MtpExecutorTest&       fixture,
+                                                               MtpExecutorComponents& components) {
+    auto& executor             = *components.executor;
+    executor.is_dspark_        = true;
+    executor.metrics_reporter_ = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags());
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 7;
+    CacheConfig cache;
+    cache.group_types = {CacheGroupType::FULL};
+    executor.setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(
+        components.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, sp_config, false));
+    auto resource          = components.resource_context;
+    resource.cache_manager = executor.cache_manager_;
+    DSparkDispatchMetricsCase result;
+    result.stream = fixture.createContextStream(components.model_config, components.runtime_config, resource, {2, 3});
+    if (!result.stream->initKVBlock().ok()) {
+        throw std::runtime_error("dispatch metrics fixture KV allocation failed");
+    }
+    // Match scheduler admission for an already prepared local KV cache.
+    result.stream->reportEvent(StreamEvents::CanRun);
+    result.stream->reportEvent(StreamEvents::CachePrepared);
+    if (result.stream->moveToNext() != StreamState::RUNNING) {
+        throw std::runtime_error("dispatch metrics fixture admission failed");
+    }
+    result.stream->setIsContextStream(false);
+    result.stream->generateConfig()->max_new_tokens = 1;
+    result.stream->generateConfig()->ignore_eos     = true;
+    auto buffer                                     = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens                                  = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
+    result.stream->setSPOutputBuffer(buffer);
+    result.output.accept_tokens_cpu = torch::tensor({{1, 0, 0, 0, 0, 0, 0, 0}}, torch::kInt32);
+    result.output.accept_len_cpu    = torch::ones({1}, torch::kInt32);
+    result.output.accept_tokens     = result.output.accept_tokens_cpu.to(torch::kCUDA);
+    result.output.accept_len        = result.output.accept_len_cpu.to(torch::kCUDA);
+    result.output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    return result;
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsPublishesBeforeSameStepConsumption) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    ASSERT_TRUE(executor.useStreamAsync()) << "Run this filtered test with RTP_LLM_STREAM_ASYNC=1 before binary load";
+    auto current = makeDSparkDispatchMetricsCase(*this, components);
+    auto ready   = cuda_graph::makeGraphEvent();
+    executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+    struct PreviousWorkerGate {
+        std::mutex              mutex;
+        std::condition_variable cv;
+        bool                    started = false;
+        bool                    release = false;
+        bool                    exited  = false;
+    };
+    auto gate = std::make_shared<PreviousWorkerGate>();
+    // CPU worker gate only; finite automatic release, no CUDA host callback.
+    executor.spec_bookkeeping_runner_.launch([gate] {
+        std::unique_lock<std::mutex> lock(gate->mutex);
+        gate->started = true;
+        gate->cv.notify_all();
+        gate->cv.wait_for(lock, std::chrono::seconds(5), [&] { return gate->release; });
+        gate->exited = true;
+    });
+    bool                saw_claim             = false;
+    bool                metrics_still_pending = false;
+    std::thread         observer([&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            // This acquire observes the real dispatch's acq_rel claim. With
+            // the previous worker still gated, launch cannot return and the
+            // main thread cannot concurrently mutate metrics during this read.
+            if (current.stream->hasPendingAsyncBookkeeping()) {
+                std::lock_guard<std::mutex> lock(gate->mutex);
+                if (gate->started && !gate->exited) {
+                    saw_claim             = true;
+                    metrics_still_pending = executor.metrics_accept_len_sum_cpu_.defined();
+                    gate->release         = true;
+                    gate->cv.notify_all();
+                    return;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        gate->release = true;
+        gate->cv.notify_all();
+    });
+    MtpMetricsCollector collector;
+    absl::Status        status;
+    std::exception_ptr  call_error;
+    try {
+        status = executor.dispatchDecodeOutput(
+            StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr);
+    } catch (...) {
+        call_error = std::current_exception();
+    }
+    observer.join();
+    auto worker_error = executor.spec_bookkeeping_runner_.joinAndDrain();
+    EXPECT_FALSE(call_error);
+    EXPECT_FALSE(worker_error);
+    EXPECT_TRUE(status.ok());
+    EXPECT_TRUE(saw_claim);
+    EXPECT_TRUE(metrics_still_pending);
+    EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+    EXPECT_EQ(collector.sp_engine_collector.total_accepted_token_num, 1);
+    EXPECT_EQ(collector.sp_engine_collector.total_propose_token_num, 7);
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsPreviousLaunchErrorPreservedAfterCleanup) {
+    struct DispatchSentinel: std::runtime_error {
+        DispatchSentinel(): std::runtime_error("dispatch sentinel") {}
+    };
+    for (const bool malformed_metrics : {false, true}) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = 7;
+        auto  components         = createMtpExecutorComponents(config);
+        auto& executor           = *components.executor;
+        ASSERT_TRUE(executor.useStreamAsync()) << "Set RTP_LLM_STREAM_ASYNC=1 before binary load";
+        auto current = makeDSparkDispatchMetricsCase(*this, components);
+        auto ready   = cuda_graph::makeGraphEvent();
+        executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+        if (malformed_metrics) {
+            // Ready CPU staging, not an event failure or in-flight D2H.
+            executor.metrics_accept_len_sum_cpu_ = torch::ones({2}, torch::kInt64);
+        }
+        auto original = std::make_exception_ptr(DispatchSentinel{});
+        executor.spec_bookkeeping_runner_.launch([original] { std::rethrow_exception(original); });
+        MtpMetricsCollector collector;
+        EXPECT_THROW(
+            executor.dispatchDecodeOutput(
+                StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr),
+            DispatchSentinel);
+        EXPECT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+        EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+        if (malformed_metrics) {
+            // Failed consume retains storage; no premature/pseudo-success reset.
+            EXPECT_TRUE(executor.metrics_accept_len_sum_cpu_.defined());
+        } else {
+            EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+            EXPECT_EQ(collector.sp_engine_collector.total_accepted_token_num, 1);
+            EXPECT_EQ(collector.sp_engine_collector.total_propose_token_num, 7);
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsCollectionFailureDoesNotPreventAcceptedWorker) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    ASSERT_TRUE(executor.useStreamAsync()) << "Set RTP_LLM_STREAM_ASYNC=1 before binary load";
+    auto current = makeDSparkDispatchMetricsCase(*this, components);
+    auto ready   = cuda_graph::makeGraphEvent();
+    executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+    executor.metrics_accept_len_sum_cpu_ = torch::ones({2}, torch::kInt64);
+    MtpMetricsCollector collector;
+    EXPECT_ANY_THROW(executor.dispatchDecodeOutput(
+        StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr));
+    EXPECT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+    EXPECT_TRUE(current.stream->getPendingSwapDoneEvent());
+    EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(executor.metrics_accept_len_sum_cpu_.defined());
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsFinalB1HasNoIdleTail) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    // Valid in both filtered binary invocations: async on and async off.
+    for (const bool cuda_metrics : {false, true}) {
+        auto               current = makeDSparkDispatchMetricsCase(*this, components);
+        const StreamGroups groups({current.stream});
+        const auto         cached_max_seq_len = groups.maxSeqLen();
+        auto               ready              = cuda_graph::makeGraphEvent();
+        ready.record(cuda_graph::graphGetCurrentStream());
+        executor.stageAcceptLenMetrics(
+            cuda_metrics ? current.output.accept_len : current.output.accept_len_cpu, ready, 1);
+        MtpMetricsCollector collector;
+        ASSERT_TRUE(
+            executor.dispatchDecodeOutput(groups, collector, {current.stream}, current.output, {}, {}, nullptr, nullptr)
+                .ok());
+        if (executor.useStreamAsync()) {
+            ASSERT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+        }
+        EXPECT_TRUE(current.stream->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_EQ(current.stream->moveToNext(), StreamState::FINISHED);
+        EXPECT_TRUE(current.stream->isFinished());
+        EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+        EXPECT_EQ(collector.executor_collector.generate_batch_size, groups.totalModelBatchSize());
+        EXPECT_EQ(collector.executor_collector.max_seq_len, cached_max_seq_len);
+        EXPECT_EQ(collector.sp_engine_collector.total_accepted_token_num, 1);
+        EXPECT_EQ(collector.sp_engine_collector.total_stream_num, 1);
+        EXPECT_EQ(collector.sp_engine_collector.total_propose_token_num, 7);
+        EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+        EXPECT_FALSE(executor.metrics_accept_len_sum_cpu_.defined());
+        EXPECT_FALSE(executor.metrics_accept_len_sum_gpu_.defined());
+        EXPECT_FALSE(executor.metrics_accept_len_ready_event_);
+        EXPECT_EQ(executor.metrics_accept_len_stream_num_, 0);
+        EXPECT_EQ(executor.metrics_accept_len_propose_token_num_, 0);
+        // Next iteration creates a fresh request after final-step drain.
+        current.stream->releaseResource();
+    }
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsAbsentReporterDoesNotCollect) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    auto  current            = makeDSparkDispatchMetricsCase(*this, components);
+    executor.metrics_reporter_.reset();
+    auto ready = cuda_graph::makeGraphEvent();
+    executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+    MtpMetricsCollector collector;
+    ASSERT_TRUE(
+        executor
+            .dispatchDecodeOutput(
+                StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr)
+            .ok());
+    if (executor.useStreamAsync()) {
+        EXPECT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+    }
+    EXPECT_TRUE(executor.metrics_accept_len_sum_cpu_.defined());
+    EXPECT_EQ(collector.sp_engine_collector.total_accepted_token_num, 0);
+    EXPECT_TRUE(executor.consumePendingAcceptLenMetrics().valid);
+}
+
+TEST_F(MtpExecutorTest, DSparkDispatchMetricsSyncCollectsBeforePublication) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    ASSERT_FALSE(executor.useStreamAsync()) << "Run this filtered test with RTP_LLM_STREAM_ASYNC=0 before binary load";
+    auto current = makeDSparkDispatchMetricsCase(*this, components);
+    auto ready   = cuda_graph::makeGraphEvent();
+    executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+    executor.metrics_accept_len_sum_cpu_ = torch::ones({2}, torch::kInt64);
+    MtpMetricsCollector collector;
+    EXPECT_ANY_THROW(executor.dispatchDecodeOutput(
+        StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr));
+    EXPECT_FALSE(current.stream->getNextSeqLenGpu().defined());
+    EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(current.stream->getPendingSwapDoneEvent());
+}
+
+TEST_F(MtpExecutorTest, NonDSparkDispatchMetricsCollectsBeforeAsyncPublication) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    ASSERT_TRUE(executor.useStreamAsync()) << "Set RTP_LLM_STREAM_ASYNC=1 before binary load";
+    auto current        = makeDSparkDispatchMetricsCase(*this, components);
+    executor.is_dspark_ = false;
+    auto ready          = cuda_graph::makeGraphEvent();
+    executor.stageAcceptLenMetrics(current.output.accept_len_cpu, ready, 1);
+    executor.metrics_accept_len_sum_cpu_ = torch::ones({2}, torch::kInt64);
+    MtpMetricsCollector collector;
+    // The collector fault must prevent dispatch entirely. This control does
+    // not execute the processor and is not a legacy-MTP model-quality test.
+    EXPECT_ANY_THROW(executor.dispatchDecodeOutput(
+        StreamGroups({current.stream}), collector, {current.stream}, current.output, {}, {}, nullptr, nullptr));
+    EXPECT_FALSE(current.stream->getNextSeqLenGpu().defined());
+    EXPECT_FALSE(current.stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(current.stream->getPendingSwapDoneEvent());
+}
+
 TEST_F(MtpExecutorTest, testMtpHiddenOverrideUsesExplicitCpLocalRowsAndLayout) {
     auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     auto* source     = components.fake_target_model.get();
@@ -2018,6 +2297,267 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
         "[dispatch-bench] batched: %ld us total, %.2f us/iter", us_batched, (double)us_batched / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
+}
+
+TEST_F(MtpExecutorTest, DSparkMetricsFaultThroughProcessDrainsWorkerAndReaderBeforeLeaseRelease) {
+    // Genuine outer exception path. Only model outputs and stream publication
+    // are test doubles; dispatch, collection and processWithKvLease are real.
+    ScopedDisableCoreDumpOnException no_core;
+    MtpExecutorTestConfig            config;
+    config.gen_num_per_cycle   = 1;
+    config.vocab_size_override = 4;
+    auto  components           = createMtpExecutorComponents(config);
+    auto& executor             = *components.executor;
+    ASSERT_TRUE(executor.useStreamAsync()) << "Set RTP_LLM_STREAM_ASYNC=1 before binary load";
+    executor.is_dspark_              = true;
+    executor.role_type_              = RoleType::DECODE;
+    executor.dspark_adaptive_verify_ = false;
+    executor.metrics_reporter_       = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags());
+    executor.draft_vocab_size_       = 4;
+    const auto float_cuda            = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    executor.dspark_markov_w1_       = torch::zeros({4, 2}, float_cuda);
+    executor.dspark_markov_w2_       = torch::zeros({4, 2}, float_cuda);
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type                         = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle            = 1;
+    sp_config.sp_dspark_mask_token_id      = 0;
+    sp_config.sp_dspark_sample_from_anchor = true;
+    CacheConfig cache;
+    cache.group_types = {CacheGroupType::FULL};
+    executor.setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(
+        components.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, sp_config, false));
+
+    struct Gate {
+        std::mutex              mutex;
+        std::condition_variable cv;
+        bool                    worker_entered = false;
+        bool                    release_worker = false;
+        bool                    reader_entered = false;
+        bool                    timed_out      = false;
+        std::atomic<bool>       worker_finished{false};
+        std::atomic<bool>       reader_finished{false};
+        std::atomic<bool>       fault_staged{false};
+    };
+    auto                    gate = std::make_shared<Gate>();
+    class GatedOutputStream final: public NormalGenerateStream {
+    public:
+        GatedOutputStream(const std::shared_ptr<GenerateInput>& input,
+                          const ModelConfig&                    model,
+                          const RuntimeConfig&                  runtime,
+                          const ResourceContext&                resource,
+                          std::shared_ptr<Gate>                 gate):
+            NormalGenerateStream(input, model, runtime, resource, nullptr), gate_(std::move(gate)) {}
+        void updateOutput(const StreamUpdateInfo& info) override {
+            {
+                std::unique_lock<std::mutex> lock(gate_->mutex);
+                gate_->worker_entered = true;
+                gate_->cv.notify_all();
+                if (!gate_->cv.wait_for(lock, std::chrono::seconds(10), [&] { return gate_->release_worker; })) {
+                    gate_->timed_out = true;
+                }
+            }
+            NormalGenerateStream::updateOutput(info);
+            gate_->worker_finished.store(true, std::memory_order_release);
+        }
+
+    private:
+        std::shared_ptr<Gate> gate_;
+    };
+    auto input                             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::tensor({2, 3}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 1;
+    input->generate_config->ignore_eos     = true;
+    input->generate_config->top_k          = 1;
+    auto resource                          = components.resource_context;
+    resource.cache_manager                 = executor.cache_manager_;
+    auto stream =
+        std::make_shared<GatedOutputStream>(input, components.model_config, components.runtime_config, resource, gate);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    stream->reportEvent(StreamEvents::CanRun);
+    stream->reportEvent(StreamEvents::CachePrepared);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+    stream->setScoreLen(2);
+    auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens = torch::tensor({{3, -1}}, torch::kInt32);
+    stream->setSPOutputBuffer(buffer);
+    const auto free_before = executor.cache_manager_->freeBlocksNum();
+
+    // Build expected inputs with the actual processor, not a mirrored DSpark
+    // geometry helper. Rehearsal only prepares tensors and never dispatches.
+    TensorHolder       holder;
+    const StreamGroups groups({stream});
+    auto               gathered = executor.batch_stream_processor_->gatherDecodeModelInput(groups, holder);
+    ASSERT_TRUE(gathered.ok());
+    auto       model_input    = gathered.value();
+    const auto round          = executor.batch_stream_processor_->buildDSparkRoundState(groups, model_input, holder);
+    auto       proposal_input = model_input;
+    executor.batch_stream_processor_->prepareDSparkProposeModelInput(round, proposal_input, holder);
+    GptModelOutputs proposal_output;
+    proposal_output.logits            = torch::tensor({{0.f, 20.f, 0.f, 0.f}}, float_cuda);
+    proposal_output.all_hidden_states = torch::zeros({1, 2}, float_cuda);
+    executor.batch_stream_processor_->prepareDSparkTargetVerifyModelInput(
+        round,
+        model_input,
+        torch::ones({1, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)),
+        holder);
+    GptModelOutputs target_output;
+    target_output.logits            = torch::ones({2, 4}, float_cuda);
+    target_output.all_hidden_states = torch::zeros({2, 2}, float_cuda);
+    components.fake_target_model->setInputs({model_input});
+    components.fake_target_model->setOutputs({target_output});
+    executor.batch_stream_processor_->updateDecodePostDSparkCommitInput(
+        model_input, target_output.all_hidden_states, 1);
+    GptModelOutputs commit_output;
+    commit_output.all_hidden_states = torch::zeros({2, 2}, float_cuda);
+    components.fake_draft_model->setInputs({proposal_input, model_input});
+    components.fake_draft_model->setOutputs({proposal_output, commit_output});
+    components.fake_sampler->setInputs({SamplerInputs{target_output.logits.clone()}});
+    SamplerOutput sample;
+    sample.token_ids = torch::ones({2, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    sample.all_probs = torch::full({2, 4}, 0.25f, float_cuda);
+    components.fake_sampler->setOutputs({sample});
+    spec::SpeculativeSamplerOutput rejection;
+    rejection.accept_tokens_cpu = torch::tensor({{1, 0}}, torch::kInt32);
+    rejection.accept_len_cpu    = torch::ones({1}, torch::kInt32);
+    rejection.accept_tokens     = rejection.accept_tokens_cpu.cuda();
+    rejection.accept_len        = rejection.accept_len_cpu.cuda();
+    rejection.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    components.fake_speculative_sampler->setOutputs({rejection});
+
+    class MetricsFaultDraft final: public ModelBase {
+    public:
+        MetricsFaultDraft(std::unique_ptr<FakeModel> model, MtpExecutor& executor, std::shared_ptr<Gate> gate):
+            model_(std::move(model)), executor_(executor), gate_(std::move(gate)) {}
+        GptModelOutputs forward(const GptModelInputs& input) override {
+            auto output = model_->forward(input);
+            if (input.is_mtp_draft_prefill) {
+                // Same main thread, after genuine staging, before genuine
+                // dispatch. Keep the real ready event and all sampler data.
+                if (!executor_.metrics_accept_len_sum_cpu_.defined()) {
+                    throw std::runtime_error("combined metrics test did not reach same-step staging");
+                }
+                // Do not replace pinned storage while its real D2H may still
+                // be writing. This deliberate test wait is not a perf claim.
+                if (executor_.metrics_accept_len_ready_event_) {
+                    executor_.metrics_accept_len_ready_event_->synchronize();
+                }
+                executor_.metrics_accept_len_sum_cpu_ = torch::ones({2}, torch::kInt64);
+                gate_->fault_staged.store(true, std::memory_order_release);
+            }
+            return output;
+        }
+
+    private:
+        std::unique_ptr<FakeModel> model_;
+        MtpExecutor&               executor_;
+        std::shared_ptr<Gate>      gate_;
+    };
+    auto* target      = components.fake_target_model.get();
+    auto  fault_draft = std::make_unique<MetricsFaultDraft>(std::move(components.fake_draft_model), executor, gate);
+    executor.setTargetModel(std::move(components.fake_target_model));
+    executor.setDraftModel(std::move(fault_draft));
+    executor.setSampler(std::move(components.fake_sampler));
+    executor.setSpeculativeSampler(std::move(components.fake_speculative_sampler));
+    // Warm the exact genuine Markov/math path before any observer deadline.
+    // The first filtered run spent ~7.09s between proposal and target forward
+    // (cold sampleDSparkDraft), longer than the 5s worker-arrival deadline.
+    // This does not consume queued fake forward/rejection outputs or publish
+    // stream state; all bounded worker/reader and lease assertions stay intact.
+    auto warm_draft = executor.sampleDSparkDraft(groups, proposal_output.logits, round.anchors);
+    cuda_graph::graphGetCurrentStream().synchronize();
+    ASSERT_EQ(warm_draft.token_ids.numel(), 1);
+    ASSERT_EQ(warm_draft.token_ids.cpu().item<int32_t>(), 1);
+    auto writer = std::make_shared<CacheStoreAsyncWriter>();
+    writer->init();
+    target->drain_hook = [gate, writer, stream] {
+        EXPECT_TRUE(gate->worker_finished.load(std::memory_order_acquire));
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+        {
+            std::lock_guard<std::mutex> lock(gate->mutex);
+            gate->reader_entered = true;
+        }
+        gate->cv.notify_all();
+        writer->drainIfRunning();
+    };
+    auto scratch       = torch::zeros({64}, float_cuda);
+    auto reader_stream = cuda_graph::graphGetStreamFromPool(false);
+    cuda_graph::graphGetCurrentStream().synchronize();
+    // Construct the observer before tracking work or launching a worker. Its
+    // captures own all gates/readers; join on every exit, including exceptions.
+    struct JoinedThread {
+        std::thread thread;
+        ~JoinedThread() {
+            if (thread.joinable())
+                thread.join();
+        }
+    } observer{std::thread([gate, writer, stream, scratch, reader_stream] {
+        {
+            std::unique_lock<std::mutex> lock(gate->mutex);
+            if (!gate->cv.wait_for(lock, std::chrono::seconds(5), [&] { return gate->worker_entered; })) {
+                gate->timed_out = true;
+            } else {
+                EXPECT_TRUE(gate->fault_staged.load(std::memory_order_acquire));
+                EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+                EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 1);
+                EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+            }
+            gate->release_worker = true;
+            gate->cv.notify_all();
+            if (!gate->cv.wait_for(lock, std::chrono::seconds(5), [&] { return gate->reader_entered; })) {
+                gate->timed_out = true;
+            }
+        }
+        std::exception_ptr reader_error;
+        try {
+            cuda_graph::GraphStreamGuard guard(cuda_graph::toGraphStream(reader_stream));
+            scratch.fill_(19);
+            EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 1);
+            EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+            reader_stream.synchronize();
+            gate->reader_finished.store(true, std::memory_order_release);
+        } catch (...) {
+            reader_error = std::current_exception();
+        }
+        writer->finishExternalTask(reader_error);
+    })};
+    writer->trackExternalTask();
+    std::exception_ptr process_error;
+    try {
+        (void)executor.processWithKvLease({stream}, 0);
+    } catch (...) {
+        process_error = std::current_exception();
+    }
+    observer.thread.join();
+    ASSERT_TRUE(process_error);
+    try {
+        std::rethrow_exception(process_error);
+    } catch (const c10::Error& error) {
+        EXPECT_NE(std::string(error.what()).find("Scalar"), std::string::npos);
+    } catch (...) {
+        ADD_FAILURE() << "Expected the genuine two-element metrics .item() exception";
+    }
+    EXPECT_FALSE(gate->timed_out);
+    EXPECT_TRUE(gate->worker_entered);
+    EXPECT_TRUE(gate->reader_entered);
+    EXPECT_TRUE(gate->reader_finished.load(std::memory_order_acquire));
+    EXPECT_TRUE(torch::equal(scratch.cpu(), torch::full({64}, 19, torch::kFloat32)));
+    EXPECT_FALSE(executor.spec_bookkeeping_runner_.joinAndDrain());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(stream->async_bookkeeping_->kv_execution.users.load(), 0);
+    EXPECT_TRUE(stream->getNextSeqLenGpu().defined());
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), (std::vector<int>{2, 3, 1}));
+    EXPECT_TRUE(stream->hasOutput());
+    EXPECT_TRUE(stream->generate_status_->hasEvent(StreamEvents::GenerateDone) || stream->isFinished());
+    EXPECT_TRUE(executor.metrics_accept_len_sum_cpu_.defined());
+    EXPECT_EQ(executor.metrics_accept_len_sum_cpu_.numel(), 2);
+    stream->moveToNext();
+    stream->releaseResource();
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_GT(executor.cache_manager_->freeBlocksNum(), free_before);
 }
 
 }  // namespace rtp_llm

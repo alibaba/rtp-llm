@@ -122,6 +122,7 @@ protected:
                                              std::shared_ptr<torch::Event>       draft_tokens_ready_event);
     void         collectDecodeMetrics(const StreamGroups& stream_groups, MtpMetricsCollector& metrics_collector);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
+                                      MtpMetricsCollector&                         metrics_collector,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                       GptModelOutputs                              draft_prefill_model_output,

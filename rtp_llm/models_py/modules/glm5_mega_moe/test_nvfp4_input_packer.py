@@ -87,7 +87,7 @@ class NVFP4InputPackerTest(unittest.TestCase):
         hidden, topk = 6144, 4
         # Include the measured small vector decode tiles, partial tiles, and
         # the separate large Prefill path under changed-input Graph replay.
-        for tokens in (17, 25, 40, 80, 128, 4097):
+        for tokens in (17, 20, 25, 40, 60, 80, 100, 128, 4097):
             with self.subTest(tokens=tokens):
                 x = torch.zeros(tokens, hidden, dtype=torch.bfloat16, device="cuda")
                 x[1].fill_(-0.0)

@@ -1,4 +1,13 @@
 py_test(
+    name = "test_q8kv4_combine_mxfp8",
+    srcs = ["test_q8kv4_combine_mxfp8.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_minimax_decode_topk",
     srcs = ["test_minimax_decode_topk.py"],
     deps = [

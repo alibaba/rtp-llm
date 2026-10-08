@@ -1406,11 +1406,24 @@ def flash_prefill_topk_to_block_tables_fp4(
     )
 
     native_workspace = None
-    if isinstance(
-        host_metadata, PrefillScoreHostMetadata
-    ) and supported_native_index_workspace(
-        chunks, idx_k_fp4.shape[0], num_heads, total_q, max_chunk_q, max_pages
-    ):
+    native_arguments = (
+        chunks,
+        idx_k_fp4.shape[0],
+        num_heads,
+        total_q,
+        max_chunk_q,
+        max_pages,
+    )
+    compact = False
+    eligible = False
+    if isinstance(host_metadata, PrefillScoreHostMetadata):
+        eligible = supported_native_index_workspace(*native_arguments)
+        # Keep the cheaper all-pool path whenever it fits. Compact staging is
+        # an admission rescue, not a blanket replacement or a new user flag.
+        if not eligible:
+            compact = supported_native_index_workspace(*native_arguments, compact=True)
+            eligible = compact
+    if eligible:
         previous = index_score_plan.get("_native_q8_index_workspace")
         # Chunk identity includes the producer epoch, not merely its shape.
         if (
@@ -1418,6 +1431,7 @@ def flash_prefill_topk_to_block_tables_fp4(
             or previous.pages != idx_k_fp4.shape[0]
             or previous.device != idx_q.device
             or previous.heads != num_heads
+            or getattr(previous, "compact", False) != compact
             or len(previous.chunks) != len(chunks)
             or any(a is not b for a, b in zip(previous.chunks, chunks))
         ):
@@ -1426,7 +1440,7 @@ def flash_prefill_topk_to_block_tables_fp4(
             index_score_plan.pop("_native_q8_index_workspace", None)
             previous = None
             previous = NativeIndexWorkspace(
-                chunks, idx_k_fp4.shape[0], num_heads, idx_q.device
+                chunks, idx_k_fp4.shape[0], num_heads, idx_q.device, compact=compact
             )
             index_score_plan["_native_q8_index_workspace"] = previous
         native_workspace = previous

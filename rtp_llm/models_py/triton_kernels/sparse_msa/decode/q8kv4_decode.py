@@ -26,6 +26,7 @@ import torch
 
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import NVFP4CacheLayout
 from rtp_llm.models_py.triton_kernels.sparse_msa.decode.nvfp4_q8_attention import (
+    _q8kv4_sparse_decode_attention_mxfp8,
     q8kv4_sparse_decode_attention,
 )
 from rtp_llm.models_py.triton_kernels.sparse_msa.decode.nvfp4_q8_index_score import (
@@ -40,16 +41,26 @@ class Q8KV4DecodeResult:
     index_scores: torch.Tensor
 
 
+@dataclass(frozen=True)
+class Q8KV4Mxfp8DecodeResult:
+    output_fp8: torch.Tensor
+    output_scales_packed: torch.Tensor
+    topk_indices: torch.Tensor
+    index_scores: torch.Tensor
+
+
 @dataclass
 class _Q8KV4DecodeWorkspace:
     q8: torch.Tensor
     idx_q8: torch.Tensor
     scores: torch.Tensor
     topk_i32: torch.Tensor
-    output: torch.Tensor
+    output: torch.Tensor | None
     partial_output: torch.Tensor
     partial_lse: torch.Tensor
     partial_counts: torch.Tensor
+    output_fp8: torch.Tensor | None
+    output_scales_packed: torch.Tensor | None
 
     _CACHE: ClassVar[dict[tuple, "_Q8KV4DecodeWorkspace"]] = {}
 
@@ -61,6 +72,7 @@ class _Q8KV4DecodeWorkspace:
         max_blocks: int,
         topk: int,
         num_topk_chunks: int,
+        output_format: str = "bf16",
     ) -> "_Q8KV4DecodeWorkspace":
         batch, q_heads, dim = map(int, q.shape)
         idx_heads = int(idx_q.shape[1])
@@ -74,6 +86,8 @@ class _Q8KV4DecodeWorkspace:
             topk,
             num_topk_chunks,
         )
+        if output_format not in ("bf16", "mxfp8"):
+            raise ValueError("unknown Q8KV4 output format")
         workspace = cls._CACHE.get(key)
         if workspace is None:
             workspace = cls(
@@ -93,13 +107,9 @@ class _Q8KV4DecodeWorkspace:
                     dtype=torch.int32,
                     device=q.device,
                 ),
-                output=torch.empty(
-                    batch,
-                    q_heads,
-                    dim,
-                    dtype=torch.bfloat16,
-                    device=q.device,
-                ),
+                output=None,
+                output_fp8=None,
+                output_scales_packed=None,
                 partial_output=torch.empty(
                     batch,
                     idx_heads,
@@ -125,6 +135,24 @@ class _Q8KV4DecodeWorkspace:
                 ),
             )
             cls._CACHE[key] = workspace
+        # Geometry buffers are shared by both output formats. Never replace an
+        # allocated output: each captured format retains its own stable address.
+        if output_format == "bf16":
+            if workspace.output is None:
+                workspace.output = torch.empty(
+                    batch, q_heads, dim, dtype=torch.bfloat16, device=q.device
+                )
+        elif workspace.output_fp8 is None:
+            aligned_m = (batch + 3) // 4 * 4
+            output_fp8 = torch.empty(
+                batch, q_heads, dim, dtype=torch.float8_e4m3fn, device=q.device
+            )
+            output_scales = torch.empty(
+                (q_heads, aligned_m), dtype=torch.int32, device=q.device
+            ).t()[:batch]
+            # Publish together only after both allocations succeed.
+            workspace.output_fp8 = output_fp8
+            workspace.output_scales_packed = output_scales
         return workspace
 
 
@@ -182,6 +210,62 @@ def q8kv4_paged_sparse_decode(
     valid_token_mask: torch.Tensor | None = None,
     max_seq_len: int | None = None,
 ) -> Q8KV4DecodeResult:
+    """Run native Q8KV4; BF16 activation output remains the default API."""
+    return _q8kv4_paged_sparse_decode(
+        q,
+        idx_q,
+        layout,
+        block_table,
+        seq_lens,
+        indexer_dim=indexer_dim,
+        block_size=block_size,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        score_type=score_type,
+        sm_scale=sm_scale,
+        idx_sm_scale=idx_sm_scale,
+        mma_scale_layout=mma_scale_layout,
+        query_width=query_width,
+        query_cu_seqlens=query_cu_seqlens,
+        max_query_width=max_query_width,
+        fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+        valid_token_mask=valid_token_mask,
+        max_seq_len=max_seq_len,
+    )
+
+
+@torch.no_grad()
+def _q8kv4_paged_sparse_decode_mxfp8(*args, **kwargs) -> Q8KV4Mxfp8DecodeResult:
+    """Internal producer for the exact MXFP8 O-proj consumer; no public flag."""
+    return _q8kv4_paged_sparse_decode(*args, **kwargs, _output_format="mxfp8")
+
+
+@torch.no_grad()
+def _q8kv4_paged_sparse_decode(
+    q: torch.Tensor,
+    idx_q: torch.Tensor,
+    layout: NVFP4CacheLayout,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    indexer_dim: int,
+    block_size: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    score_type: str,
+    sm_scale: float | None = None,
+    idx_sm_scale: float | None = None,
+    mma_scale_layout: bool = False,
+    query_width: int = 1,
+    query_cu_seqlens: torch.Tensor | None = None,
+    max_query_width: int = 1,
+    fuse_bf16_query_rounding: bool = False,
+    valid_token_mask: torch.Tensor | None = None,
+    max_seq_len: int | None = None,
+    _output_format: str = "bf16",
+) -> Q8KV4DecodeResult | Q8KV4Mxfp8DecodeResult:
     """Run RTP Q8KV4 decode or grouped target verification.
 
     M3.1 has one local index-Q head per local KV head.  Other index-head
@@ -228,8 +312,19 @@ def q8kv4_paged_sparse_decode(
         min(topk, 1024 // max(1, int(q.shape[0]) * layout.num_heads)),
     )
     num_topk_chunks = 1 << (target_chunks.bit_length() - 1)
+    if _output_format == "mxfp8" and (
+        not q.is_cuda
+        or torch.cuda.get_device_capability(q.device) != (10, 3)
+        or not 0 < q.shape[0] <= 100
+        or tuple(q.shape[1:]) != (64, 128)
+        or layout.num_heads != 4
+        or topk != 16
+    ):
+        raise ValueError(
+            "MXFP8 output requires tested SM103 Hq64/Hkv4/D128/TopK16 M1..100"
+        )
     workspace = _Q8KV4DecodeWorkspace.acquire(
-        q, idx_q, max_blocks, topk, num_topk_chunks
+        q, idx_q, max_blocks, topk, num_topk_chunks, _output_format
     )
     if fuse_bf16_query_rounding:
         from .nvfp4_q8_query_cast import fused_query_cast
@@ -282,7 +377,14 @@ def q8kv4_paged_sparse_decode(
         int(topk),
     )
     topk_indices = workspace.topk_i32
-    output = q8kv4_sparse_decode_attention(
+    attention_fn = q8kv4_sparse_decode_attention
+    attention_out = workspace.output
+    output_options = {}
+    if _output_format == "mxfp8":
+        attention_fn = _q8kv4_sparse_decode_attention_mxfp8
+        attention_out = workspace.output_fp8
+        output_options["output_scales"] = workspace.output_scales_packed
+    output = attention_fn(
         q8,
         logical.main_k_fp4,
         logical.main_v_fp4,
@@ -292,13 +394,21 @@ def q8kv4_paged_sparse_decode(
         topk_indices,
         seq_lens,
         sm_scale=layout.head_dim**-0.5 if sm_scale is None else sm_scale,
-        out=workspace.output,
+        out=attention_out,
         partial_out=workspace.partial_output,
         partial_lse=workspace.partial_lse,
         counts=workspace.partial_counts,
         mma_scale_layout=mma_scale_layout,
         valid_token_mask=valid_token_mask,
+        **output_options,
     )
+    if _output_format == "mxfp8":
+        return Q8KV4Mxfp8DecodeResult(
+            output_fp8=output,
+            output_scales_packed=workspace.output_scales_packed,
+            topk_indices=topk_indices,
+            index_scores=index_scores,
+        )
     return Q8KV4DecodeResult(
         output=output,
         topk_indices=topk_indices,

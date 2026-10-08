@@ -520,6 +520,88 @@ TEST(DSparkSamplerTest, SkippedProbabilityDrawReservationMatchesRealCalls) {
     EXPECT_TRUE(torch::equal(expected, rng.state()));
 }
 
+TEST(SpeculativeSamplerTest, ForceAcceptFlagsPreserveRejectionFailureAndRng) {
+    if (!torch::cuda::is_available()) {
+        GTEST_SKIP() << "CUDA is required";
+    }
+    CudaGeneratorStateGuard rng;
+    constexpr int64_t       batch = 3, steps = 2, vocab = 8;
+    const auto              cpu_i32 = torch::TensorOptions().dtype(torch::kInt32);
+    const auto              cpu_f32 = torch::TensorOptions().dtype(torch::kFloat32);
+    for (const auto mode : {DraftProposalMode::LEGACY, DraftProposalMode::SAMPLED}) {
+        for (const bool do_sample : {false, true}) {
+            for (const bool fail_request : {false, true}) {
+                if (fail_request && mode != DraftProposalMode::SAMPLED) {
+                    continue;  // Legacy rejection does not expose the sampled-draft failure guard.
+                }
+                const auto    initial_rng = rng.state();
+                torch::Tensor expected_rng;
+                for (const int force_mode : {0, 1, 2}) {
+                    SCOPED_TRACE(::testing::Message() << "mode=" << static_cast<int>(mode) << "sample=" << do_sample
+                                                      << "failure=" << fail_request << "force=" << force_mode);
+                    rng.restore(initial_rng);
+                    ModelConfig model;
+                    model.max_seq_len = 32;
+                    model.vocab_size  = vocab;
+                    RuntimeConfig                runtime;
+                    ResourceContext              resources;
+                    std::list<GenerateStreamPtr> streams;
+                    for (int64_t b = 0; b < batch; ++b) {
+                        auto request                              = std::make_shared<GenerateInput>();
+                        request->input_ids                        = torch::tensor({0}, cpu_i32);
+                        request->generate_config                  = std::make_shared<GenerateConfig>();
+                        request->generate_config->top_k           = do_sample ? 0 : 1;
+                        request->generate_config->force_sp_accept = force_mode == 1 || (force_mode == 2 && b != 2);
+                        streams.push_back(
+                            std::make_shared<NormalGenerateStream>(request, model, runtime, resources, nullptr));
+                    }
+                    SamplerOutput draft, target;
+                    draft.token_ids  = torch::ones({batch, steps}, cpu_i32).cuda();
+                    auto draft_probs = torch::zeros({batch, steps, vocab}, cpu_f32);
+                    draft_probs.select(2, 1).fill_(1.f);
+                    draft.all_probs = draft_probs.cuda();
+                    auto target_ids = torch::full({batch, steps + 1}, 2, cpu_i32);
+                    target_ids.select(1, steps).fill_(3);
+                    target.token_ids  = target_ids.reshape({batch * (steps + 1), 1}).cuda();
+                    auto target_probs = torch::zeros({batch, steps + 1, vocab}, cpu_f32);
+                    target_probs.select(2, 2).fill_(1.f);
+                    target_probs.select(1, steps).zero_();
+                    target_probs.select(1, steps).select(1, 3).fill_(1.f);
+                    target.all_probs    = target_probs.cuda();
+                    auto target_success = torch::ones({batch, steps + 1}, torch::kBool);
+                    if (fail_request) {
+                        target_success.select(0, 1).fill_(false);
+                    }
+                    target.success = target_success.reshape({-1}).cuda();
+                    SpeculativeSampler verifier(torch::Tensor(), steps, mode);
+                    auto               result = verifier.forward(streams, draft, target);
+                    result.transfer_done_event->synchronize();
+                    for (int64_t b = 0; b < batch; ++b) {
+                        const bool failed = fail_request && b == 1;
+                        const bool forced = force_mode == 1 || (force_mode == 2 && b != 2);
+                        EXPECT_EQ(result.accept_len_cpu.data_ptr<int32_t>()[b], !failed && forced ? steps + 1 : 1);
+                        const auto tokens = result.accept_tokens_cpu.select(0, b);
+                        if (failed) {
+                            ASSERT_TRUE(result.success_cpu.defined());
+                            EXPECT_FALSE(result.success_cpu.data_ptr<bool>()[b]);
+                            EXPECT_TRUE(tokens.eq(0).all().item<bool>());
+                        } else if (forced) {
+                            EXPECT_TRUE(torch::equal(tokens, torch::tensor({1, 1, 3}, cpu_i32)));
+                        } else {
+                            EXPECT_EQ(tokens.data_ptr<int32_t>()[0], 2);
+                        }
+                    }
+                    if (force_mode == 0) {
+                        expected_rng = rng.state();
+                    } else {
+                        EXPECT_TRUE(torch::equal(rng.state(), expected_rng));
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(DSparkSamplerTest, CompactTargetSlotsMatchFullHistoryThroughSamplerAndRejection) {
     if (!torch::cuda::is_available()) {
         GTEST_SKIP() << "CUDA is required";

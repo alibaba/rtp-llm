@@ -1957,11 +1957,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draft_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    if (metrics_reporter_) {
-        collectDecodeMetrics(stream_groups, metrics_collector);
-    }
-
     return dispatchDecodeOutput(stream_groups,
+                                metrics_collector,
                                 streams,
                                 speculative_sampler_output,
                                 std::move(draft_prefill_model_output),
@@ -2382,32 +2379,62 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups& stream_groups, MtpMet
 }
 
 absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&                          stream_groups,
+                                               MtpMetricsCollector&                         metrics_collector,
                                                const std::list<GenerateStreamPtr>&          streams,
                                                const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                                GptModelOutputs                              draft_prefill_model_output,
                                                SamplerOutput                 draft_prefill_sampler_output,
                                                std::shared_ptr<torch::Event> rejection_event,
                                                std::shared_ptr<torch::Event> draft_event) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
-    absl::Status result;
-    if (useStreamAsync()) {
-        // Hand off to a worker that waits on main-stream rejection/draft events
-        // via cudaStreamWaitEvent; the main thread returns immediately.
-        result = dispatchDecodeAsync(stream_groups,
-                                     speculative_sampler_output,
-                                     {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)},
-                                     std::move(rejection_event),
-                                     std::move(draft_event));
-    } else {
-        MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
-                                          std::move(draft_prefill_sampler_output)};
-        result =
-            batch_stream_processor_->dispatchDecode(stream_groups, speculative_sampler_output, draft_prefill_output);
-        if (result.ok()) {
-            publishSyncMtpDeviceState(stream_groups, speculative_sampler_output, draft_prefill_output);
+    auto dispatch_output = [&] {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
+        absl::Status result;
+        if (useStreamAsync()) {
+            // Hand off to a worker that waits on main-stream rejection/draft events
+            // via cudaStreamWaitEvent; the main thread returns immediately.
+            result =
+                dispatchDecodeAsync(stream_groups,
+                                    speculative_sampler_output,
+                                    {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)},
+                                    std::move(rejection_event),
+                                    std::move(draft_event));
+        } else {
+            MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
+                                              std::move(draft_prefill_sampler_output)};
+            result = batch_stream_processor_->dispatchDecode(
+                stream_groups, speculative_sampler_output, draft_prefill_output);
+            if (result.ok()) {
+                publishSyncMtpDeviceState(stream_groups, speculative_sampler_output, draft_prefill_output);
+            }
         }
+        return result;
+    };
+
+    if (is_dspark_ && useStreamAsync() && metrics_reporter_) {
+        absl::Status status;
+        try {
+            status = dispatch_output();
+        } catch (...) {
+            const auto original = std::current_exception();
+            try {
+                collectDecodeMetrics(stream_groups, metrics_collector);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("[DSpark] metrics cleanup after dispatch failure: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("[DSpark] metrics cleanup after dispatch failure: unknown exception");
+            }
+            std::rethrow_exception(original);
+        }
+        // Consume exactly once even for non-OK status; keep metrics failures
+        // outside the dispatch catch so accepted-worker cleanup is not retried.
+        collectDecodeMetrics(stream_groups, metrics_collector);
+        return status;
     }
-    return result;
+
+    if (metrics_reporter_) {
+        collectDecodeMetrics(stream_groups, metrics_collector);
+    }
+    return dispatch_output();
 }
 
 void MtpExecutor::releaseAllModelBuffers() {

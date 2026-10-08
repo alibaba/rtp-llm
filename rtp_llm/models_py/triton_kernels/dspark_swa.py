@@ -255,9 +255,25 @@ def _paged_swa(
     )
 
 
-def _swa_launch_config(batch, width, hq, hk, page, window_left, causal, sm_major):
+def _swa_launch_config(
+    batch, width, hq, hk, page, window_left, causal, sm_major, sm_minor=None
+):
     rows = width * hq // hk
     tile_rows = min(32, max(16, triton.next_power_of_2(rows)))
+    # Small-batch SM10 proposal: split query rows to fill more CTAs without
+    # changing the history tile or online-softmax reduction order. Non-causal
+    # proposal was independently measured on SM103; keep other devices default.
+    if (
+        1 <= batch <= 5
+        and width == 7
+        and hq == 64
+        and hk == 4
+        and page == 128
+        and window_left == 4095
+        and (causal or sm_minor == 3)
+        and sm_major == 10
+    ):
+        return 16, 64, 4
     # Measured SM10 B16 proposal shape: reuse each history tile for more query
     # rows. Other shapes retain the lower shared-memory launch configuration.
     if (
@@ -360,7 +376,7 @@ def paged_gqa_swa(
         page,
         window_left,
         causal,
-        torch.cuda.get_device_capability(q.device)[0],
+        *torch.cuda.get_device_capability(q.device),
     )
     _paged_swa[(b, hk, triton.cdiv(rows, tile_rows))](
         q,

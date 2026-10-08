@@ -391,7 +391,7 @@ def _q8kv4_combine(
 
 
 @torch.no_grad()
-def q8kv4_sparse_decode_attention(
+def _q8kv4_partial_decode(
     q: torch.Tensor,
     packed_k: torch.Tensor,
     packed_v: torch.Tensor,
@@ -402,13 +402,12 @@ def q8kv4_sparse_decode_attention(
     seq_lens: torch.Tensor,
     *,
     sm_scale: float,
-    out: torch.Tensor,
     partial_out: torch.Tensor,
     partial_lse: torch.Tensor,
     counts: torch.Tensor,
     mma_scale_layout: bool = False,
     valid_token_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> None:
     """Run the fixed M3.1 64Q/4KV/D128/TopK16 decode contract."""
     batch = q.shape[0]
     if valid_token_mask is not None and (
@@ -433,8 +432,6 @@ def q8kv4_sparse_decode_attention(
         raise ValueError("partial LSE has incompatible Q8KV4 shape")
     if tuple(counts.shape) != (batch, 4) or counts.dtype != torch.int32:
         raise ValueError("counts must be int32 [batch,4]")
-    if tuple(out.shape) != (batch, 64, 128) or out.dtype != torch.bfloat16:
-        raise ValueError("output must be BF16 [batch,64,128]")
     for packed in (packed_k, packed_v):
         if packed.data_ptr() % 4 or packed.stride(0) % 4:
             raise ValueError("packed main page base/stride must be 4-byte aligned")
@@ -477,6 +474,47 @@ def q8kv4_sparse_decode_attention(
         MMA_SCALE_LAYOUT=bool(mma_scale_layout),
         num_warps=4,
     )
+
+
+@torch.no_grad()
+def q8kv4_sparse_decode_attention(
+    q: torch.Tensor,
+    packed_k: torch.Tensor,
+    packed_v: torch.Tensor,
+    scale_k: torch.Tensor,
+    scale_v: torch.Tensor,
+    block_table: torch.Tensor,
+    topk_idx: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    sm_scale: float,
+    out: torch.Tensor,
+    partial_out: torch.Tensor,
+    partial_lse: torch.Tensor,
+    counts: torch.Tensor,
+    mma_scale_layout: bool = False,
+    valid_token_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run the fixed M3.1 64Q/4KV/D128/TopK16 decode contract."""
+    batch = q.shape[0]
+    if tuple(out.shape) != (batch, 64, 128) or out.dtype != torch.bfloat16:
+        raise ValueError("output must be BF16 [batch,64,128]")
+    _q8kv4_partial_decode(
+        q,
+        packed_k,
+        packed_v,
+        scale_k,
+        scale_v,
+        block_table,
+        topk_idx,
+        seq_lens,
+        sm_scale=sm_scale,
+        partial_out=partial_out,
+        partial_lse=partial_lse,
+        counts=counts,
+        mma_scale_layout=mma_scale_layout,
+        valid_token_mask=valid_token_mask,
+    )
     _q8kv4_combine[(batch, 4)](
         partial_out,
         partial_lse,
@@ -484,6 +522,88 @@ def q8kv4_sparse_decode_attention(
         out,
         out.stride(0),
         out.stride(1),
+        LOG2E=LOG2E_F32,
+        valid_token_mask=valid_token_mask,
+        HAS_VALID_TOKEN_MASK=valid_token_mask is not None,
+        valid_token_mask_stride=(
+            valid_token_mask.stride(0) if valid_token_mask is not None else 1
+        ),
+        num_warps=4,
+    )
+    return out
+
+
+@torch.no_grad()
+def _q8kv4_sparse_decode_attention_mxfp8(
+    q,
+    packed_k,
+    packed_v,
+    scale_k,
+    scale_v,
+    block_table,
+    topk_idx,
+    seq_lens,
+    *,
+    sm_scale,
+    out,
+    output_scales,
+    partial_out,
+    partial_lse,
+    counts,
+    mma_scale_layout=False,
+    valid_token_mask=None,
+):
+    batch = q.shape[0]
+    aligned_m = (batch + 3) // 4 * 4
+    if (
+        not q.is_cuda
+        or torch.cuda.get_device_capability(q.device) != (10, 3)
+        or not 0 < batch <= 100
+    ):
+        raise ValueError("MXFP8 combine requires tested SM103 and 1..100 query rows")
+    if (
+        out.dtype != torch.float8_e4m3fn
+        or tuple(out.shape) != (batch, 64, 128)
+        or not out.is_contiguous()
+        or out.device != q.device
+    ):
+        raise ValueError("MXFP8 output must be contiguous device-local E4M3 [M,64,128]")
+    if (
+        output_scales.dtype != torch.int32
+        or tuple(output_scales.shape) != (batch, 64)
+        or output_scales.stride() != (1, aligned_m)
+        or output_scales.device != q.device
+    ):
+        raise ValueError(
+            "MXFP8 scales must be device-local int32 [M,64] TMA strides (1,aligned_M)"
+        )
+    _q8kv4_partial_decode(
+        q,
+        packed_k,
+        packed_v,
+        scale_k,
+        scale_v,
+        block_table,
+        topk_idx,
+        seq_lens,
+        sm_scale=sm_scale,
+        partial_out=partial_out,
+        partial_lse=partial_lse,
+        counts=counts,
+        mma_scale_layout=mma_scale_layout,
+        valid_token_mask=valid_token_mask,
+    )
+    from .nvfp4_q8_combine_mxfp8 import _combine_mxfp8
+
+    # Kernel writes encoded FP8 bytes: use the same-storage uint8 pointer ABI,
+    # never a numeric FP8 cast or a second quantization of encoded byte values.
+    _combine_mxfp8[(batch, 4)](
+        partial_out,
+        partial_lse,
+        counts,
+        out.view(torch.uint8),
+        output_scales,
+        aligned_m,
         LOG2E=LOG2E_F32,
         valid_token_mask=valid_token_mask,
         HAS_VALID_TOKEN_MASK=valid_token_mask is not None,

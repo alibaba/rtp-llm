@@ -12,6 +12,76 @@ from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class NativeIndexRuntimeShapeTest(unittest.TestCase):
+    def test_compact_map_rebuild_and_graph_replay(self):
+        device = torch.device("cuda:0")
+        pages, entries = 31, 263
+        packed = torch.randint(0, 256, (pages, 8448), device=device, dtype=torch.uint8)
+        scales = torch.full((pages, 1280), 56, device=device, dtype=torch.uint8)
+        table = torch.arange(entries, device=device, dtype=torch.int32) % pages
+        table[0], table[-1] = -1, pages
+        mapping = torch.empty(pages + 1, device=device, dtype=torch.int32)
+        page_list = torch.empty(pages, device=device, dtype=torch.int32)
+        count = torch.empty(1, device=device, dtype=torch.int32)
+        safe = torch.empty_like(table)
+        compact = torch.zeros(
+            (pages + 1, 128, 128), device=device, dtype=torch.uint8
+        ).view(torch.float8_e4m3fn)
+        full = torch.empty_like(compact)
+
+        def run():
+            mapping.fill_(-1)
+            count.zero_()
+            grid = (triton.cdiv(entries, 256),)
+            op._claim_index_pages[grid](
+                table, mapping, page_list, count, entries, pages, 256
+            )
+            op._stage_compact_index_pages[(pages,)](
+                packed,
+                scales,
+                compact,
+                page_list,
+                count,
+                8448,
+                1280,
+                pages,
+                num_warps=4,
+            )
+            op._remap_index_pages[grid](
+                table, mapping, safe, entries, pages, pages, 256
+            )
+
+        def check():
+            op._stage_index_pages[(pages,)](
+                packed, scales, full, pages, 8448, 1280, num_warps=4
+            )
+            full[pages].zero_()
+            expected = torch.where((table >= 0) & (table < pages), table, pages)
+            self.assertTrue(
+                torch.equal(
+                    compact[safe.long()].view(torch.uint8),
+                    full[expected.long()].view(torch.uint8),
+                )
+            )
+            self.assertEqual(
+                count.item(), table[(table >= 0) & (table < pages)].unique().numel()
+            )
+
+        run()
+        check()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for mode in ("changed", "invalid", "one_page"):
+            if mode == "changed":
+                table.copy_((table * 13 + 7) % pages)
+                packed.bitwise_xor_(255)
+            elif mode == "invalid":
+                table.fill_(-1)
+            else:
+                table.fill_(0)
+            graph.replay()
+            check()
+
     def test_shape_changes_preserve_packed_reader_and_score_layout(self):
         device = torch.device("cuda:0")
         torch.manual_seed(20261007)

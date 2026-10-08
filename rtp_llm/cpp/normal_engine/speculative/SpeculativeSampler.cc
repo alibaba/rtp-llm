@@ -279,19 +279,19 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // forceSpAccept: override rejection sampling results for streams that requested
     // forced acceptance — accept all draft tokens plus the target bonus token.
     {
-        bool has_force = false;
-        auto force_mask =
-            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        int idx = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
-                force_mask[idx] = true;
-                has_force       = true;
-            }
-            idx++;
-        }
+        const bool has_force =
+            std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->forceSpAccept(); });
         if (has_force) {
             RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
+            auto force_mask =
+                torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
+            int idx = 0;
+            for (const auto& stream : streams) {
+                if (stream->forceSpAccept()) {
+                    force_mask[idx] = true;
+                }
+                idx++;
+            }
             // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
             // Extract the bonus token at position propose_step for each batch item.
             int64_t token_stride = target_token_ids_d_t.size(1);

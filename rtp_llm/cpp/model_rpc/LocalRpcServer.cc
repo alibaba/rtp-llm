@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
+#include "rtp_llm/models_py/bindings/core/RuntimeDevice.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -151,6 +153,14 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
+#if USING_CUDA || USING_ROCM
+    // Keep the RPC thread bound through GenerateContext/GenerateStream destruction:
+    // releasing their completion event on an unbound thread can create a device0
+    // primary context while restoring the thread's previous CUDA device.
+    if (!pinThreadToDeviceOnce(static_cast<int>(getDeviceId()))) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to bind RPC thread to runtime device");
+    }
+#endif
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
