@@ -605,6 +605,37 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 layer._source_pool("csa_state")
 
     @torch.no_grad()
+    def test_native_fp32_state_matches_opaque_bytes(self):
+        layer = make_layer(2, 2)
+        byte_cache = NativeTaggedCache([layer])
+        native_cache = NativeTaggedCache([layer])
+        state = native_cache.groups[0, "csa_state"].kv_cache_base
+        native_cache.groups[0, "csa_state"].kv_cache_base = state.view(torch.float32)
+        x = torch.randn(3, 512, device="cuda", dtype=torch.bfloat16)
+        outputs = []
+        for cache in (byte_cache, native_cache):
+            positions, tables, _ = prepare(layer, x, cache, [3])
+            outputs.append(layer(x, positions, cache, tables).clone())
+        torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+        for key, group in byte_cache.groups.items():
+            torch.testing.assert_close(
+                group.kv_cache_base,
+                native_cache.groups[key].kv_cache_base.view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+        with bind_attn_cache(layer, native_cache, {}):
+            pool = layer._source_pool("csa_state")
+            self.assertEqual(pool.dtype, torch.float32)
+            self.assertEqual(pool.data_ptr(), state.data_ptr())
+            self.assertIs(pool, layer._source_pool("csa_state"))
+            native_cache.groups[0, "csa_state"].kv_cache_base = state.view(
+                torch.float16
+            )
+            with self.assertRaisesRegex(ValueError, "checkpoint geometry"):
+                layer._source_pool("csa_state")
+
+    @torch.no_grad()
     def test_preflight_rejects_unqualified_work_before_writes(self):
         layer = make_layer(2, 2)
         cache = NativeTaggedCache([layer])

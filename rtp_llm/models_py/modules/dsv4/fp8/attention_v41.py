@@ -1073,17 +1073,22 @@ class AttentionV41FP8(AttentionFP8):
         if base is None or base.numel() == 0:
             raise ValueError("V4.1 bound cache must have allocated pages")
         page = self._cache_layouts[region]
+        dtype, width = self._pool_spec[region]
+        # Native state pools retain their FP32 allocation dtype. The byte
+        # fixture and PD payloads expose the same storage as uint8.
+        item_bytes = base.element_size()
         if (
-            base.dtype != torch.uint8
+            base.dtype not in (torch.uint8, dtype)
             or base.ndim != 2
-            or base.shape[1] != page.stride_bytes
+            or base.shape[1] * item_bytes != page.stride_bytes
             or base.stride(1) != 1
-            or base.stride(0) < page.stride_bytes
+            or base.stride(0) * item_bytes < page.stride_bytes
         ):
             raise ValueError(
-                "V4.1 cache page layout does not match checkpoint geometry"
+                "V4.1 cache page layout does not match checkpoint geometry: "
+                f"{region} {base.dtype} {tuple(base.shape)} stride={base.stride()}, "
+                f"expected {page.stride_bytes} bytes per page"
             )
-        dtype, width = self._pool_spec[region]
         views = self._shared_attention.setdefault("source_pool_views", {})
         key = (layer.layer_id, region, dtype, width)
         layout = (base.shape, base.stride(), base.data_ptr(), base.dtype, base.device)
