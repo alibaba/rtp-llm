@@ -17,7 +17,6 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
-    model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
     model_input_gatherer_config_.block_stride_bytes         = cache_config.kv_block_stride_bytes;
     model_input_gatherer_config_.scale_stride_bytes         = cache_config.kv_scale_stride_bytes;
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;

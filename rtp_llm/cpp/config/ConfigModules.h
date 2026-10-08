@@ -512,34 +512,16 @@ struct RuntimeConfig {
 };
 
 struct PDSepConfig {
-    RoleType role_type                       = RoleType::PDFUSION;
-    bool     cache_store_rdma_mode           = true;
-    int64_t  cache_store_listen_port         = 0;
-    int64_t  cache_store_connect_port        = 0;
-    int64_t  cache_store_rdma_listen_port    = 0;
-    int64_t  cache_store_rdma_connect_port   = 0;
-    int64_t  remote_rpc_server_port          = 0;
-    int64_t  prefill_retry_times             = 0;
-    int64_t  prefill_retry_timeout_ms        = 20;
-    int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
-    int64_t  decode_retry_times              = 100;
-    int64_t  decode_retry_timeout_ms         = 100;
-    int64_t  decode_retry_interval_ms        = 1;
-    int64_t  decode_polling_kv_cache_step_ms = 30;
-    int64_t  decode_polling_call_prefill_ms  = 30;
-    int64_t  rdma_connect_retry_times        = 0;
-    int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
-    int64_t  worker_port_offset              = 0;
-    bool     decode_entrance                 = false;
-    // ========== Prefill Thread Pool Configuration ==========
-    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
-    int64_t prefill_prepare_resource_pool_size = 0;
-    // Max wait time in stopStream() for Engine Loop to call finish_internal().
-    // When GenerateDone is set and stream has no error, stopStream() waits up to
-    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
-    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
-
+    RoleType    role_type                     = RoleType::PDFUSION;
+    bool        cache_store_rdma_mode         = true;
+    int64_t     cache_store_listen_port       = 0;
+    int64_t     cache_store_connect_port      = 0;
+    int64_t     cache_store_rdma_listen_port  = 0;
+    int64_t     cache_store_rdma_connect_port = 0;
+    int64_t     remote_rpc_server_port        = 0;
+    int64_t     load_cache_timeout_ms         = 5000;
+    int64_t     max_rpc_timeout_ms            = 2 * 3600 * 1000;  // 2h default
+    int64_t     worker_port_offset            = 0;
     std::string to_string() const;
 };
 

@@ -21,7 +21,6 @@ from smoke.gpu_diagnostics import (
 from smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
-    PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
 from smoke.task_info import TaskInfo
@@ -37,10 +36,7 @@ def get_runner_type(
         return CaseRunner
     else:
         if "prefill" in env_args:
-            if "DECODE_ENTRANCE=1" in env_args["prefill"]:
-                return DpSeperationCaseRunner
-            else:
-                return PdSeperationCaseRunner
+            return DpSeperationCaseRunner
         elif "frontend" in env_args:
             return FrontAppSeperationCaseRunner
         elif "vit" in env_args:

@@ -485,7 +485,7 @@ TEST_F(GenerateStreamTest, outputQueueCapacityReportsFullWithoutDeadlock) {
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
 }
 
-TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
+TEST_F(GenerateStreamTest, consumerWaitWakesOnPrefillHandoffReady) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
 
@@ -496,7 +496,7 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
         return stream->nextOutput();
     });
     consumer_ready.get();
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     waitForConsumer(consumer, stream);
     auto result = consumer.get();
@@ -526,7 +526,7 @@ TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion)
                     true,
                     false});
 
-    ASSERT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     auto output_result = stream->nextOutput();
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
@@ -627,7 +627,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideRemoteHandoff) {
     stream->generateConfig()->timeout_ms = 10;
     stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 20 * 1000);
 
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_TRUE(stream->statusInfo().ok());

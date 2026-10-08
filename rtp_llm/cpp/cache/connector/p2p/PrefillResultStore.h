@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -25,6 +26,8 @@ public:
         int32_t                              remote_reuse_len = 0;
         int32_t                              memory_reuse_len = 0;
         int32_t                              disk_reuse_len   = 0;
+        bool                                 prefill_use_independent_block_pools  = false;
+        uint32_t                             generation_prefill_cuda_graph_status = 0;
         std::vector<int>                     propose_tokens;
         torch::Tensor                        propose_probs;
         torch::Tensor                        propose_hidden;

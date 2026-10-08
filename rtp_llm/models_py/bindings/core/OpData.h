@@ -79,7 +79,6 @@ struct GptModelInputs {
     size_t seq_size_per_block        = 0;
     size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
     bool   pd_separation             = false;
-    bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;

@@ -19,7 +19,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorCodePB,
     ErrorDetailsPB,
-    FetchRequestPB,
     GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -57,13 +56,17 @@ JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 
 def _selected_pd_separation(
-    selected_role: Optional[RoleType], generate_config: GenerateConfig
+    selected_role: Optional[RoleType],
+    generate_config: GenerateConfig,
+    enqueued_by_master: bool,
 ) -> Optional[bool]:
     if selected_role == RoleType.PDFUSION:
         return False
-    if selected_role != RoleType.PREFILL:
+    if selected_role not in (RoleType.PREFILL, RoleType.DECODE):
         return None
-    # Keep this aligned with PrefillRpcServer::GenerateStreamCall. These are
+    if selected_role == RoleType.DECODE and enqueued_by_master:
+        return True
+    # Match the request-level PD decision at the selected backend. These are
     # the request fields actually sent to the selected Prefill endpoint, so
     # the result describes its real PD-vs-local branch rather than process role.
     return (
@@ -413,11 +416,6 @@ def _split_host_port(address: str) -> tuple[str, int]:
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
-
-
-def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
-    finished = outputs_pb.flatten_output.finished
-    return bool(finished) and all(finished)
 
 
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
@@ -915,7 +913,7 @@ class ModelRpcClient(object):
         addresses: list[str],
         client_config,
         max_rpc_timeout_ms: int = 0,
-        decode_entrance: bool = False,
+        role_type: RoleType = RoleType.PDFUSION,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -924,11 +922,11 @@ class ModelRpcClient(object):
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
-            decode_entrance: Whether this is a decode entrance
+            role_type: Local backend role for addresses without an explicit route.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
-        self._decode_entrance = decode_entrance
+        self._role_type = role_type
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -942,40 +940,36 @@ class ModelRpcClient(object):
 
     async def close(self) -> None:
         await self._channel_pool.close()
+
     def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
         for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ) and role_addr.ip != "":
+            if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
                 return _format_host_port(role_addr.ip, role_addr.grpc_port)
         return None
 
     def _build_response_role_addrs(
         self, input_py: GenerateInput, target_address: str
     ) -> list[RoleAddr] | None:
-        response_role_addrs = (
-            [
-                role_addr
-                for role_addr in input_py.generate_config.role_addrs
-                if role_addr.role == RoleType.DECODE
-            ]
-            if self._decode_entrance
-            else None
-        )
-        if self._decode_entrance and not response_role_addrs:
-            target_ip, target_port = _split_host_port(target_address)
-            response_role_addrs = list(response_role_addrs or [])
-            response_role_addrs.append(
-                RoleAddr(
-                    role=RoleType.DECODE,
-                    ip=target_ip,
-                    http_port=target_port - 1,
-                    grpc_port=target_port,
-                )
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
+                if role_addr.role == RoleType.PDFUSION:
+                    return None
+                return [
+                    addr
+                    for addr in input_py.generate_config.role_addrs
+                    if addr.role == RoleType.DECODE
+                ]
+        if self._role_type not in (RoleType.PREFILL, RoleType.DECODE):
+            return None
+        target_ip, target_port = _split_host_port(target_address)
+        return [
+            RoleAddr(
+                role=RoleType.DECODE,
+                ip=target_ip,
+                http_port=target_port - 1,
+                grpc_port=target_port,
             )
-        return response_role_addrs
+        ]
 
     def _select_address_and_response_role_addrs(
         self, input_py: GenerateInput
@@ -1091,37 +1085,17 @@ class ModelRpcClient(object):
         rpc_status = None
         stream_state = StreamState()
         include_all_sequences = not input_py.generate_config.has_num_beams()
-        use_fetch_response = bool(
-            getattr(input_py, "enqueued_by_master", False)
-            and not self._decode_entrance
+        selected_role = (
+            self._role_type
+            if self._role_type in (RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE)
+            else None
         )
-        selected_role = None
-
-        if use_fetch_response:
-            address_list = [
-                _format_host_port(role_addr.ip, role_addr.grpc_port)
-                for role_addr in input_py.generate_config.role_addrs
-                if role_addr.role == RoleType.PREFILL and role_addr.ip
-            ]
-            if address_list:
-                # FetchResponse targets the Prefill endpoint the master enqueued
-                # on, so the PD attribute follows the same Prefill semantics as
-                # the streaming channel below.
-                selected_role = RoleType.PREFILL
-        else:
-            address_list = self._addresses
-            for role_addr in input_py.generate_config.role_addrs:
-                if (
-                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                    or role_addr.role == RoleType.PDFUSION
-                    or (
-                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
-                    )
-                ):
-                    if role_addr.ip != "":
-                        address_list = [_format_host_port(role_addr.ip, role_addr.grpc_port)]
-                        selected_role = role_addr.role
-                        break
+        address_list = self._addresses
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
+                address_list = [_format_host_port(role_addr.ip, role_addr.grpc_port)]
+                selected_role = role_addr.role
+                break
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
@@ -1134,24 +1108,23 @@ class ModelRpcClient(object):
         )
         response_role_addrs = self._build_response_role_addrs(input_py, target_address)
         stream_done = False
-        terminal_seen = False
         client_settlement_task = None
         client_settlement_abandoned = None
         rpc_deadline = None
 
         trace_state = CURRENT_TRACE_STATE.get()
-        pd_separation = _selected_pd_separation(selected_role, input_py.generate_config)
+        pd_separation = _selected_pd_separation(
+            selected_role,
+            input_py.generate_config,
+            getattr(input_py, "enqueued_by_master", False),
+        )
         if pd_separation is not None and trace_state is not None:
             trace_state.set_attribute(trace_attrs.RTP_LLM_PD_SEP, pd_separation)
 
         # gRPC CLIENT span: child of the HTTP SERVER span
         # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
         # metadata. Both are no-ops when telemetry is disabled.
-        client_span_name = (
-            "rtp_llm.fetch_response"
-            if use_fetch_response
-            else "rtp_llm.generate_stream_call"
-        )
+        client_span_name = "rtp_llm.generate_stream_call"
         client_span, trace_metadata = start_client_span(
             client_span_name, target_address
         )
@@ -1170,28 +1143,21 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 grpc_kwargs["timeout"] = effective_ms / 1000.0
             if trace_metadata:
-                # One injection point covers both channels: W3C traceparent
-                # rides gRPC metadata for FetchResponse and GenerateStreamCall.
+                # W3C traceparent
+                # rides gRPC metadata for GenerateStreamCall.
                 grpc_kwargs["metadata"] = trace_metadata
             if effective_ms > 0:
                 # grpc.aio starts this timeout when the call is created. The
                 # observer uses the same absolute boundary, so time spent
                 # receiving application frames is included.
                 rpc_deadline = asyncio.get_running_loop().time() + effective_ms / 1000.0
-            if use_fetch_response:
-                response_iterator = stub.FetchResponse(
-                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
-                )
-            else:
-                response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
+            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 if response.error_info.error_code or response.error_info.error_message:
                     self._raise_pb_error(response.error_info, f"request={input_pb.request_id}")
                 output_py = trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
                 last_output = output_py
-                if use_fetch_response and _is_finished_response(response):
-                    terminal_seen = True
                 if _engine_reported_finished(output_py) and client_span is not None:
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
@@ -1351,21 +1317,33 @@ class ModelRpcClient(object):
                     _record_client_span_latency(client_span, last_output)
                     client_span.finish(error=cleanup_cancel, error_type="Cancelled")
                 raise
-            should_cancel = (
-                not stream_done
-                and client_settlement_task is None
-                and not (use_fetch_response and terminal_seen)
-            )
+            should_cancel = not stream_done and client_settlement_task is None
             if response_iterator and should_cancel:
                 response_iterator.cancel()
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
-        if self._decode_entrance:
+        selected_roles = [
+            next(
+                (
+                    addr.role
+                    for addr in inp.generate_config.role_addrs
+                    if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
+                ),
+                None,
+            )
+            for inp in inputs
+        ]
+        if self._role_type in (RoleType.PREFILL, RoleType.DECODE) or any(
+            role == RoleType.DECODE
+            or (self._role_type == RoleType.FRONTEND and role != RoleType.PDFUSION)
+            or getattr(inp, "enqueued_by_master", False)
+            for role, inp in zip(selected_roles, inputs)
+        ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
-                "/batch_infer is not supported with decode_entrance",
+                "/batch_infer is not supported for PD roles",
             )
 
         max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)

@@ -266,17 +266,15 @@ def update_worker_addrs(
     runtime_config: RuntimeConfig,
     parallelism_config: ParallelismConfig,
     world_info,
-    decode_entrance: bool = False,
+    role_type: RoleType = RoleType.PDFUSION,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info.
 
-    `worker_addrs` keeps the legacy cache-store address list in normal PD mode:
-    `ip:cache_store_listen_port:cache_store_rdma_listen_port`.
-    In decode_entrance mode, P2P needs an extra transfer port and rpc port, so we
-    publish the P2P-specific `ip:p2p_transfer_port:grpc_port` format there.
-    The P2P transfer port is reserved as `cache_store_listen_port + 1`
-    (worker base + 3) and is validated before publishing.
+    PD workers publish `ip:p2p_transfer_port:grpc_port`. Other roles keep the
+    CacheStore address format. The P2P transfer port uses the reserved slot
+    `cache_store_listen_port + 1` and is validated before publishing.
     """
+    p2p_enabled = role_type in (RoleType.PREFILL, RoleType.DECODE)
     if world_info is None:
         # For standalone mode, skip worker address updates
         logging.warning(
@@ -296,7 +294,7 @@ def update_worker_addrs(
             if member.cache_store_listen_port > 0
             else member.cache_store_listen_port
         )
-        if decode_entrance:
+        if p2p_enabled:
             _validate_p2p_transfer_port(member, p2p_transfer_port)
             p2p_transfer_ports = p2p_transfer_ports_by_ip.setdefault(member.ip, set())
             if p2p_transfer_port in p2p_transfer_ports:
@@ -314,7 +312,7 @@ def update_worker_addrs(
         ):
             worker_addr = (
                 p2p_worker_addr
-                if decode_entrance
+                if p2p_enabled
                 else (
                     f"{member.ip}:{member.cache_store_listen_port}:"
                     f"{member.cache_store_rdma_listen_port}"
@@ -393,11 +391,10 @@ def setup_pd_sep_config(
     # downstream consumers but must agree on whether RDMA is in use:
     #   * PDSepConfig.cache_store_rdma_mode (C++ default true)
     #     -> P2PConnectorWorker selects TransferBackend
-    #        (kBarexRdma vs kTcp) for the decode_entrance push path;
-    #     -> server_config_setup gates ACCL env hints; also referenced
-    #        by RemoteRpcServer::initCacheStore and other PDSep RDMA-port wiring.
+    #        (kBarexRdma vs kTcp) for the PD P2P path;
+    #     -> server_config_setup gates ACCL env hints and PD RDMA-port wiring.
     #   * CacheStoreConfig.cache_store_rdma_mode (C++ default false)
-    #     -> only used for non-P2P CacheStore paths (decode_entrance=0).
+    #     -> only used for non-P2P CacheStore paths.
     # The C++ defaults disagree, so without an unconditional sync we can
     # end up with PDSepConfig=true while CacheStoreConfig=false or vice versa.
     # CACHE_STORE_RDMA_MODE env binds to cache_store_config.* via argparse,

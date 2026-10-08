@@ -2874,20 +2874,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(["<|user|>", "<|observation|>"]),
         )
 
-    def test_frontend_decode_entrance_fallback_backend_role(self):
+    def test_frontend_pd_fallback_backend_role(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
         host_args = HostServiceArgs()
 
         roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
 
         self.assertEqual(roles, [RoleType.DECODE, RoleType.PREFILL])
 
-    def test_prefill_decode_entrance_routes_to_decode_backend(self):
+    def test_pdfusion_frontend_does_not_require_pd_roles(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        host_args = HostServiceArgs(pdfusion_domain="pdfusion-test")
+        roles = BackendRPCServerVisitor.get_backend_role_list(config, host_args)
+        self.assertEqual(roles, [RoleType.PDFUSION])
+
+    def test_prefill_pd_routes_to_decode_backend(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.PREFILL
-        pd_sep_config.decode_entrance = True
         host_args = HostServiceArgs()
 
         roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
@@ -2897,7 +2902,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_domain_routing_skips_when_no_missing_roles(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
@@ -2925,12 +2929,11 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         self.assertFalse(called)
 
-    async def test_route_ips_fail_fast_when_decode_entrance_frontend_lacks_prefill(
+    async def test_route_ips_fail_fast_when_pd_frontend_lacks_prefill(
         self,
     ):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
@@ -2961,13 +2964,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             generate_config=GenerateConfig(),
         )
 
-        with self.assertRaisesRegex(Exception, "missing backend role addresses"):
+        with self.assertRaisesRegex(Exception, "no backend role addresses found"):
             await visitor.route_ips(input_obj)
 
     def _decode_batch_visitor_and_inputs(self):
         config = PDSepConfig()
         config.role_type = RoleType.FRONTEND
-        config.decode_entrance = True
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
@@ -2986,88 +2988,24 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ]
         return visitor, inputs
 
-    async def test_batch_enqueue_decode_entrance_is_unsupported(self):
+    async def test_batch_enqueue_pd_is_unsupported(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
         with self.assertRaisesRegex(
-            FtRuntimeException, "/batch_infer is not supported with decode_entrance"
+            FtRuntimeException, "/batch_infer is not supported for PD roles"
         ):
             await visitor.batch_enqueue(inputs)
 
-    @skip("decode-entrance /batch_infer support was removed")
-    async def test_batch_enqueue_decode_entrance_uses_one_batch_rpc(self):
-        visitor, inputs = self._decode_batch_visitor_and_inputs()
-        calls = []
-        outputs = [GenerateOutputs(), GenerateOutputs()]
 
-        async def batch_enqueue(batch):
-            calls.append(batch)
-            return outputs
 
-        def unexpected_enqueue(_input):
-            raise AssertionError("batch must not be split into stream RPCs")
 
-        visitor.model_rpc_client.enqueue = unexpected_enqueue
-        visitor.model_rpc_client.batch_enqueue = batch_enqueue
-        self.assertIs(await visitor.batch_enqueue(inputs), outputs)
-        self.assertEqual(calls, [inputs])
 
-    @skip("decode-entrance /batch_infer support was removed")
-    async def test_batch_enqueue_decode_entrance_routes_once(self):
-        visitor, inputs = self._decode_batch_visitor_and_inputs()
-        visitor.host_service.service_available = True
-        routed = []
-
-        async def route(input_obj):
-            routed.append(input_obj.request_id)
-
-        async def batch_enqueue(batch):
-            return []
-
-        visitor.route_ips = route
-        visitor.model_rpc_client.batch_enqueue = batch_enqueue
-        await visitor.batch_enqueue(inputs)
-        self.assertEqual(routed, [11])
-
-    @skip("decode-entrance /batch_infer support was removed")
-    async def test_batch_enqueue_decode_entrance_propagates_batch_error(self):
-        visitor, inputs = self._decode_batch_visitor_and_inputs()
-
-        async def batch_enqueue(batch):
-            raise RuntimeError("batch item 1 failed")
-
-        visitor.model_rpc_client.batch_enqueue = batch_enqueue
-        with self.assertRaisesRegex(RuntimeError, "batch item 1 failed"):
-            await visitor.batch_enqueue(inputs)
-
-    @skip("decode-entrance /batch_infer support was removed")
-    async def test_batch_enqueue_decode_entrance_cancels_batch_rpc(self):
-        visitor, inputs = self._decode_batch_visitor_and_inputs()
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-
-        async def batch_enqueue(batch):
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-
-        visitor.model_rpc_client.batch_enqueue = batch_enqueue
-        task = asyncio.create_task(visitor.batch_enqueue(inputs))
-        await asyncio.wait_for(started.wait(), timeout=1)
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.assertTrue(cancelled.is_set())
-
-    async def test_batch_enqueue_decode_entrance_empty(self):
+    async def test_batch_enqueue_pd_empty(self):
         visitor, _ = self._decode_batch_visitor_and_inputs()
         self.assertEqual(await visitor.batch_enqueue([]), [])
 
     async def test_batch_enqueue_routes_each_request_for_batch_infer(self):
         pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = False
+        pd_sep_config.role_type = RoleType.PDFUSION
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
@@ -3082,7 +3020,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             route_calls.append(input_obj.request_id)
             input_obj.generate_config.role_addrs = [
                 RoleAddr(
-                    role=RoleType.PREFILL,
+                    role=RoleType.PDFUSION,
                     ip="10.0.0.10",
                     http_port=10100,
                     grpc_port=10101,

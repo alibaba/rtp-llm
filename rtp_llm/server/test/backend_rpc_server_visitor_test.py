@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -768,6 +768,45 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
+
+
+class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
+    def make_visitor(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.pd_sep_config = SimpleNamespace(role_type=RoleType.FRONTEND)
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION]
+        visitor.fill_request_info = Mock()
+        visitor._validate_input = Mock()
+        visitor.check_sp_supported = Mock()
+        visitor.check_prefill_cp_supported = Mock()
+        visitor.route_ips = AsyncMock()
+        visitor.host_service = Mock()
+        visitor.model_rpc_client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=["result"]))
+        return visitor
+
+    async def test_mixed_frontend_resolves_pdfusion_without_master_enqueue(self):
+        visitor = self.make_visitor()
+        fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)
+        visitor.host_service.get_backend_role_addrs.return_value = [fusion]
+        inputs = [_FakeRouteInput(), _FakeRouteInput()]
+        result = await visitor.batch_enqueue(inputs)
+        self.assertEqual(result, ["result"])
+        visitor.host_service.get_backend_role_addrs.assert_called_once_with([RoleType.PDFUSION])
+        visitor.route_ips.assert_not_awaited()
+        for item in inputs:
+            self.assertEqual(item.generate_config.role_addrs, [fusion])
+
+    async def test_pd_target_and_missing_pdfusion_remain_unsupported(self):
+        visitor = self.make_visitor()
+        visitor.host_service.get_backend_role_addrs.return_value = []
+        item = _FakeRouteInput()
+        with self.assertRaises(FtRuntimeException):
+            await visitor.batch_enqueue([item])
+        item.generate_config.role_addrs = [RoleAddr(role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2)]
+        with self.assertRaises(FtRuntimeException):
+            await visitor.batch_enqueue([item])
+        visitor.model_rpc_client.batch_enqueue.assert_not_awaited()
+        visitor.route_ips.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -601,21 +601,9 @@ std::string PDSepConfig::to_string() const {
         << "cache_store_rdma_listen_port: " << cache_store_rdma_listen_port << "\n"
         << "cache_store_rdma_connect_port: " << cache_store_rdma_connect_port << "\n"
         << "remote_rpc_server_port: " << remote_rpc_server_port << "\n"
-        << "prefill_retry_times: " << prefill_retry_times << "\n"
-        << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
-        << "prefill_max_wait_timeout_ms: " << prefill_max_wait_timeout_ms << "\n"
-        << "decode_retry_times: " << decode_retry_times << "\n"
-        << "decode_retry_timeout_ms: " << decode_retry_timeout_ms << "\n"
-        << "decode_retry_interval_ms: " << decode_retry_interval_ms << "\n"
-        << "decode_polling_kv_cache_step_ms: " << decode_polling_kv_cache_step_ms << "\n"
-        << "decode_polling_call_prefill_ms: " << decode_polling_call_prefill_ms << "\n"
-        << "rdma_connect_retry_times: " << rdma_connect_retry_times << "\n"
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
-        << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance << "\n"
-        << "prefill_prepare_resource_pool_size: " << prefill_prepare_resource_pool_size << "\n"
-        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms;
+        << "worker_port_offset: " << worker_port_offset << "\n";
     return oss.str();
 }
 

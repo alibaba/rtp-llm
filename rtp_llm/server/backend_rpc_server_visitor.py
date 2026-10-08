@@ -99,10 +99,7 @@ class BackendRPCServerVisitor:
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
-        # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
-        decode_entrance = pd_sep_config.decode_entrance
-        self.decode_entrance = decode_entrance
 
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
@@ -114,7 +111,7 @@ class BackendRPCServerVisitor:
             addresses=addresses,
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
-            decode_entrance=decode_entrance,
+            role_type=pd_sep_config.role_type,
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -218,17 +215,9 @@ class BackendRPCServerVisitor:
         config_role_type = pd_sep_config.role_type
 
         if config_role_type == RoleType.PREFILL:
-            role_list.append(RoleType.DECODE)
-            if pd_sep_config.decode_entrance:
-                role_list.append(RoleType.PREFILL)
-                logging.info(
-                    "Added DECODE and PREFILL roles for PREFILL type in decode_entrance mode"
-                )
-            else:
-                logging.info("Added DECODE role for PREFILL type")
-        elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
+            role_list.extend([RoleType.DECODE, RoleType.PREFILL])
+        elif config_role_type == RoleType.DECODE:
             role_list.append(RoleType.PREFILL)
-            logging.info("Added PREFILL role for DECODE type")
         elif config_role_type == RoleType.FRONTEND:
             logging.info(
                 f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
@@ -242,17 +231,6 @@ class BackendRPCServerVisitor:
             if host_args.pdfusion_domain:
                 role_list.append(RoleType.PDFUSION)
                 logging.info("Added PDFUSION role for FRONTEND type")
-            if pd_sep_config.decode_entrance:
-                if RoleType.DECODE not in role_list:
-                    role_list.append(RoleType.DECODE)
-                    logging.info(
-                        "Added DECODE role for FRONTEND type as decode_entrance fallback"
-                    )
-                if RoleType.PREFILL not in role_list:
-                    role_list.append(RoleType.PREFILL)
-                    logging.info(
-                        "Added PREFILL role for FRONTEND type as decode_entrance requirement"
-                    )
 
         logging.info(f"configured backend role list: {role_list}")
         return role_list
@@ -731,10 +709,10 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
-        if self.decode_entrance:
+        if self.pd_sep_config.role_type in (RoleType.PREFILL, RoleType.DECODE):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
-                "/batch_infer is not supported with decode_entrance",
+                "/batch_infer is not supported for PD roles",
             )
         for input in inputs:
             self.fill_request_info(input)
@@ -742,7 +720,46 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        if self.host_service.service_available:
+        # HTTP batch has no PD batch entry. Resolve only PDFUSION endpoints,
+        # without asking Master to reserve/enqueue a P/D request first.
+        if self.pd_sep_config.role_type == RoleType.FRONTEND:
+            selected_pdfusion = None
+            for input in inputs:
+                targets = [
+                    addr
+                    for addr in input.generate_config.role_addrs
+                    if addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                ]
+                if targets:
+                    if targets[0].role != RoleType.PDFUSION or getattr(
+                        input, "enqueued_by_master", False
+                    ):
+                        raise FtRuntimeException(
+                            ExceptionType.UNSUPPORTED_OPERATION,
+                            "/batch_infer requires a PDFUSION target",
+                        )
+                    if selected_pdfusion is None:
+                        selected_pdfusion = targets[0]
+                    continue
+                if selected_pdfusion is None:
+                    candidates = self.host_service.get_backend_role_addrs(
+                        [RoleType.PDFUSION]
+                    )
+                    selected_pdfusion = next(
+                        (
+                            addr
+                            for addr in (candidates or [])
+                            if addr.role == RoleType.PDFUSION and addr.ip
+                        ),
+                        None,
+                    )
+                if selected_pdfusion is None:
+                    raise FtRuntimeException(
+                        ExceptionType.UNSUPPORTED_OPERATION,
+                        "/batch_infer requires a PDFUSION target",
+                    )
+                input.generate_config.role_addrs = [selected_pdfusion]
+        elif self.host_service.service_available:
             for input in inputs:
                 await self.route_ips(input)
 

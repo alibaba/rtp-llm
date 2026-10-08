@@ -1533,8 +1533,9 @@ final class RequestSlot {
 
     private static CancelTarget cancelTarget(ScheduledRequest active) {
         ServerStatus prefill = active == null ? null : active.prefill();
-        return prefill == null ? null
-                : new CancelTarget(
+        ServerStatus decode = active == null ? null : active.decode();
+        return prefill == null || decode == null ? null
+                : CancelTarget.of(decode.getServerIp(), decode.getGrpcPort(),
                         prefill.getServerIp(), prefill.getGrpcPort());
     }
 

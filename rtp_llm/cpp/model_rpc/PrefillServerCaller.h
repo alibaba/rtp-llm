@@ -23,7 +23,7 @@ struct PrefillPeerInfo {
 
 class PrefillServerCaller {
 public:
-    explicit PrefillServerCaller(const std::string& process_id);
+    PrefillServerCaller();
 
     ErrorResult<std::shared_ptr<PrefillServerCallerContext>> callPrefill(const GenerateInputPB* request,
                                                                          const std::string&     ip,
@@ -37,8 +37,6 @@ public:
 
     // Fetch once for each PD request; only the RPC connection is reused.
     ErrorResult<PrefillPeerInfo> getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
-
-    int getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
 
 private:
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,
@@ -62,7 +60,6 @@ private:
         grpc::CompletionQueue*)>;
 
     std::shared_ptr<RPCPool> rpc_pool_;
-    std::string              process_id_;
     AsyncReaderFactory       async_reader_factory_;
 };
 

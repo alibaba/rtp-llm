@@ -44,7 +44,7 @@ class DecodePreemptionCoordinatorTest {
                 .thenReturn(true);
         when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
         when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
-                Optional.of(new CancelTarget("10.0.0.1", 9090)));
+                Optional.of(new CancelTarget("10.0.0.1", 9090, "10.0.0.2:9090")));
         when(requests.tryApplyPreemptionPhase(any(), any())).thenReturn(true);
 
         CompletableFuture<VictimTerminal> firstTerminal = new CompletableFuture<>();

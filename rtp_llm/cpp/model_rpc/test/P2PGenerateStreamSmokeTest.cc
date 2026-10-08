@@ -26,8 +26,8 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -150,7 +150,6 @@ public:
         model_.vocab_size                   = 256;
         model_.attn_config.tokens_per_block = kTokensPerBlock;
         resource_context_.role_type         = pd.role_type;
-        resource_context_.decode_entrance   = true;
         resource_context_.reuse_cache       = false;
         resource_context_.cache_manager     = std::make_shared<KVCacheManager>(cache_config,
                                                                            false,
@@ -441,7 +440,7 @@ private:
 class PayloadRpcService: public RpcService::Service {
 public:
     LocalRpcServer*       target  = nullptr;
-    PrefillRpcServerNew2* prefill = nullptr;
+    PrefillRpcServer*     prefill = nullptr;
     std::atomic<int>      generate_calls{0}, peer_calls{0}, load_calls{0}, read_calls{0}, handle_read_calls{0};
     std::atomic<int>      generate_done{0}, generate_cancelled{0}, load_done{0}, load_cancelled{0};
     std::atomic<int>      read_done{0}, handle_read_done{0}, cancel_read_calls{0};
@@ -498,7 +497,7 @@ public:
 
 class PayloadEndpoint {
 public:
-    PayloadEndpoint(LocalRpcServer& target, PrefillRpcServerNew2* prefill, const std::string& host): host(host) {
+    PayloadEndpoint(LocalRpcServer& target, PrefillRpcServer* prefill, const std::string& host): host(host) {
         service.target  = &target;
         service.prefill = prefill;
         grpc::ServerBuilder builder;
@@ -524,7 +523,6 @@ std::shared_ptr<PayloadEngine> makePayloadEngine(
     const CacheConfig& config, RoleType role, const PayloadEndpoint& endpoint, bool rdma, int load_timeout_ms) {
     PDSepConfig pd;
     pd.role_type             = role;
-    pd.decode_entrance       = true;
     pd.cache_store_rdma_mode = rdma;
     // Same port convention as serving: transfer backend listens at base+1.
     const auto transfer_port = autil::NetUtil::randomPort();
@@ -813,7 +811,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     ASSERT_LT(host.size(), sizeof(WorkerReport{}.host));
     ASSERT_TRUE(transport != "rdma" || host != "127.0.0.1");
     {
-        PrefillRpcServerNew2 prefill;
+        PrefillRpcServer prefill;
         prefill.meta_ = std::make_shared<RpcServerRuntimeMeta>();
         PayloadEndpoint endpoint(prefill, &prefill, host);
         const auto      config = test::makeSimpleMhaCacheConfig(
@@ -901,7 +899,7 @@ protected:
         decode_engine_ =
             makePayloadEngine(cache_config, RoleType::DECODE, *decode_rpc_, transport == "rdma", timeouts_.load_ms);
         decode_.engine_                = decode_engine_;
-        decode_.prefill_server_caller_ = std::make_shared<PrefillServerCaller>("p2p-payload-smoke");
+        decode_.prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
         decode_engine_->start();
     }
 
@@ -1120,7 +1118,7 @@ protected:
 
     PayloadTimeouts                  timeouts_{10000, 3000};
     std::string                      host_;
-    DecodeRpcServerNew2              decode_;
+    DecodeRpcServer                  decode_;
     std::shared_ptr<PayloadEngine>   decode_engine_;
     std::unique_ptr<PrefillProcess>  prefill_process_;
     std::unique_ptr<PayloadEndpoint> decode_rpc_;

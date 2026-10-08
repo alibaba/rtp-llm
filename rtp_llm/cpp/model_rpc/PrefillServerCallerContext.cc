@@ -52,74 +52,6 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
     shutdownAndDrainCompletionQueue();
 }
 
-bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& snapshot) {
-    checkDone();
-    std::shared_lock<std::shared_mutex> lock(state_mutex_);
-    if (reuse_lens_valid_) {
-        snapshot = reuse_lens_snapshot_;
-        return true;
-    }
-    if (!response_received_ || !response_.has_flatten_output() || response_.flatten_output().aux_info_size() == 0) {
-        return false;
-    }
-
-    const auto& aux_info = response_.flatten_output().aux_info(0);
-    snapshot.total       = aux_info.prefill_total_reuse_len();
-    snapshot.local       = aux_info.prefill_local_reuse_len();
-    snapshot.remote      = aux_info.prefill_remote_reuse_len();
-    snapshot.memory      = aux_info.prefill_memory_reuse_len();
-    snapshot.disk        = aux_info.prefill_disk_reuse_len();
-
-    if (snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0 || snapshot.disk > 0) {
-        return true;
-    }
-
-    snapshot.total  = aux_info.total_reuse_len();
-    snapshot.local  = aux_info.local_reuse_len();
-    snapshot.remote = aux_info.remote_reuse_len();
-    snapshot.memory = aux_info.memory_reuse_len();
-    snapshot.disk   = aux_info.disk_reuse_len();
-    return snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0 || snapshot.disk > 0;
-}
-
-void PrefillServerCallerContext::setPrefillReuseLensSnapshotForTest(const ReuseLensSnapshot& snapshot) {
-    std::unique_lock<std::shared_mutex> lock(state_mutex_);
-    reuse_lens_snapshot_ = snapshot;
-    reuse_lens_valid_    = true;
-}
-
-bool PrefillServerCallerContext::updateReuseLensSnapshotLocked(const GenerateOutputsPB& response) {
-    if (!response.has_flatten_output() || response.flatten_output().aux_info_size() == 0) {
-        return false;
-    }
-
-    ReuseLensSnapshot snapshot;
-    const auto&       aux_info = response.flatten_output().aux_info(0);
-    snapshot.total             = aux_info.prefill_total_reuse_len();
-    snapshot.local             = aux_info.prefill_local_reuse_len();
-    snapshot.remote            = aux_info.prefill_remote_reuse_len();
-    snapshot.memory            = aux_info.prefill_memory_reuse_len();
-    snapshot.disk              = aux_info.prefill_disk_reuse_len();
-
-    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0
-        && snapshot.disk <= 0) {
-        snapshot.total  = aux_info.total_reuse_len();
-        snapshot.local  = aux_info.local_reuse_len();
-        snapshot.remote = aux_info.remote_reuse_len();
-        snapshot.memory = aux_info.memory_reuse_len();
-        snapshot.disk   = aux_info.disk_reuse_len();
-    }
-
-    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0
-        && snapshot.disk <= 0) {
-        return false;
-    }
-
-    reuse_lens_snapshot_ = snapshot;
-    reuse_lens_valid_    = true;
-    return true;
-}
-
 void PrefillServerCallerContext::cancel() {
     bool need_cancel = false;
     auto async_state = async_state_;
@@ -153,9 +85,7 @@ void PrefillServerCallerContext::startPolling() {
 
 void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
     auto async_state = async_state_;
-    response_.CopyFrom(response);
     response_received_ = true;
-    updateReuseLensSnapshotLocked(response);
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
         error_info_ =
             ErrorInfo(transRPCErrorCode(response.error_info().error_code()), response.error_info().error_message());

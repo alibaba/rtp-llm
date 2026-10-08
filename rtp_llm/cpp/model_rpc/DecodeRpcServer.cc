@@ -1,1711 +1,477 @@
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include <algorithm>
-#include <chrono>
-#include <cstdlib>
-#include <mutex>
-#include <memory>
-#include <thread>
-#include <unistd.h>
-#include <limits.h>
-#include <condition_variable>
-#include <unordered_set>
-#include <c10/core/DeviceGuard.h>
-#include <c10/core/InferenceMode.h>
-
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/utils/KVCacheUtils.h"
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
-#include "autil/LockFreeThreadPool.h"
-
-using namespace std;
-using namespace autil::legacy;
-
-using grpc::Status;
-using grpc::ClientContext;
-using grpc::CompletionQueue;
-using grpc::ClientAsyncResponseReader;
-
-const int LOAD_TIMEOUT_MS         = 5 * 1000;
-const int EXTRA_TIMEOUT_MS        = 100;
-const int RDMA_CONNECT_RETRY_TIME = 3;
-
-#define GRPC_RET_IF_ERROR(decode_context, stat, code, msg)                                                             \
-    do {                                                                                                               \
-        if (!(stat)) {                                                                                                 \
-            const auto        grpc_error_code    = (code);                                                             \
-            const std::string grpc_error_message = (msg);                                                              \
-            decode_context.error_status          = grpc::Status(grpc_error_code, grpc_error_message);                  \
-            const std::string request_identity   = decode_context.request_key == "0" ?                                 \
-                                                       (decode_context.server_context != nullptr ?                     \
-                                                            "pending peer " + decode_context.server_context->peer() :  \
-                                                            "pending") :                                               \
-                                                       decode_context.request_key;                                     \
-            RTP_LLM_LOG_WARNING("request [%s] RPC stage failed, grpc status code [%d], message [%s]",                  \
-                                request_identity.c_str(),                                                              \
-                                static_cast<int>(grpc_error_code),                                                     \
-                                grpc_error_message.c_str());                                                           \
-            return;                                                                                                    \
-        }                                                                                                              \
-    } while (false)
-
-string makeRequestKey(const string& client_id, size_t request_id) {
-    return client_id + "_request_id_" + std::to_string(request_id);
-}
+#include "rtp_llm/cpp/engine_base/Host.h"
+#include "autil/NetUtil.h"
+#include <chrono>
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
+#include <utility>
 
 namespace rtp_llm {
 
 namespace {
 
-// gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
-// before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
-// falling back to a staged synchronous copy on the handler thread. Pinning is
-// best-effort: on failure keep the pageable tensor rather than failing the
-// request.
-torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
-    if (!tensor.defined() || tensor.is_cuda() || tensor.is_pinned() || tensor.numel() == 0) {
-        return tensor;
+constexpr int64_t kMinGrpcPort = 1;
+constexpr int64_t kMaxGrpcPort = 65535;
+
+struct ReuseLens {
+    int64_t total  = 0;
+    int64_t local  = 0;
+    int64_t remote = 0;
+    int64_t memory = 0;
+    int64_t disk   = 0;
+};
+
+ReuseLens getPrefillReuseLens(std::shared_ptr<GenerateStream>& stream) {
+    ReuseLens reuse_lens;
+    reuse_lens.total  = stream->prefillTotalReuseLen();
+    reuse_lens.local  = stream->prefillLocalReuseLen();
+    reuse_lens.remote = stream->prefillRemoteReuseLen();
+    reuse_lens.memory = stream->prefillMemoryReuseLen();
+    reuse_lens.disk   = stream->prefillDiskReuseLen();
+    return reuse_lens;
+}
+
+bool parseGrpcPort(const std::string& port_text, uint32_t* port) {
+    if (!port || port_text.empty()) {
+        return false;
     }
-    try {
-        return tensor.pin_memory();
-    } catch (const c10::Error& e) {
-        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
-        return tensor;
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
-        return tensor;
+    char* end             = nullptr;
+    errno                 = 0;
+    auto       value      = std::strtoll(port_text.c_str(), &end, 10);
+    const bool parsed_all = end == port_text.c_str() + port_text.size();
+    if (errno != 0 || !parsed_all || value < kMinGrpcPort || value > kMaxGrpcPort) {
+        return false;
     }
+    *port = static_cast<uint32_t>(value);
+    return true;
+}
+
+std::string prefillAddress(const GenerateInputPB& request) {
+    for (const auto& addr : request.generate_config().role_addrs()) {
+        if (addr.role() == RoleAddrPB::PREFILL) {
+            return formatGrpcHostPort(addr.ip(), addr.grpc_port());
+        }
+    }
+    return {};
 }
 
 }  // namespace
 
-grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
-    if (cancelled) {
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
-    }
-    return grpc::Status(grpc::StatusCode::INTERNAL, "poll generate request failed");
+std::string makeDecodeEntranceUniqueKey(const std::string& bind_ip, int64_t unique_key_id, int64_t current_time_us) {
+    return bind_ip + "_" + std::to_string(unique_key_id) + "_" + std::to_string(current_time_us);
 }
 
-ErrorInfo DecodeRpcServer::cacheLoadClientError(int64_t request_id, ErrorCode error_code) {
-    return ErrorInfo(error_code, "cache load failed; correlation_id=" + std::to_string(request_id));
+GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request,
+                                                 const std::string&     handoff_unique_key) {
+    GenerateInputPB handoff_request;
+    handoff_request.CopyFrom(request);
+    handoff_request.mutable_generate_config()->set_unique_key(handoff_unique_key);
+    return handoff_request;
 }
 
-const char* DecodeRpcServer::phaseErrorType(bool                         request_ok,
-                                            DecodeStatInfo::ExecuteStage stage,
-                                            const ErrorInfo&             error_info,
-                                            const grpc::Status&          error_status) {
-    if (request_ok) {
-        return nullptr;
+grpc::Status DecodeRpcServer::parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port) {
+    if (!ip || !port || addr.empty()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "malformed prefill dp_addr: " + addr);
     }
-    // Cancellation is a request outcome even when the stage has not yet copied
-    // the transport status into error_status (loadCacheFromPrefill synthesizes
-    // its child span before the final GRPC_RET_IF_ERROR below).
-    if (error_info.hasError() && error_info.code() == ErrorCode::CANCELLED) {
-        return "Cancelled";
+
+    std::string host;
+    std::string port_text;
+    if (addr.front() == '[') {
+        const auto close_pos = addr.find(']');
+        if (close_pos == std::string::npos || close_pos + 1 >= addr.size() || addr[close_pos + 1] != ':') {
+            RTP_LLM_LOG_ERROR("malformed prefill dp_addr: %s", addr.c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, "malformed prefill dp_addr: " + addr);
+        }
+        host      = addr.substr(0, close_pos + 1);
+        port_text = addr.substr(close_pos + 2);
+    } else {
+        const auto colon_pos = addr.rfind(':');
+        if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos + 1 >= addr.size()) {
+            RTP_LLM_LOG_ERROR("malformed prefill dp_addr: %s", addr.c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, "malformed prefill dp_addr: " + addr);
+        }
+        host      = addr.substr(0, colon_pos);
+        port_text = addr.substr(colon_pos + 1);
+        if (host.find(':') != std::string::npos) {
+            if (host.back() == ':' || host.find('.') != std::string::npos) {
+                RTP_LLM_LOG_ERROR("malformed prefill dp_addr: %s", addr.c_str());
+                return grpc::Status(grpc::StatusCode::INTERNAL, "malformed prefill dp_addr: " + addr);
+            }
+            host = "[" + host + "]";
+        }
     }
-    // A failure while waiting for KV cache from Prefill is an upstream dependency
-    // problem rather than a fault of this node, so the wait span must say so. The
-    // gRPC status cannot carry that distinction: transErrorCodeToGrpc maps the
-    // cache timeouts onto DEADLINE_EXCEEDED, indistinguishable from a request
-    // deadline elsewhere. Client cancellation also surfaces in this stage and
-    // keeps its own classification.
-    if (stage == DecodeStatInfo::loadCacheFromPrefill && error_info.hasError()
-        && error_info.code() != ErrorCode::CANCELLED) {
-        return "DependencyFailure";
+
+    if (host.empty() || !parseGrpcPort(port_text, port)) {
+        RTP_LLM_LOG_ERROR("invalid port in prefill dp_addr: %s", addr.c_str());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "invalid port in prefill dp_addr: " + addr);
     }
-    if (!error_status.ok()) {
-        return telemetry::grpcStatusCodeName(error_status.error_code());
+    *ip = std::move(host);
+    return grpc::Status::OK;
+}
+
+DecodeRpcServer::~DecodeRpcServer() {
+    if (cancel_cleanup_thread_)
+        cancel_cleanup_thread_->stop();
+}
+
+grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) {
+    if (!request || request->request_id() <= 0 || !response)
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
+    if (!cancel_registry_)
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode is not initialized");
+    auto handle = cancel_registry_->find(request->request_id());
+    if (!handle && !request->prefill_address().empty()) {
+        // Create a control-only record so retries can finish Prefill cancellation
+        // even when the frontend has not connected to Decode yet.
+        GenerateInputPB pending_request;
+        pending_request.set_request_id(request->request_id());
+        const auto admission = cancel_registry_->admit(pending_request,
+                                                       masterEnqueuedHandoffUniqueKey(request->request_id()),
+                                                       request->prefill_address(),
+                                                       currentTimeMs() + 10 * 60 * 1000,
+                                                       handle);
+        if (!admission.ok())
+            handle = cancel_registry_->find(request->request_id());
+        if (admission.ok())
+            cancel_registry_->finishLocal(handle);
     }
-    return "Exception";
+    if (handle && handle->terminal.load()) {
+        // Internal forwarding may retry after WorkerStatus's short delta window.
+        // This retained terminal record proves both endpoint cleanups returned.
+        response->set_status(CANCEL_STATUS_NOT_FOUND);
+    } else {
+        response->set_status(cancel_registry_->cancel(
+            request->request_id(),
+            {request->cancel_error_code() == 0 ? ErrorCode::PRIORITY_PREEMPTED :
+                                                 static_cast<ErrorCode>(request->cancel_error_code()),
+             request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()}));
+    }
+    return grpc::Status::OK;
+}
+
+void DecodeRpcServer::cancelCleanupTick() {
+    for (const auto& handle : cancel_registry_->pending()) {
+        if (handle->downstream_address.empty()) {
+            cancel_registry_->complete(handle);
+            continue;
+        }
+        auto connection = cancel_pool_.getConnection(handle->downstream_address);
+        if (!connection.ok())
+            continue;
+        CancelRequestPB request;
+        request.set_request_id(handle->identity.request_id);
+        request.set_cancel_error_code(static_cast<int64_t>(handle->cancel_reason.code()));
+        request.set_cancel_error_message(handle->cancel_reason.ToString());
+        CancelResponsePB    response;
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
+        if (!connection->stub->Cancel(&context, request, &response).ok())
+            continue;
+        if (response.status() == CANCEL_STATUS_TOMBSTONED || response.status() == CANCEL_STATUS_NOT_FOUND) {
+            cancel_registry_->finishDownstream(handle);
+        } else if (response.status() == CANCEL_STATUS_ACCEPTED) {
+            StatusVersionPB version;
+            version.set_latest_finished_version(0);
+            WorkerStatusPB      status;
+            grpc::ClientContext status_context;
+            status_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
+            if (connection->stub->GetWorkerStatus(&status_context, version, &status).ok()) {
+                for (const auto& task : status.finished_task_list()) {
+                    if (task.request_id() == handle->identity.request_id) {
+                        cancel_registry_->finishDownstream(handle);
+                        break;
+                    }
+                }
+            }
+        }
+        cancel_registry_->complete(handle);
+    }
 }
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
+        RTP_LLM_LOG_ERROR("decode rpc server new2 init failed, err: %s", ret.error_message().c_str());
         return ret;
     }
+
+    auto kvcache_manager = engine_->getCacheManager();
+    if (!kvcache_manager) {
+        RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, kvcache manager is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
+    }
+    if (!kvcache_manager->hasP2PConnector()) {
+        RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, PD requires P2P connector");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "PD requires P2P connector");
+    }
+
+    prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
+    cancel_registry_       = std::make_unique<PDCancelRegistry>(meta_);
+    cancel_cleanup_thread_ =
+        autil::LoopThread::createLoopThread([this]() { cancelCleanupTick(); }, 10 * 1000, "P2PDecodeCancel");
+    if (!cancel_cleanup_thread_)
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start Decode cancel cleanup");
+
+    RTP_LLM_LOG_INFO("decode rpc server new2 init");
     return grpc::Status::OK;
 }
 
-std::string
-DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id) {
-    return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
-}
-
-std::string DecodeRpcServer::makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag) {
-    return std::to_string(request_id) + "-" + std::to_string(layer_id) + "-tag-" + tag;
-}
-
-std::vector<DecodeRpcServer::MTPModuleLoadPlan>
-DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params) {
-    if (propose_params == nullptr || propose_params->mtp_model_params_ == nullptr
-        || propose_params->mtp_model_params_->empty() || propose_params->mtp_model_params_->front() == nullptr) {
-        return {};
+grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          request,
+                                               int64_t                         deadline_ms,
+                                               std::shared_ptr<GenerateInput>& input,
+                                               GenerateInputPB&                prefill_request,
+                                               PrefillPeerInfo&                peer_info) {
+    input                      = QueryConverter::transQuery(&request);
+    input->request_deadline_ms = deadline_ms;
+    // Preserve the configured duration on the wire; D keeps its own deadline.
+    input->generate_config->timeout_ms = request.generate_config().timeout_ms();
+    auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    if (!status.ok())
+        return serializeErrorMsg(std::to_string(request.request_id()), status);
+    prefill_request.CopyFrom(request);
+    prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
+    const auto  address = prefillAddress(request);
+    std::string ip;
+    uint32_t    port         = 0;
+    auto        parse_status = parsePrefillDpAddr(address, &ip, &port);
+    if (!parse_status.ok())
+        return parse_status;
+    const auto remaining = deadline_ms - currentTimeMs();
+    if (remaining <= 0)
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "PD preprocessing deadline exceeded");
+    auto peer_result = prefill_server_caller_->getPrefillPeerInfo(ip, port, clampRpcTimeoutMsToInt32(remaining));
+    if (!peer_result.ok())
+        return grpcStatusFromErrorInfo(peer_result.status());
+    peer_info = std::move(peer_result.value());
+    if (peer_info.tp_size <= 0 || peer_info.cp_size <= 0) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
     }
-
-    const auto* active_module = propose_params->mtp_model_params_->front().get();
-    return {{/*module_index=*/0, active_module, active_module->model_id}};
-}
-
-size_t DecodeRpcServer::cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block) {
-    return (base_seq_size_per_block > 0 && group_seq_size_per_block >= base_seq_size_per_block
-            && group_seq_size_per_block % base_seq_size_per_block == 0) ?
-               group_seq_size_per_block / base_seq_size_per_block :
-               1;
-}
-
-size_t DecodeRpcServer::keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
-                                                 size_t                  group_seq_size_per_block,
-                                                 size_t                  base_seq_size_per_block) {
-    const size_t block_scale = cacheKeysPerPhysicalBlock(group_seq_size_per_block, base_seq_size_per_block);
-    const bool   compact     = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && block_scale > 1;
-    return compact ? 1 : block_scale;
-}
-
-void DecodeRpcServer::markCacheKeyRange(std::vector<size_t>& cache_key_counts,
-                                        size_t               endpoint_key_index,
-                                        size_t               block_offset_index,
-                                        size_t               cache_keys_per_physical_block) {
-    if (endpoint_key_index >= cache_key_counts.size() || cache_keys_per_physical_block == 0) {
-        return;
-    }
-    const size_t begin =
-        cache_keys_per_physical_block == 1 ? endpoint_key_index : block_offset_index * cache_keys_per_physical_block;
-    const size_t end = std::min(endpoint_key_index + 1, cache_key_counts.size());
-    if (begin >= end) {
-        return;
-    }
-    for (size_t key_index = begin; key_index < end; ++key_index) {
-        ++cache_key_counts[key_index];
-    }
-}
-
-std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const CacheGroupPolicy& policy,
-                                                                     size_t                  local_block_num,
-                                                                     size_t                  cache_key_count,
-                                                                     size_t                  reuse_block_size,
-                                                                     bool                    use_hybrid,
-                                                                     size_t                  group_seq_size_per_block,
-                                                                     size_t                  base_seq_size_per_block) {
-    std::vector<CacheStoreBlockPair> plan;
-    if (local_block_num == 0 || cache_key_count == 0) {
-        return plan;
-    }
-
-    const size_t block_scale = cacheKeysPerPhysicalBlock(group_seq_size_per_block, base_seq_size_per_block);
-    const size_t key_blocks_per_logical_block =
-        keyBlocksPerLogicalBlock(policy, group_seq_size_per_block, base_seq_size_per_block);
-    const bool   compact = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && block_scale > 1;
-    const size_t group_block_count =
-        (cache_key_count + key_blocks_per_logical_block - 1) / key_blocks_per_logical_block;
-    const size_t total_logical_blocks = compact ? cache_key_count : std::min(local_block_num, group_block_count);
-    const size_t logical_reuse_block_size =
-        compact ? reuse_block_size : reuse_block_size / key_blocks_per_logical_block;
-    // Decode owns whole logical blocks of BLOCK_ROUND_ROBIN groups; the per-peer
-    // split happens later, per block, so only compact groups are CP-projected here.
-    const int cp_size = compact ? static_cast<int>(block_scale) : 1;
-
-    const auto raw_plan = buildCacheStorePlan(policy,
-                                              total_logical_blocks,
-                                              logical_reuse_block_size,
-                                              use_hybrid,
-                                              /*cp_rank=*/cp_size - 1,
-                                              cp_size,
-                                              key_blocks_per_logical_block,
-                                              cache_key_count);
-    plan.reserve(raw_plan.size());
-    for (const auto& pair : raw_plan) {
-        if (static_cast<size_t>(pair.offset_index) < local_block_num
-            && static_cast<size_t>(pair.key_index) < cache_key_count) {
-            plan.push_back(pair);
-        }
-    }
-    return plan;
-}
-
-ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t peer_size) {
-    if (worker_size == 0 || peer_size == 0) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker or peer address list is empty");
-    }
-    if (worker_size % peer_size != 0 && peer_size % worker_size != 0) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer address count is not compatible with worker count");
-    }
-    return ErrorInfo::OkStatus();
-}
-
-size_t DecodeRpcServer::completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
-                                                     const std::vector<size_t>& required_cache_key_counts,
-                                                     const std::vector<size_t>& transferred_cache_key_counts) {
-    if (required_cache_key_counts.empty() || required_cache_key_counts.size() != transferred_cache_key_counts.size()) {
-        return 0;
-    }
-
-    const size_t reused_blocks = std::min(already_reused_blocks, required_cache_key_counts.size());
-    size_t       prefix_blocks = reused_blocks;
-    while (prefix_blocks < required_cache_key_counts.size() && required_cache_key_counts[prefix_blocks] > 0
-           && transferred_cache_key_counts[prefix_blocks] == required_cache_key_counts[prefix_blocks]) {
-        ++prefix_blocks;
-    }
-    return prefix_blocks > reused_blocks ? prefix_blocks : 0;
-}
-
-size_t DecodeRpcServer::minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts) {
-    if (rank_loaded_cache_block_counts.empty()) {
-        return 0;
-    }
-    return *std::min_element(rank_loaded_cache_block_counts.begin(), rank_loaded_cache_block_counts.end());
-}
-
-std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_t worker_size) {
-    const size_t        completion_queue_count = (worker_size + 1) / 2;
-    std::vector<size_t> expected_response_counts(completion_queue_count, 0);
-    for (size_t worker_index = 0; worker_index < worker_size; ++worker_index) {
-        ++expected_response_counts[worker_index % completion_queue_count];
-    }
-    return expected_response_counts;
-}
-
-int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
-                                          const LoadCacheResult&                 load_result,
-                                          int                                    seq_size_per_block,
-                                          bool                                   use_independent_block_pools) {
-    if (!stream || !use_independent_block_pools || !load_result.ok() || load_result.loaded_cache_block_count == 0
-        || seq_size_per_block <= 0 || stream->inputLength() <= 1) {
-        return 0;
-    }
-
-    const size_t max_reusable_block_count =
-        static_cast<size_t>(stream->inputLength() - 1) / static_cast<size_t>(seq_size_per_block);
-    const size_t published_block_count = std::min(load_result.loaded_cache_block_count, max_reusable_block_count);
-    if (published_block_count == 0) {
-        return 0;
-    }
-
-    const int loaded_reuse_len = static_cast<int>(published_block_count) * seq_size_per_block;
-    stream->setInitialReuseLength(std::max(stream->initialReuseLength(), loaded_reuse_len));
-    stream->setReuseLength(std::max(stream->reuseLength(), loaded_reuse_len));
-    stream->setLocalReuseLength(std::max(stream->localReuseLength(), loaded_reuse_len));
-    return loaded_reuse_len;
-}
-
-void DecodeRpcServer::logReadFailures(int64_t                         request_id,
-                                      const std::string&              peer_addr,
-                                      ErrorCode                       error_code,
-                                      const std::string&              error_message,
-                                      const std::vector<std::string>& buffer_debug_infos) {
-    if (error_code == ErrorCode::CANCELLED) {
-        return;
-    }
-    if (buffer_debug_infos.empty()) {
-        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={}",
-                            static_cast<long>(request_id),
-                            peer_addr.c_str(),
-                            static_cast<int>(error_code),
-                            error_message.c_str());
-        return;
-    }
-    for (const auto& debug_info : buffer_debug_infos) {
-        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={%s}",
-                            static_cast<long>(request_id),
-                            peer_addr.c_str(),
-                            static_cast<int>(error_code),
-                            error_message.c_str(),
-                            debug_info.c_str());
-    }
-}
-
-void DecodeRpcServer::initThreadPool() {
-    if (resource_.workers.size() > 0) {
-        return;
-    }
-    thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-        resource_.workers.size() * 8, resource_.workers.size() * 8, nullptr, "RemoteCacheLoadPool");
-    RTP_LLM_CHECK_WITH_INFO(thread_pool_->start(), "DecodeRpcServer init ThreadPool failed");
-    RTP_LLM_LOG_INFO("normal cache store init done");
-}
-
-DecodeRpcServer::~DecodeRpcServer() {
-    if (thread_pool_) {
-        thread_pool_->stop();
-        thread_pool_.reset();
-    }
-}
-
-void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    decode_context.time_info.updateRequestBegineTime();
-    auto& allocate_request = decode_context.allocate_request;
-    if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
-        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
-        const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
-        RTP_LLM_LOG_WARNING(
-            "request [pending peer=%s] read allocate request failed, cancelled [%d], grpc status code [%d]",
-            peer.c_str(),
-            cancelled ? 1 : 0,
-            static_cast<int>(decode_context.error_status.error_code()));
-        return;
-    }
-    GRPC_RET_IF_ERROR(decode_context,
-                      allocate_request.stage() == RemoteStage::ALLOCATE,
-                      grpc::StatusCode::INTERNAL,
-                      "message first status != RemoteStage::ALLOCATE");
-    decode_context.request_id  = allocate_request.request_id();
-    decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
-
-    for (auto& addr : allocate_request.peer_addrs()) {
-        decode_context.peer_addrs.push_back(addr);
-    }
-    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
-        && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
-        RTP_LLM_CHECK_WITH_INFO(configured_prefill_cp_size > 1,
-                                "decode PREFILL_CP sharded mode requires explicit PREFILL_CP_SIZE");
-        decode_context.prefill_cp_size = static_cast<int32_t>(configured_prefill_cp_size);
-    } else {
-        decode_context.prefill_cp_size = 1;
-    }
-    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
-                      decode_context.request_key.c_str(),
-                      decode_context.prefill_cp_size);
-}
-
-void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    decode_context.request_info = input->request_info;
-    auto generate_stream        = engine_->makeStream(input);
-    decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
-    decode_context.setStream(generate_stream);
-
-    auto cache_manager = engine_->getCacheManager();
-    RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "decode cache manager is null");
-
-    const auto& pd_config            = maga_init_params_.pd_sep_config;
-    const auto  allocation_begin_us  = currentTimeUs();
-    const auto  cancellation_poll_ms = std::max<int64_t>(pd_config.decode_retry_interval_ms, 50);
-
-    auto finish_allocation_error = [&](grpc::StatusCode grpc_code, ErrorCode error_code, const std::string& message) {
-        const std::string error_msg = "request: [" + decode_context.request_key + "] " + message;
-        generate_stream->reportError(error_code, error_msg);
-        // The stream has not entered the scheduler yet, so the RPC thread owns this final transition.
-        // Committing FINISHED here releases any partially allocated resource and prevents stopStream()
-        // from waiting for a scheduler that has never seen the stream.
-        generate_stream->moveToNext();
-        decode_context.error_info   = ErrorInfo(error_code, error_msg);
-        decode_context.error_status = grpc::Status(grpc_code, error_msg);
-        RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
-    };
-
-    int64_t allocation_attempts = 0;
-    while (true) {
-        const auto request_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
-        if (decode_context.request_timeout_ms > 0 && request_cost_ms >= decode_context.request_timeout_ms) {
-            finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
-                                    ErrorCode::GENERATE_TIMEOUT,
-                                    "decode allocation exceeded request timeout");
-            return;
-        }
-        if (decode_context.isRequestCancelled()) {
-            finish_allocation_error(
-                grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode allocation cancelled by client");
-            return;
-        }
-
-        const auto observed_generation = cache_manager->allocationGeneration();
-        auto       allocation_status   = generate_stream->streamCacheResource().initKVBlock();
-        ++allocation_attempts;
-        decode_context.retry_times        = allocation_attempts;
-        decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
-
-        if (allocation_status.ok()) {
-            auto& cache_resource = generate_stream->streamCacheResource();
-            if (cache_resource.asyncLoadCache()) {
-                generate_stream->recordLoadingCacheStartTime();
-                while (true) {
-                    const auto load_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
-                    if (decode_context.isRequestCancelled()) {
-                        finish_allocation_error(
-                            grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode cache load cancelled by client");
-                        return;
-                    }
-                    if (decode_context.request_timeout_ms > 0 && load_cost_ms >= decode_context.request_timeout_ms) {
-                        finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
-                                                ErrorCode::GENERATE_TIMEOUT,
-                                                "decode cache load exceeded request timeout");
-                        return;
-                    }
-                    const auto load_status = cache_resource.pollAllocatorLoad();
-                    if (load_status.has_value()) {
-                        allocation_status = *load_status;
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-                generate_stream->recordLoadingCacheDoneTime();
-            }
-            if (allocation_status.ok()) {
-                // Only committed, materialized cache resources may enter the P/D handoff.
-                generate_stream->reportEvent(StreamEvents::LoadInitiated);
-                break;
-            }
-        }
-
-        if (!absl::IsUnavailable(allocation_status)) {
-            const auto grpc_code = absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
-                                                                                  grpc::StatusCode::INTERNAL;
-            finish_allocation_error(grpc_code, ErrorCode::MALLOC_FAILED, allocation_status.ToString());
-            return;
-        }
-
-        const auto wait_begin_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
-        if (decode_context.isRequestCancelled()
-            || (decode_context.request_timeout_ms > 0 && wait_begin_cost_ms >= decode_context.request_timeout_ms)) {
-            continue;
-        }
-        int64_t wait_ms = cancellation_poll_ms;
-        if (decode_context.request_timeout_ms > 0) {
-            wait_ms = std::min(wait_ms, decode_context.request_timeout_ms - wait_begin_cost_ms);
-        }
-        wait_ms = std::max<int64_t>(wait_ms, 1);
-
-        // Temporary KV pressure is admission backpressure, not a failed RPC stage.  The legacy
-        // DECODE_RETRY_{TIMES,TIMEOUT_MS} limits bound re-execution after stage errors; applying
-        // them here rejects healthy queued requests (the production default is only 100 ms).
-        // Capacity wait therefore follows the request's own deadline/cancellation.  Timed wakeups
-        // only service those stop conditions; a new allocator attempt is made exclusively after
-        // the resource generation changes, avoiding the old 1 ms malloc storm.
-        while (!cache_manager->waitForAllocationChange(
-            observed_generation, wait_ms, allocation_attempts > 1 ? wait_ms : 0)) {
-            const auto now_request_cost_ms    = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
-            decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
-            if (decode_context.isRequestCancelled()
-                || (decode_context.request_timeout_ms > 0
-                    && now_request_cost_ms >= decode_context.request_timeout_ms)) {
-                break;
-            }
-            if (decode_context.request_timeout_ms > 0) {
-                wait_ms = std::min(cancellation_poll_ms, decode_context.request_timeout_ms - now_request_cost_ms);
-            }
-        }
-    }
-
-    GenerateOutputsPB allocate_response;
-    allocate_response.set_supports_prefill_completion(true);
-    GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(allocate_response),
-                      grpc::StatusCode::INTERNAL,
-                      "failed to write allocate output");
-
-    RTP_LLM_LOG_DEBUG("request [%s] allocate resource done", decode_context.request_key.c_str());
-}
-
-void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill", decode_context.request_key.c_str());
-    AtomicGuard       request_guard(loading_cache_requests_);
-    auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
-    GenerateRequestPB load_request;
-    GRPC_RET_IF_ERROR(
-        decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
-    decode_context.time_info.updateLoadBeginTime();
-    auto load_result = loadCacheForAllRank(decode_context);
-    decode_context.time_info.updateLoadEndTime();
-    const auto& error_info      = load_result.error_info;
-    auto&       generate_stream = decode_context.getStream();
-    const bool  use_independent_block_pools =
-        generate_stream->resourceContext().cache_manager->cacheConfig().use_independent_block_pools;
-    const int loaded_reuse_len = markLoadedCacheReuse(
-        generate_stream, load_result, generate_stream->seqSizePerBlock(), use_independent_block_pools);
-    if (loaded_reuse_len > 0) {
-        RTP_LLM_LOG_DEBUG("request [%s] marked completed P/D handoff reuse_len=%d blocks=%zu",
-                          decode_context.request_key.c_str(),
-                          loaded_reuse_len,
-                          load_result.loaded_cache_block_count);
-    }
-    const auto  error_reason = error_info.ok() ? std::string() : ErrorCodeToString(error_info.code());
-    const auto* error_type =
-        error_info.ok() ? nullptr :
-                          phaseErrorType(
-                              /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, grpc::Status::OK);
-    if (!error_info.ok()) {
-        decode_context.error_info = error_info;
-        RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
-                            decode_context.request_key.c_str(),
-                            error_info.ToString().c_str(),
-                            decode_context.time_info.loadCacheTimeMs());
-    }
-    // load_cache child span [load_begin, load_end): decode's KV-arrival wait
-    // window, parallel to the prefill computation (see synthesizeKvLoadSpan).
-    // Synthesized on failure too — CACHE_STORE_LOAD_BUFFER_TIMEOUT lives here
-    // and must show up on the waterfall instead of an unnamed gap.
-    if (decode_context.trace_span_guard && decode_context.trace_span_guard->valid()) {
-        telemetry::synthesizeKvLoadSpan(decode_context.trace_span_guard->sharedSpan(),
-                                        decode_context.time_info.load_begin_time_us,
-                                        decode_context.time_info.load_end_time_us,
-                                        decode_context.request_id,
-                                        error_info.ok(),
-                                        error_type,
-                                        static_cast<int64_t>(error_info.code()),
-                                        error_reason.c_str());
-    }
-
-    GenerateOutputsPB load_response;
-    load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
-    GRPC_RET_IF_ERROR(
-        decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
-    if (!error_info.ok()) {
-        // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
-        // failure point: report to FlexLB immediately. Keep full downstream/topology details in server-side
-        // reporting, but return only the domain code and request correlation id across the client boundary.
-        reportEarlyFinishTask(decode_context,
-                              static_cast<int64_t>(error_info.code()),
-                              "decode load cache from prefill failed: " + error_info.ToString());
-        const auto client_error = cacheLoadClientError(decode_context.request_id, error_info.code());
-        decode_context.error_status =
-            serializeErrorMsg(decode_context.request_key, decode_context.request_info, client_error);
-        return;
-    }
-    RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
-}
-
-void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
-    auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
-    auto&             generate_stream = decode_context.getStream();
-    GenerateRequestPB generate_request;
-    if (!grpc_stream->Read(&generate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
-        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
-        RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
-                            decode_context.request_key.c_str(),
-                            cancelled ? 1 : 0,
-                            static_cast<int>(decode_context.error_status.error_code()));
-        return;
-    }
-    if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
-        GRPC_RET_IF_ERROR(decode_context,
-                          generate_request.request_id() == decode_context.request_id
-                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill completion request identity mismatch");
-        GRPC_RET_IF_ERROR(
-            decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
-        GRPC_RET_IF_ERROR(decode_context,
-                          !decode_context.requestDeadlineExceeded(),
-                          grpc::StatusCode::DEADLINE_EXCEEDED,
-                          "request deadline exhausted");
-        if (!generate_stream->finishWithoutGenerate()) {
-            const auto error            = generate_stream->statusInfo();
-            decode_context.error_status = error.hasError() ?
-                                              serializeErrorMsg(decode_context.request_key, error) :
-                                              grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                                                           "decode stream cannot complete before generation");
-        }
-        return;
-    }
-    GRPC_RET_IF_ERROR(decode_context,
-                      generate_request.stage() == RemoteStage::GENERATE,
-                      grpc::StatusCode::INTERNAL,
-                      "message first status != RemoteStage::GENERATE");
-    decode_context.time_info.updateGenerateBeginTime();
-    generate_stream->setIsContextStream(false);
-    generate_stream->step();
-
-    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
-
-    new_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
-    generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens,
-                             1,
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor()});
-    if (generate_request.position_ids_size() > 0) {
-        auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
-                                                     {(int64_t)generate_request.position_ids_size()},
-                                                     torch::kInt32)
-                                        .clone();
-        generate_stream->setContextPositionIds(context_position_ids);
-    }
-    if (!propose_maga_init_params_) {
-        generate_stream->markGrpcNormalDeviceStatePending();
-    }
-    if (propose_maga_init_params_) {
-        // gRPC handler threads default to CUDA device 0; pin allocations below
-        // to this worker's device so local_rank>0 workers don't place the MTP
-        // device-state tensors on the wrong GPU.
-        c10::DeviceGuard device_guard(torch::Device(
-            torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
-        RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
-        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
-            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
-                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
-                                    propose_step,
-                                    maga_init_params_.sp_config.gen_num_per_cycle);
-        }
-
-        std::vector<int> propose_tokens;
-        propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
-        // the decode round head produces the first one. Traditional MTP/Eagle
-        // retain their target+draft handoff contract.
-        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
-                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
-                                propose_tokens.size(),
-                                static_cast<int>(engine_->isDSpark()));
-        generate_stream->initSpeculativeHandoffPositions();
-        if (!propose_tokens.empty()) {
-            generate_stream->setContainProposeToken(true);
-            generate_stream->setProposeToken(propose_tokens);
-
-            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-            sp_output_buffer->propose_step = propose_step;
-            sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
-                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            memcpy(
-                sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
-
-            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
-
-            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
-
-            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len                      = torch::ones({1}, cuda_i32);
-            auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-            accept_tokens[0][0]                  = sp_output_buffer->tokens[0][0];
-            sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
-
-            auto next_seq_len = torch::ones({1}, cuda_i32);
-            next_seq_len[0]   = generate_stream->seqLength();
-
-            generate_stream->setSPOutputBuffer(sp_output_buffer);
-            // The per-step refresher (MtpExecutor's device-state publish) is gated
-            // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
-            // this static snapshot without those pipelines active would leave a
-            // stale next_seq_len_upper_bound that overrides incrKVBlock forever (same
-            // failure mode as the normal-decode grpc device state).
-            auto env_on = [](const char* name) {
-                const char* value = std::getenv(name);
-                return value != nullptr && std::string(value) == "1";
-            };
-            if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
-                generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                    .epoch                        = 0,
-                    .accept_len_gpu               = std::move(accept_len),
-                    .accept_tokens_gpu            = std::move(accept_tokens),
-                    .next_seq_len_gpu             = std::move(next_seq_len),
-                    .propose_tokens_gpu           = std::move(propose_tokens_gpu),
-                    .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
-                    .draft_all_probs_gpu          = sp_output_buffer->all_probs,
-                    .previous_seq_len_upper_bound = generate_stream->seqLength(),
-                    .next_seq_len_upper_bound     = generate_stream->seqLength(),
-                });
-            }
-        }
-    }
-
-    generate_stream->resetBeginTime(currentTimeUs());
-    RTP_LLM_LOG_DEBUG(
-        "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
-    engine_->enqueue(generate_stream);
-    if (generate_stream->hasError()) {
-        decode_context.error_status = serializeErrorMsg(decode_context.request_key, generate_stream->statusInfo());
-        return;
-    }
-    RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
-    decode_context.error_status =
-        pollStreamOutput(decode_context.server_context,
-                         decode_context.request_key,
-                         dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
-                         generate_stream);
-    decode_context.time_info.updateGenerateEndTime();
-    meta_->dequeue(decode_context.request_id, decode_context.getStream());
-
-    RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
-}
-
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
-    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
-    BroadcastLoadRequestPB request;
-    request.set_request_id(load_context.request_id);
-    request.set_request_key(load_context.request_key);
-    request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    request.set_partition_count(1);
-    request.set_partition_id(0);
-    request.set_prefill_cp_size(load_context.prefill_cp_size);
-
-    if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: every decode rank must pull the shard owned by
-        // every prefill CP peer.
-        for (const auto& addr : peer_addrs) {
-            request.add_peer_addrs(addr);
-        }
-    } else if (resource_.workers.size() % peer_addrs.size() == 0) {
-        // D >= P
-        int part_cnt = resource_.workers.size() / peer_addrs.size();
-        request.add_peer_addrs(peer_addrs[index / part_cnt]);
-    } else {
-        // P >= D, load multi block of prefill
-        int group_num = peer_addrs.size() / resource_.workers.size();
-        request.add_peer_addrs(peer_addrs[index * group_num]);
-    }
-    for (auto& cache_key : load_context.cache_keys) {
-        request.add_cache_keys(cache_key);
-    }
-    if (!load_context.block_ids_by_group.empty()) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
-    }
-    request.set_reuse_block_size(load_context.reuse_block_size);
-    request.set_timeout_ms(load_context.timeout_ms);
-    return request;
-}
-
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                                   int                             index,
-                                                                   const std::vector<std::string>& peer_addrs) const {
-    BroadcastLoadRequestPB request;
-    request.set_request_id(load_context.request_id);
-    request.set_request_key(load_context.request_key);
-    request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    request.set_prefill_cp_size(load_context.prefill_cp_size);
-    if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: each peer owns a page-level or in-page shard.
-        // Keep one logical partition and let loadCache route groups/blocks to
-        // the owning peer.
-        request.set_partition_count(1);
-        request.set_partition_id(0);
-        for (const auto& addr : peer_addrs) {
-            request.add_peer_addrs(addr);
-        }
-    } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        // Prefill worker has full KV cache on each rank.
-        int part_cnt = resource_.workers.size();
-        int peer_cnt = peer_addrs.size();
-        request.set_partition_count(part_cnt);
-        request.set_partition_id(index % part_cnt);
-        request.add_peer_addrs(peer_addrs[index % peer_cnt]);
-    } else {
-        if (resource_.workers.size() % peer_addrs.size() == 0) {
-            // D >= P, load part block of prefill
-            int part_cnt = resource_.workers.size() / peer_addrs.size();
-            request.set_partition_count(part_cnt);
-            request.set_partition_id(index % part_cnt);
-            request.add_peer_addrs(peer_addrs[index / part_cnt]);
-        } else {
-            // P >= D, load multi block of prefill
-            request.set_partition_count(1);
-            request.set_partition_id(0);
-            int group_num = peer_addrs.size() / resource_.workers.size();
-            for (int i = 0; i < group_num; i++) {
-                request.add_peer_addrs(peer_addrs[index * group_num + i]);
-            }
-        }
-    }
-
-    for (auto& cache_key : load_context.cache_keys) {
-        request.add_cache_keys(cache_key);
-    }
-    // Prefer per-group block ids if available (hybrid KV cache).
-    if (!load_context.block_ids_by_group.empty()) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
-    }
-    request.set_reuse_block_size(load_context.reuse_block_size);
-    request.set_timeout_ms(load_context.timeout_ms);
-    return request;
-}
-
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    auto*       generate_stream    = decode_context.getStream().get();
-    auto&       cache_keys         = generate_stream->cacheKeys(0);
-    const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
-
-    const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
-    if (!topology_error.ok()) {
-        RTP_LLM_LOG_WARNING("request:[%s] invalid remote load topology: peer count=%zu worker count=%zu error=%s",
-                            decode_context.request_key.c_str(),
-                            decode_context.peer_addrs.size(),
-                            resource_.workers.size(),
-                            topology_error.ToString().c_str());
-        return {topology_error, 0};
-    }
-
-    auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
-    load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
-    auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto request_timeout_ms    = decode_context.request_timeout_ms;
-    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
-    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
-    // (<= 0 means unlimited for that knob).
-    int64_t min_timeout_ms = load_cache_timeout_ms;
-    if (max_rpc_timeout_ms > 0) {
-        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
-    }
-    if (request_timeout_ms > 0) {
-        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
-    }
-
-    LoadKVCacheContext load_context{decode_context.request_id,
-                                    decode_context.request_key,
-                                    decode_context.peer_addrs,
-                                    cache_keys,
-                                    block_ids_by_group,
-                                    generate_stream->reuseBlockSize(),
-                                    min_timeout_ms,
-                                    1,
-                                    0,
-                                    decode_context.server_context,
-                                    decode_context.prefill_cp_size};
-
-    // Prefill: TP = 1 && Decode: TP = 1
-    if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
-        for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
-            auto load_result = loadCache(load_context);
-            if (load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
-                && load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
-                return load_result;
-            }
-        }
-    }
-
-    return loadCacheAsyncForTp(decode_context, load_context);
-}
-
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
-                                                                      LoadKVCacheContext&    load_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    int64_t load_cache_begin_time_us = currentTimeUs();
-
-    struct WorkerRpcContext {
-        WorkerRpcContext() {
-            client_context = make_shared<ClientContext>();
-        }
-        BroadcastLoadResponsePB           response;
-        Status                            status;
-        std::shared_ptr<RpcService::Stub> stub;
-        std::shared_ptr<ClientContext>    client_context;
-    };
-
-    const size_t             worker_size = resource_.grpc_workers.size();
-    vector<WorkerRpcContext> all_context(worker_size);
-    const auto               expected_response_counts = completionQueueExpectedResponseCounts(worker_size);
-    vector<CompletionQueue>  completion_queues(expected_response_counts.size());
-    vector<size_t>           each_finished_count(expected_response_counts.size(), 0);
-    const size_t             cq_size = completion_queues.size();
-    if (worker_size == 0 || cq_size == 0) {
-        RTP_LLM_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %zu, cq size = %zu",
-                            decode_context.request_key.c_str(),
-                            worker_size,
-                            cq_size);
-        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker size or cq size is 0"), 0};
-    }
-    RTP_LLM_LOG_DEBUG("request:[%s] start to async remote load for all rank", decode_context.request_key.c_str());
-    for (size_t i = 0; i < worker_size; i++) {
-        auto& worker         = resource_.grpc_workers[i];
-        auto  connect_status = resource_.rpc_pool.getConnection(worker);
-        if (!connect_status.ok()) {
-            const auto peer_addr =
-                static_cast<size_t>(i) < decode_context.peer_addrs.size() ? decode_context.peer_addrs[i] : "<missing>";
-            string error_msg = "request [" + decode_context.request_key + "] get grpc connection failed: rank="
-                               + std::to_string(i) + ", worker=" + worker + ", peer=" + peer_addr;
-            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-            return {ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg), 0};
-        }
-        auto& rpc_context = all_context[i];
-        rpc_context.stub  = connect_status.value().stub;
-        BroadcastLoadRequestPB load_request;
-
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
-            load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
-        } else {
-            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
-        }
-        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
-            rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
-        reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
-    }
-
-    bool                all_success               = true;
-    size_t              finished_count            = 0;
-    auto                total_timeout_ms          = load_context.timeout_ms + EXTRA_TIMEOUT_MS;
-    ErrorCode           error_code                = ErrorCode::NONE_ERROR;
-    std::string         error_msg                 = "failed to load kv cache in rank: ";
-    int64_t             min_response_done_time_us = 1lu << 60;
-    int64_t             max_response_done_time_us = 0;
-    std::vector<size_t> rank_loaded_cache_block_counts;
-    rank_loaded_cache_block_counts.reserve(worker_size);
-    while (true) {
-        RTP_LLM_LOG_DEBUG("request [%s] load cache loop step", decode_context.request_key.c_str());
-        auto cost_time_ms = (currentTimeUs() - load_cache_begin_time_us) / 1000;
-        if (cost_time_ms > total_timeout_ms) {
-            error_msg = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
-                        + "ms, "
-                          "total timeout for load cache is "
-                        + std::to_string(total_timeout_ms) + "ms, finished=" + std::to_string(finished_count) + "/"
-                        + std::to_string(worker_size) + ", request=" + decode_context.request_key;
-            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-            return {ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, error_msg), 0};
-        }
-        if (load_context.server_context->IsCancelled()) {
-            string error_msg = "load cache cancelled: request=" + decode_context.request_key
-                               + ", finished=" + std::to_string(finished_count) + "/" + std::to_string(worker_size)
-                               + ", cost_ms=" + std::to_string(cost_time_ms);
-            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-            return {ErrorInfo(ErrorCode::CANCELLED, error_msg), 0};
-        }
-        auto once_deadline =
-            std::chrono::system_clock::now()
-            + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms);
-        RTP_LLM_LOG_DEBUG("request [%s] start to execute async next", decode_context.request_key.c_str());
-        // TODO(xinfei.sxf) There is a problem with complete queue next call delay here, the reason is yet to be
-        // investigated
-        void* got_tag;
-        bool  ok = false;
-        for (size_t i = 0; i < completion_queues.size(); i++) {
-            if (each_finished_count[i] == expected_response_counts[i]) {
-                continue;
-            }
-            if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
-                == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                RTP_LLM_LOG_DEBUG("request [%s] async next timeout", decode_context.request_key.c_str());
-                continue;
-            }
-            each_finished_count[i]++;
-            if (!ok) {
-                string error_msg = "grpc completion queue event failed: request=" + decode_context.request_key
-                                   + ", cq=" + std::to_string(i) + ", finished=" + std::to_string(finished_count) + "/"
-                                   + std::to_string(worker_size) + ", cost_ms=" + std::to_string(cost_time_ms);
-                RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-                return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg), 0};
-            }
-            auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
-            const auto& status           = all_context[rank].status;
-            const auto& response         = all_context[rank].response;
-            const auto& pb_error_code    = response.error_info().error_code();
-            const auto& pb_error_message = response.error_info().error_message();
-            min_response_done_time_us    = std::min(min_response_done_time_us, response.done_time_us());
-            max_response_done_time_us    = std::max(max_response_done_time_us, response.done_time_us());
-            RTP_LLM_LOG_DEBUG("request [%s] load cache for rank [%d] done", decode_context.request_key.c_str(), rank);
-            if (!status.ok()) {
-                all_success             = false;
-                error_code              = ErrorCode::LOAD_KV_CACHE_FAILED;
-                const auto& worker_addr = resource_.grpc_workers.at(rank);
-                const auto  peer_addr =
-                    rank < decode_context.peer_addrs.size() ? decode_context.peer_addrs[rank] : "<missing>";
-                error_msg +=
-                    "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr + ", cq="
-                    + std::to_string(i) + ", grpc_code=" + std::to_string(static_cast<int>(status.error_code()))
-                    + ", grpc_message=" + status.error_message() + ", grpc_details=" + status.error_details() + "; ";
-            } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
-                all_success             = false;
-                error_code              = transRPCErrorCode(pb_error_code);
-                const auto& worker_addr = resource_.grpc_workers.at(rank);
-                const auto  peer_addr =
-                    rank < decode_context.peer_addrs.size() ? decode_context.peer_addrs[rank] : "<missing>";
-                error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
-                             + ", cq=" + std::to_string(i) + ", remote_code=" + std::to_string(pb_error_code)
-                             + ", remote_message=" + pb_error_message + "; ";
-            } else if (response.loaded_cache_block_count() < 0
-                       || static_cast<size_t>(response.loaded_cache_block_count()) > load_context.cache_keys.size()) {
-                all_success = false;
-                error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
-                error_msg += "rank=" + std::to_string(rank) + ", invalid loaded_cache_block_count="
-                             + std::to_string(response.loaded_cache_block_count()) + "; ";
-            } else {
-                rank_loaded_cache_block_counts.push_back(static_cast<size_t>(response.loaded_cache_block_count()));
-            }
-            finished_count++;
-            if (finished_count == worker_size) {
-                break;
-            }
-        }
-        if (finished_count == worker_size) {
-            break;
-        }
-    }
-
-    for (auto& completion_queue : completion_queues) {
-        completion_queue.Shutdown();
-    }
-
-    if (finished_count != worker_size) {
-        all_success = false;
-    }
-    if (!all_success) {
-        RTP_LLM_LOG_WARNING("request [%s] async TP load cache failed: finished=%zu/%zu, cost_ms=%ld, error=%s",
-                            decode_context.request_key.c_str(),
-                            finished_count,
-                            worker_size,
-                            (currentTimeUs() - load_cache_begin_time_us) / 1000,
-                            error_msg.c_str());
-        return {ErrorInfo(error_code, error_msg), 0};
-    }
-
-    decode_context.stat_info.load_cache_min_rt_us       = min_response_done_time_us - load_cache_begin_time_us;
-    decode_context.stat_info.load_cache_max_rt_us       = max_response_done_time_us - load_cache_begin_time_us;
-    decode_context.stat_info.load_cache_polling_cost_us = currentTimeUs() - max_response_done_time_us;
-
-    RTP_LLM_LOG_DEBUG("load_cache_min_rt_us = %ld, load_cache_max_rt_us = %ld, load_cache_polling_cost_us = %ld",
-                      decode_context.stat_info.load_cache_min_rt_us,
-                      decode_context.stat_info.load_cache_max_rt_us,
-                      decode_context.stat_info.load_cache_polling_cost_us);
-
-    return {ErrorInfo::OkStatus(), minLoadedCacheBlockCount(rank_loaded_cache_block_counts)};
-}
-
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key   = load_context.request_key;
-    auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    auto        layer_num     = maga_init_params_.model_config_.num_layers;
-
-    const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
-    RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
-
-    const bool   use_mla             = cache_config.use_mla;
-    const bool   use_hybrid          = cache_config.groupNums() > 1;
-    const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
-    const auto&  spec                = cache_config.specForGroup(0);
-    const size_t k_total_bytes       = spec->k_block_size_bytes();
-    const size_t v_total_bytes       = spec->v_block_size_bytes();
-
-    if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                k_total_bytes,
-                                peer_cnt);
-        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                v_total_bytes,
-                                peer_cnt);
-    }
-
-    auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
-    auto start_load_time_us = currentTimeUs();
-    std::vector<std::pair<std::string, std::shared_ptr<LoadContext>>> load_contexts;
-    std::vector<size_t> required_cache_key_counts(load_context.cache_keys.size(), 0);
-    std::vector<size_t> transferred_cache_key_counts(load_context.cache_keys.size(), 0);
-    auto                buffersDebugInfos = [](const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {
-        std::vector<std::string> debug_infos;
-        debug_infos.reserve(buffers.size());
-        for (const auto& buffer : buffers) {
-            debug_infos.push_back(buffer == nullptr ? "null" : buffer->debugInfo());
-        }
-        return debug_infos;
-    };
-    const bool is_page_level_rr = load_context.prefill_cp_size > 1
-                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
-        std::vector<int> layer_gids;
-        if (use_hybrid) {
-            const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-            RTP_LLM_CHECK_WITH_INFO(layer_id < layer_group_ids.size(),
-                                    "hybrid cache layer %zu missing layer_to_group_ids, size=%zu",
-                                    layer_id,
-                                    layer_group_ids.size());
-            RTP_LLM_CHECK_WITH_INFO(
-                !layer_group_ids[layer_id].empty(), "hybrid cache layer %zu has empty layer_to_group_ids", layer_id);
-            layer_gids = layer_group_ids[layer_id];
-        } else {
-            layer_gids.push_back(0);
-        }
-        return layer_gids;
-    };
-    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, size_t gid) {
-        if (use_hybrid && static_cast<int>(gid) < cfg.groupNums()) {
-            return cfg.typeForGroup(gid);
-        }
-        return CacheGroupType::FULL;
-    };
-    auto groupTag = [](const CacheConfig& cfg, size_t gid) -> std::string {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(gid) < cfg.groupNums(),
-                                "cache group id out of range: gid=%zu group_num=%d",
-                                gid,
-                                cfg.groupNums());
-        return cfg.tagForGroup(gid);
-    };
-    auto cpMapperForGroup = [&](const CacheConfig& cfg, size_t gid) {
-        return CPSlotMapper(load_context.prefill_cp_size - 1,
-                            load_context.prefill_cp_size,
-                            static_cast<int>(cfg.seqSizePerBlockForGroup(gid)));
-    };
-    auto groupUsesCpSlice = [&](const CacheConfig& cfg, size_t gid) {
-        if (load_context.prefill_cp_size <= 1 || static_cast<int>(gid) >= cfg.groupNums()) {
-            return false;
-        }
-        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
-    };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!is_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
-        // Some specs are CP-sliced inside one logical block on prefill, while
-        // decode still owns the full block. Pull every peer slice and place it
-        // into the destination offset declared by the spec.
-        return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
-    };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
-        if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
-            return true;
-        }
-        return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
-    };
-    auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
-                                         const CacheConfig&     cfg,
-                                         size_t                 gid,
-                                         int                    peer_idx) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-            return parts;
-        }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
-    };
-    // One projection shared by the main model and MTP, mirroring the producer.
-    auto groupLoadPlan = [&](const CacheConfig& cfg, bool cfg_use_hybrid, size_t gid, size_t local_block_num) {
-        return buildGroupLoadPlan(cfg.policyForGroup(gid),
-                                  local_block_num,
-                                  load_context.cache_keys.size(),
-                                  static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
-                                  cfg_use_hybrid,
-                                  cfg.seqSizePerBlockForGroup(gid),
-                                  cfg.seq_size_per_block);
-    };
-    for (int i = 0; i < load_context.peer_addrs.size(); i++) {
-        auto&                                            peer_addr = load_context.peer_addrs[i];
-        std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
-        RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
-
-        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-            // Some typed-region cache layouts let one logical layer own
-            // multiple groups. Iterate every group the layer owns; other
-            // layouts reduce to the legacy one-gid-per-layer behaviour.
-            std::vector<int> layer_gids = layerGroupIds(cache_config, use_hybrid, layer_id);
-
-            for (int gid_int : layer_gids) {
-                const size_t gid         = static_cast<size_t>(gid_int);
-                const auto   tag         = groupTag(cache_config, gid);
-                auto         request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                auto         load_layer_cache =
-                    std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-
-                RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
-                                        "group id out of range: gid=%zu group_num=%zu",
-                                        gid,
-                                        load_context.block_ids_by_group.size());
-                RTP_LLM_CHECK_WITH_INFO(
-                    load_context.block_ids_by_group[gid] != nullptr, "null group_block: gid=%zu", gid);
-                const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                auto        block_num = block_ids.size();
-                size_t      model_id  = maga_init_params_.model_id;
-
-                CacheGroupType group_type                    = groupType(cache_config, use_hybrid, gid);
-                const auto     load_plan                     = groupLoadPlan(cache_config, use_hybrid, gid, block_num);
-                const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
-                    cache_config.seqSizePerBlockForGroup(gid), cache_config.seq_size_per_block);
-
-                if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
-                    continue;
-                }
-                for (const auto& plan_pair : load_plan) {
-                    const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
-                    const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                        continue;
-                    }
-                    markCacheKeyRange(
-                        required_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block);
-                    auto block_id = block_ids[block_pos];
-                    if (isNullBlockIdx(block_id)) {
-                        continue;
-                    }
-                    auto cache_key =
-                        makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
-
-                    const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
-                    const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
-                    std::vector<BlockInfo> parts;
-                    if (use_whole_kv_block) {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
-                    } else {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
-                    }
-
-                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
-                    auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
-                        RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
-                        RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                        RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_READ_BLOCK key=%s request_id=%ld tag=%s layer=%zu "
-                                          "peer_idx=%d peer=%s cp_size=%d block_pos=%zu key_index=%zu block_id=%d "
-                                          "addr=%p len=%zu",
-                                          key.c_str(),
-                                          static_cast<long>(load_context.request_id),
-                                          tag.c_str(),
-                                          layer_id,
-                                          i,
-                                          peer_addr.c_str(),
-                                          load_context.prefill_cp_size,
-                                          block_pos,
-                                          cache_key_index,
-                                          block_id,
-                                          block.addr,
-                                          block.size_bytes);
-                        std::shared_ptr<void> addr(block.addr, [](void*) {});
-                        load_layer_cache->addBlock(
-                            key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
-                    };
-
-                    if (use_kv_key_prefix) {
-                        RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
-                                                "unexpected mla convertIndexToBuffer parts size=%zu",
-                                                parts.size());
-                        addBufBlock("kv_" + cache_key, parts[0]);
-                        if (parts.size() == 2) {
-                            addBufBlock("kv_scale_" + cache_key, parts[1]);
-                        }
-                    } else {
-                        RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
-                                                "unexpected convertIndexToBuffer parts size=%zu",
-                                                parts.size());
-                        addBufBlock("k_" + cache_key, parts[0]);
-                        addBufBlock("v_" + cache_key, parts[1]);
-                        if (parts.size() == 4) {
-                            addBufBlock("k_scale_" + cache_key, parts[2]);
-                            addBufBlock("v_scale_" + cache_key, parts[3]);
-                        }
-                    }
-                    markCacheKeyRange(
-                        transferred_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block);
-                }
-                layer_caches.push_back(load_layer_cache);
-            }
-        }
-
-        if (engine_->isMTPEagle()) {
-            if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
-                && !propose_maga_init_params_->mtp_model_params_->empty()) {
-                const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
-                if (mtp_load_plan.empty()) {
-                    return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
-                }
-
-                for (const auto& module_plan : mtp_load_plan) {
-                    const size_t            mtp_model_id           = module_plan.module_index;
-                    const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
-
-                    const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
-                    const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
-
-                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
-                                            "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
-                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
-                                                + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-
-                    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                        const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
-
-                        // Same multi-group iteration as the main path.
-                        std::vector<int> mtp_layer_gids = layerGroupIds(mtp_cache_cfg, mtp_use_hybrid, layer_id);
-
-                        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-                            static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
-                            static_cast<int>(mtp_model_id),
-                            static_cast<uint32_t>(layer_num),
-                            static_cast<int>(layer_id));
-                        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                                "invalid decode MTP global layer: main=%ld module=%zu "
-                                                "module_layers=%zu local=%zu",
-                                                maga_init_params_.model_config_.num_layers,
-                                                mtp_model_id,
-                                                layer_num,
-                                                layer_id);
-
-                        for (int gid_int : mtp_layer_gids) {
-                            const size_t gid         = static_cast<size_t>(gid_int);
-                            const auto   tag         = groupTag(mtp_cache_cfg, gid);
-                            auto         request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                            auto         load_layer_cache = std::make_shared<RequestBlockBuffer>(
-                                std::to_string(load_context.request_id), request_key);
-
-                            RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
-                                                    "mtp group id out of range: gid=%zu group_num=%zu",
-                                                    gid,
-                                                    load_context.block_ids_by_group.size());
-                            RTP_LLM_CHECK_WITH_INFO(
-                                load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
-                            const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                            auto        block_num = block_ids.size();
-                            size_t      model_id  = module_plan.cache_model_id;
-
-                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
-                            const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
-                                mtp_cache_cfg.seqSizePerBlockForGroup(gid), mtp_cache_cfg.seq_size_per_block);
-
-                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
-                                continue;
-                            }
-                            for (const auto& plan_pair : load_plan) {
-                                const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
-                                const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                                    continue;
-                                }
-                                markCacheKeyRange(required_cache_key_counts,
-                                                  cache_key_index,
-                                                  block_pos,
-                                                  cache_keys_per_physical_block);
-                                auto block_id = block_ids[block_pos];
-                                if (isNullBlockIdx(block_id)) {
-                                    continue;
-                                }
-                                auto cache_key = makeCacheKey(
-                                    model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
-                                const bool mtp_use_mla = mtp_cache_cfg.use_mla;
-                                const bool mtp_use_kv_key_prefix =
-                                    mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
-                                const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
-                                std::vector<BlockInfo> parts;
-                                if (mtp_use_whole_kv_block) {
-                                    parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
-                                } else {
-                                    parts = cache_manager->convertIndexToBufferByTag(
-                                        block_id, global_layer_id, tag, peer_cnt, i);
-                                }
-
-                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
-                                auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
-                                    RTP_LLM_CHECK_WITH_INFO(
-                                        block.addr != nullptr, "null block addr for key=%s", key.c_str());
-                                    RTP_LLM_CHECK_WITH_INFO(
-                                        block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                                    RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_READ_BLOCK key=%s request_id=%ld tag=%s layer=%zu "
-                                                      "model_id=%zu mtp_module=%zu peer_idx=%d peer=%s cp_size=%d "
-                                                      "block_pos=%zu key_index=%zu block_id=%d addr=%p len=%zu",
-                                                      key.c_str(),
-                                                      static_cast<long>(load_context.request_id),
-                                                      tag.c_str(),
-                                                      layer_id,
-                                                      model_id,
-                                                      mtp_model_id,
-                                                      i,
-                                                      peer_addr.c_str(),
-                                                      load_context.prefill_cp_size,
-                                                      block_pos,
-                                                      cache_key_index,
-                                                      block_id,
-                                                      block.addr,
-                                                      block.size_bytes);
-                                    std::shared_ptr<void> addr(block.addr, [](void*) {});
-                                    load_layer_cache->addBlock(
-                                        key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
-                                };
-
-                                if (mtp_use_kv_key_prefix) {
-                                    RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
-                                                            "unexpected mtp mla convertIndexToBuffer parts size=%zu",
-                                                            parts.size());
-                                    addBufBlock("kv_" + cache_key, parts[0]);
-                                    if (parts.size() == 2) {
-                                        addBufBlock("kv_scale_" + cache_key, parts[1]);
-                                    }
-                                } else {
-                                    RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
-                                                            "unexpected mtp convertIndexToBuffer parts size=%zu",
-                                                            parts.size());
-                                    addBufBlock("k_" + cache_key, parts[0]);
-                                    addBufBlock("v_" + cache_key, parts[1]);
-                                    if (parts.size() == 4) {
-                                        addBufBlock("k_scale_" + cache_key, parts[2]);
-                                        addBufBlock("v_scale_" + cache_key, parts[3]);
-                                    }
-                                }
-                                markCacheKeyRange(transferred_cache_key_counts,
-                                                  cache_key_index,
-                                                  block_pos,
-                                                  cache_keys_per_physical_block);
-                            }
-                            layer_caches.push_back(load_layer_cache);
-                        }
-                    }
-                }
-            } else {
-                return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
-            }
-        }
-
-        auto ip_parts = autil::StringUtil::split(peer_addr, ":");
-        if (ip_parts.size() != 3) {
-            logReadFailures(load_context.request_id,
-                            peer_addr,
-                            ErrorCode::LOAD_KV_CACHE_FAILED,
-                            "invalid_peer",
-                            buffersDebugInfos(layer_caches));
-            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip"), 0};
-        }
-
-        auto layer_cache_load_context =
-            resource_.cache_store->loadBuffers(layer_caches,
-                                               ip_parts[0],
-                                               autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
-                                               autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
-                                               load_context.timeout_ms,
-                                               cancel_check_func,
-                                               load_context.partition_count,
-                                               load_context.partition_id);
-        if (!layer_cache_load_context) {
-            logReadFailures(load_context.request_id,
-                            peer_addr,
-                            ErrorCode::LOAD_KV_CACHE_FAILED,
-                            "null_load_context",
-                            buffersDebugInfos(layer_caches));
-            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed"), 0};
-        }
-        load_contexts.emplace_back(peer_addr, layer_cache_load_context);
-    }
-
-    for (auto& [peer_addr, layer_cache_load_context] : load_contexts) {
-        layer_cache_load_context->waitDone();
-        if (layer_cache_load_context->success()) {
-            RTP_LLM_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
-        } else {
-            // TODO(xinfei.sxf) add retry for part failed blocks.
-            auto       load_done_time_us = currentTimeUs();
-            const auto error_info        = layer_cache_load_context->getErrorInfo();
-            logReadFailures(load_context.request_id,
-                            peer_addr,
-                            error_info.code(),
-                            error_info.ToString(),
-                            layer_cache_load_context->failedBlockDebugInfos());
-            RTP_LLM_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld] ms",
-                                request_key.c_str(),
-                                layer_cache_load_context->getErrorInfoString().c_str(),
-                                (load_done_time_us - start_load_time_us) / 1000);
-            return {error_info, 0};
-        }
-    }
-
-    const size_t already_reused_blocks = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-    return {
-        ErrorInfo::OkStatus(),
-        completedHandoffPrefixBlocks(already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts)};
-}
-
-grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
-                                         const BroadcastLoadRequestPB* request,
-                                         BroadcastLoadResponsePB*      response) {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
-        RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
-        return grpc::Status::OK;
-    }
-
-    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology           = cache_config.topology();
-    GroupBlockIds             block_ids_by_group = decodeGroupBlockIds(*request, topology);
-
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-
-    // TODO(xinfei.sxf) add retry
-    auto load_result = loadCache({request->request_id(),
-                                  request->request_key(),
-                                  peer_addrs,
-                                  cache_keys,
-                                  block_ids_by_group,
-                                  request->reuse_block_size(),
-                                  request->timeout_ms(),
-                                  request->partition_count(),
-                                  request->partition_id(),
-                                  server_context,
-                                  request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
-    response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_result.error_info.code()));
-    response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
-    response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));
-    response->set_done_time_us(currentTimeUs());
-    RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }
 
-GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                   const CacheTopology&          topology) {
-    GroupBlockIds block_ids_by_group(topology.groups().size());
-    for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        const auto group_id = topology.groupIdForTag(tagged_row.tag());
-        RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_group[group_id] == nullptr, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
-        auto holder = std::make_shared<BlockIds>();
-        holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        block_ids_by_group[group_id] = std::move(holder);
+grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
+                                                 const GenerateInputPB*                 request,
+                                                 grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+    struct PrefillContextGuard {
+        std::shared_ptr<PrefillServerCallerContext> context;
+
+        ~PrefillContextGuard() {
+            if (!context) {
+                return;
+            }
+            if (!context->done()) {
+                context->cancel();
+            }
+            context->wait();
+        }
+    };
+
+    const int64_t request_entry_ms          = currentTimeMs();
+    const auto    normalized_timeout_ms     = normalizeRpcTimeoutMs(request->generate_config().timeout_ms(),
+                                                             maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    const auto    normalized_timeout_ms_i32 = clampRpcTimeoutMsToInt32(normalized_timeout_ms);
+
+    // Always isolate decode-entrance P2P handoff from any caller-provided business unique_key.
+    // The external unique_key remains on the original request object, while the internal handoff
+    // request gets a per-request key used only by the prefill/decode P2P pipeline.
+    GenerateInputPB request_with_handoff_key;
+    const auto*     effective_request = request;
+
+    // Check if pd separation should be used
+    // A successful Master batch admission is authoritative: Prefill has
+    // already entered the P2P path, so Decode must attach to that handoff.
+    auto pd_separation = checkPDSupport(*request).supported || request->enqueued_by_master();
+    if (pd_separation) {
+        std::string handoff_unique_key;
+        if (request->enqueued_by_master()) {
+            handoff_unique_key = masterEnqueuedHandoffUniqueKey(request->request_id());
+        } else {
+            const auto handoff_id = unique_key_id_.fetch_add(1);
+            handoff_unique_key = makeDecodeEntranceUniqueKey(autil::NetUtil::getBindIp(), handoff_id, currentTimeUs());
+        }
+        request_with_handoff_key = makeDecodeEntranceHandoffRequest(*request, handoff_unique_key);
+        request_with_handoff_key.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
+        effective_request = &request_with_handoff_key;
     }
-    RTP_LLM_CHECK_WITH_INFO(
-        std::all_of(block_ids_by_group.begin(), block_ids_by_group.end(), [](const auto& value) { return value; }),
-        "RPC cache tag set does not match local topology");
-    return block_ids_by_group;
+    if (!pd_separation) {
+        RTP_LLM_LOG_DEBUG("pd separation is disabled, call prefill server");
+        GenerateInputPB prefill_forward_request;
+        prefill_forward_request.CopyFrom(*effective_request);
+        prefill_forward_request.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
+        return prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
+    }
+
+    AtomicGuard request_guard(onflight_requests_);
+    auto        request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    PDCancelRegistry::Handle cancel_handle;
+    auto                     admission = cancel_registry_->admit(*effective_request,
+                                             effective_request->generate_config().unique_key(),
+                                             prefillAddress(*effective_request),
+                                             request_entry_ms + normalized_timeout_ms,
+                                             cancel_handle);
+    if (!admission.ok())
+        return serializeErrorMsg(std::to_string(request_id), admission);
+    PDCancelRegistry::CallGuard cancel_guard(*cancel_registry_, cancel_handle);
+    auto                        generate_context =
+        GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
+    struct PrefillCancelGuard {
+        PDCancelRegistry&        registry;
+        PDCancelRegistry::Handle handle;
+        GenerateContext&         context;
+        bool                     completed{false};
+        void                     cancel() {
+            auto reason = errorInfoFromGrpcStatus(context.error_status);
+            if (!reason.hasError())
+                reason = {ErrorCode::CANCELLED, "PD request abandoned before completion"};
+            registry.cancel(handle->identity.request_id, reason);
+        }
+        ~PrefillCancelGuard() {
+            if (!completed)
+                cancel();
+        }
+    } prefill_cancel_guard{*cancel_registry_, cancel_handle, generate_context};
+    std::shared_ptr<GenerateInput> input;
+    GenerateInputPB                prefill_request;
+    PrefillPeerInfo                peer_info;
+    const auto                     prepare_start_us = currentTimeUs();
+    auto                           prepare_status   = preparePDRequest(
+        *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
+    {
+        RpcMetricsCollector collector;
+        collector.min_response_done_time_us      = 0;
+        collector.prepare_generate_context_rt_us = currentTimeUs() - prepare_start_us;
+        generate_context.reportMetrics(collector);
+    }
+    if (!prepare_status.ok()) {
+        generate_context.error_status = prepare_status;
+        return prepare_status;
+    }
+    if (cancel_handle->canceled.load()) {
+        generate_context.error_info   = cancel_handle->cancel_reason;
+        generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
+        return generate_context.error_status;
+    }
+    auto stream = engine_->makeStream(input);
+    stream->setPrefillTpSize(peer_info.tp_size);
+    stream->setPrefillCpSize(peer_info.cp_size);
+    generate_context.setStream(stream);
+    cancel_registry_->attach(cancel_handle, stream);
+
+    std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
+    PrefillContextGuard                         prefill_context_guard;
+    if (!request->enqueued_by_master()) {
+        if (cancel_handle->canceled.load()) {
+            engine_->enqueue(stream);  // Let the scheduler commit canceled lifecycle cleanup.
+            generate_context.error_info   = cancel_handle->cancel_reason;
+            generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
+            return generate_context.error_status;
+        }
+        const auto& unique_key          = input->generate_config->unique_key;
+        const auto  request_deadline_ms = input->request_deadline_ms;
+        // The frontend owns Prefill selection. Use the same endpoint as the peer-info probe.
+        std::string target_ip;
+        uint32_t    target_port  = 0;
+        auto        parse_status = parsePrefillDpAddr(prefillAddress(prefill_request), &target_ip, &target_port);
+        if (!parse_status.ok()) {
+            return parse_status;
+        }
+        const auto prefill_call_start_us = currentTimeUs();
+        auto       started               = prefill_server_caller_->callPrefill(
+            &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+        {
+            RpcMetricsCollector collector;
+            collector.min_response_done_time_us = 0;
+            collector.remote_generate_rt_us     = currentTimeUs() - prefill_call_start_us;
+            generate_context.reportMetrics(collector);
+        }
+        if (!started.ok()) {
+            generate_context.error_info   = started.status();
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
+            return generate_context.error_status;
+        }
+        prefill_caller_ctx            = std::move(started.value());
+        prefill_context_guard.context = prefill_caller_ctx;
+    }
+
+    engine_->enqueue(stream);
+
+    // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
+    // decode stream, so client output must come exclusively from pollStreamOutput().
+    if (prefill_caller_ctx) {
+        generate_context.error_status = pollStreamOutput(server_context,
+                                                         generate_context.request_key,
+                                                         response_writer,
+                                                         generate_context.getStream(),
+                                                         [&](bool& done) {
+                                                             done = prefill_caller_ctx->done();
+                                                             return prefill_caller_ctx->firstError();
+                                                         });
+    } else {
+        // Prefill was admitted by Master. Decode still enters the normal
+        // engine path, which starts StartLoad/asyncRead for this handoff key.
+        generate_context.error_status = pollStreamOutput(
+            server_context, generate_context.request_key, response_writer, generate_context.getStream());
+    }
+    prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
+                                     && stream->getStatus() == StreamState::FINISHED;
+    if (prefill_cancel_guard.completed)
+        cancel_registry_->finishDownstream(cancel_handle);
+    else
+        prefill_cancel_guard.cancel();
+    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+
+    if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
+        prefill_caller_ctx->cancel();
+    }
+    return generate_context.error_status;
 }
 
-// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
-// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
-// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
-// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
-// (e.g. allocateResource), only from final failure points after retries are exhausted.
-void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
-                                            int64_t                error_code,
-                                            const std::string&     error_message) {
-    if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
-        return;
+void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {
+    auto       first_token_rt_us = stream->getTimeInfo().first_token_rt_us;
+    auto       cost_time_us      = autil::TimeUtility::currentTimeInMicroSeconds() - stream->beginTimeUs();
+    const auto reuse_lens        = getPrefillReuseLens(stream);
+
+    for (size_t i = 0; i < outputs_pb.flatten_output().aux_info_size(); i++) {
+        auto       aux_info                = outputs_pb.mutable_flatten_output()->mutable_aux_info(i);
+        const auto decode_total_reuse_len  = aux_info->total_reuse_len();
+        const auto decode_local_reuse_len  = aux_info->local_reuse_len();
+        const auto decode_remote_reuse_len = aux_info->remote_reuse_len();
+        const auto decode_memory_reuse_len = aux_info->memory_reuse_len();
+        const auto decode_disk_reuse_len   = aux_info->disk_reuse_len();
+        aux_info->set_first_token_cost_time_us(first_token_rt_us);
+        aux_info->set_cost_time_us(cost_time_us);
+        aux_info->set_pd_sep(true);
+
+        const bool expose_decode_reuse =
+            stream->prefillUsesIndependentBlockPools() && decode_total_reuse_len > reuse_lens.total;
+        aux_info->set_total_reuse_len(expose_decode_reuse ? decode_total_reuse_len : reuse_lens.total);
+        aux_info->set_local_reuse_len(expose_decode_reuse ? decode_local_reuse_len : reuse_lens.local);
+        aux_info->set_remote_reuse_len(expose_decode_reuse ? decode_remote_reuse_len : reuse_lens.remote);
+        aux_info->set_memory_reuse_len(expose_decode_reuse ? decode_memory_reuse_len : reuse_lens.memory);
+        aux_info->set_disk_reuse_len(expose_decode_reuse ? decode_disk_reuse_len : reuse_lens.disk);
+
+        aux_info->set_prefill_total_reuse_len(reuse_lens.total);
+        aux_info->set_prefill_local_reuse_len(reuse_lens.local);
+        aux_info->set_prefill_remote_reuse_len(reuse_lens.remote);
+        aux_info->set_prefill_memory_reuse_len(static_cast<int32_t>(reuse_lens.memory));
+        aux_info->set_prefill_disk_reuse_len(static_cast<int32_t>(reuse_lens.disk));
+
+        aux_info->set_decode_total_reuse_len(decode_total_reuse_len);
+        aux_info->set_decode_local_reuse_len(decode_local_reuse_len);
+        aux_info->set_decode_remote_reuse_len(decode_remote_reuse_len);
+        aux_info->set_decode_memory_reuse_len(decode_memory_reuse_len);
+        aux_info->set_decode_disk_reuse_len(decode_disk_reuse_len);
     }
-    decode_context.early_finish_reported = true;
-    auto& stream                         = decode_context.getStream();
-    meta_->finishTask(decode_context.request_id,
-                      stream ? stream->inputLength() : 0,
-                      /*prefix_length=*/0,
-                      error_code,
-                      error_message);
-    RTP_LLM_LOG_DEBUG("request [%s] reported early finished task to master, error_code [%ld]",
-                      decode_context.request_key.c_str(),
-                      error_code);
-}
-
-grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
-    RTP_LLM_PROFILE_FUNCTION();
-    c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    DecodeRpcContext   rpc_context{grpc_stream};
-    // TODO(xinfei.sxf) request id is 0 here
-    auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
-    decode_context.onflight_requests = &onflight_requests_;
-    decode_context.loading_cache_requests = &loading_cache_requests_;
-
-    // Decode SERVER span: wrapping the handler covers the whole decode
-    // lifecycle of this request; RemoteLoad fan-out stays span-free
-    // (aggregate attribute strategy). RAII guard covers all exit paths.
-    if (telemetry::TelemetryRuntime::isActive()) {
-        auto span = telemetry::startRpcServerSpan(
-            "rtp_llm.decode_remote_generate", server_context, true, "RpcService/RemoteGenerate");
-        decode_context.trace_span_guard =
-            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &decode_context.error_status);
-    }
-    telemetry::PhaseSpanSynthesisScope phase_span_scope([&decode_context](bool exception_unwinding) {
-        if (!decode_context.trace_span_guard || !decode_context.trace_span_guard->valid()) {
-            return;
-        }
-        auto& stream = decode_context.getStream();
-        if (!stream) {
-            return;
-        }
-        const auto             time_info  = stream->getTimeInfo();
-        const bool             request_ok = decode_context.error_status.ok() && !exception_unwinding;
-        telemetry::PhaseTiming phase_timing;
-        phase_timing.begin_time_us           = time_info.begin_time_us;
-        phase_timing.running_started         = time_info.running_started;
-        phase_timing.running_started_time_us = time_info.running_started_time_us;
-        phase_timing.first_token_committed   = time_info.first_token_committed;
-        phase_timing.first_token_time_us     = time_info.first_token_time_us;
-        phase_timing.generation_done         = time_info.generation_done;
-        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-        phase_timing.synthesis_end_time_us   = currentTimeUs();
-        phase_timing.request_id              = decode_context.request_id;
-        phase_timing.error_type              = DecodeRpcServer::phaseErrorType(
-            request_ok, decode_context.stat_info.stage, decode_context.error_info, decode_context.error_status);
-        telemetry::synthesizePhaseSpans(
-            decode_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Decode, request_ok);
-        if (request_ok && time_info.generation_done) {
-            telemetry::setUsageTokenAttributes(
-                *decode_context.trace_span_guard, (int64_t)stream->inputLength(), (int64_t)stream->outputTokenLen());
-        }
-    });
-
-    try {
-        // The first Read establishes the request protocol and owns its failure diagnostics. Do not let the generic
-        // pre-stage cancellation check bypass it: a cancelled synchronous gRPC stream makes Read return false, and
-        // prepareGenerateContext then classifies and logs the failure consistently.
-        decode_context.stat_info.nextStage();
-        prepareGenerateContext(decode_context);
-        CHECK_ERROR_STATUS(decode_context);
-        if (decode_context.trace_span_guard) {
-            // request_id becomes known only after the first ALLOCATE message;
-            // `request_id` (string) is the Bailian Unitrace index key
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
-                                                          std::to_string(decode_context.request_id));
-        }
-        CHECK_REQUEST_STOP(decode_context);
-        decode_context.stat_info.nextStage();
-        allocateResource(decode_context);
-        decode_context.stat_info.finishStage();
-        if (decode_context.hasError()) {
-            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after %ld attempts, cost time ms [%ld]",
-                                decode_context.request_key.c_str(),
-                                decode_context.retry_times,
-                                decode_context.retry_cost_time_ms);
-            // Retries are exhausted: this is the final failure point, report it to FlexLB so the
-            // scheduler releases its inflight entry without waiting for TTL eviction.
-            auto& stream     = decode_context.getStream();
-            auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                  ErrorCode::MALLOC_FAILED);
-            reportEarlyFinishTask(decode_context,
-                                  error_code,
-                                  "decode allocate resource failed: " + decode_context.error_status.error_message());
-            return decode_context.error_status;
-        }
-        EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
-        EXECUTE_STAGE_FUNC(localGenerate, decode_context);
-        decode_context.stat_info.nextStage();
-    } catch (const std::exception& e) {
-        auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
-        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
-        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
-        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
-        return decode_context.error_status;
-    } catch (...) {
-        auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
-        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
-        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
-        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
-        return decode_context.error_status;
-    }
-
-    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

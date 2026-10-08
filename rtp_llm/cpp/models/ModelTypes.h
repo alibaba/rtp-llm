@@ -161,7 +161,6 @@ enum GptModelInputControlFlag : uint32_t {
     kControlFakeStream          = 1u << 5,
     kControlTargetVerify        = 1u << 6,
     kControlPdSeparation        = 1u << 7,
-    kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
 };
 

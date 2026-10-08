@@ -108,7 +108,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
-    encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
@@ -230,7 +229,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
-    inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));

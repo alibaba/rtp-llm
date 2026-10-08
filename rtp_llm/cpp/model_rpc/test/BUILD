@@ -106,24 +106,6 @@ cc_test(
 )
 
 cc_test(
-    name = "prefill_rpc_server_test",
-    srcs = ["PrefillRpcServerTest.cc"],
-    copts = test_copts,
-    deps = test_deps,
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "decode_rpc_server_test",
-    srcs = ["DecodeRpcServerTest.cc"],
-    copts = test_copts,
-    deps = test_deps,
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
     name = "recent_cache_key_window_test",
     srcs = [
         "RecentCacheKeyWindowTest.cc",
@@ -134,34 +116,6 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + cuda13_torch_link_deps,
-)
-
-cc_test(
-    name = "response_buffer_test",
-    srcs = [
-        "ResponseBufferTest.cc",
-    ],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "prefill_batch_rpc_server_test",
-    srcs = [
-        "PrefillBatchRpcServerTest.cc",
-    ],
-    copts = test_copts,
-    deps = test_deps + [
-        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
-    ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -206,9 +160,9 @@ cc_test(
 cc_test(
     name = "p2p_model_rpc_test",
     srcs = [
-        "DecodeRpcServerNew2Test.cc",
-        "PrefillRpcServerNew2Test.cc",
+        "DecodeRpcServerTest.cc",
         "PrefillRpcServerTest.cc",
+        "RemoteRpcServiceImplTest.cc",
         "PrefillServerCallerTest.cc",
         "PDRequestUtilsTest.cc",
         "RpcTimeoutUtilsTest.cc",

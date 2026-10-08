@@ -532,7 +532,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
     cache_store_inputs.request_deadline_ms   = to_host(inputs.request_deadline_ms);
-    if (inputs.decode_entrance && cache_manager_->hasP2PConnector()) {
+    if (cache_manager_->hasP2PConnector()) {
         cache_store_inputs.p2p_layer_write = [manager = cache_manager_](size_t                               model_id,
                                                                         int                                  layer_id,
                                                                         const std::string&                   tag,

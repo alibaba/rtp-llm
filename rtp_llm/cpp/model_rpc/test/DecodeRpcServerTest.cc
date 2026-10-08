@@ -1,924 +1,305 @@
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include <memory>
+
 #include <gtest/gtest.h>
+#include "torch/all.h"
 
-#include <chrono>
-#include <thread>
-
+#define private public
+#define protected public
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
-#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#undef private
+#undef protected
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/testing/TestLogCapture.h"
-#include "rtp_llm/cpp/testing/TestBase.h"
 
-namespace rtp_llm {
+namespace rtp_llm::test {
 
 namespace {
 
-DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
-                                                    const std::vector<std::string>&  peer_addrs,
-                                                    const std::vector<CacheKeyType>& cache_keys,
-                                                    const GroupBlockIds&             block_ids_by_group,
-                                                    int32_t                          prefill_cp_size,
-                                                    int64_t                          reuse_block_size = 0) {
-    return {/*request_id=*/42,
-            request_key,
-            peer_addrs,
-            cache_keys,
-            block_ids_by_group,
-            reuse_block_size,
-            /*timeout_ms=*/1000,
-            /*partition_count=*/1,
-            /*partition_id=*/0,
-            /*server_context=*/nullptr,
-            prefill_cp_size};
+std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& input_ids) {
+    ModelConfig                    model_config;
+    RuntimeConfig                  runtime_config;
+    ResourceContext                resource_context;
+    std::shared_ptr<GenerateInput> query = std::make_shared<GenerateInput>();
+
+    model_config.max_seq_len                 = 4096;
+    model_config.vocab_size                  = 32000;
+    model_config.special_tokens.eos_token_id = 151643;
+
+    query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+
+    return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
-
-    GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = 8;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = 8;
-    return group;
-}
-
-// Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
-// of a compacted fixed/state group under prefill CP=2 (cp.scale_seq_size).
-constexpr size_t kBaseSeqSizePerBlock    = 64;
-constexpr size_t kCompactSeqSizePerBlock = kBaseSeqSizePerBlock * 2;
-
-CacheGroupPolicy makeCompactStatePolicy(uint32_t active_tail_blocks) {
-    auto policy               = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.active_tail_blocks = active_tail_blocks;
-    policy.cp_slice           = CpBlockSliceMode::PAYLOAD_BYTES;
-    EXPECT_EQ(policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
-    return policy;
-}
-
-using KeyOffsetPairs = std::vector<std::pair<int, int>>;
-
-KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
-    KeyOffsetPairs pairs;
-    pairs.reserve(plan.size());
-    for (const auto& pair : plan) {
-        pairs.emplace_back(pair.key_index, pair.offset_index);
-    }
-    return pairs;
-}
-
-std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
-    auto input             = std::make_shared<GenerateInput>();
-    input->generate_config = std::make_shared<GenerateConfig>();
-    input->input_ids       = torch::zeros({seq_length}, torch::kInt32);
-
-    ModelConfig model_config;
-    model_config.max_seq_len = seq_length + 16;
-    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, int memory, int disk = 0) {
+    GenerateOutputsPB outputs_pb;
+    outputs_pb.mutable_flatten_output()->add_finished(false);
+    auto* aux_info = outputs_pb.mutable_flatten_output()->add_aux_info();
+    aux_info->set_total_reuse_len(total);
+    aux_info->set_local_reuse_len(local);
+    aux_info->set_remote_reuse_len(remote);
+    aux_info->set_memory_reuse_len(memory);
+    aux_info->set_disk_reuse_len(disk);
+    aux_info->set_step_output_len(1);
+    return outputs_pb;
 }
 
 }  // namespace
 
-TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
-    DecodeRpcContext             rpc_context{nullptr};
-    kmonitor::MetricsReporterPtr metrics_reporter;
-    DecodeGenerateContext        context(rpc_context, /*timeout_ms=*/0, nullptr, metrics_reporter, nullptr);
-
-    EXPECT_FALSE(context.request_deadline.has_value());
-    EXPECT_FALSE(context.requestDeadlineExceeded());
-
-    context.setRequestTimeoutMs(1000);
-    ASSERT_TRUE(context.request_deadline.has_value());
-    const auto absolute_deadline = *context.request_deadline;
-    EXPECT_GT(absolute_deadline, std::chrono::system_clock::now());
-    EXPECT_EQ(context.request_timeout_ms, 1000);
-
-    context.setRequestTimeoutMs(1000);
-    EXPECT_EQ(context.request_deadline, absolute_deadline) << "reapplying a timeout must not extend its budget";
-
-    context.setRequestTimeoutMs(1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    EXPECT_TRUE(context.requestDeadlineExceeded());
-
-    context.setRequestTimeoutMs(0);
-    EXPECT_FALSE(context.request_deadline.has_value());
-    EXPECT_FALSE(context.requestDeadlineExceeded());
-
-    context.setRequestTimeoutMs(-1);
-    EXPECT_FALSE(context.request_deadline.has_value());
-    EXPECT_FALSE(context.requestDeadlineExceeded());
-}
-
-TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
-    const auto* broadcast = BroadcastLoadRequestPB::descriptor();
-    ASSERT_NE(broadcast, nullptr);
-    EXPECT_TRUE(broadcast->IsReservedNumber(5));
-    EXPECT_TRUE(broadcast->IsReservedNumber(12));
-    EXPECT_EQ(broadcast->FindFieldByName("block_num")->number(), 6);
-    EXPECT_EQ(broadcast->FindFieldByName("reuse_block_size")->number(), 7);
-    EXPECT_EQ(broadcast->FindFieldByName("timeout_ms")->number(), 8);
-    EXPECT_EQ(broadcast->FindFieldByName("dp_rank")->number(), 9);
-    EXPECT_EQ(broadcast->FindFieldByName("partition_count")->number(), 10);
-    EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
-    EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
-    EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
-
-    const auto* response = BroadcastLoadResponsePB::descriptor();
-    ASSERT_NE(response, nullptr);
-    EXPECT_EQ(response->FindFieldByName("loaded_cache_block_count")->number(), 3);
-
-    const auto* remote = RemoteOperationRequestPB::descriptor();
-    ASSERT_NE(remote, nullptr);
-    EXPECT_TRUE(remote->IsReservedNumber(3));
-    EXPECT_EQ(remote->FindFieldByName("group_ids"), nullptr);
-    EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
-    EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
-    EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
-}
-
-TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
-    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(8, 4), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, 8, 4), 2u);
-
-    std::vector<size_t> transferred(5, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*block_offset_index=*/0, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*block_offset_index=*/1, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*block_offset_index=*/2, /*key_span=*/2);
-
-    EXPECT_EQ(transferred, (std::vector<size_t>{1, 1, 1, 1, 1}));
-}
-
-TEST(DecodeRpcServerTest, CompactPhysicalBlockCoversEveryBaseKey) {
-    auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 1u);
-
-    std::vector<size_t> transferred(11, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*block_offset_index=*/4, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(
-        transferred, /*endpoint_key_index=*/10, /*block_offset_index=*/5, /*key_span=*/2);
-
-    EXPECT_EQ(transferred, (std::vector<size_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1}));
-}
-
-TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresEveryTransferObligation) {
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/2,
-                  /*required=*/{0, 0, 2, 2, 2, 2},
-                  /*transferred=*/{0, 0, 2, 2, 1, 2}),
-              4u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/0, /*required=*/{2, 2}, /*transferred=*/{1, 2}),
-              0u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/2, /*required=*/{0, 0, 0, 0}, /*transferred=*/{0, 0, 0, 0}),
-              0u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/0, /*required=*/{1}, /*transferred=*/{}),
-              0u);
-}
-
-TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
-    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({6, 4, 5}), 4u);
-    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
-}
-
-TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
-    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/0, /*peer_size=*/1).code(),
-              ErrorCode::LOAD_KV_CACHE_FAILED);
-    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/1, /*peer_size=*/0).code(),
-              ErrorCode::LOAD_KV_CACHE_FAILED);
-    EXPECT_TRUE(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/4, /*peer_size=*/2).ok());
-    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/3, /*peer_size=*/2).code(),
-              ErrorCode::LOAD_KV_CACHE_FAILED);
-}
-
-TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
-    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(3), (std::vector<size_t>{2, 1}));
-    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(5), (std::vector<size_t>{2, 2, 1}));
-    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(4), (std::vector<size_t>{2, 2}));
-    EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
-}
-
-TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
-    auto stream = makeGenerateStream(/*seq_length=*/2560);
-
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
-              2304);
-    EXPECT_EQ(stream->initialReuseLength(), 2304);
-    EXPECT_EQ(stream->reuseLength(), 2304);
-    EXPECT_EQ(stream->localReuseLength(), 2304);
-}
-
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
-    auto stream = makeGenerateStream(/*seq_length=*/513);
-
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
-                  stream,
-                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
-                  /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
-              0);
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
-              0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
-}
-
-TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
-    DecodeRpcServer server;
-    server.resource_.workers = {"decode-0", "decode-1"};
-
-    const std::string               request_key = "request";
-    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys  = {101, 102};
-    const GroupBlockIds             block_ids_by_group;
-    const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
-
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
-
-    EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
-    EXPECT_EQ(request.reuse_block_size(), 3);
-    ASSERT_EQ(request.peer_addrs_size(), 2);
-    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
-    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
-    ASSERT_EQ(request.cache_keys_size(), 2);
-    EXPECT_EQ(request.cache_keys(0), 101);
-    EXPECT_EQ(request.cache_keys(1), 102);
-}
-
-TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
-    DecodeRpcServer server;
-    server.resource_.workers = {"decode-0", "decode-1"};
-
-    const std::string               request_key = "request";
-    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys  = {101};
-    const GroupBlockIds             block_ids_by_group;
-    const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
-
-    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
-
-    EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
-    EXPECT_EQ(request.reuse_block_size(), 3);
-    ASSERT_EQ(request.peer_addrs_size(), 2);
-    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
-    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
-}
-
-TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
-    auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
-                                          {{0, {"linear"}}, {1, {"full"}}});
-    BroadcastLoadRequestPB request;
-    auto*                  full = request.add_tagged_group_block_ids();
-    full->set_tag("full");
-    full->add_block_ids(10);
-    auto* linear = request.add_tagged_group_block_ids();
-    linear->set_tag("linear");
-    linear->add_block_ids(20);
-
-    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
-    EXPECT_EQ(blocks[topology->groupIdForTag("full")]->blocks(), (BlockIndicesType{10}));
-    EXPECT_EQ(blocks[topology->groupIdForTag("linear")]->blocks(), (BlockIndicesType{20}));
-
-    auto reordered = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
-                                           {{0, {"linear"}}, {1, {"full"}}});
-    EXPECT_NE(topology->groupIdForTag("full"), reordered->groupIdForTag("full"));
-    EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
-              DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
-}
-
-TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
-    auto                   topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
-    BroadcastLoadRequestPB request;
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
-}
-
-TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
-    auto topology =
-        CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}});
-    BroadcastLoadRequestPB missing_tag;
-    auto*                  row = missing_tag.add_tagged_group_block_ids();
-    row->set_tag("full");
-    row->add_block_ids(1);
-
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
-}
-
-TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
-    GenerateInputPB  input;
-    auto*            config = input.mutable_generate_config();
-    config->set_max_new_tokens(2);
+TEST(DecodeRpcServerTest, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
+    GenerateInputPB request;
+    auto*           config = request.mutable_generate_config();
+    config->set_max_new_tokens(8);
     config->set_num_beams(1);
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_TRUE(checkPDSupport(input).supported);
+    EXPECT_TRUE(checkPDSupport(request).supported);
 
-    auto single_token = input;
-    single_token.mutable_generate_config()->set_max_new_tokens(1);
-    EXPECT_FALSE(checkPDSupport(single_token).supported);
-
-    auto beam_search = input;
-    beam_search.mutable_generate_config()->set_num_beams(2);
-    EXPECT_FALSE(checkPDSupport(beam_search).supported);
-
-    auto variable_beam = input;
-    variable_beam.mutable_generate_config()->add_variable_num_beams(2);
-    EXPECT_FALSE(checkPDSupport(variable_beam).supported);
-
-    auto multi_return = input;
-    multi_return.mutable_generate_config()->set_num_return_sequences(2);
-    EXPECT_FALSE(checkPDSupport(multi_return).supported);
-
-    auto explicitly_disabled = input;
-    explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
-    EXPECT_FALSE(checkPDSupport(explicitly_disabled).supported);
-
-    auto expect_aux_output_allowed = [&](auto setter) {
-        auto with_aux_output = input;
-        setter(*with_aux_output.mutable_generate_config());
-        EXPECT_TRUE(checkPDSupport(with_aux_output).supported);
-    };
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_logits(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
-    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
-
-    auto target_logprob_without_prompt_logits = input;
-    target_logprob_without_prompt_logits.mutable_generate_config()->set_return_target_logprob(true);
-    EXPECT_TRUE(checkPDSupport(target_logprob_without_prompt_logits).supported);
+    config->set_unique_key("user-cache-key");
+    EXPECT_TRUE(checkPDSupport(request).supported);
 }
 
-TEST(PrefillRpcServerTest, LossRequestsStayLocalWithoutDisablingDecodeEntrancePD) {
-    PrefillRpcServer server;
+TEST(DecodeRpcServerTest, DecodeEntranceHandoffUsesInternalKeyAndPreservesBusinessKey) {
     GenerateInputPB request;
-    request.add_token_ids(10);
-    request.add_token_ids(20);
-    auto* config = request.mutable_generate_config();
-    config->set_max_new_tokens(2);
+    auto*           config = request.mutable_generate_config();
+    config->set_unique_key("shared-business-key");
+
+    auto first  = makeDecodeEntranceUniqueKey("127.0.0.1", 1, 100);
+    auto second = makeDecodeEntranceUniqueKey("127.0.0.1", 2, 100);
+
+    EXPECT_NE(first, second);
+    EXPECT_NE(first, request.generate_config().unique_key());
+    EXPECT_NE(second, request.generate_config().unique_key());
+
+    auto first_handoff_request  = makeDecodeEntranceHandoffRequest(request, first);
+    auto second_handoff_request = makeDecodeEntranceHandoffRequest(request, second);
+
+    EXPECT_EQ(request.generate_config().unique_key(), "shared-business-key");
+    EXPECT_EQ(first_handoff_request.generate_config().unique_key(), first);
+    EXPECT_EQ(second_handoff_request.generate_config().unique_key(), second);
+    EXPECT_NE(first_handoff_request.generate_config().unique_key(),
+              second_handoff_request.generate_config().unique_key());
+}
+
+TEST(DecodeRpcServerTest, ParsePrefillDpAddrSupportsIpv4HostAndBracketIpv6) {
+    std::string ip;
+    uint32_t    port = 0;
+
+    ASSERT_TRUE(DecodeRpcServer::parsePrefillDpAddr("127.0.0.1:9000", &ip, &port).ok());
+    EXPECT_EQ(ip, "127.0.0.1");
+    EXPECT_EQ(port, 9000);
+
+    ASSERT_TRUE(DecodeRpcServer::parsePrefillDpAddr("prefill-0.service:9001", &ip, &port).ok());
+    EXPECT_EQ(ip, "prefill-0.service");
+    EXPECT_EQ(port, 9001);
+
+    ASSERT_TRUE(DecodeRpcServer::parsePrefillDpAddr("[::1]:9002", &ip, &port).ok());
+    EXPECT_EQ(ip, "[::1]");
+    EXPECT_EQ(port, 9002);
+
+    ASSERT_TRUE(DecodeRpcServer::parsePrefillDpAddr("fe80::1:9003", &ip, &port).ok());
+    EXPECT_EQ(ip, "[fe80::1]");
+    EXPECT_EQ(port, 9003);
+}
+
+TEST(DecodeRpcServerTest, ParsePrefillDpAddrRejectsMalformedAddressOrPort) {
+    std::string ip;
+    uint32_t    port = 0;
+
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("127.0.0.1", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("fe80::1", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("[::1]9000", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("127.0.0.1:0", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("127.0.0.1:65536", &ip, &port).ok());
+    EXPECT_FALSE(DecodeRpcServer::parsePrefillDpAddr("127.0.0.1:not-a-port", &ip, &port).ok());
+}
+
+TEST(DecodeRpcServerTest, ShouldUsePDSeparationRejectsNonPdRequests) {
+    GenerateInputPB request;
+    auto*           config = request.mutable_generate_config();
+    config->set_max_new_tokens(1);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
-    config->set_return_logits(true);
-    config->set_return_hidden_states(true);
 
-    EXPECT_TRUE(server.canUsePDSep(request));
-    for (int loss_mode : {1, 2}) {
-        config->set_calculate_loss(loss_mode);
-        EXPECT_FALSE(server.canUsePDSep(request));
-        EXPECT_TRUE(checkPDSupport(request).supported);
+    EXPECT_FALSE(checkPDSupport(request).supported);
 
-        // Batch admission must use the same rule as GenerateStreamCall. A loss
-        // request mixed with a PD request is rejected before any engine/RPC work.
-        for (bool loss_first : {false, true}) {
-            BatchGenerateInputPB batch;
-            *batch.add_inputs() = request;
-            *batch.add_inputs() = request;
-            batch.mutable_inputs(loss_first ? 1 : 0)->mutable_generate_config()->set_calculate_loss(0);
-            grpc::ServerContext context;
-            BatchGenerateOutputsPB response;
-            const auto status = server.BatchGenerateCall(&context, &batch, &response);
-            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-            EXPECT_NE(status.error_message().find("mixing PD and non-PD"), std::string::npos);
-        }
-    }
-    config->set_calculate_loss(0);
-    config->set_can_use_pd_separation(false);
-    EXPECT_FALSE(server.canUsePDSep(request));
+    config->set_max_new_tokens(8);
+    config->set_num_beams(2);
+    EXPECT_FALSE(checkPDSupport(request).supported);
 }
 
-TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
-    constexpr size_t mtp_base_model_id = 17;
-
-    for (size_t mtp_model_id = 0; mtp_model_id < 2; ++mtp_model_id) {
-        EXPECT_EQ(DecodeRpcServer::makeMTPModuleCacheKey(mtp_base_model_id, "101", /*layer_id=*/0),
-                  "model_id_17_token_id_str_101_layer_id_0")
-            << "mtp_model_id=" << mtp_model_id;
-    }
-}
-
-TEST(DecodeRpcServerTest, MtpLoadPlanContainsOnlyModule0) {
-    auto module0          = std::make_unique<EngineInitParams>();
-    module0->model_id     = 17;
-    auto module1          = std::make_unique<EngineInitParams>();
-    module1->model_id     = 23;
-    auto mtp_model_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    mtp_model_params->push_back(std::move(module0));
-    mtp_model_params->push_back(std::move(module1));
-    ProposeModelEngineInitParams propose_params(SP_TYPE_MTP, /*gen_num_per_cycle=*/2, std::move(mtp_model_params));
-
-    const auto plan = DecodeRpcServer::makeMTPModuleLoadPlan(&propose_params);
-
-    ASSERT_EQ(plan.size(), 1);
-    EXPECT_EQ(plan[0].module_index, 0);
-    EXPECT_EQ(plan[0].engine_init_params, propose_params.mtp_model_params_->at(0).get());
-    EXPECT_EQ(plan[0].cache_model_id, 17);
-}
-
-TEST(DecodeRpcServerTest, MtpLoadPlanRejectsMissingModule0) {
-    EXPECT_TRUE(DecodeRpcServer::makeMTPModuleLoadPlan(nullptr).empty());
-
-    ProposeModelEngineInitParams missing_params;
-    EXPECT_TRUE(DecodeRpcServer::makeMTPModuleLoadPlan(&missing_params).empty());
-
-    auto                         empty_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    ProposeModelEngineInitParams no_modules(SP_TYPE_MTP, /*gen_num_per_cycle=*/2, std::move(empty_params));
-    EXPECT_TRUE(DecodeRpcServer::makeMTPModuleLoadPlan(&no_modules).empty());
-
-    auto mtp_model_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    mtp_model_params->push_back(nullptr);
-    mtp_model_params->push_back(std::make_unique<EngineInitParams>());
-    ProposeModelEngineInitParams null_module0(SP_TYPE_MTP, /*gen_num_per_cycle=*/2, std::move(mtp_model_params));
-    EXPECT_TRUE(DecodeRpcServer::makeMTPModuleLoadPlan(&null_module0).empty());
-}
-
-TEST(DecodeRpcServerTest, MtpLoadPlanIgnoresInactiveModules) {
-    auto mtp_model_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    mtp_model_params->push_back(std::make_unique<EngineInitParams>());
-    mtp_model_params->push_back(nullptr);
-    ProposeModelEngineInitParams propose_params(SP_TYPE_MTP, /*gen_num_per_cycle=*/2, std::move(mtp_model_params));
-
-    const auto plan = DecodeRpcServer::makeMTPModuleLoadPlan(&propose_params);
-
-    ASSERT_EQ(plan.size(), 1);
-    EXPECT_EQ(plan[0].engine_init_params, propose_params.mtp_model_params_->at(0).get());
-}
-
-TEST(DecodeRpcServerTest, ReadFailureLogContainsPeerErrorAndEveryBlockKey) {
-    test::TestLogCapture log_capture("read_cache_failure");
-    DecodeRpcServer::logReadFailures(/*request_id=*/42,
-                                     "127.0.0.1:1:2",
-                                     ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED,
-                                     "connect failed",
-                                     {"blocks={kv_key_0,kv_key_1}"});
-
-    const auto log_content = log_capture.content();
-    EXPECT_NE(log_content.find("PD_CACHE_KEY_READ_FAILED"), std::string::npos);
-    EXPECT_NE(log_content.find("127.0.0.1:1:2"), std::string::npos);
-    EXPECT_NE(log_content.find("kv_key_0"), std::string::npos);
-    EXPECT_NE(log_content.find("kv_key_1"), std::string::npos);
-}
-
-TEST(DecodeRpcServerTest, ReadTimeoutLogsKeysAndCancellationIsSilent) {
-    test::TestLogCapture log_capture("read_cache_timeout_cancel");
-    DecodeRpcServer::logReadFailures(
-        /*request_id=*/43, "peer", ErrorCode::LOAD_CACHE_TIMEOUT, "timeout", {"blocks={timeout_key}"});
-    DecodeRpcServer::logReadFailures(
-        /*request_id=*/44, "peer", ErrorCode::CANCELLED, "cancelled", {"blocks={cancelled_key}"});
-
-    const auto log_content = log_capture.content();
-    EXPECT_NE(log_content.find("timeout_key"), std::string::npos);
-    EXPECT_EQ(log_content.find("cancelled_key"), std::string::npos);
-}
-
-TEST(DecodeRpcServerTest, CancelledGenerateRequestReadUsesCancelledStatus) {
-    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/true);
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_EQ(status.error_message(), "request is cancelled");
-}
-
-TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
-    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/false);
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
-    EXPECT_EQ(status.error_message(), "poll generate request failed");
-}
-
-class PrefillCompletionRpcTest: public DeviceTestBase {};
-
-TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
-    class CompletionService final: public RpcService::Service {
-    public:
-        grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
-            DecodeRpcContext             rpc_context{rpc_stream};
-            kmonitor::MetricsReporterPtr reporter;
-            auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
-            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
-            context.request_id = 42;
-            context.allocate_request.set_client_id("prefill");
-            auto cache = std::make_shared<KVCacheManager>(
-                test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
-            EXPECT_TRUE(cache->init());
-            ResourceContext resources;
-            resources.cache_manager = cache;
-            resources.role_type     = RoleType::DECODE;
-            auto input              = std::make_shared<GenerateInput>();
-            input->request_id       = 42;
-            input->begin_time_us    = currentTimeUs();
-            input->generate_config  = std::make_shared<GenerateConfig>();
-            input->input_ids        = torch::tensor({1, 2, 3}, torch::kInt32);
-            ModelConfig config;
-            config.max_seq_len = 16;
-            auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
-            EXPECT_TRUE(stream->initKVBlock().ok());
-            EXPECT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
-            if (running) {
-                stream->generate_status_->status.store(StreamState::RUNNING);
-            }
-            context.setStream(stream);
-            if (expired) {
-                context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
-            }
-            if (stream_error) {
-                stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
-            }
-            DecodeRpcServer server;
-            server.localGenerate(context);
-            status                  = context.error_status;
-            finished                = stream->isFinished();
-            had_error               = stream->hasError();
-            resource_released       = stream->stream_cache_resource_->isResourceReleased();
-            blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
-            RpcMetricsCollector metrics;
-            context.collectBasicMetrics(metrics);
-            error_qps = metrics.error_qps;
-            if (running) {
-                // This fixture has no scheduler to drain the deliberately invalid running stream.
-                stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-                stream->moveToNext();
-            }
-            context.stopStream();
-            error_after_cleanup = stream->hasError();
-            remaining_requests  = meta->getEngineScheduleInfo(-1).running_task_info_list.size();
-            return status;
-        }
-        bool         expired      = false;
-        bool         stream_error = false;
-        bool         running      = false;
-        grpc::Status status;
-        bool         finished = false, had_error = false, resource_released = false;
-        bool         executed = false, error_qps = false, error_after_cleanup = false;
-        size_t       remaining_requests      = 1;
-        size_t       blocks_after_completion = 1;
-    };
-
-    for (const std::string mode :
-         {"complete", "eof", "wrong_request", "wrong_client", "wrong_stage", "expired", "stream_error", "running"}) {
-        SCOPED_TRACE(mode);
-        CompletionService service;
-        service.expired      = mode == "expired";
-        service.stream_error = mode == "stream_error";
-        service.running      = mode == "running";
-        grpc::ServerBuilder builder;
-        int                 port = 0;
-        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
-        builder.RegisterService(&service);
-        auto server = builder.BuildAndStart();
-        ASSERT_NE(server, nullptr);
-        auto stub = RpcService::NewStub(
-            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
-        grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-        auto rpc = stub->RemoteGenerate(&context);
-        if (mode != "eof") {
-            GenerateRequestPB request;
-            request.set_stage(mode == "wrong_stage" ? RemoteStage::LOAD : RemoteStage::PREFILL_COMPLETE);
-            request.set_request_id(mode == "wrong_request" ? 43 : 42);
-            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
-            EXPECT_TRUE(rpc->Write(request));
-        }
-        rpc->WritesDone();
-        const auto status = rpc->Finish();
-        server->Shutdown();
-        server->Wait();
-        EXPECT_EQ(service.remaining_requests, 0u);
-        EXPECT_FALSE(service.executed);
-        if (mode == "complete") {
-            EXPECT_TRUE(status.ok());
-            EXPECT_TRUE(service.finished);
-            EXPECT_TRUE(service.resource_released);
-            EXPECT_EQ(service.blocks_after_completion, 0u);
-            EXPECT_FALSE(service.had_error);
-            EXPECT_FALSE(service.error_qps);
-            EXPECT_FALSE(service.error_after_cleanup);
-        } else {
-            EXPECT_FALSE(status.ok());
-            EXPECT_TRUE(service.error_qps);
-            if (mode == "eof" || mode == "wrong_stage") {
-                EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
-            } else if (mode == "wrong_request" || mode == "wrong_client") {
-                EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-            } else if (mode == "expired") {
-                EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-            } else if (mode == "running") {
-                EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
-            }
-        }
-    }
-}
-
-TEST(DecodeRpcServerTest, CacheLoadClientErrorPreservesCodeWithoutTopologyDetails) {
-    const auto client_error =
-        DecodeRpcServer::cacheLoadClientError(/*request_id=*/12345, ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
-
-    EXPECT_EQ(client_error.code(), ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
-    EXPECT_EQ(client_error.ToString(), "cache load failed; correlation_id=12345");
-    EXPECT_EQ(client_error.ToString().find("10.0.0.8:1234"), std::string::npos);
-    EXPECT_EQ(client_error.ToString().find("rdma"), std::string::npos);
-}
-
-TEST(DecodeRpcServerTest, SerializedAllocationErrorCarriesGrammarDomainCode) {
+TEST(DecodeRpcServerTest, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDecodeReuse) {
     DecodeRpcServer server;
-    const auto      status = server.serializeErrorMsg(
-        "request", RequestInfo{}, ErrorInfo(ErrorCode::GRAMMAR_COMPILE_OVERLOADED, "grammar queue full"));
+    auto            stream = makeStream({11, 12, 13});
+    auto outputs_pb = makeOutputsWithDecodeReuse(/*total=*/7, /*local=*/3, /*remote=*/4, /*memory=*/1, /*disk=*/2);
 
-    ErrorDetailsPB details;
-    ASSERT_TRUE(details.ParseFromString(status.error_details()));
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
-    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
-    EXPECT_NE(details.error_message().find("grammar queue full"), std::string::npos);
+    stream->setPrefillReuseLength(
+        /*total=*/128, /*local=*/32, /*remote=*/96, /*memory=*/8, /*disk=*/4, /*independent_pools=*/false);
+
+    server.updateAuxInfo(outputs_pb, stream);
+
+    ASSERT_EQ(outputs_pb.flatten_output().aux_info_size(), 1);
+    const auto& aux_info = outputs_pb.flatten_output().aux_info(0);
+    EXPECT_TRUE(aux_info.pd_sep());
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 128);
+    EXPECT_EQ(aux_info.local_reuse_len(), 32);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 96);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 8);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 4);
+
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_local_reuse_len(), 32);
+    EXPECT_EQ(aux_info.prefill_remote_reuse_len(), 96);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 8);
+    EXPECT_EQ(aux_info.prefill_disk_reuse_len(), 4);
+
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 7);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 3);
+    EXPECT_EQ(aux_info.decode_remote_reuse_len(), 4);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 1);
+    EXPECT_EQ(aux_info.decode_disk_reuse_len(), 2);
 }
 
-TEST(DecodeRpcServerTest, CacheLoadTimeoutClassifiedAsDependencyFailure) {
-    // The cache timeouts map onto DEADLINE_EXCEEDED, so a predicate keyed on the
-    // gRPC status would mislabel this upstream KV-transfer failure as a local
-    // deadline of the decode node.
-    const ErrorInfo    error_info(ErrorCode::LOAD_CACHE_TIMEOUT, "load cache timeout");
-    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
-    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
-                 "DependencyFailure");
+TEST(DecodeRpcServerTest, IndependentPrefillPoolsExposeTheLongerReusePhase) {
+    for (bool independent : {false, true}) {
+        for (int decode_total : {64, 128, 256}) {
+            DecodeRpcServer server;
+            auto            stream = makeStream({11, 12, 13});
+            stream->setPrefillReuseLength(128, 32, 96, 8, 4, independent);
+            auto outputs = makeOutputsWithDecodeReuse(decode_total, 16, decode_total - 16, 2, 1);
+            server.updateAuxInfo(outputs, stream);
+            const auto& aux        = outputs.flatten_output().aux_info(0);
+            const bool  use_decode = independent && decode_total > 128;
+            EXPECT_EQ(aux.total_reuse_len(), use_decode ? decode_total : 128);
+            EXPECT_EQ(aux.local_reuse_len(), use_decode ? 16 : 32);
+            EXPECT_EQ(aux.remote_reuse_len(), use_decode ? decode_total - 16 : 96);
+            EXPECT_EQ(aux.memory_reuse_len(), use_decode ? 2 : 8);
+            EXPECT_EQ(aux.disk_reuse_len(), use_decode ? 1 : 4);
+            EXPECT_EQ(aux.prefill_total_reuse_len(), 128);
+            EXPECT_EQ(aux.decode_total_reuse_len(), decode_total);
+        }
+    }
 }
 
-TEST(DecodeRpcServerTest, CacheStoreLoadBufferTimeoutClassifiedAsDependencyFailure) {
-    const ErrorInfo    error_info(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, "load buffer timeout");
-    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
-    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+}  // namespace rtp_llm::test
 
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
-                 "DependencyFailure");
+namespace rtp_llm {
+
+TEST(DecodeRpcServerTest, CancelBeforeStreamBindingStopsTheFutureStream) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB  request;
+    request.set_request_id(201);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "handoff201", "", currentTimeMs() + 1000, handle).ok());
+    EXPECT_EQ(registry.cancel(201, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
+    auto stream = test::makeStream({1, 2, 3});
+    registry.attach(handle, stream);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::PRIORITY_PREEMPTED);
+    registry.finishLocal(handle);
+    // An error alone is not proof that the scheduler and resources are finished.
+    EXPECT_FALSE(registry.complete(handle));
 }
 
-TEST(DecodeRpcServerTest, CancelledDuringCacheLoadKeepsCancelledClassification) {
-    // A client going away while KV cache is still arriving is not a failure of the
-    // Prefill dependency, so the stage alone must not decide the classification.
-    const ErrorInfo    error_info(ErrorCode::CANCELLED, "request is cancelled");
-    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
-    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::CANCELLED);
-
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
-                 "Cancelled");
+TEST(DecodeRpcServerTest, InternalCancelRetainsCleanupProofBeyondWorkerStatusDelta) {
+    DecodeRpcServer server;
+    server.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+    server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
+    GenerateInputPB input;
+    input.set_request_id(202);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(server.cancel_registry_->admit(input, "handoff202", "", currentTimeMs() + 1000, handle).ok());
+    CancelRequestPB request;
+    request.set_request_id(202);
+    CancelResponsePB    response;
+    grpc::ServerContext context;
+    ASSERT_TRUE(server.Cancel(&context, &request, &response).ok());
+    EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
+    server.cancel_registry_->finishLocal(handle);
+    ASSERT_TRUE(server.cancel_registry_->complete(handle));
+    ASSERT_TRUE(server.Cancel(&context, &request, &response).ok());
+    EXPECT_EQ(response.status(), CANCEL_STATUS_NOT_FOUND);
 }
 
-TEST(DecodeRpcServerTest, CancelledCacheLoadClassificationDoesNotRequireTransportStatus) {
-    const ErrorInfo error_info(ErrorCode::CANCELLED, "request is cancelled");
+}  // namespace rtp_llm
 
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, grpc::Status::OK),
-                 "Cancelled");
+namespace rtp_llm {
+namespace {
+class LocalPrefillCancelService: public RpcService::Service {
+public:
+    int          calls{0};
+    int64_t      request_id{0};
+    int64_t      cancel_error_code{0};
+    grpc::Status Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) override {
+        ++calls;
+        request_id        = request->request_id();
+        cancel_error_code = request->cancel_error_code();
+        EXPECT_TRUE(request->prefill_address().empty());
+        response->set_status(CANCEL_STATUS_TOMBSTONED);
+        return grpc::Status::OK;
+    }
+};
+}  // namespace
+
+TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAndFencesLateRequest) {
+    for (auto code : {ErrorCode::PRIORITY_PREEMPTED, ErrorCode::CANCELLED, ErrorCode::GENERATE_TIMEOUT}) {
+
+        LocalPrefillCancelService prefill;
+        grpc::ServerBuilder       builder;
+        int                       port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&prefill);
+        auto rpc_server = builder.BuildAndStart();
+        ASSERT_TRUE(rpc_server);
+        DecodeRpcServer decode;
+        decode.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+        decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
+        CancelRequestPB request;
+        request.set_request_id(203);
+        request.set_cancel_error_code(static_cast<int64_t>(code));
+        request.set_prefill_address("127.0.0.1:" + std::to_string(port));
+        CancelResponsePB    response;
+        grpc::ServerContext context;
+        ASSERT_TRUE(decode.Cancel(&context, &request, &response).ok());
+        EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
+        auto handle = decode.cancel_registry_->find(203);
+        ASSERT_TRUE(handle);
+        EXPECT_FALSE(handle->terminal.load());
+        decode.cancelCleanupTick();
+        EXPECT_EQ(prefill.calls, 1);
+        EXPECT_EQ(prefill.request_id, 203);
+        EXPECT_EQ(prefill.cancel_error_code, code);
+        EXPECT_TRUE(handle->terminal.load());
+        const auto finished = decode.meta_->getEngineScheduleInfo(0);
+        ASSERT_EQ(finished.finished_task_info_list.size(), 1);
+        EXPECT_EQ(finished.finished_task_info_list.front().error_code, code);
+        GenerateInputPB late;
+        late.set_request_id(203);
+        PDCancelRegistry::Handle late_handle;
+        EXPECT_EQ(
+            decode.cancel_registry_->admit(late, "late", request.prefill_address(), currentTimeMs() + 1000, late_handle)
+                .code(),
+            code);
+        rpc_server->Shutdown();
+    }
 }
 
-TEST(DecodeRpcServerTest, DeadlineOutsideCacheLoadKeepsStatusClassification) {
-    const ErrorInfo    error_info(ErrorCode::GENERATE_TIMEOUT, "generate timeout");
-    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
-    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::localGenerate, error_info, error_status),
-                 "DeadlineExceeded");
+TEST(DecodeRpcServerTest, UnreachablePrefillDoesNotPublishCancellationComplete) {
+    DecodeRpcServer decode;
+    decode.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+    decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
+    CancelRequestPB request;
+    request.set_request_id(204);
+    request.set_prefill_address("127.0.0.1:1");
+    CancelResponsePB    response;
+    grpc::ServerContext context;
+    ASSERT_TRUE(decode.Cancel(&context, &request, &response).ok());
+    decode.cancelCleanupTick();
+    EXPECT_FALSE(decode.cancel_registry_->find(204)->terminal.load());
+    EXPECT_TRUE(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.empty());
 }
-
-TEST(DecodeRpcServerTest, ExceptionUnwindingWithoutStatusIsClassifiedAsException) {
-    // PhaseSpanSynthesisScope reports unwinding while error_status is still OK:
-    // nothing set a gRPC status on the way out.
-    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
-                     /*request_ok=*/false, DecodeStatInfo::localGenerate, ErrorInfo::OkStatus(), grpc::Status::OK),
-                 "Exception");
-}
-
-TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
-    EXPECT_EQ(DecodeRpcServer::phaseErrorType(/*request_ok=*/true,
-                                              DecodeStatInfo::loadCacheFromPrefill,
-                                              ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "ignored"),
-                                              grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "ignored")),
-              nullptr);
-}
-
-TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
-    const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/3,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/0,
-                                                   /*cp_size=*/1,
-                                                   /*key_blocks_per_logical_block=*/2,
-                                                   /*cache_key_count=*/6);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/3,
-                                                                 /*cache_key_count=*/6,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 /*group_seq_size_per_block=*/2,
-                                                                 /*base_seq_size_per_block=*/1);
-
-    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {5, 2}}));
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
-}
-
-TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
-    const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/3,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/0,
-                                                   /*cp_size=*/1,
-                                                   /*key_blocks_per_logical_block=*/2,
-                                                   /*cache_key_count=*/5);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/3,
-                                                                 /*cache_key_count=*/5,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 /*group_seq_size_per_block=*/2,
-                                                                 /*base_seq_size_per_block=*/1);
-
-    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
-}
-
-TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
-    // 11 logical blocks under prefill CP=2 compact into a 6-slot state table:
-    // slot j covers logical blocks [2j, 2j+1], so the two active tail slots 4 and
-    // 5 must be filled from the *global* cache keys 9 and 10 - not from keys 4
-    // and 5, which is what indexing the compacted table with logical positions
-    // (or the table length with the logical key count) would produce.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/6,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
-}
-
-TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
-    // The consumer must project exactly like the producer: same (key, offset)
-    // pairs, or the decode reads a key the prefill never registered.
-    const auto policy        = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/6,
-                                                                 /*cache_key_count=*/11,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 kCompactSeqSizePerBlock,
-                                                                 kBaseSeqSizePerBlock);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/11,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/1,
-                                                   /*cp_size=*/2);
-
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
-}
-
-TEST(DecodeRpcServerTest, CompactStateGroupIgnoresSpeculativeReserveTailSlots) {
-    // MTP reserve slots make the positional table longer than the canonical slots
-    // the sequence actually backs. The destinations must stay 4 and 5; picking the
-    // tail of the table would target the reserve slot 6 and duplicate key 10.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/7,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
-}
-
-TEST(DecodeRpcServerTest, CompactOneTailGroupLoadsOnlyTheLastCanonicalSlot) {
-    // hca_state declares active_tail_blocks=1; explicit_block_num only sizes its
-    // pool and must not widen the per-request projection.
-    auto policy               = makeCompactStatePolicy(/*active_tail_blocks=*/1);
-    policy.explicit_block_num = 256;
-
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/6,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{10, 5}}));
-}
-
-TEST(DecodeRpcServerTest, CompactStateGroupWithSingleLogicalBlockLoadsKeyZero) {
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/1,
-                                                          /*cache_key_count=*/1,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{0, 0}}));
-}
-
-TEST(DecodeRpcServerTest, UnscaledSwaGroupKeepsLogicalTailPositions) {
-    // A COMPACT_LAST_RANK policy on a group whose block still covers one logical
-    // block has a flat table: the tail slots are logical positions 3 and 4.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/5,
-                                                          /*cache_key_count=*/5,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{3, 3}, {4, 4}}));
-}
-
-TEST(DecodeRpcServerTest, TailGroupReserveSlotsDoNotStarveTheLoad) {
-    // The last sequence-backed slot is 2; a reserve slot 3 must not shift the
-    // one-block tail window past the stored cache keys and drop the load.
-    auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    policy.active_tail_blocks = 1;
-    ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::NONE);
-
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/4,
-                                                          /*cache_key_count=*/3,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}}));
-}
-
-TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
-    // Decode owns whole logical blocks of a BLOCK_ROUND_ROBIN group: the plan must
-    // not shard it (the per-peer split happens later, per block), and reused
-    // blocks are skipped.
-    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/5,
-                                                          /*cache_key_count=*/4,
-                                                          /*reuse_block_size=*/2,
-                                                          /*use_hybrid=*/false,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
-
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
-}
-
-TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                    /*local_block_num=*/0,
-                                                    /*cache_key_count=*/11,
-                                                    /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
-                    .empty());
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                    /*local_block_num=*/6,
-                                                    /*cache_key_count=*/0,
-                                                    /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
-                    .empty());
-}
-
 }  // namespace rtp_llm

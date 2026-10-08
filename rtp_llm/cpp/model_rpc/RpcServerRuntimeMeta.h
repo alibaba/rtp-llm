@@ -47,12 +47,12 @@ public:
             task_info.phase = derivePhase(entry.stream);
             auto overlay    = priority_preemption_overlays_.find(id);
             if (overlay != priority_preemption_overlays_.end()) {
-                task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+                task_info.priority_preemption_progress = overlay->second.priority_preemption_progress;
                 emitted_preemption_overlays.insert(id);
             }
             info.running_task_info_list.push_back(std::move(task_info));
         }
-        // A Prefill request remains the priority-cancel control record even
+        // A request retains its cancellation control record even
         // when it has no local stream yet (Stage 2), or its local stream has
         // already been dequeued while Decode is generating (Stage 4). Emit an
         // overlay-only TaskInfo without inserting a synthetic engine runtime
@@ -92,10 +92,10 @@ public:
         running_streams_[identity.request_id] = RunningEntry{std::move(new_task), stream};
     }
 
-    // WorkerStatus control overlay for the original Prefill. This does not
+    // WorkerStatus control overlay while local/downstream cancellation completes. This does not
     // mutate running_streams_, so accepting Cancel cannot inflate engine load
     // or resource accounting.
-    void markPriorityPreemptionCanceling(const TaskIdentity& identity) {
+    void markCancellationPending(const TaskIdentity& identity, bool priority_preemption) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         const auto                          request_id = identity.request_id;
         if (priority_preemption_overlays_.find(request_id) != priority_preemption_overlays_.end()) {
@@ -119,18 +119,19 @@ public:
         task_info.end_time_ms = -1;
         task_info.error_code  = 0;
         task_info.error_message.clear();
-        task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+        task_info.priority_preemption_progress =
+            priority_preemption ? PriorityPreemptionProgress::CANCELING : PriorityPreemptionProgress::NONE;
         priority_preemption_overlays_.emplace(request_id, std::move(task_info));
     }
 
-    // Publish the single authoritative completion delta for priority Cancel.
+    // Publish one completion delta with the original cancellation or failure cause.
     // The caller must invoke this only after the Prefill request execution has
     // quiesced and its local/downstream cleanup path has returned. `stream`
     // must be the registered stream, or null when no local stream was enqueued.
-    bool markPriorityPreemptionCanceled(int64_t                  request_id,
-                                        int64_t                  error_code,
-                                        const std::string&       error_message,
-                                        const GenerateStreamPtr& stream) {
+    bool markCancellationComplete(int64_t                  request_id,
+                                  int64_t                  error_code,
+                                  const std::string&       error_message,
+                                  const GenerateStreamPtr& stream) {
         StreamRuntimeSnapshot stream_snapshot;
         const bool            has_stream_snapshot = stream != nullptr;
         if (has_stream_snapshot) {
@@ -164,7 +165,9 @@ public:
         }
         task_info.error_code                   = error_code;
         task_info.error_message                = error_message;
-        task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELED;
+        task_info.priority_preemption_progress = error_code == ErrorCode::PRIORITY_PREEMPTED ?
+                                                     PriorityPreemptionProgress::CANCELED :
+                                                     PriorityPreemptionProgress::NONE;
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
@@ -273,15 +276,16 @@ protected:
 
         auto overlay = priority_preemption_overlays_.find(request_id);
         if (overlay != priority_preemption_overlays_.end()) {
-            // Once priority Cancel has published CANCELING, ordinary stream
+            // Once cancellation is pending, ordinary stream
             // teardown must not emit an untyped terminal record. Preserve the
-            // latest runtime metrics in the control overlay; the priority
-            // finalizer will publish the one authoritative CANCELED record.
+            // latest runtime metrics and cancellation kind in the control overlay;
+            // the finalizer publishes one terminal record after cleanup.
+            const auto cancellation_progress = overlay->second.priority_preemption_progress;
             overlay->second             = task_info;
             overlay->second.end_time_ms = -1;
             overlay->second.error_code  = 0;
             overlay->second.error_message.clear();
-            overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+            overlay->second.priority_preemption_progress = cancellation_progress;
             running_streams_.erase(ptr);
             return;
         }

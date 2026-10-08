@@ -1,201 +1,73 @@
 #pragma once
 #include <memory>
-#include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
-#include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 class RemoteRpcServiceImpl: public LocalRpcServiceImpl {
 public:
-    RemoteRpcServiceImpl() {}
-    ~RemoteRpcServiceImpl() {}
-    grpc::Status init(const EngineInitParams&                                maga_init_params,
+    grpc::Status init(const EngineInitParams&                                params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
 
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                    const GenerateInputPB*                 request,
-                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        switch (generateStreamTarget()) {
-            case GenerateStreamTarget::kPrefill:
-                return prefill_server_->GenerateStreamCall(context, request, writer);
-            case GenerateStreamTarget::kDecodeNew2:
-                return decode_server_new2_->GenerateStreamCall(context, request, writer);
-            case GenerateStreamTarget::kPrefillNew2:
-                return prefill_server_new2_->GenerateStreamCall(context, request, writer);
-            case GenerateStreamTarget::kUnsupported:
-            default: {
-                auto error_msg = "server not implement GenerateStreamCall";
-                RTP_LLM_LOG_ERROR(error_msg);
-                return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-            }
-        }
-    }
-
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response) override {
-        if (decode_entrance_) {
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                                "/batch_infer is not supported with decode_entrance");
-        }
-        return LocalRpcServiceImpl::BatchGenerateCall(context, request, response);
-    }
-
     grpc::Status
-    RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
-        if (!prefill_server_) {
-            auto error_msg = "server not implement RemoteFinish";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        }
-        return prefill_server_->RemoteFinish(context, request, response);
+    BatchGenerateCall(grpc::ServerContext*, const BatchGenerateInputPB*, BatchGenerateOutputsPB*) override {
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "/batch_infer is not supported for PD roles");
     }
 
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {
-        if (prefill_server_new2_) {
-            return prefill_server_new2_->EnqueueBatch(context, request, response);
+        if (prefill_server_) {
+            return prefill_server_->EnqueueBatch(context, request, response);
         }
-        if (!prefill_server_) {
-            auto error_msg = "server not implement EnqueueBatch";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
-        }
-        return prefill_server_->EnqueueBatch(context, request, response);
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch requires Prefill role");
     }
 
-    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
-                              const EnqueueGroupRequestPB* request,
-                              EnqueueBatchResponsePB*      response) override {
-        if (!prefill_server_) {
-            auto error_msg = "server not implement EnqueueGroup";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
-        }
-        return prefill_server_->EnqueueGroup(context, request, response);
-    }
-
-    grpc::Status FetchResponse(grpc::ServerContext*                   context,
-                               const FetchRequestPB*                  request,
-                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        if (!prefill_server_) {
-            auto error_msg = "server not implement FetchResponse";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
-        }
-        return prefill_server_->FetchResponse(context, request, writer);
-    }
-
-    // AutoTPM Cancel: Prefill role only; Decode role
-    // returns gRPC UNIMPLEMENTED.
     grpc::Status
     Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) override {
-        if (!prefill_server_) {
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Cancel is only supported on Prefill role");
+        if (!request || request->request_id() <= 0 || !response) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
         }
-        return prefill_server_->Cancel(context, request, response);
-    }
-
-    grpc::Status RemoteLoad(grpc::ServerContext*          context,
-                            const BroadcastLoadRequestPB* request,
-                            BroadcastLoadResponsePB*      response) override {
-        if (!decode_server_) {
-            auto error_msg = "server not implement RemoteLoad";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        }
-        return decode_server_->RemoteLoad(context, request, response);
-    }
-
-    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
-        if (!decode_server_) {
-            auto error_msg = "server not implement RemoteGenerate";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        }
-        return decode_server_->RemoteGenerate(context, stream);
+        if (prefill_server_)
+            return prefill_server_->Cancel(context, request, response);
+        if (decode_server_)
+            return decode_server_->Cancel(context, request, response);
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "PD server is not initialized");
     }
 
     grpc::Status StartLoad(grpc::ServerContext*                  context,
                            const P2PConnectorStartLoadRequestPB* request,
                            P2PConnectorStartLoadResponsePB*      response) override {
-        if (prefill_server_new2_) {
-            return prefill_server_new2_->StartLoad(context, request, response);
+        if (prefill_server_) {
+            return prefill_server_->StartLoad(context, request, response);
         }
-        auto error_msg = "server not implement StartLoad";
-        RTP_LLM_LOG_ERROR(error_msg);
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server not implement StartLoad");
     }
 
     grpc::Status GetPeerInfo(grpc::ServerContext*        context,
                              const GetPeerInfoRequestPB* request,
                              GetPeerInfoResponsePB*      response) override {
-        if (prefill_server_new2_) {
-            return prefill_server_new2_->GetPeerInfo(context, request, response);
-        }
-        auto error_msg = "server not implement GetPeerInfo";
-        RTP_LLM_LOG_ERROR(error_msg);
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-    }
-
-    void beginShutdown() override {
         if (prefill_server_) {
-            prefill_server_->beginShutdown();
+            return prefill_server_->GetPeerInfo(context, request, response);
         }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server not implement GetPeerInfo");
     }
 
     void stop() override {
         if (prefill_server_) {
-            prefill_server_->beginShutdown();
             prefill_server_->stop();
         }
         if (decode_server_) {
             decode_server_->stop();
         }
-        if (prefill_server_new2_) {
-            prefill_server_new2_->stop();
-        }
-        if (decode_server_new2_) {
-            decode_server_new2_->stop();
-        }
     }
 
 private:
-    enum class GenerateStreamTarget {
-        kPrefill,
-        kDecodeNew2,
-        kPrefillNew2,
-        kUnsupported,
-    };
-
-    GenerateStreamTarget generateStreamTarget() const {
-        if (decode_entrance_) {
-            if (decode_server_new2_) {
-                return GenerateStreamTarget::kDecodeNew2;
-            }
-            if (prefill_server_new2_) {
-                return GenerateStreamTarget::kPrefillNew2;
-            }
-            return GenerateStreamTarget::kUnsupported;
-        }
-        if (prefill_server_) {
-            return GenerateStreamTarget::kPrefill;
-        }
-        return GenerateStreamTarget::kUnsupported;
-    }
-
-    std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer>      decode_server_;
-    bool                                  decode_entrance_ = false;
-    std::shared_ptr<PrefillRpcServerNew2> prefill_server_new2_;
-    std::shared_ptr<DecodeRpcServerNew2>  decode_server_new2_;
+    std::shared_ptr<PrefillRpcServer> prefill_server_;
+    std::shared_ptr<DecodeRpcServer>  decode_server_;
 };
 
 }  // namespace rtp_llm

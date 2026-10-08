@@ -215,7 +215,6 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
     inputs.pd_separation             = true;
-    inputs.decode_entrance           = true;
     inputs.use_opaque_kv_cache_store = true;
     inputs.kv_block_stride_bytes     = 4096;
     inputs.kv_scale_stride_bytes     = 256;

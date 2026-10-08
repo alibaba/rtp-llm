@@ -137,7 +137,7 @@ public:
     void stopMetricsReporter();
     void recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics);
 
-    // CacheStore ownership (set by RemoteRpcServer, read during model forward)
+    // CacheStore ownership, read during model forward
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
     std::shared_ptr<CacheStore> getCacheStore() const;
 
@@ -159,6 +159,7 @@ public:
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
     int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms);
+    void              cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
     void              publishPrefillPayload(const std::string&                           unique_key,
                                              int64_t                                      deadline_ms,
                                              PrefillResultStore::SideChannelData&& data);

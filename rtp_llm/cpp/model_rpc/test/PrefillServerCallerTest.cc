@@ -337,10 +337,10 @@ protected:
     }
 
 protected:
-    PrefillServerCaller caller_{"prefill-server-caller-test"};
+    PrefillServerCaller caller_;
 };
 
-TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailedAndPreservesFirstSnapshot) {
+TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailed) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kFirstChunkSnapshot));
     ASSERT_TRUE(server.start());
@@ -352,22 +352,6 @@ TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailedAndPreservesFirstSna
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_EQ(context->errorInfo().ToString(), "first chunk error");
-
-    const auto& response = context->response();
-    ASSERT_TRUE(response.has_error_info());
-    EXPECT_EQ(response.error_info().error_code(), ErrorCodePB::UNKNOWN_ERROR);
-    EXPECT_EQ(response.error_info().error_message(), "first chunk error");
-    ASSERT_TRUE(response.has_flatten_output());
-    ASSERT_EQ(response.flatten_output().aux_info_size(), 1);
-    EXPECT_EQ(response.flatten_output().aux_info(0).step_output_len(), 1);
-
-    PrefillServerCallerContext::ReuseLensSnapshot reuse_lens;
-    ASSERT_TRUE(context->getPrefillReuseLensSnapshot(reuse_lens));
-    EXPECT_EQ(reuse_lens.total, 88);
-    EXPECT_EQ(reuse_lens.local, 16);
-    EXPECT_EQ(reuse_lens.remote, 72);
-    EXPECT_EQ(reuse_lens.memory, 4);
-    EXPECT_EQ(reuse_lens.disk, 3);
 }
 
 TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish) {
@@ -385,7 +369,7 @@ TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
-TEST_F(PrefillServerCallerTest, LaterChunkReuseLensRefreshSnapshot) {
+TEST_F(PrefillServerCallerTest, MultipleChunksCompleteSuccessfully) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kLaterChunkSnapshot));
     ASSERT_TRUE(server.start());
@@ -395,19 +379,6 @@ TEST_F(PrefillServerCallerTest, LaterChunkReuseLensRefreshSnapshot) {
     ASSERT_TRUE(waitDone(context));
     EXPECT_TRUE(context->success());
     EXPECT_FALSE(context->failed());
-
-    const auto& response = context->response();
-    ASSERT_TRUE(response.has_flatten_output());
-    ASSERT_EQ(response.flatten_output().aux_info_size(), 1);
-    EXPECT_EQ(response.flatten_output().aux_info(0).step_output_len(), 2);
-
-    PrefillServerCallerContext::ReuseLensSnapshot reuse_lens;
-    ASSERT_TRUE(context->getPrefillReuseLensSnapshot(reuse_lens));
-    EXPECT_EQ(reuse_lens.total, 96);
-    EXPECT_EQ(reuse_lens.local, 24);
-    EXPECT_EQ(reuse_lens.remote, 72);
-    EXPECT_EQ(reuse_lens.memory, 8);
-    EXPECT_EQ(reuse_lens.disk, 6);
 }
 
 TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
@@ -592,7 +563,6 @@ TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_NE(context->errorInfo().ToString().find("prefill failed before any response"), std::string::npos);
-    EXPECT_FALSE(context->response().has_error_info());
 }
 
 TEST_F(PrefillServerCallerTest, SyncFallbackTimeoutCancelsPrefillRpc) {

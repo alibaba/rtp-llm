@@ -2167,21 +2167,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_store_rdma_listen_port", &PDSepConfig::cache_store_rdma_listen_port)
         .def_readwrite("cache_store_rdma_connect_port", &PDSepConfig::cache_store_rdma_connect_port)
         .def_readwrite("remote_rpc_server_port", &PDSepConfig::remote_rpc_server_port)
-        .def_readwrite("prefill_retry_times", &PDSepConfig::prefill_retry_times)
-        .def_readwrite("prefill_retry_timeout_ms", &PDSepConfig::prefill_retry_timeout_ms)
-        .def_readwrite("prefill_max_wait_timeout_ms", &PDSepConfig::prefill_max_wait_timeout_ms)
-        .def_readwrite("decode_retry_times", &PDSepConfig::decode_retry_times)
-        .def_readwrite("decode_retry_timeout_ms", &PDSepConfig::decode_retry_timeout_ms)
-        .def_readwrite("decode_retry_interval_ms", &PDSepConfig::decode_retry_interval_ms)
-        .def_readwrite("decode_polling_kv_cache_step_ms", &PDSepConfig::decode_polling_kv_cache_step_ms)
-        .def_readwrite("decode_polling_call_prefill_ms", &PDSepConfig::decode_polling_call_prefill_ms)
-        .def_readwrite("rdma_connect_retry_times", &PDSepConfig::rdma_connect_retry_times)
         .def_readwrite("load_cache_timeout_ms", &PDSepConfig::load_cache_timeout_ms)
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
-        .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
-        .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
-        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2192,50 +2180,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cache_store_rdma_listen_port,
                                       self.cache_store_rdma_connect_port,
                                       self.remote_rpc_server_port,
-                                      self.prefill_retry_times,
-                                      self.prefill_retry_timeout_ms,
-                                      self.prefill_max_wait_timeout_ms,
-                                      self.decode_retry_times,
-                                      self.decode_retry_timeout_ms,
-                                      self.decode_retry_interval_ms,
-                                      self.decode_polling_kv_cache_step_ms,
-                                      self.decode_polling_call_prefill_ms,
-                                      self.rdma_connect_retry_times,
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
-                                      self.worker_port_offset,
-                                      self.decode_entrance,
-                                      self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.worker_port_offset);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                if (t.size() != 10)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 10 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
-                    c.role_type                           = t[0].cast<RoleType>();
-                    c.cache_store_rdma_mode               = t[1].cast<bool>();
-                    c.cache_store_listen_port             = t[2].cast<int64_t>();
-                    c.cache_store_connect_port            = t[3].cast<int64_t>();
-                    c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
-                    c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
-                    c.remote_rpc_server_port              = t[6].cast<int64_t>();
-                    c.prefill_retry_times                 = t[7].cast<int64_t>();
-                    c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
-                    c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
-                    c.decode_retry_times                  = t[10].cast<int64_t>();
-                    c.decode_retry_timeout_ms             = t[11].cast<int64_t>();
-                    c.decode_retry_interval_ms            = t[12].cast<int64_t>();
-                    c.decode_polling_kv_cache_step_ms     = t[13].cast<int64_t>();
-                    c.decode_polling_call_prefill_ms      = t[14].cast<int64_t>();
-                    c.rdma_connect_retry_times            = t[15].cast<int64_t>();
-                    c.load_cache_timeout_ms               = t[16].cast<int64_t>();
-                    c.max_rpc_timeout_ms                  = t[17].cast<int64_t>();
-                    c.worker_port_offset                  = t[18].cast<int64_t>();
-                    c.decode_entrance                     = t[19].cast<bool>();
-                    c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
-                    c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
+                    c.role_type                     = t[0].cast<RoleType>();
+                    c.cache_store_rdma_mode         = t[1].cast<bool>();
+                    c.cache_store_listen_port       = t[2].cast<int64_t>();
+                    c.cache_store_connect_port      = t[3].cast<int64_t>();
+                    c.cache_store_rdma_listen_port  = t[4].cast<int64_t>();
+                    c.cache_store_rdma_connect_port = t[5].cast<int64_t>();
+                    c.remote_rpc_server_port        = t[6].cast<int64_t>();
+                    c.load_cache_timeout_ms         = t[7].cast<int64_t>();
+                    c.max_rpc_timeout_ms            = t[8].cast<int64_t>();
+                    c.worker_port_offset            = t[9].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

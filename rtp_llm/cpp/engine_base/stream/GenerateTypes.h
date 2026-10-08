@@ -201,7 +201,7 @@ public:
         CanRun             = 1 << 1,  // 调度器允许运行
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
-        NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+        PrefillHandoffReady = 1 << 4,  // Prefill output is ready for Decode handoff
     };
 
     void append(EventType event) {

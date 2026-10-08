@@ -370,7 +370,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
-    model_input.decode_entrance           = config_.decode_entrance;
     model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
 

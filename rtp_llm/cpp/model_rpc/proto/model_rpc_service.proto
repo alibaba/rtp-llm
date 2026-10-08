@@ -867,6 +867,9 @@ message SideChannelPayloadPB {
     int32  memory_reuse_len        = 6;
     bool   has_first_generate_token = 7;
     int32  disk_reuse_len          = 8;
+    // GenerationPrefillCudaGraphStatus value; zero means NOT_REQUESTED.
+    uint32 generation_prefill_cuda_graph_status = 9;
+    bool prefill_use_independent_block_pools = 10;
 }
 
 message P2PConnectorStartLoadResponsePB {
@@ -994,16 +997,21 @@ message FetchRequestPB {
 
 message CancelRequestPB {
     int64 request_id = 1;
+    // Selected Prefill endpoint, needed when Cancel precedes Decode admission.
+    string prefill_address = 2;
+    // Zero means an explicit FlexLB priority preemption; cleanup forwards its exact ErrorCode.
+    int64 cancel_error_code = 3;
+    string cancel_error_message = 4;
 }
 
 enum CancelStatusPB {
     CANCEL_STATUS_UNSPECIFIED = 0;
-    // The original Prefill atomically installed the priority-preemption
-    // latch/intent and triggered current-or-future P-to-D cancellation. This
+    // The receiving endpoint atomically installed the priority-preemption
+    // latch/intent. Decode forwards cancellation to Prefill. This
     // is not a resource-release acknowledgement.
     CANCEL_STATUS_ACCEPTED = 1;
     CANCEL_STATUS_NOT_FOUND = 2;
-    // No active request was visible, so Prefill installed (or found) a
+    // No active request was visible, so the endpoint installed (or found) a
     // short-lived request-id tombstone. A later Enqueue for the same id is
     // rejected with 8429 before it can reach the Engine scheduler.
     CANCEL_STATUS_TOMBSTONED = 3;
@@ -1044,10 +1052,10 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
-    // AutoTPM priority-preemption Cancel targets the original Prefill role.
-    // Prefill triggers the existing Prefill->Decode stream cancellation;
-    // Decode does not implement this RPC. Completion is reported separately
-    // by Prefill WorkerStatus as priority_preemption_progress=CANCELED with
+    // AutoTPM priority-preemption Cancel targets the selected Decode role.
+    // Decode forwards Cancel to Prefill, including cancel-before-attach fences.
+    // Prefill cancels only local work. Completion is reported separately
+    // by Decode WorkerStatus after both endpoints release resources, as priority_preemption_progress=CANCELED with
     // error code 8429. The original Enqueue/Fetch path also returns 8429.
     rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }

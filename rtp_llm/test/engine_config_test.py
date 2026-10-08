@@ -49,7 +49,7 @@ class EngineConfigTest(TestCase):
             runtime_config,
             self._parallelism_config(),
             self._world_info(),
-            decode_entrance=False,
+            role_type=RoleType.PDFUSION,
         )
 
         self.assertEqual(
@@ -67,30 +67,32 @@ class EngineConfigTest(TestCase):
             ],
         )
 
-    def test_update_worker_addrs_uses_p2p_format_for_decode_entrance(self):
-        runtime_config = RuntimeConfig()
+    def test_update_worker_addrs_uses_p2p_format_for_pd_roles(self):
+        for role_type in (RoleType.PREFILL, RoleType.DECODE):
+            with self.subTest(role_type=role_type):
+                runtime_config = RuntimeConfig()
 
-        update_worker_addrs(
-            runtime_config,
-            self._parallelism_config(),
-            self._world_info(),
-            decode_entrance=True,
-        )
+                update_worker_addrs(
+                    runtime_config,
+                    self._parallelism_config(),
+                    self._world_info(),
+                    role_type=role_type,
+                )
 
-        self.assertEqual(
-            runtime_config.worker_addrs,
-            [
-                "127.0.0.1:12001:13000",
-                "127.0.0.2:12011:13010",
-            ],
-        )
-        self.assertEqual(
-            runtime_config.worker_grpc_addrs,
-            [
-                "127.0.0.1:13000",
-                "127.0.0.2:13010",
-            ],
-        )
+                self.assertEqual(
+                    runtime_config.worker_addrs,
+                    [
+                        "127.0.0.1:12001:13000",
+                        "127.0.0.2:12011:13010",
+                    ],
+                )
+                self.assertEqual(
+                    runtime_config.worker_grpc_addrs,
+                    [
+                        "127.0.0.1:13000",
+                        "127.0.0.2:13010",
+                    ],
+                )
 
     def test_update_worker_addrs_orders_workers_by_world_rank(self):
         runtime_config = RuntimeConfig()
@@ -101,7 +103,7 @@ class EngineConfigTest(TestCase):
             runtime_config,
             self._parallelism_config(),
             world_info,
-            decode_entrance=True,
+            role_type=RoleType.PREFILL,
         )
 
         self.assertEqual(
@@ -134,7 +136,7 @@ class EngineConfigTest(TestCase):
                 runtime_config,
                 self._parallelism_config(),
                 world_info,
-                decode_entrance=True,
+                role_type=RoleType.PREFILL,
             )
 
     def test_update_worker_addrs_rejects_p2p_port_conflict(self):
@@ -156,7 +158,7 @@ class EngineConfigTest(TestCase):
                 runtime_config,
                 self._parallelism_config(),
                 world_info,
-                decode_entrance=True,
+                role_type=RoleType.PREFILL,
             )
 
     def test_update_worker_addrs_rejects_duplicate_p2p_port_on_same_ip(self):
@@ -185,8 +187,39 @@ class EngineConfigTest(TestCase):
                 runtime_config,
                 self._parallelism_config(),
                 world_info,
-                decode_entrance=True,
+                role_type=RoleType.PREFILL,
             )
+
+    def test_pd_sep_config_roundtrip_after_legacy_cleanup(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.DECODE
+        config.cache_store_rdma_mode = False
+        config.load_cache_timeout_ms = 12345
+        config.max_rpc_timeout_ms = 67890
+        state = config.__getstate__()
+        self.assertEqual(len(state), 10)
+        restored = PDSepConfig()
+        maybe_restored = restored.__setstate__(state)
+        if maybe_restored is not None:
+            restored = maybe_restored
+        self.assertEqual(restored.__getstate__(), state)
+        self.assertEqual(restored.role_type, RoleType.DECODE)
+        self.assertEqual(restored.load_cache_timeout_ms, 12345)
+        for removed in (
+            "decode_entrance",
+            "prefill_retry_times",
+            "prefill_retry_timeout_ms",
+            "prefill_max_wait_timeout_ms",
+            "decode_retry_times",
+            "decode_retry_timeout_ms",
+            "decode_retry_interval_ms",
+            "decode_polling_kv_cache_step_ms",
+            "decode_polling_call_prefill_ms",
+            "rdma_connect_retry_times",
+            "prefill_prepare_resource_pool_size",
+            "prefill_stop_stream_wait_timeout_ms",
+        ):
+            self.assertFalse(hasattr(restored, removed))
 
     def test_cache_store_config_roundtrip_after_timeout_cleanup(self):
         config = CacheStoreConfig()

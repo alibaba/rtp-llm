@@ -1,96 +1,107 @@
 #pragma once
 
-#include <chrono>
-#include <cstdint>
-#include <map>
-#include <memory>
-#include <optional>
-#include <string>
 #include "grpc++/grpc++.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
-#include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "autil/LoopThread.h"
+#include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace rtp_llm {
 
-enum class PriorityCancelResult : uint8_t {
-    ACCEPTED,
-    TOMBSTONED,
-    NOT_FOUND,
-};
-
-// Prefill-side gRPC server for PD (prefill/decode) separation — the single-request path.
-//
-//   GenerateStreamCall
-//     → syncPrefix    (prepareAllocateResource with retry + enqueueRequest)
-//     → finishStream  (remoteLoadCacheStart → pollLocalOutput → remoteLoadCacheEnd
-//                       → remoteGenerate → pollRemoteOutput)
-//
-// The batch-enqueue path (EnqueueBatch / EnqueueGroup / FetchResponse and the thread pools,
-// response registry and pool metrics behind it) lives entirely in the derived PrefillBatchRpcServer,
-// which reuses finishStream / prepareAllocateResource from this class. This base is never mutated by
-// the batch path, keeping the single-request behavior isolated.
-class PrefillRpcServer: public RemoteRpcServer {
+class PrefillRpcServer: public LocalRpcServer {
 public:
     PrefillRpcServer() {}
-    ~PrefillRpcServer() override;
+    ~PrefillRpcServer();
+
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
+
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
+    grpc::Status
+    EnqueueBatch(grpc::ServerContext* context, const EnqueueBatchRequestPB* request, EnqueueBatchResponsePB* response);
 
-    // AutoTPM Cancel targets an active batch request. ACCEPTED is a weak ACK:
-    // the priority first-cause latch is installed and P-to-D cancellation is
-    // triggered, while completion is reported later through WorkerStatus.
-    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
+    ::grpc::Status StartLoad(::grpc::ServerContext*                context,
+                             const P2PConnectorStartLoadRequestPB* request,
+                             P2PConnectorStartLoadResponsePB*      response);
 
-protected:
-    // Shared with the derived batch server (each batch slot reuses these).
-    grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
-    grpc::Status finishStream(PrefillGenerateContext& prefill_context);
-    grpc::Status preferPriorityPreemption(PrefillGenerateContext& prefill_context, const grpc::Status& fallback);
-    void         setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info);
-    void         setContextError(PrefillGenerateContext& prefill_context,
-                                 const ErrorInfo&        error_info,
-                                 const grpc::Status&     error_status);
-    virtual PriorityCancelResult onCancelRequest(int64_t request_id) {
-        return PriorityCancelResult::NOT_FOUND;
-    }
+    ::grpc::Status
+    GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
 private:
-    grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);
-    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
-    void         prepareGenerateInput(PrefillGenerateContext& prefill_context);
-    static std::chrono::system_clock::time_point
-    decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context, int64_t max_rpc_timeout_ms);
-    static std::optional<ErrorInfo> parseDownstreamError(const grpc::Status& status);
-    void                            getRpcConnection(PrefillGenerateContext& prefill_context);
-    void                            multimodalProcess(PrefillGenerateContext& prefill_context);
-    void                            remoteAllocateResource(PrefillGenerateContext& prefill_context);
-    GenerateRequestPB               buildAllocateRequest(PrefillGenerateContext& prefill_context);
-    void                            enqueueRequest(PrefillGenerateContext& prefill_context);
-    void                            remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
-    void                            pollLocalOutput(PrefillGenerateContext& prefill_context);
-    void                            remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
-    void                            remoteGenerate(PrefillGenerateContext& prefill_context);
-    void                            pollRemoteOutput(PrefillGenerateContext& prefill_context);
-    static void mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
-    static void mergeCacheReuseInfo(AuxInfoPB& aux_info,
-                                    int        prefill_total_reuse_len,
-                                    int        prefill_local_reuse_len,
-                                    int        prefill_remote_reuse_len,
-                                    int        prefill_memory_reuse_len,
-                                    int        prefill_disk_reuse_len,
-                                    bool       use_independent_block_pools);
+    std::unique_ptr<PDCancelRegistry> cancel_registry_;
+    // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
+    // registers an entry on entry and removes it on return; the background
+    // hang_diag_thread_ periodically scans for entries that have been alive
+    // beyond a threshold and reports them with which step they last reached.
+    // This is how we will catch the 5/22 P1-B-style stuck requests (where
+    // GenerateStreamCall thread enters but never returns and prints nothing).
+    enum class GenerateStreamStep : int {
+        kEntry = 0,           // RemoteRpcServiceImpl entry, just past pd_separation/unique_key checks
+        kAfterTransQuery,     // QueryConverter::transQuery + mm_processor done
+        kAfterEngineEnqueue,  // engine_->enqueue returned (stream created and pushed to scheduler)
+        kAfterPollStream,     // pollStreamOutput returned (success or error)
+    };
 
-private:
-    std::string decode_cluster_name_;
+    struct OnflightTracker {
+        int64_t          request_id{0};
+        int64_t          start_us{0};
+        std::atomic<int> step{static_cast<int>(GenerateStreamStep::kEntry)};
+    };
+
+    class OnflightScope {
+    public:
+        OnflightScope(PrefillRpcServer* owner, int64_t request_id);
+        ~OnflightScope();
+        void markStep(GenerateStreamStep s);
+
+    private:
+        PrefillRpcServer*                owner_;
+        int64_t                          request_id_;
+        std::shared_ptr<OnflightTracker> tracker_;
+    };
+
+    struct BatchEntry {
+        // Reserved before preprocessing; cleared when the local context finishes.
+        bool                             reserved{false};
+        std::unique_ptr<GenerateContext> context;
+        std::weak_ptr<GenerateStream>    stream;
+        int64_t                          deadline_ms{0};
+        int64_t                          request_deadline_ms{0};
+        bool                             attach_pending{false};
+        bool                             expired{false};
+    };
+    void                                        registerBatchAttach(const std::string&       key,
+                                                                    const GenerateStreamPtr& stream,
+                                                                    int64_t                  timeout_ms,
+                                                                    int64_t                  request_deadline_ms,
+                                                                    int64_t                  now_ms);
+    bool                                        attachBatch(const std::string& key, int64_t now_ms);
+    void                                        expireBatchAttachments(int64_t now_ms);
+    std::mutex                                  batch_mutex_;
+    std::unordered_map<std::string, BatchEntry> batch_entries_;
+
+    void               hangDiagTick();
+    void               batchContextCleanupTick();
+    void               cancelCleanupTick();
+    int64_t            last_cancel_tick_ms_{0};
+    static const char* stepName(int step);
+
+    mutable std::mutex                                            onflight_trackers_mutex_;
+    std::unordered_map<int64_t, std::shared_ptr<OnflightTracker>> onflight_trackers_;
+    autil::LoopThreadPtr                                          hang_diag_thread_;
+    autil::LoopThreadPtr                                          batch_context_cleanup_thread_;
+    int64_t                                                       hang_diag_warn_threshold_ms_{60 * 1000};
 };
 
 }  // namespace rtp_llm

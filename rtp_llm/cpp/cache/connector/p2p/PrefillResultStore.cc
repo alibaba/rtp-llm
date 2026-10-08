@@ -121,6 +121,8 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         if (data.has_first_token) {
             payload->set_first_generate_token_id(data.first_token_id);
         }
+        payload->set_generation_prefill_cuda_graph_status(data.generation_prefill_cuda_graph_status);
+        payload->set_prefill_use_independent_block_pools(data.prefill_use_independent_block_pools);
         payload->set_total_reuse_len(data.total_reuse_len);
         payload->set_local_reuse_len(data.local_reuse_len);
         payload->set_remote_reuse_len(data.remote_reuse_len);

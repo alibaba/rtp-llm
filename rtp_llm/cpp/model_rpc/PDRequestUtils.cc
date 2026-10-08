@@ -28,7 +28,7 @@ ErrorInfo validatePDHandoff(const GenerateInputPB& request) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid P2P request timeout");
     }
     if (request.generate_config().unique_key().empty()) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "decode_entrance handoff requires non-empty unique_key");
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "PD handoff requires non-empty unique_key");
     }
     return ErrorInfo::OkStatus();
 }

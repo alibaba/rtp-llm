@@ -27,14 +27,6 @@ struct PrefillServerCallerAsyncState {
 
 class PrefillServerCallerContext {
 public:
-    struct ReuseLensSnapshot {
-        int32_t total  = 0;
-        int32_t local  = 0;
-        int32_t remote = 0;
-        int32_t memory = 0;
-        int32_t disk   = 0;
-    };
-
     ~PrefillServerCallerContext();
 
     // Constructor (only friends can create instances)
@@ -68,11 +60,6 @@ public:
                    && async_state_->status.error_code() != grpc::StatusCode::CANCELLED);
     }
 
-    // Get response (only valid after done() returns true)
-    const GenerateOutputsPB& response() const {
-        return response_;
-    }
-
     FirstError::Snapshot firstError() {
         first_error_.record(errorInfo());
         return first_error_.snapshot();
@@ -89,10 +76,6 @@ public:
         return error_info_;
     }
 
-    bool getPrefillReuseLensSnapshot(ReuseLensSnapshot& snapshot);
-
-    void setPrefillReuseLensSnapshotForTest(const ReuseLensSnapshot& snapshot);
-
     // Cancel the ongoing RPC call
     void cancel();
 
@@ -101,7 +84,6 @@ public:
 
 private:
     friend class PrefillServerCaller;
-    bool updateReuseLensSnapshotLocked(const GenerateOutputsPB& response);
     void handleReadChunkLocked(const GenerateOutputsPB& response);
     bool waitWithTimeoutMs(int64_t timeout_ms);
     void shutdownAndDrainCompletionQueue();
@@ -114,7 +96,6 @@ private:
     std::shared_ptr<PrefillServerCallerAsyncState> async_state_;
 
     // Request/Response
-    GenerateOutputsPB response_;
     ErrorInfo         error_info_;
     FirstError        first_error_;
 
@@ -124,8 +105,6 @@ private:
     bool              finish_started_    = false;
     bool              rpc_started_       = false;
     bool              cancel_requested_      = false;
-    bool              reuse_lens_valid_      = false;
-    ReuseLensSnapshot reuse_lens_snapshot_;
 
     mutable std::shared_mutex state_mutex_;
     std::mutex                completion_queue_poll_mutex_;

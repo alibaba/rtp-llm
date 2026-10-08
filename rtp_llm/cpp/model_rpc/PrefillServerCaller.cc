@@ -74,9 +74,8 @@ private:
 
 }  // namespace
 
-PrefillServerCaller::PrefillServerCaller(const std::string& process_id):
+PrefillServerCaller::PrefillServerCaller():
     rpc_pool_(std::make_shared<RPCPool>()),
-    process_id_(process_id),
     async_reader_factory_([](const std::shared_ptr<RpcService::Stub>& stub,
                              grpc::ClientContext*                     client_context,
                              const GenerateInputPB&                   request,
@@ -122,10 +121,9 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
     auto context   = std::make_shared<PrefillServerCallerContext>(prefill_addr, unique_key);
     context->async_state_->stub = stub;
 
-    // Preserve the original request shape for decode_entrance handoff so the
+    // Preserve the original request shape for PD handoff so the
     // prefill side still recognizes it as a PD-separation request.
     context->async_state_->request.CopyFrom(*request);
-    context->async_state_->request.set_client_id(process_id_);
     context->async_state_->request.set_start_time(currentTimeUs());
     context->async_state_->request.mutable_generate_config()->set_can_use_pd_separation(true);
     context->async_state_->request.mutable_generate_config()->set_unique_key(unique_key);
@@ -297,9 +295,5 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
     return std::move(info);
 }
 
-int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
-    const auto result = getPrefillPeerInfo(ip, port, request_timeout_ms);
-    return result.ok() ? result.value().tp_size : -1;
-}
 
 }  // namespace rtp_llm

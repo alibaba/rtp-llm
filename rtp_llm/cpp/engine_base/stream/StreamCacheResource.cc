@@ -149,28 +149,30 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         };
         stream->setIsContextStream(false);
         stream->step();
-        stream->updateWithoutLock({.new_tokens =
-                                       buildFirstTokenUpdateTokens(stream, static_cast<int32_t>(payload.first_token_id)),
-                                   .num_new_tokens = 1,
-                                   .hidden_states = output_tensor("first_token_hidden_states"),
-                                   .logits = output_tensor("first_token_logits"),
-                                   .softmax_probs = output_tensor("first_token_softmax_probs"),
-                                   .cum_log_probs = output_tensor("first_token_cum_log_probs"),
-                                   .all_probs = output_tensor("first_token_all_probs"),
-                                   .loss = output_tensor("first_token_loss"),
-                                   .src_batch_indices = {},
-                                   .all_hidden_states = output_tensor("first_token_all_hidden_states"),
-                                   .update_remote_generate = false,
-                                   .force_update_info = false});
+        stream->updateWithoutLock(
+            {.new_tokens        = buildFirstTokenUpdateTokens(stream, static_cast<int32_t>(payload.first_token_id)),
+             .num_new_tokens    = 1,
+             .hidden_states     = output_tensor("first_token_hidden_states"),
+             .logits            = output_tensor("first_token_logits"),
+             .softmax_probs     = output_tensor("first_token_softmax_probs"),
+             .cum_log_probs     = output_tensor("first_token_cum_log_probs"),
+             .all_probs         = output_tensor("first_token_all_probs"),
+             .loss              = output_tensor("first_token_loss"),
+             .src_batch_indices = {},
+             .all_hidden_states = output_tensor("first_token_all_hidden_states"),
+             .update_remote_generate = false,
+             .force_update_info      = false,
+             .generation_prefill_cuda_graph_status =
+                 static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
     }
 
-    if (payload.total_reuse_len > 0) {
-        stream->setPrefillReuseLength(
-            payload.total_reuse_len,
-            payload.local_reuse_len,
-            payload.remote_reuse_len,
-            payload.memory_reuse_len,
-            payload.disk_reuse_len);
+    {
+        stream->setPrefillReuseLength(payload.total_reuse_len,
+                                      payload.local_reuse_len,
+                                      payload.remote_reuse_len,
+                                      payload.memory_reuse_len,
+                                      payload.disk_reuse_len,
+                                      payload.prefill_use_independent_block_pools);
     }
 
     const bool has_probs = payload.propose_probs.shape_size() > 0 || !payload.propose_probs.fp16_data().empty()
@@ -248,6 +250,10 @@ void StreamCacheResource::init(int batch_size) {
     resource_released_ = false;
 }
 
+bool StreamCacheResource::p2pReleasePending() const {
+    return !p2pLoadSafeToRelease(p2p_load_context_) || !p2pLoadSafeToRelease(released_p2p_load_context_.lock());
+}
+
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
@@ -283,6 +289,7 @@ void StreamCacheResource::releaseResource() {
     }
     if (p2p_load_context_) {
         resource_context_.cache_manager->cancelP2PLoad(p2p_load_context_);
+        released_p2p_load_context_ = p2p_load_context_;
         p2p_load_context_.reset();
     }
     allocator_load_error_ = absl::OkStatus();
@@ -291,10 +298,7 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
         return;
     }
-    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
-                      stream_->streamId(),
-                      curBlocksNum(),
-                      pd_kvcache_ref_.get());
+    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d", stream_->streamId(), curBlocksNum());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
@@ -831,16 +835,4 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     }
 }
 
-void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
-    if (ref) {
-        pd_kvcache_ref_ = std::move(ref);
-    }
-}
-
-void StreamCacheResource::releaseKVCacheForPDSep() {
-    pd_kvcache_ref_.reset();
-}
 }  // namespace rtp_llm

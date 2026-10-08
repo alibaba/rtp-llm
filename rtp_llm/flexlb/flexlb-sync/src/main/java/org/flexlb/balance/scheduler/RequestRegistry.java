@@ -1124,11 +1124,11 @@ public class RequestRegistry {
         return snapshot.deliveryClaimKind() == DeliveryClaimKind.NONE;
     }
 
-    private static CancelTarget cancelTarget(
-            ScheduledRequest item) {
+    private static CancelTarget cancelTarget(ScheduledRequest item) {
         ServerStatus prefill = item == null ? null : item.prefill();
-        return prefill == null ? null
-                : new CancelTarget(
+        ServerStatus decode = item == null ? null : item.decode();
+        return prefill == null || decode == null ? null
+                : CancelTarget.of(decode.getServerIp(), decode.getGrpcPort(),
                         prefill.getServerIp(), prefill.getGrpcPort());
     }
 

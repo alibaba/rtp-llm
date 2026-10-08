@@ -102,7 +102,7 @@ bool P2PWorkerPrefillRead::init() {
 
     // OPT-A2: dedicated pool for sender_->send so the dispatcher thread does
     // not block on the synchronous cuda copy + sync inside TcpKVCacheSender.
-    // See PrefillRpcServerNew2.h / P2PWorkerPrefillRead.h comments and
+    // See PrefillRpcServer.h / P2PWorkerPrefillRead.h comments and
     // the OPT-0 analysis for full rationale.
     auto             sender_pool            = std::make_shared<autil::LockFreeThreadPool>(
         config_.p2p_prefill_sender_thread_count, config_.p2p_prefill_sender_queue_size, nullptr, "P2PWorkerAsyncSender");

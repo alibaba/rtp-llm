@@ -8,6 +8,7 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
+    _selected_pd_separation,
     StreamState,
     trans_input,
     trans_output,
@@ -153,7 +154,7 @@ class FakeModelRpcClient(ModelRpcClient):
             [],  # addresses: empty list for fake client
             {},  # client_config: empty dict for fake client
             0,  # max_rpc_timeout_ms
-            False,  # decode_entrance
+            RoleType.PDFUSION,  # local backend role
         )
         self.stub = FakeStub()
 
@@ -594,20 +595,20 @@ class ModelRpcClientTest(TestCase):
             input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
         )
 
-    def test_enqueue_fetches_response_when_master_already_enqueued(self):
+    def test_master_enqueued_request_uses_decode_stream(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.DECODE,
         )
         client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
             generate_config=GenerateConfig(
                 timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                role_addrs=[_decode_role_addr("decode-worker", 9001)],
             ),
             request_id=321,
             mm_inputs=[],
@@ -624,13 +625,13 @@ class ModelRpcClientTest(TestCase):
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
-        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
-        self.assertEqual(len(stub.fetch_calls), 1)
-        self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
-        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
-        self.assertEqual(stub.generate_calls, [])
+        self.assertEqual(client._channel_pool.targets, ["decode-worker:9001"])
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertEqual(stub.generate_calls[0][0].request_id, 321)
+        self.assertEqual(stub.generate_calls[0][1]["timeout"], 1.0)
+        self.assertEqual(stub.fetch_calls, [])
         start_span.assert_called_once_with(
-            "rtp_llm.fetch_response", "prefill-worker:9000"
+            "rtp_llm.generate_stream_call", "decode-worker:9001"
         )
 
     def test_enqueue_uses_generate_stream_without_master_enqueue(self):
@@ -638,7 +639,7 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.PDFUSION,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
@@ -666,7 +667,7 @@ class ModelRpcClientTest(TestCase):
             "rtp_llm.generate_stream_call", "worker:9000"
         )
 
-    def test_enqueue_cancels_fetch_stream_on_early_close(self):
+    def test_enqueue_cancels_decode_stream_on_early_close(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             first = await gen.__anext__()
@@ -677,11 +678,11 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.DECODE,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(
-            fetch_responses=[
+            generate_responses=[
                 _make_response(finished=False),
                 _make_response(finished=True),
             ]
@@ -690,7 +691,7 @@ class ModelRpcClientTest(TestCase):
             token_ids=torch.tensor([1, 2, 3]),
             generate_config=GenerateConfig(
                 timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                role_addrs=[_decode_role_addr("decode-worker", 9001)],
             ),
             request_id=323,
             mm_inputs=[],
@@ -703,9 +704,9 @@ class ModelRpcClientTest(TestCase):
         ):
             asyncio.run(run_and_close())
 
-        self.assertTrue(stub.fetch_iterator.cancelled)
+        self.assertTrue(stub.generate_iterator.cancelled)
 
-    def test_master_enqueued_request_uses_decode_entrance_and_forwards_flag(self):
+    def test_master_enqueued_request_uses_pd_and_forwards_flag(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             await gen.__anext__()
@@ -715,7 +716,7 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=True,
+            role_type=RoleType.DECODE,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(generate_responses=[_make_response(finished=False)])
@@ -755,15 +756,15 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.DECODE,
         )
         client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
             generate_config=GenerateConfig(
                 timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                role_addrs=[_decode_role_addr("decode-worker", 9001)],
             ),
             request_id=324,
             mm_inputs=[],
@@ -776,7 +777,7 @@ class ModelRpcClientTest(TestCase):
         ):
             asyncio.run(run_and_close_after_finished())
 
-        self.assertFalse(stub.fetch_iterator.cancelled)
+        self.assertFalse(stub.generate_iterator.cancelled)
 
     def test_logits_index_serialization_preserves_presence_and_value(self):
         for logits_index in (None, 0, 2):
@@ -797,8 +798,60 @@ class ModelRpcClientTest(TestCase):
                 if logits_index is not None:
                     self.assertEqual(config.logits_index.value, logits_index)
 
-    def test_decode_entrance_batch_enqueue_is_unsupported(self):
-        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, True)
+    def test_pd_route_ignores_prefill_and_targets_decode_without_mode_flag(self):
+        client = ModelRpcClient(["local:9000"], {})
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(
+                role_addrs=[
+                    _prefill_role_addr("prefill", 9001),
+                    _decode_role_addr("decode", 9002),
+                ]
+            ),
+            request_id=1,
+            mm_inputs=[],
+        )
+        self.assertEqual(client._get_explicit_target_address(input_py), "decode:9002")
+        self.assertEqual(
+            client._build_response_role_addrs(input_py, "decode:9002"),
+            [input_py.generate_config.role_addrs[1]],
+        )
+
+    def test_pdfusion_route_does_not_fabricate_decode_response_address(self):
+        client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.DECODE)
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(
+                role_addrs=[
+                    RoleAddr(
+                        role=RoleType.PDFUSION,
+                        ip="fusion",
+                        http_port=9000,
+                        grpc_port=9001,
+                    )
+                ]
+            ),
+            request_id=1,
+            mm_inputs=[],
+        )
+        self.assertEqual(client._get_explicit_target_address(input_py), "fusion:9001")
+        self.assertIsNone(client._build_response_role_addrs(input_py, "fusion:9001"))
+
+    def test_batch_rejects_explicit_decode_route_on_frontend(self):
+        client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.FRONTEND)
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(
+                role_addrs=[_decode_role_addr("decode", 9002)]
+            ),
+            request_id=1,
+            mm_inputs=[],
+        )
+        with self.assertRaisesRegex(FtRuntimeException, "not supported for PD roles"):
+            asyncio.run(client.batch_enqueue([input_py]))
+
+    def test_pd_batch_enqueue_is_unsupported(self):
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.DECODE)
         input_obj = GenerateInput(
             token_ids=torch.tensor([1, 2]),
             generate_config=GenerateConfig(),
@@ -806,212 +859,12 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
         )
         with self.assertRaisesRegex(
-            FtRuntimeException, "/batch_infer is not supported with decode_entrance"
+            FtRuntimeException, "/batch_infer is not supported for PD roles"
         ):
             asyncio.run(client.batch_enqueue([input_obj]))
 
-    @unittest.skip("decode-entrance /batch_infer support was removed")
-    def test_batch_enqueue_returns_decode_role_addr_only_in_decode_entrance(self):
-        client = ModelRpcClient(
-            ["127.0.0.1:10101"],
-            {},
-            0,
-            True,
-        )
-        fake_stub = FakeBatchStub()
-
-        async def fake_get(_):
-            return object()
-
-        client._channel_pool.get = fake_get
-
-        config_1 = GenerateConfig(aux_info=True)
-        config_1.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.PREFILL,
-                ip="10.0.0.2",
-                http_port=3000,
-                grpc_port=3001,
-            ),
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.1",
-                http_port=2000,
-                grpc_port=2001,
-            ),
-        ]
-        input_1 = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=config_1,
-            request_id=0,
-            mm_inputs=[],
-        )
-        config_2 = GenerateConfig(aux_info=True)
-        config_2.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.PREFILL,
-                ip="10.0.0.2",
-                http_port=3000,
-                grpc_port=3001,
-            ),
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.1",
-                http_port=2000,
-                grpc_port=2001,
-            ),
-        ]
-        input_2 = GenerateInput(
-            token_ids=torch.tensor([4, 5, 6]),
-            generate_config=config_2,
-            request_id=1,
-            mm_inputs=[],
-        )
-
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=fake_stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RoleAddr",
-            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
-        ):
-            results = asyncio.run(client.batch_enqueue([input_1, input_2]))
-
-        self.assertEqual(fake_stub.last_batch_size, 2)
-        result_role_addrs = results[0].generate_outputs[0].aux_info.role_addrs
-        self.assertEqual(len(result_role_addrs), 1)
-        self.assertEqual(
-            {role_addr.role for role_addr in result_role_addrs},
-            {RoleType.DECODE},
-        )
-        self.assertEqual(
-            next(
-                role_addr.ip
-                for role_addr in result_role_addrs
-                if role_addr.role == RoleType.DECODE
-            ),
-            "10.0.0.1",
-        )
-
-    @unittest.skip("decode-entrance /batch_infer support was removed")
-    def test_batch_enqueue_preserves_per_request_role_addrs_in_decode_entrance(self):
-        client = ModelRpcClient(
-            ["127.0.0.1:10101"],
-            {},
-            0,
-            True,
-        )
-        fake_stub = FakeBatchStub()
-
-        async def fake_get(_):
-            return object()
-
-        client._channel_pool.get = fake_get
-
-        config_1 = GenerateConfig(aux_info=True)
-        config_1.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.PREFILL,
-                ip="10.0.0.2",
-                http_port=3000,
-                grpc_port=3001,
-            ),
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.1",
-                http_port=2000,
-                grpc_port=2001,
-            ),
-        ]
-        input_1 = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=config_1,
-            request_id=0,
-            mm_inputs=[],
-        )
-        config_2 = GenerateConfig(aux_info=True)
-        config_2.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.PREFILL,
-                ip="10.0.0.3",
-                http_port=4000,
-                grpc_port=4001,
-            ),
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.1",
-                http_port=2000,
-                grpc_port=2001,
-            ),
-        ]
-        input_2 = GenerateInput(
-            token_ids=torch.tensor([4, 5, 6]),
-            generate_config=config_2,
-            request_id=1,
-            mm_inputs=[],
-        )
-
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=fake_stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RoleAddr",
-            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
-        ):
-            results = asyncio.run(client.batch_enqueue([input_1, input_2]))
-
-        self.assertEqual(fake_stub.last_batch_size, 2)
-        self.assertEqual(
-            {
-                role_addr.role
-                for role_addr in results[0].generate_outputs[0].aux_info.role_addrs
-            },
-            {RoleType.DECODE},
-        )
-        self.assertEqual(
-            next(
-                role_addr.ip
-                for role_addr in results[0].generate_outputs[0].aux_info.role_addrs
-                if role_addr.role == RoleType.DECODE
-            ),
-            "10.0.0.1",
-        )
-        self.assertEqual(
-            next(
-                role_addr.ip
-                for role_addr in results[1].generate_outputs[0].aux_info.role_addrs
-                if role_addr.role == RoleType.DECODE
-            ),
-            "10.0.0.1",
-        )
-
-    @unittest.skip("decode-entrance /batch_infer support was removed")
-    def test_decode_batch_preserves_individual_timeouts(self):
-        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, False)
-        stub = FakeBatchStub()
-
-        async def fake_get(_):
-            return object()
-
-        client._channel_pool.get = fake_get
-        inputs = [
-            GenerateInput(
-                token_ids=torch.tensor([1, 2]),
-                generate_config=GenerateConfig(timeout_ms=timeout),
-                request_id=i,
-                mm_inputs=[],
-            )
-            for i, timeout in enumerate([100, 2000, 0])
-        ]
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
-        ):
-            asyncio.run(client.batch_enqueue(inputs))
-        self.assertEqual(stub.last_item_timeouts, [100, 2000, 5000])
-        self.assertEqual(stub.last_timeout, 5.0)
-
     def test_batch_rejects_wrong_result_count(self):
-        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, True)
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, RoleType.PDFUSION)
 
         async def fake_get(_):
             return object()
@@ -1040,10 +893,10 @@ class ModelRpcClientTest(TestCase):
             error_code=ExceptionType.MM_PROCESS_ERROR.value,
             error_message="original backend failure",
         )
-        for decode_entrance in (False,):
+        for role_type in (RoleType.PDFUSION,):
             for metadata in (None, (("grpc-status-details-bin", details.SerializeToString()),)):
-                with self.subTest(decode_entrance=decode_entrance, structured=bool(metadata)):
-                    client = ModelRpcClient([target], {}, 5000, decode_entrance)
+                with self.subTest(role_type=role_type, structured=bool(metadata)):
+                    client = ModelRpcClient([target], {}, 5000, role_type)
 
                     async def fake_get(_):
                         return object()
@@ -1083,111 +936,8 @@ class ModelRpcClientTest(TestCase):
                     if metadata:
                         self.assertIn(details.error_message, caught.exception.message)
 
-    @unittest.skip("decode-entrance /batch_infer support was removed")
-    def test_batch_enqueue_uses_first_selected_backend_for_multi_address_batch(self):
-        client = ModelRpcClient(
-            ["10.0.0.10:10101", "10.0.0.11:10111"],
-            {},
-            0,
-            True,
-        )
-        fake_stub = FakeBatchStub()
-        requested_channels = []
-
-        async def fake_get(address):
-            requested_channels.append(address)
-            return object()
-
-        client._channel_pool.get = fake_get
-
-        input_1 = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(aux_info=True),
-            request_id=0,
-            mm_inputs=[],
-        )
-        input_2 = GenerateInput(
-            token_ids=torch.tensor([4, 5, 6]),
-            generate_config=GenerateConfig(aux_info=True),
-            request_id=1,
-            mm_inputs=[],
-        )
-
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=fake_stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RoleAddr",
-            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
-        ):
-            results = asyncio.run(client.batch_enqueue([input_1, input_2]))
-
-        self.assertEqual(fake_stub.last_batch_size, 2)
-        self.assertEqual(requested_channels, ["10.0.0.10:10101"])
-        for result in results:
-            decode_role_addr = next(
-                role_addr
-                for role_addr in result.generate_outputs[0].aux_info.role_addrs
-                if role_addr.role == RoleType.DECODE
-            )
-            self.assertEqual(decode_role_addr.ip, "10.0.0.10")
-            self.assertEqual(decode_role_addr.grpc_port, 10101)
-            self.assertEqual(decode_role_addr.http_port, 10100)
-
-    @unittest.skip("decode-entrance /batch_infer support was removed")
-    def test_batch_enqueue_rejects_conflicting_explicit_backend_role_addrs(self):
-        client = ModelRpcClient(
-            ["10.0.0.10:10101", "10.0.0.11:10111"],
-            {},
-            0,
-            True,
-        )
-
-        config_1 = GenerateConfig(aux_info=True)
-        config_1.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.10",
-                http_port=10100,
-                grpc_port=10101,
-            ),
-        ]
-        config_2 = GenerateConfig(aux_info=True)
-        config_2.role_addrs = [
-            SimpleNamespace(
-                role=RoleType.DECODE,
-                ip="10.0.0.11",
-                http_port=10110,
-                grpc_port=10111,
-            ),
-        ]
-        input_1 = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=config_1,
-            request_id=0,
-            mm_inputs=[],
-        )
-        input_2 = GenerateInput(
-            token_ids=torch.tensor([4, 5, 6]),
-            generate_config=config_2,
-            request_id=1,
-            mm_inputs=[],
-        )
-
-        with self.assertRaisesRegex(
-            FtRuntimeException,
-            "conflicting explicit backends",
-        ) as caught:
-            asyncio.run(client.batch_enqueue([input_1, input_2]))
-        self.assertEqual(
-            caught.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
-        )
-        self.assertIn("batch item 1", caught.exception.message)
-        self.assertNotIn("10.0.0.10", caught.exception.message)
-        self.assertNotIn("10.0.0.11", caught.exception.message)
-
     def test_explicit_decode_role_addr_formats_raw_ipv6_target(self):
-        client = ModelRpcClient(["10.0.0.10:10101"], {}, 0, True)
+        client = ModelRpcClient(["10.0.0.10:10101"], {}, 0, RoleType.DECODE)
         config = GenerateConfig(aux_info=True)
         config.role_addrs = [
             SimpleNamespace(
@@ -1209,8 +959,8 @@ class ModelRpcClientTest(TestCase):
             "[fe80::1]:9003",
         )
 
-    def test_decode_entrance_response_role_addr_splits_bracket_ipv6_target(self):
-        client = ModelRpcClient(["[fe80::1]:9003"], {}, 0, True)
+    def test_pd_response_role_addr_splits_bracket_ipv6_target(self):
+        client = ModelRpcClient(["[fe80::1]:9003"], {}, 0, RoleType.DECODE)
         input_obj = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
             generate_config=GenerateConfig(aux_info=True),
@@ -1237,7 +987,7 @@ class ModelRpcClientTest(TestCase):
             ["10.0.0.10:10101", "10.0.0.11:10111"],
             {},
             0,
-            True,
+            RoleType.DECODE,
         )
 
         async def fake_get(_):
@@ -1334,7 +1084,7 @@ class ModelRpcClientTest(TestCase):
             def trailing_metadata(self):
                 return ()
 
-        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, False)
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.PDFUSION)
         with self.assertRaises(FtRuntimeException) as cm:
             client._handle_grpc_error(_FakeRpcError(), "test-request")
         self.assertEqual(cm.exception.exception_type, ExceptionType.MALLOC_ERROR)
@@ -1576,7 +1326,7 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
         asyncio.run(run())
 
-    def test_fetch_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
+    def test_master_enqueued_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
 
         async def run():
@@ -1598,14 +1348,14 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
             self.assertTrue(
                 tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
             )
-            root = tracing.start_server_span("fetch-root", {})
+            root = tracing.start_server_span("master-enqueued-root", {})
             client = ModelRpcClient([], {}, max_rpc_timeout_ms=1000)
             client._channel_pool = _RealChannelPool(channel)
             input_py = GenerateInput(
                 token_ids=torch.tensor([1, 2, 3]),
                 generate_config=GenerateConfig(
                     timeout_ms=1000,
-                    role_addrs=[_prefill_role_addr("127.0.0.1", port)],
+                    role_addrs=[_decode_role_addr("127.0.0.1", port)],
                 ),
                 request_id=954,
                 mm_inputs=[],
@@ -1615,20 +1365,20 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
                 responses = [response async for response in client.enqueue(input_py)]
                 await asyncio.wait_for(servicer.metadata_ready.wait(), timeout=5)
                 self.assertEqual(len(responses), 1)
-                self.assertEqual(servicer.method, "FetchResponse")
+                self.assertEqual(servicer.method, "GenerateStreamCall")
                 self.assertIn("traceparent", servicer.metadata)
                 root.finish()
                 self.assertTrue(tracing.shutdown_telemetry())
                 spans = {span.name: span for span in exporter.get_finished_spans()}
-                fetch_span = spans["rtp_llm.fetch_response"]
+                decode_span = spans["rtp_llm.generate_stream_call"]
                 self.assertEqual(
-                    fetch_span.parent.span_id, spans["fetch-root"].context.span_id
+                    decode_span.parent.span_id, spans["master-enqueued-root"].context.span_id
                 )
                 self.assertEqual(
-                    fetch_span.attributes["rpc.response.status_code"], "OK"
+                    decode_span.attributes["rpc.response.status_code"], "OK"
                 )
-                self.assertEqual(fetch_span.attributes["gen_ai.usage.input_tokens"], 3)
-                self.assertEqual(fetch_span.attributes["gen_ai.usage.output_tokens"], 1)
+                self.assertEqual(decode_span.attributes["gen_ai.usage.input_tokens"], 3)
+                self.assertEqual(decode_span.attributes["gen_ai.usage.output_tokens"], 1)
             finally:
                 await channel.close()
                 await server.stop(None)
@@ -1950,7 +1700,7 @@ class ClientSpanSettlementTest(TestCase):
         terminal_delay=0.0,
         terminal_never=False,
     ):
-        client = ModelRpcClient(["127.0.0.1:1234"], {}, 0, False)
+        client = ModelRpcClient(["127.0.0.1:1234"], {}, 0, RoleType.PDFUSION)
         stub = _SpanAwareStub(
             total,
             finish_last,
@@ -2375,12 +2125,12 @@ class ClientSpanSettlementTest(TestCase):
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
 
-    def test_fetch_cancellation_records_observed_latency_before_single_end(self):
+    def test_master_enqueued_cancellation_records_observed_latency_before_single_end(self):
         async def run(span, client, exception_type, output_len, sequences):
             input_py = self._make_input()
             input_py.enqueued_by_master = True
             input_py.generate_config.role_addrs = [
-                _prefill_role_addr("127.0.0.1", 1234)
+                _decode_role_addr("127.0.0.1", 1234)
             ]
             outputs = GenerateOutputs(
                 generate_outputs=[
@@ -2417,7 +2167,7 @@ class ClientSpanSettlementTest(TestCase):
                         run(span, client, exception_type, output_len, sequences)
                     )
 
-    def test_fetch_cleanup_recancellation_records_latency_before_single_end(self):
+    def test_master_enqueued_cleanup_recancellation_records_latency_before_single_end(self):
         span = _FakeClientSpan()
         client = self._build_client(span, total=3, finish_last=False)
 
@@ -2425,7 +2175,7 @@ class ClientSpanSettlementTest(TestCase):
             input_py = self._make_input()
             input_py.enqueued_by_master = True
             input_py.generate_config.role_addrs = [
-                _prefill_role_addr("127.0.0.1", 1234)
+                _decode_role_addr("127.0.0.1", 1234)
             ]
             gen = client.enqueue(input_py)
             for _ in range(3):
@@ -2452,7 +2202,7 @@ class ClientSpanSettlementTest(TestCase):
 
         asyncio.run(run())
 
-    def test_fetch_cancel_before_any_output_omits_latency(self):
+    def test_master_enqueued_cancel_before_any_output_omits_latency(self):
         span = _FakeClientSpan()
         client = self._build_client(span, total=0, terminal_never=True)
 
@@ -2460,7 +2210,7 @@ class ClientSpanSettlementTest(TestCase):
             input_py = self._make_input()
             input_py.enqueued_by_master = True
             input_py.generate_config.role_addrs = [
-                _prefill_role_addr("127.0.0.1", 1234)
+                _decode_role_addr("127.0.0.1", 1234)
             ]
 
             async def consume():
@@ -2744,6 +2494,48 @@ class FirstCauseRpcErrorTest(TestCase):
                 "item 0",
             )
         self.assertEqual(caught.exception.exception_type, ExceptionType.GENERATE_TIMEOUT)
+
+
+class MixedPdfusionBatchTest(unittest.IsolatedAsyncioTestCase):
+    def make_input(self, request_id, roles):
+        return GenerateInput(token_ids=torch.tensor([1, 2]),
+                             generate_config=GenerateConfig(role_addrs=roles),
+                             request_id=request_id, mm_inputs=[])
+
+    async def test_frontend_pdfusion_batch_allows_unselected_decode_role(self):
+        fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)
+        decode = _decode_role_addr("decode", 9002)
+        client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
+        targets = []
+        async def channel(target):
+            targets.append(target)
+            return object()
+        client._channel_pool.get = channel
+        stub = FakeBatchStub()
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
+            outputs = await client.batch_enqueue([self.make_input(1, [fusion, decode]),
+                                                  self.make_input(2, [fusion])])
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual(targets, ["fusion:9001"])
+        self.assertEqual(stub.last_batch_size, 2)
+
+    async def test_batch_rejects_conflicting_pdfusion_targets_before_rpc(self):
+        client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
+        inputs = [self.make_input(i, [RoleAddr(role=RoleType.PDFUSION, ip=ip,
+                                             http_port=9000, grpc_port=9001)])
+                  for i, ip in [(1, "fusion1"), (2, "fusion2")]]
+        with self.assertRaises(FtRuntimeException):
+            await client.batch_enqueue(inputs)
+
+
+class PdTraceDecisionTest(unittest.TestCase):
+    def test_decode_matches_pd_support_and_master_admission(self):
+        config = GenerateConfig(max_new_tokens=8)
+        self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, False))
+        config.can_use_pd_separation = False
+        self.assertFalse(_selected_pd_separation(RoleType.DECODE, config, False))
+        self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, True))
+        self.assertFalse(_selected_pd_separation(RoleType.PDFUSION, config, True))
 
 
 if __name__ == "__main__":

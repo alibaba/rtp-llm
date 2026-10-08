@@ -38,7 +38,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
     /**
      * The Decode argument is only the planning capability gate. The actual
-     * destination is the original Prefill route carried by {@code target}.
+     * destination is the selected Decode route carried by {@code target}.
      */
     @Override
     public boolean isSupported(DecodeEndpoint endpoint) {
@@ -53,7 +53,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             // No routable endpoint — report the transport-failure branch: the
             // intent never reached the engine, but release is still settled by
             // the WorkerStatus report (iron rule 4).
-            log.debug("[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
+            log.debug("[auto-tpm] cancel has no decode control owner for request_id={}, not routed",
                     requestId);
             return CompletableFuture.completedFuture(CancelAck.FAILED);
         }
@@ -62,6 +62,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             EngineRpcService.CancelRequestPB requestPB =
                     EngineRpcService.CancelRequestPB.newBuilder()
                             .setRequestId(requestId)
+                            .setPrefillAddress(target.prefillAddress())
                             .build();
 
             // Fire-and-forget contract: fork the gRPC Context so that when the
@@ -71,8 +72,8 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             Context previous = fork.attach();
             try {
                 return engineGrpcClient.cancelAsync(
-                                target.prefillIp(),
-                                target.prefillGrpcPort(),
+                                target.decodeIp(),
+                                target.decodeGrpcPort(),
                                 requestPB,
                                 Math.max(1, timeoutMs))
                         .thenApply(GrpcEngineCancelChannel::mapResponse)

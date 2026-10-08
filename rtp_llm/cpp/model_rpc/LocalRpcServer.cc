@@ -247,15 +247,15 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
             return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
-        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
-            if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL
-                && stream->resourceContext().decode_entrance) {
+        if (stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
+            if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
                 while (!context->IsCancelled() && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 if (context->IsCancelled()) {
                     stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
-                    RTP_LLM_LOG_WARNING("request [%s] cancelled by user during decode_entrance wait", request_key.c_str());
+                    RTP_LLM_LOG_WARNING("request [%s] cancelled by user during Prefill completion wait",
+                                        request_key.c_str());
                     return serializeErrorMsg(request_key, stream->statusInfo());
                 }
             }

@@ -249,12 +249,14 @@ public:
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
-    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk);
+    void    setPrefillReuseLength(
+           int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
     int64_t prefillMemoryReuseLen() const;
     int64_t prefillDiskReuseLen() const;
+    bool    prefillUsesIndependentBlockPools() const;
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
@@ -313,7 +315,7 @@ public:
             generation_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         }
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
-            || event == StreamEvents::NeedRemoteGenerate) {
+            || event == StreamEvents::PrefillHandoffReady) {
             consumer_cv_->notify_all();
         }
     }
@@ -449,9 +451,6 @@ public:
     bool needReturnHiddenStates() {
         return return_all_hidden_states_;
     }
-
-    void holdKVCacheForPDSep();
-    void releaseKVCacheForPDSep();
 
     std::vector<int> getLatestTokens(size_t token_num);
 
@@ -592,6 +591,7 @@ public:
     void waitPendingAsyncBookkeeping();
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
+    bool hasPendingP2PResourceHold() const;
 
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
@@ -916,6 +916,7 @@ protected:
     int                                host_reuse_length_    = 0;
     int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
+    bool    prefill_independent_block_pools_ = false;
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
     int64_t prefill_remote_reuse_len_ = 0;

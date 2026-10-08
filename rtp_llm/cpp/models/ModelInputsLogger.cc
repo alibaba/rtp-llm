@@ -160,7 +160,6 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("seq_size_per_block", static_cast<int64_t>(inputs.seq_size_per_block));
     payload.insert("kernel_seq_size_per_block", static_cast<int64_t>(inputs.kernel_seq_size_per_block));
     payload.insert("pd_separation", inputs.pd_separation);
-    payload.insert("decode_entrance", inputs.decode_entrance);
     payload.insert("use_opaque_kv_cache_store", inputs.use_opaque_kv_cache_store);
     payload.insert("need_all_logits", inputs.need_all_logits);
     payload.insert("need_all_hidden_states", inputs.need_all_hidden_states);

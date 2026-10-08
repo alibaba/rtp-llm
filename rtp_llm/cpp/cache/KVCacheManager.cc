@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -766,6 +767,13 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+void KVCacheManager::cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms) {
+    if (p2p_connector_) {
+        if (auto store = p2p_connector_->streamStore())
+            store->markCancelled(unique_key, request_deadline_ms);
+    }
+}
+
 int64_t KVCacheManager::prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms) {
     auto store = p2p_connector_ ? p2p_connector_->streamStore() : nullptr;
     return store ? store->requestDeadline(unique_key, timeout_ms) : 0;
@@ -1167,17 +1175,15 @@ bool KVCacheManager::collectCacheHitRates(std::chrono::steady_clock::time_point 
 }
 
 bool KVCacheManager::initP2PConnector() {
-    const bool p2p_enabled = (pd_sep_config_.role_type == RoleType::PREFILL
-                              || pd_sep_config_.role_type == RoleType::DECODE)
-                             && pd_sep_config_.decode_entrance;
+    const bool p2p_enabled =
+        pd_sep_config_.role_type == RoleType::PREFILL || pd_sep_config_.role_type == RoleType::DECODE;
     if (!p2p_enabled) {
         return true;
     }
 
-    RTP_LLM_LOG_INFO("KVCacheManager: initializing P2PConnector, role_type=%d, decode_entrance=%d, "
+    RTP_LLM_LOG_INFO("KVCacheManager: initializing P2PConnector, role_type=%d, "
                      "pd_rdma_mode=%d, cache_store_rdma_mode=%d, listen_port=%ld",
                      static_cast<int>(pd_sep_config_.role_type),
-                     pd_sep_config_.decode_entrance ? 1 : 0,
                      pd_sep_config_.cache_store_rdma_mode ? 1 : 0,
                      cache_store_config_.cache_store_rdma_mode ? 1 : 0,
                      pd_sep_config_.cache_store_listen_port);

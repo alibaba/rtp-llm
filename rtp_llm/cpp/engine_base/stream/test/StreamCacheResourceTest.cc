@@ -1568,6 +1568,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", eos=" << eos);
             const std::string key = "first-token-outputs";
             prepareP2PRegistrationResource(true, key);
+            cache_manager_->config_.use_independent_block_pools = requested;
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
             const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
             const auto make_stream       = [&](RoleType role) {
@@ -1597,7 +1598,6 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 model.special_tokens.eos_token_id  = eos ? 7 : 15;
                 ResourceContext resources;
                 resources.role_type       = role;
-                resources.decode_entrance = true;
                 resources.reuse_cache     = false;
                 resources.cache_manager   = cache_manager_;
                 auto result = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
@@ -1611,20 +1611,25 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             auto all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
             auto probs      = torch::full({1, 16}, 0.0625f);
             auto loss       = torch::arange(5, torch::kFloat32);
+            const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
+                                            GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
             prefill->step();
-            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                             .num_new_tokens    = 1,
-                             .hidden_states     = hidden,
-                             .logits            = logits,
-                             .softmax_probs     = torch::full({1, 1}, 0.75f),
-                             .cum_log_probs     = torch::full({1}, -0.5f),
-                             .all_probs         = probs,
-                             .loss              = requested ? loss : torch::Tensor{},
-                             .all_hidden_states = all_hidden});
+            prefill->update({.new_tokens                           = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                             .num_new_tokens                       = 1,
+                             .hidden_states                        = hidden,
+                             .logits                               = logits,
+                             .softmax_probs                        = torch::full({1, 1}, 0.75f),
+                             .cum_log_probs                        = torch::full({1}, -0.5f),
+                             .all_probs                            = probs,
+                             .loss                                 = requested ? loss : torch::Tensor{},
+                             .all_hidden_states                    = all_hidden,
+                             .generation_prefill_cuda_graph_status = graph_status});
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
+            EXPECT_EQ(published.prefill_use_independent_block_pools, requested);
+            EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
             logits.fill_(-1);
             hidden.fill_(-1);
@@ -1636,6 +1641,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_TRUE(prefill_connector.fillStartLoadResponsePayload(published, result->response).ok());
             result->complete(true);
             ASSERT_TRUE(result->success());
+            EXPECT_EQ(result->side_channel_payload.generation_prefill_cuda_graph_status,
+                      static_cast<uint32_t>(graph_status));
             auto broadcast = std::make_shared<P2PBroadcastClient::Result>(key);
             auto context =
                 std::make_shared<P2PConnectorAsyncReadContext>(std::make_shared<KVCacheResource>(),
@@ -1656,6 +1663,12 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             const auto& output = output_result.value().generate_outputs.front();
             EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
             EXPECT_EQ(output.finished, eos);
+            EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), requested);
+            EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
+            if (requested) {
+                EXPECT_EQ(output.aux_info.generation_prefill_cuda_graph_status,
+                          generationPrefillCudaGraphStatusString(graph_status));
+            }
             EXPECT_FALSE(decode->hasOutput());
             // Rechecking completion must not enqueue the first token a second time.
             ASSERT_TRUE(decode->streamCacheResource().loadCacheDone());
@@ -1677,6 +1690,20 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 EXPECT_FLOAT_EQ(output.aux_info.softmax_probs->item<float>(), 0.75f);
                 EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), -0.5f);
                 EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, torch::full({1, 16}, 0.0625f)));
+            }
+            if (!eos) {
+                // Later Decode updates default to NOT_REQUESTED and must retain Prefill's status.
+                decode->step();
+                decode->update({.new_tokens = torch::tensor({8}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+                ASSERT_FALSE(decode->hasError());
+                EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
+                auto next_result = decode->nextOutput();
+                ASSERT_TRUE(next_result.ok());
+                if (requested) {
+                    EXPECT_EQ(
+                        next_result.value().generate_outputs.front().aux_info.generation_prefill_cuda_graph_status,
+                        generationPrefillCudaGraphStatusString(graph_status));
+                }
             }
         }
     }
@@ -1749,6 +1776,27 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
     ASSERT_TRUE(status.has_value());
     EXPECT_TRUE(status->ok());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
+}
+
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+
+TEST_F(StreamCacheResourceTest, testCancelCompletionRetainsP2PLeaseProofAfterStreamRelease) {
+    prepareResource(/*reuse_cache=*/false);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(), "cancel-cleanup-lease", nullptr, /*lease_query_timeout_ms=*/1000);
+    context->cancel(nullptr);
+    ASSERT_TRUE(context->done());
+    context->lease_hold_pending_.store(true);
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    stream_->releaseResource();
+    EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
+    // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    context->lease_hold_pending_.store(false);
+    EXPECT_FALSE(stream_->hasPendingP2PResourceHold());
 }
 
 }  // namespace rtp_llm

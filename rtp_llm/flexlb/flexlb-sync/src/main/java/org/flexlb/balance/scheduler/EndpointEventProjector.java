@@ -129,10 +129,9 @@ public final class EndpointEventProjector {
             PrefillEndpoint source,
             RoleType role,
             PrefillState.WorkerStatusFact fact) {
-        if (fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED
-                && role != RoleType.PDFUSION) {
+        if (role != RoleType.PDFUSION) {
             logWarnNoFail(
-                    "Ignoring Prefill-stage successful terminal projection: request_id={} engine={}",
+                    "Ignoring local Prefill terminal projection; waiting for Decode completion: request_id={} engine={}",
                     fact.item().requestId(), source.getIp());
             return;
         }
