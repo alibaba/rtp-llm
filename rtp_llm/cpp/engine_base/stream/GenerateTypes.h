@@ -70,6 +70,13 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (mm_locs.has_value()) {
+            mm_locs = mm_locs.value() + prefix_length;
+        }
+        if (text_tokens_mask.has_value()) {
+            auto prefix_mask = torch::ones({prefix_length}, text_tokens_mask->options());
+            text_tokens_mask = torch::cat({prefix_mask, text_tokens_mask.value()}, 0);
+        }
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }

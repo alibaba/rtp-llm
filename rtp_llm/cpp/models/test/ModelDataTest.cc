@@ -716,3 +716,16 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsDistributedOrEplbMoe)
 }
 
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST(GenerateInputPrefixTest, MediaLocationsAndTextMaskFollowInsertedPrefix) {
+    GenerateInput input;
+    input.input_ids        = torch::tensor({10, 11, 12}, torch::kInt32);
+    input.mm_locs          = torch::tensor({1}, torch::kInt32);
+    input.text_tokens_mask = torch::tensor({1, 0, 1}, torch::kInt32);
+    input.updatePrefix({7, 8});
+    EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({7, 8, 10, 11, 12}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(*input.mm_locs, torch::tensor({3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(*input.text_tokens_mask, torch::tensor({1, 1, 1, 0, 1}, torch::kInt32)));
+}
+}  // namespace rtp_llm
