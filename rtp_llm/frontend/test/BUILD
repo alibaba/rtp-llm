@@ -25,8 +25,8 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:utils",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -37,8 +37,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ] + telemetry_test_deps(),
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -77,8 +77,8 @@ py_test(
         "//rtp_llm:frontend",
         "//rtp_llm:testlib",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(

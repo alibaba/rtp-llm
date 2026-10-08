@@ -3,7 +3,7 @@ load("//:def.bzl", "cc_test_wrapper", "copts")
 cc_test_wrapper(
     name = "client_wrapper_test",
     testonly = True,
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "ClientWrapperTest.cc",
         "MockKVCMClient.h",
@@ -20,12 +20,12 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test_wrapper(
     name = "kvcm_internal_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["KVCMInternalTest.cc"],
     copts = copts(),
     target_compatible_with = select({
@@ -39,7 +39,7 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 kvcm_backend_test_deps = [
@@ -57,7 +57,7 @@ kvcm_backend_test_deps = [
 
 cc_test_wrapper(
     name = "kvcm_local_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMLocalTest.cc",
         "KVCMMockTestBase.h",
@@ -65,7 +65,7 @@ cc_test_wrapper(
     ],
     copts = ["-fno-access-control"] + copts(),
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     target_compatible_with = select({
@@ -77,7 +77,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_full_linear_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMMockFullLinearTest.cc",
         "KVCMMockTestBase.h",
@@ -85,7 +85,7 @@ cc_test_wrapper(
     ],
     copts = ["-fno-access-control"] + copts(),
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     target_compatible_with = select({
@@ -97,7 +97,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_only_full_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMMockOnlyFullTest.cc",
         "KVCMMockTestBase.h",
@@ -105,7 +105,7 @@ cc_test_wrapper(
     ],
     copts = ["-fno-access-control"] + copts(),
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     target_compatible_with = select({
@@ -156,7 +156,7 @@ cc_test_wrapper(
 cc_test_wrapper(
     name = "kvcm_independent_pool_test",
     testonly = True,
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMIndependentPoolTest.cc",
         "KVCMMockTestBase.h",
@@ -164,7 +164,7 @@ cc_test_wrapper(
     ],
     copts = ["-fno-access-control"] + copts(),
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     target_compatible_with = select({

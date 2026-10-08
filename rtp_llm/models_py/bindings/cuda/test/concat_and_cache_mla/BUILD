@@ -9,8 +9,8 @@ py_test(
         "util.py",
     ],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # test_dpsk32_fp8 / test_model1_fp8 verified on sm86: 3/3 and 5/5 pass, 0 skips.
@@ -23,8 +23,8 @@ py_test(
         "util.py",
     ],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -34,6 +34,6 @@ py_test(
         "util.py",
     ],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

@@ -6,8 +6,8 @@ py_test (
     name = "fused_moe_test",
     srcs = ["fused_moe_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
@@ -21,9 +21,9 @@ py_test (
         "//rtp_llm/test/model_test/test_util",
     ],
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 

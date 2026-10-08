@@ -66,12 +66,12 @@ cc_test(
     env = device_test_envs(),
     exec_properties = select({
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {"gpu": "A10_CU13"},
+        "//conditions:default": {"gpu": "L20_CU13"},
     }),
     # Keeps upstream's select shape and its ROCm branch; the CUDA branch is A10
     # rather than H20. sampler_test is in the 183 targets executed twice on sm86
     # and is not among that run's failures, and ut-sm8x has gone green with it
     # on A10. Upstream was preserving the old H20 pin while refactoring env to
     # device_test_envs(), not asserting this needs sm90.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

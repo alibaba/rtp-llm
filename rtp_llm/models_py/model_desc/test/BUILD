@@ -24,10 +24,10 @@ py_test(
     deps = py_test_deps,
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -40,10 +40,10 @@ py_test(
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -55,12 +55,12 @@ py_test(
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
     # CPU-only contract test (mocks + CPU tensors); needs an accelerator image
     # solely to import librtp_compute_ops, so any CUDA worker works — no H20 pin.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -87,12 +87,12 @@ py_test(
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
     # Mock-based routing test on CPU tensors; needs only a generic CUDA worker
     # (librtp_compute_ops import), not an H20.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test(

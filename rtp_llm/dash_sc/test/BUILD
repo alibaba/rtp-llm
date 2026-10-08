@@ -5,8 +5,8 @@ py_test(
     srcs = ["codec_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -15,8 +15,8 @@ py_test(
     main = "inference/grammar_validator_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -32,8 +32,8 @@ py_test(
     main = "think_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -45,8 +45,8 @@ py_test(
     # cannot silently vanish when this target is run on its own.
     deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -56,8 +56,8 @@ py_test(
     main = "inference/mrcr_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -68,8 +68,8 @@ py_test(
     # on the locks that carry opentelemetry.
     deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -78,8 +78,8 @@ py_test(
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -88,8 +88,8 @@ py_test(
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -97,6 +97,6 @@ py_test(
     srcs = ["app_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
