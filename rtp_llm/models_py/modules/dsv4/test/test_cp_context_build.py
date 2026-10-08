@@ -49,6 +49,7 @@ def _load_cp_module():
     sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler_module
 
     here = os.path.dirname(os.path.abspath(__file__))
+    sys.modules["rtp_llm.models_py.modules.dsv4"].__path__ = [os.path.dirname(here)]
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
     spec = importlib.util.spec_from_file_location(
         "rtp_llm.models_py.modules.dsv4.cp", cp_path
