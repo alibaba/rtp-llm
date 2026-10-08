@@ -55,8 +55,6 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -294,8 +292,6 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -306,8 +302,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -318,8 +312,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -332,8 +324,6 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -344,8 +334,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -404,8 +392,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(

@@ -218,21 +218,6 @@ def select_py_bindings():
         ],
     })
 
-def cuda13_test_exec_properties(gpu_count = 1):
-    """CUDA13 tests use existing pools matching their target architecture.
-
-    Coverage map: x86 tests execute on B300 (L20D_TEST, sm_103 cubins) and on
-    A10 (A10_CU13, sm_86); ARM tests execute on GB200 (SM100_ARM_CU13, sm_100).
-    The sm_120 (x86) and sm_103 (ARM) cubins built by the configs have no
-    matching pool yet and are compiled for forward compatibility only.
-    """
-    return select({
-        "@rtp_llm//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": str(gpu_count)},
-        "@rtp_llm//:using_cuda13_x86": {"gpu": "L20D_TEST", "gpu_count": str(gpu_count)},
-        "@rtp_llm//:using_cuda12_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
-        "//conditions:default": {"gpu": "A10_CU13", "gpu_count": str(gpu_count)},
-    })
-
 def no_block_copy_link_deps():
     """Deps for the cc_library that defines execNoBlockCopy / warmupNoBlockCopy (per device)."""
     return select({
