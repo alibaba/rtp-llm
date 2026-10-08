@@ -103,10 +103,7 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             local_expert_start=0,
             local_expert_end=cfg.n_local_experts,
         )
-        if _is_sm120_runtime() and _has_fp8_fp4_grouped_kernel():
-            self._local: RoutedExpertsStrategy = GroupedFP4Strategy(local_cfg)
-        else:
-            self._local = LocalLoopStrategy(local_cfg)
+        self._local: RoutedExpertsStrategy = self._make_local_strategy(local_cfg)
         self._chunk_extent_tensor: Optional[torch.Tensor] = None
         self._count_tensor: Optional[torch.Tensor] = None
         self._count_gather: Optional[torch.Tensor] = None
@@ -119,6 +116,11 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         self._local_replay_entries: dict[tuple, dict] = {}
         self._local_replay_captures = 0
         self._local_replay_replays = 0
+
+    def _make_local_strategy(self, local_cfg):
+        if _is_sm120_runtime() and _has_fp8_fp4_grouped_kernel():
+            return GroupedFP4Strategy(local_cfg)
+        return LocalLoopStrategy(local_cfg)
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:

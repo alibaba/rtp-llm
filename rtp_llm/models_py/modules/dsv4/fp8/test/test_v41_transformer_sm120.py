@@ -461,7 +461,9 @@ class V41TransformerSM120Test(unittest.TestCase):
         ):
             with self.assertRaises(NotImplementedError):
                 V4Transformer(bad, weights)
-        with self.assertRaisesRegex(RuntimeError, "explicitly compatible provider"):
+        # EP has a recipe-compatible adapter now, but these unsliced weights
+        # must still be rejected before the local provider consumes them.
+        with self.assertRaisesRegex(ValueError, "local expert shard"):
             V4Transformer(replace(args, ep_size=2), weights)
         self.assertIn(W.v4_routed_w1_w, weights.weights[0])
 
