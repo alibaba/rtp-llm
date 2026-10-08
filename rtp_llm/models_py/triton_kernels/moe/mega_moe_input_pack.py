@@ -461,7 +461,7 @@ def _validate_inputs(
     specs = (
         ("x", x, (T, D), torch.bfloat16),
         ("weights", weights, (T, topk), torch.float32),
-        ("indices", indices, (T, topk), torch.int64),
+        ("indices", indices, (T, topk), (torch.int32, torch.int64)),
         ("out_fp8", out_fp8, (T, D), torch.float8_e4m3fn),
         ("out_sf", out_sf, (T, D // 128), torch.int32),
         ("out_indices", out_indices, (T, topk), torch.int64),
@@ -480,7 +480,8 @@ def _validate_inputs(
                 f"{name} shape mismatch: expected {expected_shape}, "
                 f"got {tuple(tensor.shape)}"
             )
-        if tensor.dtype != expected_dtype:
+        allowed_dtypes = expected_dtype if isinstance(expected_dtype, tuple) else (expected_dtype,)
+        if tensor.dtype not in allowed_dtypes:
             raise ValueError(f"{name} must be {expected_dtype}, got {tensor.dtype}")
         if tensor.dim() > 1 and tensor.stride(-1) != 1:
             raise ValueError(

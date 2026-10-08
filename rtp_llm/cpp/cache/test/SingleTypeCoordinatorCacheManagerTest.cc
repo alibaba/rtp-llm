@@ -1448,6 +1448,18 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, MtpModuleConfigPlanKeepsWeightsAnd
     }
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, RecurrentMtpKeepsOneModuleForThreePredictions) {
+    auto config = makeTestModelConfig(/*num_layers=*/1);
+    config.reuse_single_mtp_module = true;
+    const auto plan = buildMTPModuleConfigPlan(config, 1, 3, SP_TYPE_MTP);
+    EXPECT_EQ(plan.source_layer_indices, (std::vector<size_t>{0}));
+    ASSERT_EQ(plan.module_configs.size(), 1u);
+    EXPECT_TRUE(plan.module_configs[0].reuse_single_mtp_module);
+    EXPECT_EQ(plan.module_configs[0].kv_cache_spec_descs[0][0].tag,
+              config.kv_cache_spec_descs[0][0].tag);
+    EXPECT_THROW(buildMTPModuleConfigPlan(config, 2, 3, SP_TYPE_MTP), std::runtime_error);
+}
+
 // Test convert index to buffer
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertIndexToBuffer) {
     auto config = createSingleTypeTestConfig();

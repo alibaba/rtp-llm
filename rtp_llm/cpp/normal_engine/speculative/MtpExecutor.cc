@@ -360,8 +360,10 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_inp
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
+    RTP_LLM_CHECK_WITH_INFO(!uses_recurrent_mtp_ || model_output.mtp_target_hidden_states.defined(),
+                            "recurrent MTP requires explicit pre-norm model output");
     if (model_output.mtp_target_hidden_states.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows <= 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
                                 model_output.mtp_target_hidden_states.size(0),
                                 hidden_rows);
@@ -693,12 +695,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
+    // Resolve process-wide flags before NormalEngine starts its execution
+    // thread. Lazy getenv on that thread can race with environment changes
+    // made by the Python service startup. Preserve the existing cached values
+    // and parsing semantics; only move their first evaluation into setup.
+    (void)useStreamAsync();
+    (void)useAsyncDeviceState();
+    (void)useDropBroadSync();
+    (void)useAsyncPrepare();
+    (void)useDeviceInput();
+    (void)checkDeviceInput();
+    (void)debugTargetVerifyInputEnabled();
+
     data_type_                  = params.model_config_.data_type;
     hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_               = propose_params->gen_num_per_circle;
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    uses_recurrent_mtp_         = propose_params->getEngineInitParams().model_config_.reuse_single_mtp_module;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1646,6 +1661,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    GptModelOutputs target_diagnostics;
+    if (isTpRank0() && !warm_up_ && !model_input.is_fake_stream) {
+        bool need_logits = false;
+        bool need_hidden = false;
+        for (const auto& stream : streams) {
+            need_logits |= stream->returnLogits();
+            need_hidden |= stream->generateConfig()->return_hidden_states;
+        }
+        if (need_logits) {
+            TORCH_CHECK(model_output.logits.defined(), "Target verify did not return requested logits");
+            // Sampling processors may mutate logits; capture the model output first.
+            target_diagnostics.logits = model_output.logits.clone();
+        }
+        if (need_hidden) {
+            TORCH_CHECK(model_output.hidden_states.defined(), "Target verify did not return requested hidden states");
+            target_diagnostics.hidden_states = model_output.hidden_states;
+        }
+    }
+
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
@@ -1736,6 +1770,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            if (target_diagnostics.logits.defined() || target_diagnostics.hidden_states.defined()) {
+                auto selected = MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                    target_diagnostics, speculative_sampler_output.accept_len, propose_step_ + 1);
+                speculative_sampler_output.target_logits        = std::move(selected.logits);
+                speculative_sampler_output.target_hidden_states = std::move(selected.hidden_states);
+            }
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden
@@ -1775,7 +1815,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // DSpARK commit input was bound from the explicit target-forward output
     // above. Re-reading mutable Python model state here is both redundant and
     // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    if (!is_dspark_ && !uses_recurrent_mtp_) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);
@@ -1957,6 +1997,13 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    // Host rejection sampling compacts draft input rows to accepted lengths.
+    // Its pre-rejection metadata therefore cannot be reused by the forward.
+    // Let PyWrappedModel prepare from the final compact inputs instead.
+    // DSpARK and device-state MTP retain the fixed verify geometry.
+    if (!is_dspark_ && !useStreamAsync() && !useAsyncDeviceState()) {
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2899,7 +2946,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
     auto next_position_ids_all =
         is_dspark_ ? advanceDSparkPositionIds(
-            verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                         verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                      torch::Tensor();
 
     torch::Tensor next_kv_cache_block_id;

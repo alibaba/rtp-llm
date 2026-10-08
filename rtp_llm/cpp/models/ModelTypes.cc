@@ -171,6 +171,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
+    encode_flag(inputs.is_mtp_draft_update, GptModelInputControlFlag::kControlMtpDraftUpdate);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
@@ -319,6 +320,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
+    inputs.is_mtp_draft_update       = has_flag(GptModelInputControlFlag::kControlMtpDraftUpdate);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);

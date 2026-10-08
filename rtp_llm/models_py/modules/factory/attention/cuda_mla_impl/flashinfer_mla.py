@@ -196,6 +196,9 @@ class MlaFlashInferPrefillOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
         self.kv_cache_type = kv_cache_dtype
+        self.prefill_wrapper = self._create_prefill_wrapper()
+
+    def _create_prefill_wrapper(self):
         global g_workspace_buffer
         if g_workspace_buffer is None:
             # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
@@ -212,7 +215,7 @@ class MlaFlashInferPrefillOp(object):
                 device=device,
             )
 
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+        return BatchPrefillWithRaggedKVCacheWrapper(
             g_workspace_buffer,
             "NHD",
             backend="auto",
@@ -319,6 +322,15 @@ class MlaFlashInferPrefillOp(object):
         )
         return final_compressed_kv, final_k_pe
 
+    def _make_kv_b_proj(self, layer_id):
+        return LinearFactory.create_linear_from_weights(
+            self.weights[layer_id],
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            self.quant_config,
+        )
+
     def _concat_and_cast_mha_k(self, k_nope, k_pe):
         # Temporary for DeepSeek V3/R1 only, but can generalize if needed
         k_shape = (
@@ -373,13 +385,7 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.kv_b_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id],
-            W.mla_kv_b_w,
-            W.mla_kv_b_s,
-            None,
-            self.quant_config,
-        )
+        self.kv_b_proj = self._make_kv_b_proj(layer_id)
 
         kv = self.kv_b_proj(compressed_kv)
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)

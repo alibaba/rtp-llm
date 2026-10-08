@@ -1,0 +1,91 @@
+{
+  "upstream": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "changes": "Import namespace substitutions and runtime helpers; bounded KDA gate uses explicit Gluon layout to preserve native Triton 3.7 BS=32 FP32 scan association under RTP Triton 3.6. Other kernel bodies remain unchanged.",
+  "files": [
+    {
+      "source": "models/kimi_k3/nvidia/ops/third_party/kda/chunk.py",
+      "sha256": "9a677dc5607d6518decd455c164dc55d268dfc375780a9581770827be322a80b",
+      "adapted_sha256": "a435e763e7195f24df50ae24f48a4fcd129d2e7603b09ab1496f45eac22a35d0"
+    },
+    {
+      "source": "models/kimi_k3/nvidia/ops/third_party/kda/chunk_intra.py",
+      "sha256": "9fc4359180dc0e33446ad90be47f32e11811d92dbb8119fc84162808347ec89d",
+      "adapted_sha256": "7aa0c45dd503e9886ef513234d46e9ea92250737c81f8e51936dcc459ef53f1d"
+    },
+    {
+      "source": "models/kimi_k3/nvidia/ops/third_party/kda/chunk_intra_token_parallel.py",
+      "sha256": "696162f62f2bc1c121f29fde40475d8f1092e378b12f930ec5b14222011a66fa",
+      "adapted_sha256": "37265bdb986b2807ec895005b0e2f5bdc120b7da8fae38d66cab2abfe5e13ffb"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/chunk_delta_h.py",
+      "sha256": "1b3ad391f939d9443c6b7adb19e57fe381bd5dccea064e8417a4f85b0e713b26",
+      "adapted_sha256": "98b59157432ad67ef737d4153fd87f4ff38d826d2627f15404dbf4bfa06d3f30"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/cumsum.py",
+      "sha256": "d818215669b451868823202ac0bcea77e7a9d75957254c7c1060a73a55dc39b6",
+      "adapted_sha256": "194162c83d4fee2f97c811c1ccfca24c992de223e0f892bbeac01f8f2888d28c"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/index.py",
+      "sha256": "a4f8b2c052635cb519a80099e8a85411d1d5d6880b38f466788259bbe66b154d",
+      "adapted_sha256": "2bd6f60a27f26ef8d38f0bba43ddc2f28ccecb64752ee3ea471f751f064080c4"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/l2norm.py",
+      "sha256": "520f4513ef4fc97e6b88dc07877cca8e29da0d34e44673fe989e3af002d86381",
+      "adapted_sha256": "755717e2bcbe4e8a7ef1f7e8154521e0411534395c560501699c5a7892232bc2"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/op.py",
+      "sha256": "456da84fd12411cf53c96a90dd4f78f49afb454c3d51d2c524ea8e7106fe8ae5",
+      "adapted_sha256": "3e92c7fdcdd279c5302765fe93e99b66b9cb273eccdacb482a30d3eaf13a9a09"
+    },
+    {
+      "source": "third_party/flash_linear_attention/ops/utils.py",
+      "sha256": "d6c90d36505e02086954c23ca4dd2fea82a69416d68ff1d0501e16b3148b5b0c",
+      "adapted_sha256": "47fa14740bd20d1036f14ab46680f0b53665206b50c2e03dbb213990086ea08b"
+    }
+  ],
+  "compat_sha256": "310f7121c2a9f570e3c0be7664fb2d3bd5902734aaf5e4caa7a1e3530ecd2df7",
+  "correction": "RCP_LN2 exactly matches pinned vLLM math_utils.py",
+  "integration": "Prefill only. Bounded gate dispatches to the local explicit-layout adaptation; unbounded gate and recurrent/decode paths retain their existing behavior.",
+  "chunk_index_adaptation": "Retain original sequence ordinals across zero-length requests; return shape [0, 2] when all requests are empty.",
+  "bounded_gate_adaptation": {
+    "file": "kda/bounded_gate.py",
+    "sha256": "d2f45bedb340818f8ec3233612a8376224c72204c42ffc53d7f3532af1a21307",
+    "reference_layout": {
+      "with_bias": {
+        "size_per_thread": [
+          1,
+          8
+        ],
+        "threads_per_warp": [
+          8,
+          4
+        ]
+      },
+      "without_bias": {
+        "size_per_thread": [
+          1,
+          4
+        ],
+        "threads_per_warp": [
+          4,
+          8
+        ]
+      },
+      "warps_per_cta": [
+        4,
+        1
+      ],
+      "order": [
+        1,
+        0
+      ],
+      "gate_tile_width": 32
+    },
+    "arithmetic": "FP32 sigmoid reciprocal then lower-bound multiplication; FP32 scan then RCP_LN2. Preserve these rounding boundaries."
+  }
+}

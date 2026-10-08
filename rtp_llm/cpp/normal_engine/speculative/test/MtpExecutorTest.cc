@@ -276,10 +276,13 @@ public:
         event_name_ = std::move(name);
     }
 
+    size_t prepare_call_count = 0;
+
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
         if (input_observer_) {
             input_observer_(inputs);
         }
+        ++prepare_call_count;
         if (prepare_input_holder.test_data.empty()) {
             return;
         }
@@ -873,6 +876,25 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 }
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
+TEST_F(MtpExecutorTest, testExplicitMtpHiddenDefaultRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    components.executor->uses_recurrent_mtp_ = true;
+    auto output = createRandomGptModelOutputs(3, 4, 8);
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat32);
+    components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_draft_model);
+    EXPECT_TRUE(output.all_hidden_states.equal(output.mtp_target_hidden_states));
+}
+
+TEST_F(MtpExecutorTest, testExplicitMtpHiddenPositiveRowsRemainStrict) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    components.executor->uses_recurrent_mtp_ = true;
+    auto output = createRandomGptModelOutputs(3, 4, 8);
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat32);
+    EXPECT_NO_THROW(components.executor->maybeOverrideLastHiddenWithMtpBuffer(
+        output, *components.fake_target_model, 3));
+    EXPECT_ANY_THROW(components.executor->maybeOverrideLastHiddenWithMtpBuffer(
+        output, *components.fake_target_model, 2));
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
@@ -1383,6 +1405,11 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
+    if (!components.executor->useStreamAsync() && !components.executor->useAsyncDeviceState()) {
+        // This fixture accepts three rows from a five-row verify window.
+        // Preparing the draft before rejection would retain the wrong shape.
+        EXPECT_EQ(draft_prefill_fake_model->prepare_call_count, 0u);
+    }
     if (components.executor->useAsyncPrepare()) {
         EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
     }
