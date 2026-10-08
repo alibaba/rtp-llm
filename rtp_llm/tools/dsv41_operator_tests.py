@@ -27,6 +27,7 @@ SUITES = (
     "feed_forward",
     "block",
     "stage",
+    "model",
     "routed",
     "engram",
     "dispatch",

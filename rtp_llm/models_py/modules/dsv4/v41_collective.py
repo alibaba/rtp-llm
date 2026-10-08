@@ -166,10 +166,14 @@ class V41CollectiveMoE(nn.Module):
         self._identity = self._runtime_identity()
         self._admitted = True
 
-    def forward(self, x, weights, indices, *, valid_rows=None):
-        plan, group, device = self.plan, self.process_group, self.local.experts.device
+    def require_admitted(self):
+        """Check startup admission without launching communication or writes."""
         if not self._admitted or self._identity != self._runtime_identity():
             raise RuntimeError("V4.1 EP requires admission for this group/plan/device")
+
+    def forward(self, x, weights, indices, *, valid_rows=None):
+        self.require_admitted()
+        plan, group, device = self.plan, self.process_group, self.local.experts.device
         if (
             x.ndim != 2
             or x.shape[1] != plan.dispatch.hidden

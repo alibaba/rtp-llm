@@ -185,6 +185,9 @@ class V41Stage:
             raise ValueError("V4.1 stage zero/decode must start with fresh selections")
         swas, sources = [], {}
         for op in self.blocks:
+            routed = op.feed_forward.routed
+            if isinstance(routed, V41CollectiveMoE):
+                routed.require_admitted()
             plan = plans[op.layer_id]
             if not isinstance(plan, V41AttentionPlan):
                 raise ValueError("V4.1 layer requires an explicit attention plan")

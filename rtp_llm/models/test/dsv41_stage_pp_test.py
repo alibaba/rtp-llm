@@ -99,7 +99,11 @@ class V41StagePPTest(unittest.TestCase):
         self.driver.dim, self.driver.device = 5120, torch.device("cpu")
         self.driver.max_rows, self.driver.max_positions = 128, 512
         self.driver.blocks = tuple(
-            SimpleNamespace(layer_id=s.layer_id, attention=SimpleNamespace(sources=s))
+            SimpleNamespace(
+                layer_id=s.layer_id,
+                attention=SimpleNamespace(sources=s),
+                feed_forward=SimpleNamespace(routed=None),
+            )
             for s in fixture.config_fixture().layer_sources()[21:]
         )
         self.driver.engram = fixture.stage_module.V41EngramStage(
