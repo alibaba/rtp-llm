@@ -2296,6 +2296,11 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+    // Set the phase on every TP rank, also when Graph is disabled. Ordinary
+    // prompt prefill never calls this post-verify modeling entry point.
+    if (batch_stream_processor_->usesFixedMtpUpdateLayout()) {
+        model_input.is_mtp_draft_update = true;
+    }
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
