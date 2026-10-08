@@ -995,7 +995,6 @@ class CacheAffinitySmoke:
     def _flexlb_route() -> Dict[str, object]:
         return {
             "service_id": SERVICE_ID,
-            "load_balance": True,
             "role_endpoints": [
                 {
                     "group": "default",
