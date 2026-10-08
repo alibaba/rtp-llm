@@ -177,6 +177,26 @@ def inputs(cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=No
     )
 
 
+def decode_inputs(cache, ids, starts, history, order=None):
+    order = list(range(len(ids))) if order is None else order
+    request = inputs(
+        cache,
+        [ids[i] for i in order],
+        [1] * len(ids),
+        [starts[i] for i in order],
+        [history[i] for i in order],
+    )
+    for attn in request.attention_inputs.values():
+        attn.is_prefill = False
+        attn.sequence_lengths = torch.tensor(
+            [starts[i] for i in order], dtype=torch.int32
+        )
+        attn.kv_cache_kernel_block_id_device = attn.kv_cache_kernel_block_id_device[
+            order
+        ].contiguous()
+    return request
+
+
 class V41WorkerSM120Test(unittest.TestCase):
     def setUp(self):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
@@ -289,7 +309,9 @@ class V41WorkerSM120Test(unittest.TestCase):
             request = inputs(model.kv_cache)
             for attn in request.attention_inputs.values():
                 setattr(attn, field, field != "is_prefill")
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises(
+                ValueError if field == "is_prefill" else NotImplementedError
+            ):
                 model.forward(request)
         request = inputs(model.kv_cache)
         request.multimodal_inputs.multimodal_features = [torch.zeros(1, device="cuda")]
@@ -311,6 +333,80 @@ class V41WorkerSM120Test(unittest.TestCase):
             self.assertTrue(torch.equal(tensor, model.kv_cache.storage[key]))
         self.assertTrue(
             torch.isfinite(model.forward(inputs(model.kv_cache)).hidden_states).all()
+        )
+        self.assert_released(model)
+
+    def test_prefill_then_decode_history_reordering_and_repeatability(self):
+        model = self.worker()
+        results = []
+        for reverse in (False, True):
+            model.kv_cache = tagged_cache(model)
+            model.forward(inputs(model.kv_cache))
+            starts, history = [3, 2], [[5, 4, 3], [7, 6, -1]]
+            outputs = []
+            for step in range(8):
+                ids = [8 + step, 24 + step]
+                order = [1, 0] if reverse and step % 2 == 0 else [0, 1]
+                request = decode_inputs(model.kv_cache, ids, starts, history, order)
+                output = model.forward(request).hidden_states
+                self.assertEqual(output.shape, (2, 512))
+                self.assertTrue(bool(torch.isfinite(output).all()))
+                outputs.append(output[order].clone())
+                self.assert_released(model)
+                history = [[ids[i], *history[i][:2]] for i in range(2)]
+                starts = [s + 1 for s in starts]
+            results.append(
+                (
+                    outputs,
+                    {key: raw.clone() for key, raw in model.kv_cache.storage.items()},
+                )
+            )
+        for left, right in zip(results[0][0], results[1][0]):
+            torch.testing.assert_close(left, right, rtol=0, atol=0)
+        for key, raw in results[0][1].items():
+            torch.testing.assert_close(raw, results[1][1][key], rtol=0, atol=0)
+
+    def test_decode_rejects_invalid_requests_and_cleans_failure_for_retry(self):
+        model = self.worker()
+        model.forward(inputs(model.kv_cache))
+        saved = {key: raw.clone() for key, raw in model.kv_cache.storage.items()}
+
+        def request():
+            return decode_inputs(
+                model.kv_cache, [8, 9], [3, 2], [[5, 4, 3], [7, 6, -1]]
+            )
+
+        for field, values in (
+            ("sequence_lengths", [256, 2]),
+            ("sequence_lengths", [-1, 2]),
+            ("sequence_lengths", [0, 2]),
+            ("sequence_lengths", [3]),
+            ("input_lengths", [2, 1]),
+            ("combo_position_ids", [4, 2]),
+        ):
+            bad = request()
+            for attn in bad.attention_inputs.values():
+                setattr(attn, field, torch.tensor(values, dtype=torch.int32))
+            with self.assertRaises(ValueError):
+                model.forward(bad)
+            self.assert_released(model)
+        bad = request()
+        bad.engram_token_windows.fill_(128)
+        with self.assertRaisesRegex(ValueError, "history"):
+            model.forward(bad)
+        self.assert_released(model)
+        for key, raw in saved.items():
+            torch.testing.assert_close(raw, model.kv_cache.storage[key], rtol=0, atol=0)
+        with patch.object(
+            model.v4.layers[0].attn,
+            "forward_decode",
+            side_effect=RuntimeError("decode injection"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "decode injection"):
+                model.forward(request())
+        self.assert_released(model)
+        self.assertTrue(
+            bool(torch.isfinite(model.forward(request()).hidden_states).all())
         )
         self.assert_released(model)
 

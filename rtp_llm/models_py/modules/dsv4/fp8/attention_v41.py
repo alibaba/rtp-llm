@@ -1115,6 +1115,13 @@ class AttentionV41FP8(AttentionFP8):
     def _pool_entries_per_block(self, attn_type):
         if self._kv_cache is None:
             return 0
+        regions = {SWA_KV}
+        if self.compress_ratio:
+            regions.update((self._global_region(), INDEXER_KV))
+            if self.compress_ratio == 2:
+                regions.add(CSA_STATE)
+        if attn_type not in regions:
+            return 0
         self._source_pool(attn_type)
         return self._cache_layouts[attn_type].entries
 

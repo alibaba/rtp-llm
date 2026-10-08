@@ -2,7 +2,7 @@
 
 Adapted from e4a9162f6f. Serving registration remains gated while this worker
 is qualified incrementally; eager short PP1/CP1/TP1 prefill admits DP1/EP1
-or a single eight-rank DP8/EP8 NCCL group.
+or a single eight-rank DP8/EP8 NCCL group. Single-token decode admits EP1.
 """
 
 from __future__ import annotations
@@ -398,9 +398,66 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise NotImplementedError("V4.1 worker CUDA graphs are not integrated")
         return None
 
+    def _validate_decode(self, inputs, attn):
+        from rtp_llm.models_py.modules.dsv4.decode.forward import (
+            build_metadata_eager,
+            build_paged_pool_specs,
+        )
+
+        if self._dp_group is not None:
+            raise NotImplementedError("V4.1 DP8 worker decode is not integrated")
+        lengths, starts = attn.input_lengths, attn.sequence_lengths
+        batch = inputs.input_ids.numel()
+        if (
+            not 1 <= batch <= self._max_generate_batch_size
+            or lengths is None
+            or starts is None
+            or lengths.shape != (batch,)
+            or starts.shape != (batch,)
+            or lengths.dtype not in (torch.int32, torch.int64)
+            or starts.dtype not in (torch.int32, torch.int64)
+            or bool((lengths != 1).any())
+        ):
+            raise ValueError("V4.1 decode requires one token per request")
+        if bool(((starts < 1) | (starts >= min(256, self._v4_args.max_seq_len))).any()):
+            raise ValueError(
+                "V4.1 decode requires prompt positions within the first page"
+            )
+        positions = attn.combo_position_ids
+        if (
+            positions is not None
+            and positions.numel()
+            and (
+                positions.dtype not in (torch.int32, torch.int64)
+                or not torch.equal(positions.cpu(), starts.cpu())
+            )
+        ):
+            raise ValueError("V4.1 decode positions disagree with requests")
+        specs = build_paged_pool_specs(
+            self.kv_cache, self.v4, self._v4_args.max_seq_len
+        )
+        metadata = build_metadata_eager(
+            self._v4_args,
+            inputs.attention_inputs,
+            inputs.input_ids.device,
+            specs,
+            kv_cache=self.kv_cache,
+            fp8_kv_cache=True,
+        )
+        probe = torch.empty(
+            (batch, 1, self._v4_args.dim),
+            device=inputs.input_ids.device,
+            dtype=torch.bfloat16,
+        )
+        for layer in self.v4.layers:
+            with bind_attn_cache(
+                layer.attn, self.kv_cache, metadata.pool_block_tables, cp_ctx=None
+            ):
+                layer.attn._require_qualified_decode(probe, metadata)
+
     def _validate_forward(self, inputs, fmha_impl):
         if fmha_impl is not None or torch.cuda.is_current_stream_capturing():
-            raise NotImplementedError("V4.1 worker requires eager prefill")
+            raise NotImplementedError("V4.1 worker requires eager execution")
         if torch.cuda.current_stream(self._weight_device()) != self._worker_stream:
             raise NotImplementedError(
                 "V4.1 worker requires its initialization CUDA stream"
@@ -430,16 +487,18 @@ class DeepSeekV41Model(DeepSeekV4Model):
             or not ids.is_contiguous()
             or bool(((ids < 0) | (ids >= self._v4_args.vocab_size)).any())
         ):
-            raise ValueError("V4.1 prefill requires valid token IDs (nonempty for EP1)")
+            raise ValueError("V4.1 worker requires valid token IDs (nonempty for EP1)")
         attn = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
         if (
             attn is None
-            or not attn.is_prefill
             or attn.is_cuda_graph
             or getattr(attn, "is_target_verify", False)
         ):
-            raise NotImplementedError("V4.1 worker decode/verify is not integrated")
-        self._validate_prefill(inputs, attn)
+            raise NotImplementedError("V4.1 worker graphs/verify are not integrated")
+        if attn.is_prefill:
+            self._validate_prefill(inputs, attn)
+        else:
+            self._validate_decode(inputs, attn)
         if ids.numel():
             if self._dp_group is not None:
                 tables = build_block_tables_batched(
