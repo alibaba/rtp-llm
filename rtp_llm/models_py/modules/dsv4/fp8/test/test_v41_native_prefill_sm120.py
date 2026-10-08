@@ -1,5 +1,7 @@
 """Bounded DP8 prefill through the native allocator, wrapper and executor."""
 
+import hashlib
+import importlib.metadata
 import os
 import socket
 import tempfile
@@ -37,6 +39,20 @@ def cache_snapshot(cache):
 def run_rank(rank, port, config):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
+    expected_version = os.environ.get("DSV41_TEST_DEEPGEMM_VERSION")
+    expected_hash = os.environ.get("DSV41_TEST_DEEPGEMM_SHA256")
+    if expected_version or expected_hash:
+        import deep_gemm
+
+        version = importlib.metadata.version("deep-gemm")
+        binary = Path(deep_gemm._C.__file__)
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if expected_version:
+            assert version == expected_version, (version, expected_version)
+        if expected_hash:
+            assert digest == expected_hash, (str(binary), digest, expected_hash)
+        if rank == 0:
+            print(f"DeepGEMM {version}: {binary} sha256={digest}", flush=True)
     os.environ.update(
         {
             "NCCL_P2P_DISABLE": "1",
