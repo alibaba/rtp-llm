@@ -3,6 +3,7 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -157,6 +158,9 @@ std::shared_ptr<TransferTask>
 TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfoMap block_infos, int64_t deadline_ms) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (task_map_.find(unique_key) != task_map_.end()) {
+        RTP_LLM_LOG_WARNING("P2P recv task registration rejected, stage=duplicate_recv_task "
+                            "partition_layer_key=%s deadline_ms=%ld",
+                            unique_key.c_str(), deadline_ms);
         return nullptr;
     }
     auto task             = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms);

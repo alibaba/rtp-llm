@@ -514,7 +514,7 @@ TEST_F(TcpTaskContextTest, Destructor_WithPendingDone_AutoRunsFailure) {
     }
 
     EXPECT_EQ(closure.run_count(), 1);
-    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_UNKNOWN_ERROR);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_DESTROYED);
 }
 
 TEST_F(TcpTaskContextTest, Destructor_AfterRunCompleted_NoDoubleRun) {

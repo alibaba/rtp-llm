@@ -49,10 +49,13 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
                                                    int&                                  total_block_count) {
-    auto fail_registration = [&](const std::string& message) {
+    auto fail_registration = [&](const std::string& message,
+                                 ErrorCode error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED) {
         cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
-        RTP_LLM_LOG_WARNING("%s", message.c_str());
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
+        RTP_LLM_LOG_WARNING("P2P recv registration failed, unique_key=%s error_code=%d error_name=%s error=%s",
+                            unique_key.c_str(), static_cast<int>(error_code),
+                            ErrorCodeToString(error_code).c_str(), message.c_str());
+        return ErrorInfo(error_code, message);
     };
     struct PreparedReceive {
         transfer::RecvRequest request;
@@ -101,7 +104,9 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                 return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
                                          + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
                                          + " task registration failed, unique_key=" + unique_key + ": "
-                                         + conversion_message);
+                                         + conversion_message,
+                                         !key_block_infos.ok() ? key_block_infos.status().code() :
+                                             ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
             }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
@@ -361,9 +366,12 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     reportReadMetrics(collector, recv_result.success, read_start_time_us, task_group);
 
     if (!recv_result.success) {
-        RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, error_code: %s, error_msg: %s",
+        RTP_LLM_LOG_WARNING("P2P Decode read failed, request_id=%ld unique_key=%s rank=%d "
+                            "error_code=%d error_name=%s error=%s",
                             request_id,
                             unique_key.c_str(),
+                            static_cast<int>(config_.tp_rank),
+                            static_cast<int>(recv_result.error_code),
                             ErrorCodeToString(recv_result.error_code).c_str(),
                             recv_result.error_msg.c_str());
         return ErrorInfo(recv_result.error_code, recv_result.error_msg);

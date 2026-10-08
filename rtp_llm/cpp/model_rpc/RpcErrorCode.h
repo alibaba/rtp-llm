@@ -104,6 +104,13 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
         {ErrorCodePB::CACHE_STORE_PUSH_ITEM_FAILED, ErrorCode::CACHE_STORE_PUSH_ITEM_FAILED},
         {ErrorCodePB::CACHE_STORE_LOAD_UNKNOWN_ERROR, ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR},
         {ErrorCodePB::CACHE_STORE_STORE_FAILED, ErrorCode::CACHE_STORE_STORE_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_RPC_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_COPY_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED, ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED},
         {ErrorCodePB::GET_PART_NODE_STATUS_FAILED, ErrorCode::GET_PART_NODE_STATUS_FAILED},
         {ErrorCodePB::GET_ALL_NODE_STATUS_FAILED, ErrorCode::GET_ALL_NODE_STATUS_FAILED},
         {ErrorCodePB::UNKNOWN_ERROR, ErrorCode::UNKNOWN_ERROR},
@@ -186,6 +193,13 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         {ErrorCode::CACHE_STORE_PUSH_ITEM_FAILED, ErrorCodePB::CACHE_STORE_PUSH_ITEM_FAILED},
         {ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR, ErrorCodePB::CACHE_STORE_LOAD_UNKNOWN_ERROR},
         {ErrorCode::CACHE_STORE_STORE_FAILED, ErrorCodePB::CACHE_STORE_STORE_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_RPC_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_COPY_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED},
         {ErrorCode::GET_PART_NODE_STATUS_FAILED, ErrorCodePB::GET_PART_NODE_STATUS_FAILED},
         {ErrorCode::GET_ALL_NODE_STATUS_FAILED, ErrorCodePB::GET_ALL_NODE_STATUS_FAILED},
         {ErrorCode::UNKNOWN_ERROR, ErrorCodePB::UNKNOWN_ERROR},
@@ -237,7 +251,11 @@ inline ErrorInfo errorInfoFromGrpcStatus(const grpc::Status& status, const std::
     ErrorDetailsPB details;
     if (!status.error_details().empty() && details.ParseFromString(status.error_details())
         && details.error_code() != 0) {
-        return ErrorInfo(static_cast<ErrorCode>(details.error_code()), details.error_message());
+        const std::string message = details.error_message().empty() ? status.error_message() : details.error_message();
+        return ErrorInfo(static_cast<ErrorCode>(details.error_code()),
+                         location.empty() ? message :
+                                            message + " [received_at " + location + " grpc_code="
+                                                + std::to_string(static_cast<int>(status.error_code())) + "]");
     }
     return ErrorInfo(transGrpcStatusToErrorCode(status.error_code()),
                      location + " grpc_code=" + std::to_string(static_cast<int>(status.error_code())) + ": "

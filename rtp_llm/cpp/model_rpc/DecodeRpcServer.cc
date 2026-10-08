@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -310,6 +311,28 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         return prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
     }
 
+    const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
+        const auto error = errorInfoFromGrpcStatus(status);
+        if (status.error_code() == grpc::StatusCode::CANCELLED && error.code() == ErrorCode::CANCELLED) {
+            RTP_LLM_LOG_INFO("P2P Decode request cancelled, stage=%s request_id=%ld unique_key=%s error=%s",
+                             stage,
+                             request->request_id(),
+                             effective_request->generate_config().unique_key().c_str(),
+                             error.ToString().c_str());
+            return;
+        }
+        RTP_LLM_LOG_WARNING("P2P Decode request failed, stage=%s request_id=%ld business_unique_key=%s unique_key=%s "
+                            "grpc_code=%d error_code=%d error_name=%s error=%s",
+                            stage,
+                            request->request_id(),
+                            request->generate_config().unique_key().c_str(),
+                            effective_request->generate_config().unique_key().c_str(),
+                            static_cast<int>(status.error_code()),
+                            static_cast<int>(error.code()),
+                            ErrorCodeToString(error.code()).c_str(),
+                            error.ToString().c_str());
+    };
+
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
@@ -354,7 +377,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     }
     if (!prepare_status.ok()) {
         generate_context.error_status = prepare_status;
-        return prepare_status;
+        log_pd_error("prepare", generate_context.error_status);
+        return generate_context.error_status;
     }
     if (cancel_handle->canceled.load()) {
         generate_context.error_info   = cancel_handle->cancel_reason;
@@ -383,7 +407,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         uint32_t    target_port  = 0;
         auto        parse_status = parsePrefillDpAddr(prefillAddress(prefill_request), &target_ip, &target_port);
         if (!parse_status.ok()) {
-            return parse_status;
+            const auto status = parse_status;
+            log_pd_error("prefill_address", status);
+            return status;
         }
         const auto prefill_call_start_us = currentTimeUs();
         auto       started               = prefill_server_caller_->callPrefill(
@@ -395,8 +421,10 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             generate_context.reportMetrics(collector);
         }
         if (!started.ok()) {
-            generate_context.error_info   = started.status();
-            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
+            generate_context.error_info = started.status();
+            generate_context.error_status =
+                serializeErrorMsg(generate_context.request_key, generate_context.error_info);
+            log_pd_error("call_prefill", generate_context.error_status);
             return generate_context.error_status;
         }
         prefill_caller_ctx            = std::move(started.value());
@@ -432,6 +460,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
 
     if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
         prefill_caller_ctx->cancel();
+    }
+    if (!generate_context.error_status.ok()) {
+        log_pd_error("stream_output", generate_context.error_status);
     }
     return generate_context.error_status;
 }

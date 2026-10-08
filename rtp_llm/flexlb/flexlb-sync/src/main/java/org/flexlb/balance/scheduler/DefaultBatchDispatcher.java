@@ -631,6 +631,8 @@ public class DefaultBatchDispatcher {
                     String errorMessage = error.hasErrorInfo()
                             ? error.getErrorInfo().getErrorMessage()
                             : "missing error_info";
+                    Logger.error("EnqueueBatch rejected batch_id={} request_id={} backend_error_code={} error={}",
+                            batchId, item.requestId(), errorCode, errorMessage);
                     observer.accept(
                             item,
                             DeliveryResult.failed(

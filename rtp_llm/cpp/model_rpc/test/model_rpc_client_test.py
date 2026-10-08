@@ -2487,6 +2487,49 @@ class FirstCauseRpcErrorTest(TestCase):
             self.assertEqual(caught.exception.exception_type, expected)
             self.assertEqual(caught.exception.message, "batch item 1: first cause")
 
+    def test_p2p_transfer_body_and_trailer_preserve_request_and_cause(self):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        for error_type in ExceptionType:
+            if not error_type.name.startswith("P2P_CONNECTOR_TRANSFER_"):
+                continue
+            for request_id in (101, 202):
+                request_desc = f"request={request_id}"
+                details = ErrorDetailsPB(
+                    error_code=error_type.value, error_message="original transfer cause"
+                )
+                with self.subTest(code=error_type, request=request_id, channel="trailer"):
+                    with self.assertLogs(level="ERROR") as logs:
+                        with self.assertRaises(FtRuntimeException) as caught:
+                            client._handle_grpc_error(
+                                self.rpc_error(
+                                    (("grpc-status-details-bin", details.SerializeToString()),),
+                                    grpc.StatusCode.INTERNAL,
+                                ),
+                                request_desc,
+                                "worker:9000",
+                            )
+                    self.assertEqual(caught.exception.exception_type, error_type)
+                    self.assertEqual(
+                        caught.exception.message,
+                        f"{request_desc}: original transfer cause",
+                    )
+                    self.assertTrue(any(request_desc in line for line in logs.output))
+                    self.assertTrue(any(error_type.name in line for line in logs.output))
+                with self.subTest(code=error_type, request=request_id, channel="body"):
+                    with self.assertRaises(FtRuntimeException) as caught:
+                        client._raise_pb_error(
+                            SimpleNamespace(
+                                error_code=ErrorCodePB.Value(error_type.name),
+                                error_message="original transfer cause",
+                            ),
+                            request_desc,
+                        )
+                    self.assertEqual(caught.exception.exception_type, error_type)
+                    self.assertEqual(
+                        caught.exception.message,
+                        f"{request_desc}: original transfer cause",
+                    )
+
     def test_batch_pb_error_without_message_is_still_failure(self):
         with self.assertRaises(FtRuntimeException) as caught:
             ModelRpcClient._raise_pb_error(

@@ -19,11 +19,18 @@ void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
     response->add_successes()->set_request_id(request_id);
 }
 
-void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t code, const std::string& message) {
+void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, ErrorCode code, const std::string& message) {
     auto* error = response->add_errors();
     error->set_request_id(request_id);
-    error->mutable_error_info()->set_error_code(code);
+    error->mutable_error_info()->set_error_code(static_cast<int64_t>(code));
     error->mutable_error_info()->set_error_message(message);
+    RTP_LLM_LOG_WARNING(
+        "P2P EnqueueBatch item failed, batch_id=%ld request_id=%ld error_code=%d error_name=%s error=%s",
+        response->batch_id(),
+        request_id,
+        static_cast<int>(code),
+        ErrorCodeToString(code).c_str(),
+        message.c_str());
 }
 
 }  // namespace
@@ -382,7 +389,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             for (const auto& external_input : dp_slot.requests()) {
                 addBatchError(response,
                               external_input.has_input() ? external_input.input().request_id() : 0,
-                              grpc::StatusCode::ALREADY_EXISTS,
+                              ErrorCode::INVALID_PARAMS,
                               "duplicate request_id in P2P EnqueueBatch");
             }
         }
@@ -408,17 +415,16 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     for (const auto& dp_slot : request->dp_slots()) {
         for (const auto& external_input : dp_slot.requests()) {
             if (!external_input.has_input()) {
-                addBatchError(response, 0, grpc::StatusCode::INVALID_ARGUMENT, "P2P EnqueueBatch input is missing");
+                addBatchError(response, 0, ErrorCode::INVALID_PARAMS, "P2P EnqueueBatch input is missing");
                 continue;
             }
             const auto request_id = external_input.input().request_id();
             if (dp_slot.dp_rank() != local_dp_rank) {
                 addBatchError(response,
                               request_id,
-                              grpc::StatusCode::INVALID_ARGUMENT,
-                              "P2P EnqueueBatch dp_rank mismatch, request dp_rank "
-                                  + std::to_string(dp_slot.dp_rank()) + ", local dp_rank "
-                                  + std::to_string(local_dp_rank));
+                              ErrorCode::INVALID_PARAMS,
+                              "P2P EnqueueBatch dp_rank mismatch, request dp_rank " + std::to_string(dp_slot.dp_rank())
+                                  + ", local dp_rank " + std::to_string(local_dp_rank));
                 continue;
             }
             if (context && context->IsCancelled()) {
@@ -430,7 +436,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 if (!batch_entries_.try_emplace(masterEnqueuedHandoffUniqueKey(request_id)).second) {
                     addBatchError(response,
                                   request_id,
-                                  grpc::StatusCode::ALREADY_EXISTS,
+                                  ErrorCode::INVALID_PARAMS,
                                   "request_id is already active in P2P EnqueueBatch");
                     continue;
                 }
@@ -452,7 +458,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 release_request_id(request_id);
                 addBatchError(response,
                               request_id,
-                              grpc::StatusCode::DEADLINE_EXCEEDED,
+                              ErrorCode::GENERATE_TIMEOUT,
                               "P2P EnqueueBatch request expired before admission");
                 continue;
             }
@@ -469,10 +475,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 cancel_registry_->finishLocal(cancel_handle);
                 cancel_registry_->finishDownstream(cancel_handle);
                 release_request_id(request_id);
-                addBatchError(response,
-                              request_id,
-                              static_cast<int64_t>(preprocess_status.code()),
-                              preprocess_status.ToString());
+                addBatchError(response, request_id, preprocess_status.code(), preprocess_status.ToString());
                 continue;
             }
             if (cancel_handle->canceled.load()) {
@@ -535,7 +538,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         release_request_id(admitted_request_ids[i]);
         addBatchError(response,
                       admitted_request_ids[i],
-                      static_cast<int64_t>(error.code()),
+                      error.hasError() ? error.code() : ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                       error.hasError() ? error.ToString() : "scheduler rejected request");
     }
     RTP_LLM_CHECK_WITH_INFO(response->successes_size() + response->errors_size() == input_count,
@@ -553,14 +556,25 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     RTP_LLM_LOG_DEBUG("receive start load request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
+    const std::string error_context = "reporter_role=PREFILL stage=StartLoad key=" + request->unique_key()
+                                      + " tp_rank=" + std::to_string(maga_init_params_.parallelism_config.tp_rank);
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("start load failed, engine is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+        RTP_LLM_LOG_WARNING("P2P Prefill StartLoad failed, unique_key=%s peer=%s grpc_code=%d error=engine is null",
+                            request->unique_key().c_str(),
+                            context->peer().c_str(),
+                            static_cast<int>(grpc::StatusCode::INTERNAL));
+        return grpcStatusFromErrorInfo(
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, error_context + ": engine is null"));
     }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("start load failed, cache manager is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+        RTP_LLM_LOG_WARNING(
+            "P2P Prefill StartLoad failed, unique_key=%s peer=%s grpc_code=%d error=cache manager is null",
+            request->unique_key().c_str(),
+            context->peer().c_str(),
+            static_cast<int>(grpc::StatusCode::INTERNAL));
+        return grpcStatusFromErrorInfo(
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, error_context + ": cache manager is null"));
     }
     if (!attachBatch(request->unique_key(), currentTimeMs())) {
         response->set_error_code(transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
@@ -574,6 +588,17 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     int64_t handle_read_start = currentTimeUs();
     cache_manager->handleRead(*request, *response, std::move(is_cancelled));
     int64_t handle_read_cost = currentTimeUs() - handle_read_start;
+    if (response->error_code() != ErrorCodePB::NONE_ERROR) {
+        response->set_error_message(error_context + ": " + response->error_message());
+        RTP_LLM_LOG_WARNING("P2P Prefill StartLoad failed, unique_key=%s peer=%s wire_code=%d "
+                            "error_code=%d error_name=%s error=%s",
+                            request->unique_key().c_str(),
+                            context->peer().c_str(),
+                            static_cast<int>(response->error_code()),
+                            static_cast<int>(transRPCErrorCode(response->error_code())),
+                            ErrorCodeToString(transRPCErrorCode(response->error_code())).c_str(),
+                            response->error_message().c_str());
+    }
     if (handle_read_cost >= 2000000) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] StartLoad slow handleRead cost_us=%ld, unique_key=%s",
                             handle_read_cost,

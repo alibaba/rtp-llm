@@ -193,7 +193,12 @@ int P2PWorkerPrefillRead::releasePendingAsyncSendTasks(const std::string&       
 }
 
 bool P2PWorkerPrefillRead::rejectLayer(int64_t request_id, int64_t request_deadline_ms, const ErrorInfo& error) {
-    RTP_LLM_LOG_ERROR("P2P layer publication failed, request_id=%ld, error=%s", request_id, error.ToString().c_str());
+    RTP_LLM_LOG_ERROR("P2P Prefill layer publication failed, request_id=%ld rank=%d error_code=%d error_name=%s error=%s",
+                      request_id,
+                      static_cast<int>(config_.tp_rank),
+                      static_cast<int>(error.code()),
+                      ErrorCodeToString(error.code()).c_str(),
+                      error.ToString().c_str());
     if (computed_buffers_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms)) {
         auto buffer = computed_buffers_->addBuffer(request_id, nullptr, request_deadline_ms);
         if (buffer) {
@@ -446,8 +451,8 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
     const int layer_id = layer_cache_buffer->getLayerId();
 
     // Account for both transport completion and a task rejected before enqueue.
-    auto make_send_done_cb = [transfer_result](const std::string& partition_layer_key) {
-        return [transfer_result, partition_layer_key](transfer::TransferErrorCode transfer_ec,
+    auto make_send_done_cb = [transfer_result, unique_key](const std::string& partition_layer_key) {
+        return [transfer_result, partition_layer_key, unique_key](transfer::TransferErrorCode transfer_ec,
                                                       const std::string&          cb_error_msg) {
             RTP_LLM_LOG_DEBUG("send done, partition_layer_key: %s, success: %d",
                               partition_layer_key.c_str(),
@@ -464,6 +469,15 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             {
                 std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
                 transfer_result->result_cv.notify_one();
+            }
+            if (transfer_ec != transfer::TransferErrorCode::OK) {
+                RTP_LLM_LOG_WARNING("P2P Prefill send callback failed, unique_key=%s partition_layer_key=%s "
+                                    "transfer_code=%d transfer_name=%s error=%s",
+                                    unique_key.c_str(),
+                                    partition_layer_key.c_str(),
+                                    static_cast<int>(transfer_ec),
+                                    transfer::transferErrorCodeToString(transfer_ec),
+                                    cb_error_msg.c_str());
             }
         };
     };
@@ -503,7 +517,8 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                     key_block_infos.status().ToString() :
                     "converted key count=" + std::to_string(key_block_infos.value().size())
                         + " differs from source key count=" + std::to_string(layer_cache_buffer->blockIdMap().size());
-            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+            mark_dispatch_failure(!key_block_infos.ok() ? key_block_infos.status().code() :
+                                      ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                   "sendKVCache: route=" + std::to_string(route.route_id) + " layer="
                                       + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
                                       + " task registration failed, unique_key=" + unique_key + ": "
@@ -633,10 +648,10 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                                         + " key=" + partition_layer_key;
             RTP_LLM_LOG_WARNING("%s", message.c_str());
             task_state->releaseIfNotStarted();
-            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
+            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, message);
             // count already includes this rejected task. No pool task will run,
             // so complete it exactly once here; preserve the dispatch error above.
-            done_cb(transfer::TransferErrorCode::UNKNOWN, message);
+            done_cb(transfer::TransferErrorCode::QUEUE_REJECTED, message);
             return count;
         }
     }
@@ -950,9 +965,12 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
     }
 
     if (!send_result.success) {
-        RTP_LLM_LOG_WARNING("sendKVCache failed, request_id: %ld, unique_key: %s, error_code: %s, error_msg: %s",
+        RTP_LLM_LOG_WARNING("P2P Prefill sendKVCache failed, request_id=%ld unique_key=%s rank=%d "
+                            "error_code=%d error_name=%s error=%s",
                             request_id,
                             unique_key.c_str(),
+                            static_cast<int>(config_.tp_rank),
+                            static_cast<int>(send_result.error_code),
                             ErrorCodeToString(send_result.error_code).c_str(),
                             send_result.error_msg.c_str());
         return ErrorInfo(send_result.error_code, send_result.error_msg);

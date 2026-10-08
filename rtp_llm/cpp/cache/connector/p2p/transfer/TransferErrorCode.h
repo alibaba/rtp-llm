@@ -29,8 +29,46 @@ enum class TransferErrorCode {
     RDMA_FAILED,  // RDMA connect / read operation failed
 
     // Catch-all
-    UNKNOWN,  // service not initialised, thread-pool error, context destroyed, etc.
+    UNKNOWN,  // unclassified failure
+
+    NOT_INITIALIZED,
+    QUEUE_REJECTED,
+    COPY_FAILED,
+    CONTEXT_DESTROYED,
 };
+
+inline const char* transferErrorCodeToString(TransferErrorCode ec) {
+    switch (ec) {
+        case TransferErrorCode::OK:
+            return "OK";
+        case TransferErrorCode::CANCELLED:
+            return "CANCELLED";
+        case TransferErrorCode::TIMEOUT:
+            return "TIMEOUT";
+        case TransferErrorCode::BUILD_REQUEST_FAILED:
+            return "BUILD_REQUEST_FAILED";
+        case TransferErrorCode::CONNECTION_FAILED:
+            return "CONNECTION_FAILED";
+        case TransferErrorCode::RPC_FAILED:
+            return "RPC_FAILED";
+        case TransferErrorCode::BUFFER_MISMATCH:
+            return "BUFFER_MISMATCH";
+        case TransferErrorCode::RDMA_FAILED:
+            return "RDMA_FAILED";
+        case TransferErrorCode::UNKNOWN:
+            return "UNKNOWN";
+        case TransferErrorCode::NOT_INITIALIZED:
+            return "NOT_INITIALIZED";
+        case TransferErrorCode::QUEUE_REJECTED:
+            return "QUEUE_REJECTED";
+        case TransferErrorCode::COPY_FAILED:
+            return "COPY_FAILED";
+        case TransferErrorCode::CONTEXT_DESTROYED:
+            return "CONTEXT_DESTROYED";
+        default:
+            return "UNRECOGNIZED_TRANSFER_ERROR";
+    }
+}
 
 /// @brief Convert a transfer-layer error code to the global rtp_llm::ErrorCode.
 /// This function is the single authoritative mapping and must only be called
@@ -44,15 +82,23 @@ inline ErrorCode toErrorCode(TransferErrorCode ec) {
         case TransferErrorCode::TIMEOUT:
             return ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT;
         case TransferErrorCode::BUILD_REQUEST_FAILED:
-            return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED;
         case TransferErrorCode::CONNECTION_FAILED:
-            return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED;
         case TransferErrorCode::RPC_FAILED:
-            return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED;
         case TransferErrorCode::BUFFER_MISMATCH:
             return ErrorCode::P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH;
         case TransferErrorCode::RDMA_FAILED:
             return ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED;
+        case TransferErrorCode::NOT_INITIALIZED:
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED;
+        case TransferErrorCode::QUEUE_REJECTED:
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED;
+        case TransferErrorCode::COPY_FAILED:
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED;
+        case TransferErrorCode::CONTEXT_DESTROYED:
+            return ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED;
         case TransferErrorCode::UNKNOWN:
             return ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED;
         default:

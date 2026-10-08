@@ -194,12 +194,32 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     if (deadline_exceeded) {
         std::string error_msg =
             "sendKVCache: broadcast wait exceeded deadline_ms, request_id: " + std::to_string(request_id);
+        const auto observed_error = result->firstError().error;
+        error_msg += " unique_key=" + unique_key + " observed_error_code="
+                     + std::to_string(static_cast<int>(observed_error.code()))
+                     + " observed_error=" + observed_error.ToString();
+        RTP_LLM_LOG_WARNING("P2P Prefill terminal, request_id=%ld unique_key=%s error_code=%d "
+                            "observed_error_code=%d observed_error_name=%s observed_error=%s",
+                            request_id, unique_key.c_str(),
+                            static_cast<int>(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT),
+                            static_cast<int>(observed_error.code()), ErrorCodeToString(observed_error.code()).c_str(),
+                            observed_error.ToString().c_str());
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT, error_msg);
     }
 
     if (cancel_result) {
         std::string error_msg = "sendKVCache: cancelled by client, request_id: " + std::to_string(request_id);
+        const auto observed_error = result->firstError().error;
+        error_msg += " unique_key=" + unique_key + " observed_error_code="
+                     + std::to_string(static_cast<int>(observed_error.code()))
+                     + " observed_error=" + observed_error.ToString();
+        RTP_LLM_LOG_WARNING("P2P Prefill terminal, request_id=%ld unique_key=%s error_code=%d "
+                            "observed_error_code=%d observed_error_name=%s observed_error=%s",
+                            request_id, unique_key.c_str(),
+                            static_cast<int>(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED),
+                            static_cast<int>(observed_error.code()), ErrorCodeToString(observed_error.code()).c_str(),
+                            observed_error.ToString().c_str());
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED, error_msg);
     }

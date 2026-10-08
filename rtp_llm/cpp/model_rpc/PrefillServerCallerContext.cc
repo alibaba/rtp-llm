@@ -87,8 +87,14 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
     auto async_state = async_state_;
     response_received_ = true;
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
-        error_info_ =
-            ErrorInfo(transRPCErrorCode(response.error_info().error_code()), response.error_info().error_message());
+        error_info_ = ErrorInfo(
+            transRPCErrorCode(response.error_info().error_code()),
+            response.error_info().error_message()
+                + " [received_at location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                + prefill_addr_
+                + " request_id=" + (async_state ? std::to_string(async_state->request.request_id()) : "unavailable")
+                + " key=" + unique_key_
+                + " wire_code=" + std::to_string(static_cast<int>(response.error_info().error_code())) + "]");
         first_error_.record(error_info_);
         if (async_state) {
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
@@ -213,7 +219,10 @@ void PrefillServerCallerContext::checkDone() {
         }
         if (!async_state->status.ok()) {
             error_info_ = errorInfoFromGrpcStatus(
-                async_state->status, "Prefill GenerateStreamCall peer=" + prefill_addr_ + " key=" + unique_key_);
+                async_state->status,
+                "location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                    + prefill_addr_ + " request_id=" + std::to_string(async_state_->request.request_id())
+                    + " key=" + unique_key_);
             first_error_.record(error_info_);
         }
         if (!async_state->status.ok()) {

@@ -379,22 +379,38 @@ void DecodeLoadHelper::Result::complete(bool ok) {
         if (!ok || !status.ok()) {
             const auto error = errorInfoFromGrpcStatus(
                 status.ok() ? grpc::Status(grpc::StatusCode::INTERNAL, "Finish event failed") : status,
-                "StartLoad peer=" + server_addr + " key=" + unique_key);
+                "location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer=" + server_addr
+                    + " request_id=" + std::to_string(request_id) + " key=" + unique_key);
             error_code    = error.code();
             error_message = error.ToString();
         } else if (response.error_code() != ErrorCodePB::NONE_ERROR) {
             error_code    = transRPCErrorCode(response.error_code());
-            error_message = response.error_message();
+            error_message =
+                response.error_message()
+                + " [received_at location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer="
+                + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key
+                + " wire_code=" + std::to_string(static_cast<int>(response.error_code())) + "]";
         } else {
             updateStreamFromResponse();
             if (!side_channel_payload.has_first_token) {
-                error_message = "StartLoad response is missing the required first token";
+                error_message =
+                    "StartLoad response is missing the required first token [location=DecodeLoadHelper::complete "
+                    "observer_role=DECODE peer="
+                    + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key + "]";
             } else {
                 success_   = true;
                 error_code = ErrorCode::NONE_ERROR;
             }
         }
         first_error_.record(ErrorInfo(error_code, error_message));
+        if (!success_) {
+            RTP_LLM_LOG_WARNING("P2P Decode StartLoad failed, unique_key=%s peer=%s grpc_code=%d "
+                                "wire_code=%d error_code=%d error_name=%s error=%s",
+                                unique_key.c_str(), server_addr.c_str(),
+                                static_cast<int>(status.error_code()), static_cast<int>(response.error_code()),
+                                static_cast<int>(error_code), ErrorCodeToString(error_code).c_str(),
+                                error_message.c_str());
+        }
         done_              = true;
         total_cost_time_us = currentTimeUs() - start_time_us;
         callback           = std::move(done_callback_);

@@ -26,6 +26,14 @@ inline TransferErrorCode transTcpErrorCode(::tcp_transfer::TcpTransferErrorCodeP
             return TransferErrorCode::TIMEOUT;
         case ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED:
             return TransferErrorCode::CANCELLED;
+        case ::tcp_transfer::TCP_TRANSFER_NOT_INITIALIZED:
+            return TransferErrorCode::NOT_INITIALIZED;
+        case ::tcp_transfer::TCP_TRANSFER_QUEUE_REJECTED:
+            return TransferErrorCode::QUEUE_REJECTED;
+        case ::tcp_transfer::TCP_TRANSFER_CONTEXT_DESTROYED:
+            return TransferErrorCode::CONTEXT_DESTROYED;
+        case ::tcp_transfer::TCP_TRANSFER_COPY_FAILED:
+            return TransferErrorCode::COPY_FAILED;
         default:
             return TransferErrorCode::UNKNOWN;
     }
@@ -56,13 +64,29 @@ public:
 
         if (controller_->Failed()) {
             error_code = TransferErrorCode::RPC_FAILED;
-            error_msg  = "tcp transfer failed: " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
+            error_msg  = "tcp transfer failed: rpc_code=" + std::to_string(controller_->GetErrorCode())
+                        + " " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
                         + std::to_string(peer_port_) + "]";
         } else if (response_->has_error_code() && response_->error_code() != ::tcp_transfer::TCP_TRANSFER_NONE_ERROR) {
             error_code = transTcpErrorCode(response_->error_code());
-            error_msg  = response_->has_error_message() ? response_->error_message() : "";
+            error_msg  = "wire_code=" + std::to_string(static_cast<int>(response_->error_code())) + ": "
+                         + (response_->has_error_message() ? response_->error_message() : "");
         }
 
+        if (error_code != TransferErrorCode::OK) {
+            error_msg += " [received_at location=TCPTransferClosure::Run peer=" + peer_ip_ + ":"
+                         + std::to_string(peer_port_) + " partition_layer_key=" + request_->unique_key() + "]";
+            RTP_LLM_LOG_WARNING("P2P TCP send RPC failed, partition_layer_key=%s peer=%s:%u "
+                                "transfer_code=%d transfer_name=%s rpc_code=%d wire_code=%d error=%s",
+                                request_->unique_key().c_str(),
+                                peer_ip_.c_str(),
+                                peer_port_,
+                                static_cast<int>(error_code),
+                                transferErrorCodeToString(error_code),
+                                controller_->GetErrorCode(),
+                                response_->has_error_code() ? static_cast<int>(response_->error_code()) : -1,
+                                error_msg.c_str());
+        }
         if (callback_) {
             callback_(error_code, error_msg);
         }

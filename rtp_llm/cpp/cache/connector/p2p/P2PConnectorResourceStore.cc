@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
 #include <limits>
 
@@ -132,6 +133,12 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
                                           const KVCacheResourcePtr& resource) {
     const auto routing = meta ? meta->p2pRouting() : std::nullopt;
     if (!routing || routing->unique_key.empty() || !validDeadline(routing->deadline_ms) || !resource) {
+        RTP_LLM_LOG_WARNING("P2P resource registration rejected, stage=validate request_id=%ld unique_key=%s "
+                            "has_routing=%d has_resource=%d deadline_ms=%ld error_code=%d",
+                            routing ? routing->request_id : -1, routing ? routing->unique_key.c_str() : "<missing>",
+                            static_cast<int>(routing.has_value()), static_cast<int>(resource != nullptr),
+                            routing ? routing->deadline_ms : 0,
+                            static_cast<int>(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         return false;
     }
     bool accepted = false;
@@ -139,6 +146,10 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         if (currentTimeMs() >= routing->deadline_ms) {
+            RTP_LLM_LOG_WARNING("P2P resource registration rejected, stage=late_resource request_id=%ld "
+                                "unique_key=%s deadline_ms=%ld error_code=%d",
+                                routing->request_id, routing->unique_key.c_str(), routing->deadline_ms,
+                                static_cast<int>(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
             // Late callbacks carry the original deadline. Reject them without
             // recreating state after its terminal record has been collected.
             release_layers = true;
@@ -157,6 +168,15 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
                 entry->add_time_us = currentTimeUs();
                 resource_map_.emplace(routing->unique_key, std::move(entry));
                 accepted = true;
+            }
+            if (!accepted) {
+                RTP_LLM_LOG_WARNING("P2P resource registration rejected, stage=state request_id=%ld unique_key=%s "
+                                    "terminal=%d consumed=%d state_deadline_ms=%ld request_deadline_ms=%ld "
+                                    "registered_deadline_ms=%ld duplicate_resource=%d error_code=%d",
+                                    routing->request_id, routing->unique_key.c_str(), static_cast<int>(state.terminal),
+                                    static_cast<int>(state.consumed), state.deadlineMs(), routing->deadline_ms,
+                                    state.request_deadline_ms, static_cast<int>(resource_map_.count(routing->unique_key)),
+                                    static_cast<int>(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
             }
             scheduleDeadlineCheckLocked(routing->unique_key, state);
         }

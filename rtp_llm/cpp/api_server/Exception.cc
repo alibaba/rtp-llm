@@ -56,6 +56,13 @@ HttpApiServerException::Type transErrorCodeToHttpExceptionType(ErrorCode code) {
         case ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED:
         case ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT:
         case ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED:
+        case ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED:
             return HttpApiServerException::REMOTE_LOAD_KV_CACHE_ERROR;
         case ErrorCode::REMOTE_GENERATE_FAILED:
         case ErrorCode::RPC_FINISH_FAILED:

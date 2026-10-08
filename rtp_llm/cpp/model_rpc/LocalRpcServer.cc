@@ -177,10 +177,18 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto& error_msg       = error_info.ToString();
-    const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
-    RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
+    std::string error_msg = error_info.ToString();
+    const auto  role      = maga_init_params_.pd_sep_config.role_type;
+    if (role == RoleType::PREFILL || role == RoleType::DECODE) {
+        error_msg = "reporter_role=" + roleTypeToString(role) + " stage=rpc_response request_key=" + request_key
+                    + " tp_rank=" + std::to_string(maga_init_params_.parallelism_config.tp_rank)
+                    + (request_info.request_id.empty() ? "" : " source_request_id=" + request_info.request_id)
+                    + (request_info.trace_id.empty() ? "" : " trace_id=" + request_info.trace_id) + ": " + error_msg;
+    }
+    const auto request_log_tag = formatRequestLogTag(request_key, request_info);
+    RTP_LLM_LOG_WARNING("%s, error_code=%d error_name=%s error_message=[%s]",
                         request_log_tag.c_str(),
+                        static_cast<int>(error_info.code()),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
@@ -1123,22 +1131,51 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 ::grpc::Status LocalRpcServer::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
                                                ::FunctionResponsePB*      response) {
+    const auto failure_status = [&](grpc::StatusCode status_code, const std::string& message) {
+        if (!request->has_p2p_request()) {
+            return grpc::Status(status_code, message);
+        }
+        const auto& p2p_request = request->p2p_request();
+        ErrorInfo error(status_code == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
+                            ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                        message);
+        if (response->has_p2p_response() && response->p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
+            error = ErrorInfo(transRPCErrorCode(response->p2p_response().error_code()),
+                              response->p2p_response().error_message());
+        }
+        const std::string detail =
+            "reporter_role=" + roleTypeToString(maga_init_params_.pd_sep_config.role_type)
+            + " stage=ExecuteFunction tp_rank=" + std::to_string(maga_init_params_.parallelism_config.tp_rank)
+            + " request_id=" + std::to_string(p2p_request.request_id()) + " unique_key=" + p2p_request.unique_key()
+            + " type=" + std::to_string(p2p_request.type()) + ": " + error.ToString();
+        RTP_LLM_LOG_WARNING("P2P ExecuteFunction rejected, request_id=%ld unique_key=%s type=%d peer=%s "
+                            "grpc_code=%d error_code=%d error_name=%s error=%s",
+                            p2p_request.request_id(), p2p_request.unique_key().c_str(),
+                            static_cast<int>(p2p_request.type()), context->peer().c_str(),
+                            static_cast<int>(status_code), static_cast<int>(error.code()),
+                            ErrorCodeToString(error.code()).c_str(), detail.c_str());
+        ErrorDetailsPB details;
+        details.set_error_code(static_cast<int>(error.code()));
+        details.set_error_message(detail);
+        // Preserve the existing transport status and failure path; carry the worker cause in details.
+        return grpc::Status(status_code, detail, details.SerializeAsString());
+    };
     RTP_LLM_LOG_DEBUG("receive execute function request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
     if (context->IsCancelled()) {
         RTP_LLM_LOG_WARNING("execute function failed, request is cancelled");
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+        return failure_status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_) {
         RTP_LLM_LOG_WARNING("execute function failed, engine is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+        return failure_status(grpc::StatusCode::INTERNAL, "engine is null");
     }
 
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+        return failure_status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
         std::string request_case;
@@ -1154,7 +1191,7 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING(
             "execute function failed, peer: %s, request_case: %s", context->peer().c_str(), request_case.c_str());
         const std::string error_msg = "execute function failed, request_case: " + request_case;
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return failure_status(grpc::StatusCode::INTERNAL, error_msg);
     }
     return grpc::Status::OK;
 }

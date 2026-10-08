@@ -13,6 +13,10 @@ enum TcpTransferErrorCodePB {
     TCP_TRANSFER_CONTEXT_TIMEOUT  = 3;
     // Matching recv task was already cancelled before the transfer RPC arrived
     TCP_TRANSFER_TASK_CANCELLED   = 4;
+    TCP_TRANSFER_NOT_INITIALIZED = 5;
+    TCP_TRANSFER_QUEUE_REJECTED = 6;
+    TCP_TRANSFER_CONTEXT_DESTROYED = 7;
+    TCP_TRANSFER_COPY_FAILED = 8;
 }
 
 // TCP mode: block content embedded inline

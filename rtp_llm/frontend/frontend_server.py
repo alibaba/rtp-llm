@@ -339,6 +339,11 @@ class FrontendServer(object):
                 _record_http_status(trace_state, 200)
                 trace_state.finish(error=e)
             format_e = format_exception(e)
+            logging.warning(
+                "Frontend streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
+                request.get(request_id_field_name), format_e.get("error_code"),
+                format_e.get("error_code_str"), format_e.get("message"),
+            )
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -562,6 +567,11 @@ class FrontendServer(object):
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+        logging.warning(
+            "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
+            request.get(request_id_field_name), exception_json.get("error_code"),
+            error_code_str, exception_json.get("message"),
+        )
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):

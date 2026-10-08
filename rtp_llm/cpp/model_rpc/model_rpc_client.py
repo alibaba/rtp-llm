@@ -1009,6 +1009,10 @@ class ModelRpcClient(object):
             # Keep the original code visible even if this frontend has no enum name.
             error_type = ExceptionType.UNKNOWN_ERROR
             message = f"backend_error_code={code}: {message}"
+        logging.error(
+            "backend failure: backend_error_code=%d frontend_error_code=%d error_name=%s message=%s",
+            code, error_type.value, error_type.name, message,
+        )
         raise FtRuntimeException(error_type, message)
 
     @staticmethod
@@ -1025,6 +1029,10 @@ class ModelRpcClient(object):
             code = ExceptionType.__members__.get(
                 name, ExceptionType.UNKNOWN_ERROR
             ).value
+        logging.error(
+            "%s backend error frame: wire_code=%d backend_error_code=%d message=%s",
+            request_desc, error.error_code, code, error.error_message,
+        )
         ModelRpcClient._raise_backend_error(code, f"{request_desc}: {error.error_message}")
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str, target_address: str = "") -> None:
@@ -1039,6 +1047,11 @@ class ModelRpcClient(object):
             # A malformed envelope must not hide the RPC failure itself.
             details.Clear()
         if details.error_code:
+            logging.error(
+                "%s RPC to [%s] failed: grpc_code=%s backend_error_code=%d message=%s",
+                request_desc, target_address, e.code(), details.error_code,
+                details.error_message or e.details(),
+            )
             self._raise_backend_error(
                 details.error_code, f"{request_desc}: {details.error_message or e.details()}"
             )
@@ -1049,7 +1062,7 @@ class ModelRpcClient(object):
             error_type = (ExceptionType.CONNECTION_RESET_BY_PEER if "socket closed" in lower or "connection reset" in lower
                           else ExceptionType.CONNECT_TIMEOUT if "timed out" in lower or "timeout" in lower
                           else ExceptionType.CONNECT_FAILED)
-            self._raise_backend_error(error_type.value, message)
+            self._raise_backend_error(error_type.value, f"{request_desc}: {message}")
         codes = {
             StatusCode.DEADLINE_EXCEEDED: ExceptionType.GENERATE_TIMEOUT,
             StatusCode.CANCELLED: ExceptionType.CANCELLED_ERROR,
@@ -1395,7 +1408,8 @@ class ModelRpcClient(object):
                     else result_pb.final_output.error_info
                 )
                 if error.error_code or error.error_message:
-                    self._raise_pb_error(error, f"batch item {i}")
+                    request_id = inputs[i].request_id if i < len(inputs) else "unmatched"
+                    self._raise_pb_error(error, f"batch item {i} request={request_id}")
             if len(response.results) != len(inputs):
                 raise FtRuntimeException(
                     ExceptionType.UNKNOWN_ERROR,
@@ -1414,9 +1428,16 @@ class ModelRpcClient(object):
             return results
 
         except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch_size={len(inputs)}", target_address)
+            self._handle_grpc_error(
+                e,
+                f"batch_size={len(inputs)} request_ids={[inp.request_id for inp in inputs]}",
+                target_address,
+            )
         except FtRuntimeException:
             raise
         except Exception as e:
-            logging.error(f"batch rpc unknown error: {str(e)}")
+            logging.error(
+                "batch rpc unknown error: request_ids=%s target=%s error=%s",
+                [inp.request_id for inp in inputs], target_address, str(e),
+            )
             raise e

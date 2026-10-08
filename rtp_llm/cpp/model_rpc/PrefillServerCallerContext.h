@@ -70,7 +70,10 @@ public:
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (error_info_.ok() && finished_ && async_state_ && !async_state_->status.ok()) {
             error_info_ = errorInfoFromGrpcStatus(
-                async_state_->status, "Prefill GenerateStreamCall peer=" + prefill_addr_ + " key=" + unique_key_);
+                async_state_->status,
+                "location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                    + prefill_addr_ + " request_id=" + std::to_string(async_state_->request.request_id())
+                    + " key=" + unique_key_);
             first_error_.record(error_info_);
         }
         return error_info_;

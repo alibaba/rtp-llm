@@ -37,6 +37,12 @@ public:
     ///        with a matching size, then batch-copies all data to device.
     /// @return true on success; false if any expected block is absent, sizes mismatch, or copy fails.
     bool executeCopy(CudaCopyUtil& cuda_copy_util);
+    TransferErrorCode copyErrorCode() const {
+        return copy_error_code_;
+    }
+    const std::string& copyErrorMessage() const {
+        return copy_error_message_;
+    }
 
     /// @brief 完成 RPC 响应并通知 task（成功或失败）
     void run(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_message = "");
@@ -55,6 +61,8 @@ private:
     int64_t                                         deadline_ms_ = 0;
 
     std::shared_ptr<TransferTask> task_;
+    TransferErrorCode             copy_error_code_{TransferErrorCode::OK};
+    std::string                   copy_error_message_;
 };
 
 }  // namespace tcp

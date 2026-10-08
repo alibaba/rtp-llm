@@ -150,8 +150,15 @@ public:
                     grpc_status_failure_seen_ = true;
                 }
                 ErrorInfo         error;
-                const std::string location =
+                std::string       location =
                     "ExecuteFunction rank=" + std::to_string(rank) + " peer=" + (ctx ? ctx->server_addr : "<null>");
+                if constexpr (std::is_same_v<RequestPB, FunctionRequestPB>) {
+                    if (ctx && ctx->request.has_p2p_request()) {
+                        location += " request_id=" + std::to_string(ctx->request.p2p_request().request_id())
+                                    + " key=" + ctx->request.p2p_request().unique_key()
+                                    + " type=" + std::to_string(static_cast<int>(ctx->request.p2p_request().type()));
+                    }
+                }
                 if (ctx && !ctx->status.ok()) {
                     error = errorInfoFromGrpcStatus(ctx->status, location);
                 } else if (!cq_event_ok || !ctx) {
@@ -164,12 +171,23 @@ public:
                         } else if (ctx->response.p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
                             const auto& response = ctx->response.p2p_response();
                             error                = ErrorInfo(transRPCErrorCode(response.error_code()),
-                                              location + " key=" + ctx->request.p2p_request().unique_key() + ": "
-                                                  + response.error_message());
+                                              location + ": " + response.error_message());
                         }
                     }
                 }
                 first_error_.record(error);
+                if constexpr (std::is_same_v<RequestPB, FunctionRequestPB>) {
+                    if (!error.ok() && ctx && ctx->request.has_p2p_request()) {
+                        RTP_LLM_LOG_WARNING("P2P ExecuteFunction failed, request_id=%ld unique_key=%s type=%d "
+                                            "rank=%zu peer=%s grpc_code=%d error_code=%d error_name=%s error=%s",
+                                            ctx->request.p2p_request().request_id(),
+                                            ctx->request.p2p_request().unique_key().c_str(),
+                                            static_cast<int>(ctx->request.p2p_request().type()), rank,
+                                            ctx->server_addr.c_str(), static_cast<int>(ctx->status.error_code()),
+                                            static_cast<int>(error.code()), ErrorCodeToString(error.code()).c_str(),
+                                            error.ToString().c_str());
+                    }
+                }
                 grpc_status_failure_seen_ = grpc_status_failure_seen_ || !error.ok();
                 if (finished_count_ == static_cast<int>(worker_contexts_.size())) {
                     finishLocked(callbacks);

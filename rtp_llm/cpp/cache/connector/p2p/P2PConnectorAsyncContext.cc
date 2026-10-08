@@ -151,12 +151,18 @@ bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
         done_          = true;
         success_       = false;
         error_code_    = ErrorCode::GENERATE_TIMEOUT;
-        error_message_ = "P2P transfer deadline exceeded";
+        error_message_ = "observer_role=DECODE stage=transfer_deadline selected_path=decode_deadline key=" + uniqueKey()
+                         + " transfer_deadline_ms=" + std::to_string(transfer_deadline_ms_) + " request_deadline_ms="
+                         + std::to_string(request_deadline_ms_) + ": P2P transfer deadline exceeded";
         if (kickoff_state_ != KickoffState::QUEUED) {
             beginLeaseHold();
         }
     }
     cancel_requested_.store(true, std::memory_order_release);
+    RTP_LLM_LOG_WARNING("P2P Decode terminal, stage=transfer_deadline unique_key=%s error_code=%d error_name=%s "
+                        "transfer_deadline_ms=%ld request_deadline_ms=%ld; physical completion may still be pending",
+                        uniqueKey().c_str(), static_cast<int>(ErrorCode::GENERATE_TIMEOUT),
+                        ErrorCodeToString(ErrorCode::GENERATE_TIMEOUT).c_str(), transfer_deadline_ms_, request_deadline_ms_);
     if (collector_) {
         collector_->decode_schedule_success            = false;
         collector_->decode_schedule_total_cost_time_us = currentTimeUs() - collector_->decode_schedule_start_time_us;
@@ -179,7 +185,26 @@ void P2PConnectorAsyncReadContext::checkDone() {
     tp_sync_result_->checkDone();  // Non-blocking metric snapshot.
     const auto first = FirstError::earlier(tp_sync_result_->firstError(), server_call_result_->firstError());
     if (first.error.hasError()) {
-        applyMergedReadOutcome({false, first.error.code(), first.error.ToString()});
+        const auto  read_observed    = tp_sync_result_->firstError();
+        const auto  prefill_observed = server_call_result_->firstError();
+        const char* selected_path    = first.order == read_observed.order ? "decode_read" : "prefill_start_load";
+        RTP_LLM_LOG_WARNING("P2P error selection, key=%s selected_path=%s selected_code=%d selected_order=%llu "
+                            "observed_after_selection_read_code=%d read_order=%llu read_error=%s "
+                            "observed_after_selection_prefill_code=%d prefill_order=%llu prefill_error=%s",
+                            uniqueKey().c_str(),
+                            selected_path,
+                            static_cast<int>(first.error.code()),
+                            static_cast<unsigned long long>(first.order),
+                            static_cast<int>(read_observed.error.code()),
+                            static_cast<unsigned long long>(read_observed.order),
+                            read_observed.error.ToString().c_str(),
+                            static_cast<int>(prefill_observed.error.code()),
+                            static_cast<unsigned long long>(prefill_observed.order),
+                            prefill_observed.error.ToString().c_str());
+        const std::string message =
+            "observer_role=DECODE stage=p2p_read_merge selected_path=" + std::string(selected_path)
+            + " key=" + uniqueKey() + " selected_order=" + std::to_string(first.order) + ": " + first.error.ToString();
+        applyMergedReadOutcome({false, first.error.code(), message});
         return;
     }
     if (tp_sync_result_->done() && server_call_result_->done()) {
@@ -193,10 +218,12 @@ P2PConnectorAsyncReadContext::MergedReadOutcome P2PConnectorAsyncReadContext::me
     if (!outcome.success) {
         if (tp_sync_result_->done() && !tp_sync_result_->success()) {
             outcome.error_code    = tp_sync_result_->errorCode();
-            outcome.error_message = tp_sync_result_->errorMessage();
+            outcome.error_message = "observer_role=DECODE stage=p2p_read_merge selected_path=decode_read key="
+                                    + uniqueKey() + ": " + tp_sync_result_->errorMessage();
         } else if (server_call_result_->done() && !server_call_result_->success()) {
             outcome.error_code    = server_call_result_->error_code;
-            outcome.error_message = server_call_result_->error_message;
+            outcome.error_message = "observer_role=DECODE stage=p2p_read_merge selected_path=prefill_start_load key="
+                                    + uniqueKey() + ": " + server_call_result_->error_message;
         }
     }
     return outcome;
@@ -308,7 +335,8 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
                 done_          = true;
                 success_       = false;
                 error_code_    = ErrorCode::CANCELLED;
-                error_message_ = "P2P async read cancelled before kickoff";
+                error_message_ = "observer_role=DECODE stage=kickoff selected_path=decode_cancel key=" + uniqueKey()
+                                 + ": P2P async read cancelled before kickoff";
                 if (collector_) {
                     collector_->decode_schedule_success            = false;
                     collector_->decode_schedule_total_cost_time_us = currentTimeUs() - collector_->decode_schedule_start_time_us;
@@ -756,8 +784,10 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
 
     for (const auto& async_context : failed_contexts) {
         auto error = async_context->errorInfo();
-        RTP_LLM_LOG_WARNING("P2PConnectorAsyncReadContextChecker checkOnce: async read failed, unique_key: %s, error: %s",
+        RTP_LLM_LOG_WARNING("P2P Decode async read failed, unique_key=%s error_code=%d error_name=%s error=%s",
                             async_context->uniqueKey().c_str(),
+                            static_cast<int>(error.code()),
+                            ErrorCodeToString(error.code()).c_str(),
                             error.ToString().c_str());
     }
 
