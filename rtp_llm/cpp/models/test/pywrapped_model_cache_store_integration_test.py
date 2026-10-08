@@ -13,13 +13,15 @@ from rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test 
 class CacheStoreForwardModel:
     """Test model that replaces attention math but keeps the real cache-store call."""
 
-    def __init__(self) -> None:
+    def __init__(self, skip_cache_store_tags=()) -> None:
         self.kv_cache = None
         self.forward_calls = 0
         self.micro_batch_calls = 0
         self.seen_input_lengths: list[list[int]] = []
         self.seen_prefill: list[bool] = []
         self.seen_cache_store_inputs: list[dict] = []
+        self.seen_tables: dict[str, dict] = {}
+        self.skip_cache_store_tags = skip_cache_store_tags
 
     def initialize(self, resources) -> bool:
         self.kv_cache = resources.kv_cache
@@ -45,6 +47,15 @@ class CacheStoreForwardModel:
                 if isinstance(attention_inputs, dict)
                 else attention_inputs
             )
+            self.seen_tables[layer_cache.tag] = {
+                name: getattr(tag_inputs, name).cpu().clone()
+                for name in (
+                    "kv_cache_block_id",
+                    "kv_cache_block_id_device",
+                    "kv_cache_kernel_block_id",
+                    "kv_cache_kernel_block_id_device",
+                )
+            }
             if (
                 tag_inputs.cache_store_inputs is not None
                 and tag_inputs.cache_store_writer is not None
@@ -57,9 +68,10 @@ class CacheStoreForwardModel:
                         "blocks": params["blocks"].tolist(),
                     }
                 )
-                tag_inputs.cache_store_writer.write(
-                    tag_inputs.cache_store_inputs, layer_cache
-                )
+                if layer_cache.tag not in self.skip_cache_store_tags:
+                    tag_inputs.cache_store_writer.write(
+                        tag_inputs.cache_store_inputs, layer_cache
+                    )
 
         hidden_states = torch.zeros(
             (inputs.input_ids.numel(), 1),
@@ -99,6 +111,48 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_retained_tables_drop_padding_and_keep_kernel_coverage(self) -> None:
+        for scenario in ("retained", "retained_device"):
+            with self.subTest(scenario=scenario):
+                # Retained-state transfer remains gated; inspect its host table
+                # while the ordinary paged group exercises the async writer.
+                model = CacheStoreForwardModel(skip_cache_store_tags=("state",))
+                result = run_scenario(model, scenario)
+                for tag, physical, kernel in (
+                    ("state", [[3], [5]], [[6, 7], [10, 11]]),
+                    ("full", [[1, 2], [6, 7]], [[1, 2, -1, -1], [6, 7, -1, -1]]),
+                ):
+                    for suffix in ("", "_device"):
+                        for name, expected in (
+                            ("kv_cache_block_id", physical),
+                            ("kv_cache_kernel_block_id", kernel),
+                        ):
+                            table = model.seen_tables[tag][name + suffix]
+                            self.assertTrue(table.is_contiguous())
+                            self.assertEqual(table.tolist(), expected)
+                seen = {entry["tag"]: entry for entry in model.seen_cache_store_inputs}
+                self.assertEqual(seen["state"]["blocks"], [[3], [5]])
+                self.assertEqual(seen["full"]["blocks"], [[1, 2], [6, 7]])
+                blocks = _blocks_by_key(result)
+                self.assertEqual(len(blocks), 4)
+                self.assertEqual(
+                    sorted(
+                        block["address"] - result["base_addresses"]["full"]
+                        for key, block in blocks.items()
+                        if "_tag_full" in key
+                    ),
+                    [16, 32, 96, 112],
+                )
+
+    def test_idle_retained_tables_allow_zero_width(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "idle_retained")
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(result["records"], [])
+        for tables in model.seen_tables.values():
+            for table in tables.values():
+                self.assertEqual(tuple(table.shape), (0, 0))
+
     def test_idle_prefill_runs_model_without_cache_store_or_lm_head(self) -> None:
         for phase in ("prefill", "decode"):
             with self.subTest(phase=phase):

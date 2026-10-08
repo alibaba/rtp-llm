@@ -405,11 +405,27 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                 col_count,
                                 group.tag.c_str(),
                                 col);
-        auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[col];
+        // Native gathering pads every group to the widest table. Persistent
+        // request state owns one physical block, possibly split into kernel blocks.
+        auto group_table = [&](const torch::Tensor& table, size_t retained_width) {
+            auto result = table[col];
+            if (group.policy.single_block_per_request) {
+                RTP_LLM_CHECK_WITH_INFO(result.size(0) == 0 || result.size(1) >= static_cast<int64_t>(retained_width),
+                                        "KV block table for retained group [%s] is too narrow",
+                                        group.tag.c_str());
+                result = result.narrow(1, 0, std::min<int64_t>(result.size(1), retained_width)).contiguous();
+                if (!result.is_cuda()) {
+                    result = result.pin_memory();
+                }
+            }
+            return result;
+        };
+        auto group_inputs = py_attn_inputs;
+        group_inputs.kv_cache_kernel_block_id =
+            group_table(inputs.kv_cache_kernel_block_id, group.seq_size_per_block / group.kernel_seq_size_per_block);
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[col];
+            group_inputs.kv_cache_block_id        = group_table(inputs.kv_cache_block_id, 1);
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
