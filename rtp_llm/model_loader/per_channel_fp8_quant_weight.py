@@ -79,16 +79,37 @@ _LAYER_INDEX_PROBES = (
 
 
 def _regex_ignore_covers_template(pattern: str, base_name_template: str) -> bool:
-    """Return whether a ``re:`` ignore pattern covers the whole weight template.
+    r"""Return whether a ``re:`` ignore pattern covers the whole weight template.
 
     The template is rendered with each of ``_LAYER_INDEX_PROBES`` and the
     pattern has to match every rendering, which is the same whole-template
     question ``_exclude_pattern_for`` answers for the compressed-tensors paths.
+
+    A pattern that matches only some renderings - a bounded quantifier such as
+    ``model\.layers\.\d{1,2}\.`` - cannot be classified here, because whether it
+    covers every layer depends on how many layers the checkpoint actually has.
+    Both readings are wrong in some configuration (reading it as "covers"
+    de-quantizes every layer, reading it as "does not cover" quantizes layers
+    the operator asked to exclude), so say so instead of deciding quietly.
     """
-    return all(
-        re.search(pattern, base_name_template.replace("{i}", probe))
+    matched = [
+        probe
         for probe in _LAYER_INDEX_PROBES
-    )
+        if re.search(pattern, base_name_template.replace("{i}", probe))
+    ]
+    if matched and len(matched) != len(_LAYER_INDEX_PROBES):
+        logging.warning(
+            "compressed-tensors ignore %r matches the weight template %r at only "
+            "%d of %d probed layer widths; whether it covers every layer depends "
+            "on the layer count of this checkpoint. Use an unbounded quantifier "
+            "such as \\d+ if every layer is meant to be excluded.",
+            pattern,
+            base_name_template,
+            len(matched),
+            len(_LAYER_INDEX_PROBES),
+        )
+        return False
+    return len(matched) == len(_LAYER_INDEX_PROBES)
 
 
 def _ckpt_base_matches_quant_exclude(

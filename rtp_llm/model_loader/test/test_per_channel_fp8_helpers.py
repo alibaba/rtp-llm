@@ -152,6 +152,9 @@ class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
         self.assertFalse(
             _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
         )
+        self.assertFalse(
+            _ckpt_base_matches_regex_exclude(self.TEMPLATE, excludes)
+        )
 
     def test_pattern_covering_any_layer_matches_the_template(self):
         excludes = {r"re:^model\.layers\.\d+\.mlp$"}
