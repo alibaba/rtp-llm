@@ -1,6 +1,12 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "dsv41_reference_probe",
+    srcs = ["dsv41_reference_probe.py"],
+    deps = ["//rtp_llm:safetensors_header", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
