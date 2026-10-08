@@ -119,30 +119,33 @@ class EightRankSummaryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MTP forwards"):
             align_ranks(ranks, 1)
 
-    def test_topologies_and_metrics_have_independent_five_percent_gates(self):
-        runs = [
-            run(v, tp, 1.02 if v == "integration" else 1)
+    def test_tp8_metrics_have_independent_five_percent_gates(self):
+        original = [
+            run(v, 8, 1.02 if v == "integration" else 1)
             for v in ("integration", "feat")
-            for tp in (4, 8)
         ]
-        self.assertTrue(compare_runs(runs)["performance_pass"])
-        for window in runs[0]["windows"]:
-            window["window_medians_us"]["mtp_modeling_gpu_us"] *= 1.05
-        result = compare_runs(runs)
-        self.assertFalse(result["performance_pass"])
-        self.assertTrue(result["topologies"][0]["performance_pass"])
-        self.assertFalse(result["topologies"][1]["performance_pass"])
-        for window in runs[0]["windows"]:
-            self.assertLessEqual(
-                window["window_medians_us"]["target_verify_gpu_us"] / 107, 1.05
-            )
+        self.assertTrue(compare_runs(original)["performance_pass"])
+        for metric in ("mtp_modeling_gpu_us", "target_verify_gpu_us"):
+            runs = copy.deepcopy(original)
+            for window in runs[0]["windows"]:
+                window["window_medians_us"][metric] *= 1.05
+            self.assertFalse(compare_runs(runs)["performance_pass"])
+
+    def test_dp2_tp4_cannot_replace_or_extend_tp8_performance_acceptance(self):
+        original = [run(v, 8) for v in ("integration", "feat")]
+        for runs in (
+            [run(v, 4) for v in ("integration", "feat")],
+            original + [run(v, 4) for v in ("integration", "feat")],
+        ):
+            with self.assertRaisesRegex(ValueError, "correctness-only"):
+                compare_runs(runs)
 
     def test_wrong_baseline_configuration_or_window_count_cannot_pass(self):
-        original = [run(v, tp) for v in ("integration", "feat") for tp in (4, 8)]
+        original = [run(v, 8) for v in ("integration", "feat")]
         for mutation in ("baseline", "contract", "windows"):
             runs = copy.deepcopy(original)
             if mutation == "baseline":
-                runs[2]["commit"] = "newer-feat-is-not-the-reference"
+                runs[1]["commit"] = "newer-feat-is-not-the-reference"
             elif mutation == "contract":
                 runs[0]["contract"]["batch_per_owner"] = 64
             else:

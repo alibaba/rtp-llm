@@ -212,15 +212,15 @@ def load_window(window, root, sample_rounds):
 
 
 def compare_runs(runs):
-    expected = {(version, tp) for version in ("integration", "feat") for tp in (4, 8)}
+    expected = {(version, 8) for version in ("integration", "feat")}
     actual = {(run["version"], run["tp"]) for run in runs}
     if actual != expected or len(runs) != len(expected):
         raise ValueError(
-            "Need integration and fixed feat for TP8 and DP2/TP4 separately"
+            "Need integration and fixed feat for DP1/TP8/EP8; DP2/TP4 is correctness-only"
         )
     by_key = {(r["version"], r["tp"]): r for r in runs}
     output = []
-    for tp in (8, 4):
+    for tp in (8,):
         pair = {v: by_key[v, tp] for v in ("integration", "feat")}
         contracts = [r["contract"] for r in pair.values()]
         if contracts[0] != contracts[1]:
@@ -300,7 +300,7 @@ def compare_runs(runs):
         "and one Q4 max-rank spans; median across rounds then three windows",
         "topologies": output,
         "performance_pass": all(r["performance_pass"] for r in output),
-        "scope": "modeling performance only; correctness/smoke acceptance is separate",
+        "scope": "DP1/TP8/EP8 modeling performance only; DP2/TP4/EP8 correctness/smoke acceptance is separate",
     }
 
 
