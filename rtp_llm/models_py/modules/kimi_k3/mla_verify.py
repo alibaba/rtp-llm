@@ -6,14 +6,19 @@ import os
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_dcp_comm import get_mla_dcp
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import PageRRMlaDecodeMetadata
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_page_rr import tokenspeed_mla_page_rr_decode
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_dcp_comm import (
+    get_mla_dcp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
+    PageRRMlaDecodeMetadata,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_page_rr import (
+    tokenspeed_mla_page_rr_decode,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.models_py.modules.kimi_k3.native_mla_decode import NativeMlaDecode
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
-
 
 _workspaces = {}
 _audit_contracts = set()
@@ -23,11 +28,18 @@ _AUDIT_CONTRACTS = os.environ.get("KIMI_K3_SMOKE_EVIDENCE", "0") == "1"
 class KimiK3MlaVerifyImpl(MlaImplBase):
     """Paged Decode, Target Verify and fixed-width Native MTP update."""
 
-    def __init__(self, config, parallelism, weights, inputs, fmha_config, is_cuda_graph):
+    def __init__(
+        self, config, parallelism, weights, inputs, fmha_config, is_cuda_graph
+    ):
         attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
         super().__init__(
-            attention, inputs, weights.weights, None, fmha_config,
-            max_seq_len=config.max_seq_len, is_cuda_graph=is_cuda_graph,
+            attention,
+            inputs,
+            weights.weights,
+            None,
+            fmha_config,
+            max_seq_len=config.max_seq_len,
+            is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism,
         )
         self.graph_mode = is_cuda_graph
@@ -35,27 +47,36 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         self.tokens = inputs.physical_token_count
         if self.batch <= 0 or self.tokens <= 0:
             raise ValueError("K3 MLA requires nonempty physical rows")
-        if (inputs.is_target_verify or inputs.is_mtp_draft_update) and self.tokens % self.batch:
+        if (
+            inputs.is_target_verify or inputs.is_mtp_draft_update
+        ) and self.tokens % self.batch:
             raise ValueError("K3 verify/MTP update requires rectangular physical rows")
         device = next(w[W.mla_vc].device for w in self.weights if W.mla_vc in w)
-        operand_dtype = torch.float8_e4m3fn if attention.mla_fp8_compute else torch.bfloat16
+        operand_dtype = (
+            torch.float8_e4m3fn if attention.mla_fp8_compute else torch.bfloat16
+        )
         workspace_key = (device, operand_dtype)
         if workspace_key not in _workspaces:
-            _workspaces[workspace_key] = torch.empty(512 * 1024 * 1024, dtype=torch.uint8, device=device)
+            _workspaces[workspace_key] = torch.empty(
+                512 * 1024 * 1024, dtype=torch.uint8, device=device
+            )
         self.native = NativeMlaDecode(
-            num_heads=attention.head_num, kv_lora_rank=attention.kv_lora_rank,
-            nope_dim=attention.nope_head_dim, pe_dim=attention.rope_head_dim,
+            num_heads=attention.head_num,
+            kv_lora_rank=attention.kv_lora_rank,
+            nope_dim=attention.nope_head_dim,
+            pe_dim=attention.rope_head_dim,
             page_size=attention.kernel_tokens_per_block,
             softmax_extra_scale=attention.softmax_extra_scale,
-            workspace=_workspaces[workspace_key], max_batch=self.batch, max_tokens=self.tokens,
+            workspace=_workspaces[workspace_key],
+            max_batch=self.batch,
+            max_tokens=self.tokens,
             fp8_compute=attention.mla_fp8_compute,
             q_scale=attention.mla_fp8_q_scale,
             kv_scale=attention.mla_fp8_kv_scale,
         )
         self._kv_scale_value = float(attention.mla_fp8_kv_scale)
         self.page_rr = bool(
-            parallelism.tp_size > 1
-            and parallelism.prefill_cp_config.kv_cache_sharded
+            parallelism.tp_size > 1 and parallelism.prefill_cp_config.kv_cache_sharded
         )
         if self.page_rr:
             if parallelism.prefill_cp_config.is_enabled():
@@ -74,16 +95,24 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             self.write_cache_store_impl = common.create_write_cache_store_impl(inputs)
             self.prepare(inputs)
             return
-        columns = (self.max_seq_len + self.native.page_size - 1) // self.native.page_size
+        columns = (
+            self.max_seq_len + self.native.page_size - 1
+        ) // self.native.page_size
         # RTP reserves additional logical blocks for speculative candidates.
         # Preserve that physical metadata capacity without extending valid KV length.
         initial_table = inputs.kv_cache_kernel_block_id
         if initial_table.ndim != 2 or initial_table.shape[0] != self.batch:
             raise ValueError("K3 MLA requires one block-table row per physical request")
         columns = max(columns, initial_table.shape[1])
-        self.block_tables_h = torch.empty((self.batch, columns), dtype=torch.int32, pin_memory=True)
-        self.block_tables = torch.empty((self.batch, columns), dtype=torch.int32, device=device)
-        self.slot_mapping_h = torch.empty(self.tokens, dtype=torch.int64, pin_memory=True)
+        self.block_tables_h = torch.empty(
+            (self.batch, columns), dtype=torch.int32, pin_memory=True
+        )
+        self.block_tables = torch.empty(
+            (self.batch, columns), dtype=torch.int32, device=device
+        )
+        self.slot_mapping_h = torch.empty(
+            self.tokens, dtype=torch.int64, pin_memory=True
+        )
         self.slot_mapping = torch.empty(self.tokens, dtype=torch.int64, device=device)
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.write_cache_store_impl = common.create_write_cache_store_impl(inputs)
@@ -95,26 +124,47 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         # The shared planner otherwise reserves reuse-page metadata only for
         # the capture prefix. A later page crossing must not reallocate it.
         self.block_tables_h.zero_()
-        reserve_lengths = inputs.input_lengths if inputs.prefix_lengths is not None and inputs.prefix_lengths.numel() else torch.ones_like(inputs.input_lengths)
-        reserve_prefix = torch.full_like(reserve_lengths, self.max_seq_len) - reserve_lengths
+        reserve_lengths = (
+            inputs.input_lengths
+            if inputs.prefix_lengths is not None and inputs.prefix_lengths.numel()
+            else torch.ones_like(inputs.input_lengths)
+        )
+        reserve_prefix = (
+            torch.full_like(reserve_lengths, self.max_seq_len) - reserve_lengths
+        )
         self.fmha_params.fill_params(
-            reserve_prefix, torch.empty(0, dtype=torch.int32), reserve_lengths,
-            self.block_tables_h, self.native.page_size, False,
+            reserve_prefix,
+            torch.empty(0, dtype=torch.int32),
+            reserve_lengths,
+            self.block_tables_h,
+            self.native.page_size,
+            False,
         )
         self.prepare(inputs)
 
     def _record_input_contract(self, inputs):
         if not _AUDIT_CONTRACTS:
             return
-        phase = ("target_verify" if inputs.is_target_verify else
-                 "mtp_update" if inputs.is_mtp_draft_update else "proposal_or_decode")
+        phase = (
+            "target_verify"
+            if inputs.is_target_verify
+            else "mtp_update" if inputs.is_mtp_draft_update else "proposal_or_decode"
+        )
         logical = inputs.logical_request_count or self.batch
         width = self.tokens // self.batch
         dtype = torch.float8_e4m3fn if self.native.fp8_compute else torch.bfloat16
         backend = "tokenspeed_page_rr" if self.page_rr else self.native.backend
         workspace = self.native.workspace.data_ptr()
-        contract = (phase, self.graph_mode, logical, self.batch, self.tokens,
-                    dtype, backend, bool(inputs.is_fake_stream), workspace)
+        contract = (
+            phase,
+            self.graph_mode,
+            logical,
+            self.batch,
+            self.tokens,
+            dtype,
+            backend,
+            workspace,
+        )
         if contract in _audit_contracts:
             return
         _audit_contracts.add(contract)
@@ -123,13 +173,23 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         logging.info(
             "[K3_MLA_PAGED_INPUT] phase=%s graph=%d logical_batch=%d "
             "physical_batch=%d q=%d physical_tokens=%d operand_dtype=%s "
-            "projection_dtype=bf16 backend=%s fake=%d workspace=0x%x",
-            phase, self.graph_mode, logical, self.batch, width, self.tokens,
-            dtype, backend, inputs.is_fake_stream, workspace,
+            "projection_dtype=bf16 backend=%s workspace=0x%x",
+            phase,
+            self.graph_mode,
+            logical,
+            self.batch,
+            width,
+            self.tokens,
+            dtype,
+            backend,
+            workspace,
         )
 
     def prepare(self, inputs, forbid_realloc=False):
-        if inputs.input_lengths.numel() != self.batch or inputs.physical_token_count != self.tokens:
+        if (
+            inputs.input_lengths.numel() != self.batch
+            or inputs.physical_token_count != self.tokens
+        ):
             raise ValueError("K3 MLA replay requires the captured physical shape")
         self._record_input_contract(inputs)
         if self.page_rr:
@@ -143,8 +203,12 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             raise ValueError("K3 MLA block table exceeds captured metadata capacity")
         self.attn_inputs = inputs
         self.fmha_params.fill_params(
-            inputs.prefix_lengths, inputs.sequence_lengths, inputs.input_lengths,
-            table, self.native.page_size, forbid_realloc,
+            inputs.prefix_lengths,
+            inputs.sequence_lengths,
+            inputs.input_lengths,
+            table,
+            self.native.page_size,
+            forbid_realloc,
         )
         offsets = self.fmha_params.qo_indptr_h
         query_bound = int((offsets[1:] - offsets[:-1]).max())
@@ -162,24 +226,34 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             raise ValueError("K3 MLA sequence exceeds configured capacity")
         # Graph launch bounds are captured constants and must cover later replay.
         # Eager execution can use the current host metadata, as vLLM does.
-        self.kernel_max_seq_len = self.max_seq_len if self.graph_mode else max(1, actual_max_seq_len)
+        self.kernel_max_seq_len = (
+            self.max_seq_len if self.graph_mode else max(1, actual_max_seq_len)
+        )
         if self.max_query_len is None:
             self.max_query_len = max(1, query_bound)
         elif query_bound > self.max_query_len:
-            raise ValueError("K3 MLA query width exceeds the capture bound; select a new bucket")
+            raise ValueError(
+                "K3 MLA query width exceeds the capture bound; select a new bucket"
+            )
         # CPU padding and one H2D copy outside capture avoid per-layer metadata
         # kernels and preserve the address captured by the attention backend.
         self.block_tables_h.zero_()
-        self.block_tables_h[:, :table.shape[1]].copy_(table)
+        self.block_tables_h[:, : table.shape[1]].copy_(table)
         self.block_tables.copy_(self.block_tables_h, non_blocking=True)
         # RTP reserves page zero for SP dummy requests. vLLM uses slot -1 for
         # those rows; passing RTP's unmodified zero-page slot would overwrite it.
-        rows = torch.repeat_interleave(torch.arange(self.batch), offsets[1:] - offsets[:-1])
+        rows = torch.repeat_interleave(
+            torch.arange(self.batch), offsets[1:] - offsets[:-1]
+        )
         positions = self.fmha_params.positions_h.to(torch.int64)
         pages = table[rows, positions // self.native.page_size].to(torch.int64)
-        self.slot_mapping_h.copy_(torch.where(
-            pages > 0, pages * self.native.page_size + positions % self.native.page_size, -1
-        ))
+        self.slot_mapping_h.copy_(
+            torch.where(
+                pages > 0,
+                pages * self.native.page_size + positions % self.native.page_size,
+                -1,
+            )
+        )
         self.slot_mapping.copy_(self.slot_mapping_h, non_blocking=True)
 
     def prepare_cuda_graph(self, inputs):
@@ -191,10 +265,16 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         weights = self.weights[layer_id]
         if self.page_rr:
             query = self.native.write_cache(
-                q, compressed_kv, k_pe, kv_cache.kv_cache_base,
-                self.page_rr_metadata.slot_mapping, weights[W.mla_kc],
+                q,
+                compressed_kv,
+                k_pe,
+                kv_cache.kv_cache_base,
+                self.page_rr_metadata.slot_mapping,
+                weights[W.mla_kc],
             )
-            common.apply_write_cache_store(self.write_cache_store_impl, self.attn_inputs, kv_cache)
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
             local_query = query.transpose(0, 1).contiguous()
             gathered = self.page_rr_communicator.query_gather(local_query)
             batch, queries = self.page_rr_metadata.local_causal_lens.shape
@@ -211,32 +291,49 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
                 self.native.pe_dim,
                 self.page_rr_metadata.query_block_tables,
                 self.page_rr_metadata.local_causal_lens,
-                self.page_rr_metadata.query_block_tables.shape[1] * self.native.page_size,
-                self.native.scale * (
+                self.page_rr_metadata.query_block_tables.shape[1]
+                * self.native.page_size,
+                self.native.scale
+                * (
                     self.native.q_scale * self._kv_scale_value
-                    if self.native.fp8_compute else 1.0
+                    if self.native.fp8_compute
+                    else 1.0
                 ),
                 output_scale=self._kv_scale_value if self.native.fp8_compute else 1.0,
                 normalize_empty=False,
             )
             merged = self.page_rr_communicator.combine(
-                partial.view(self.tokens, self.page_rr_communicator.heads,
-                             self.native.kv_lora_rank),
+                partial.view(
+                    self.tokens,
+                    self.page_rr_communicator.heads,
+                    self.native.kv_lora_rank,
+                ),
                 lse.view(self.tokens, self.page_rr_communicator.heads),
                 self.page_rr_metadata.local_causal_lens,
             )
-            output = q.new_empty(self.tokens, self.native.num_heads,
-                                 weights[W.mla_vc].shape[-1])
+            output = q.new_empty(
+                self.tokens, self.native.num_heads, weights[W.mla_vc].shape[-1]
+            )
             torch.bmm(merged, weights[W.mla_vc], out=output.transpose(0, 1))
             return output
         query = self.native.write_cache(
-            q, compressed_kv, k_pe, kv_cache.kv_cache_base,
-            self.slot_mapping, weights[W.mla_kc],
+            q,
+            compressed_kv,
+            k_pe,
+            kv_cache.kv_cache_base,
+            self.slot_mapping,
+            weights[W.mla_kc],
         )
-        common.apply_write_cache_store(self.write_cache_store_impl, self.attn_inputs, kv_cache)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
         return self.native.attend(
-            query, kv_cache.kv_cache_base, weights[W.mla_vc],
-            block_tables=self.block_tables, seq_lens=self.fmha_params.kvlen_d,
+            query,
+            kv_cache.kv_cache_base,
+            weights[W.mla_vc],
+            block_tables=self.block_tables,
+            seq_lens=self.fmha_params.kvlen_d,
             cu_query_lens=self.fmha_params.qo_indptr_d,
-            max_query_len=self.max_query_len, max_seq_len=self.kernel_max_seq_len,
+            max_query_len=self.max_query_len,
+            max_seq_len=self.kernel_max_seq_len,
         )
