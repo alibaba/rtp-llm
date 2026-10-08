@@ -109,6 +109,7 @@ std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase
 
 CacheTopology::CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers):
     groups_(std::move(groups)), layers_(std::move(layers)) {
+    std::sort(groups_.begin(), groups_.end(), [](const auto& left, const auto& right) { return left.tag < right.tag; });
     validateAndBuildIndex();
 }
 

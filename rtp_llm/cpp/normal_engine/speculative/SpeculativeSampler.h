@@ -39,6 +39,7 @@ public:
 
 struct FastTopKSamplerOutput {
     torch::Tensor all_probs;
+    // Token IDs are int32 on the logits device.
     torch::Tensor token_ids;
 };
 

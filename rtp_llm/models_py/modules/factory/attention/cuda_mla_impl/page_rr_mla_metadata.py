@@ -180,10 +180,8 @@ class PageRRMlaMetadata:
         if self.query_block_tables is None or self.query_block_tables.shape != table_shape:
             if forbid_realloc:
                 raise ValueError("Page-RR Decode query page table shape cannot change during replay")
-            self.query_block_tables = torch.zeros(table_shape, dtype=torch.int32, device=base.device)
-        if table.shape[1] and not mtp_update:
-            self.query_block_tables.view(base.numel(), queries, width).copy_(table[:, None, :])
-        grid = (rows,) if mtp_update else (triton.cdiv(rows, 128),)
+            self.query_block_tables = torch.empty(table_shape, dtype=torch.int32, device=base.device)
+        grid = (rows, 1) if mtp_update else (triton.cdiv(rows, 32), triton.cdiv(width, 128))
         _prepare_decode_metadata[grid](
             base,
             # Main's sequence_lengths is a CPU mirror. The device length is
@@ -209,5 +207,6 @@ class PageRRMlaMetadata:
             mtp_update=mtp_update,
             request_count=batch,
             has_valid_mask=valid_mask is not None,
-            block=128,
+            block=32,
+            table_block=128,
         )

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <c10/cuda/CUDAException.h>
 
 namespace rtp_llm {
 
@@ -159,16 +160,17 @@ void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
     checkCudaI32Vector(prefix_lengths, "prefix_lengths", batch_size);
     checkCudaI32Vector(sequence_lengths_plus_1, "sequence_lengths_plus_1", batch_size);
     checkCudaI32Vector(lm_output_indexes, "lm_output_indexes", batch_size);
-
     constexpr int block_size = 256;
     const int     grid_size  = static_cast<int>((batch_size + block_size - 1) / block_size);
-    mtpTargetVerifyPrepareKernel<<<grid_size, block_size, 0, stream>>>(sequence_lengths.data_ptr<int32_t>(),
-                                                                       input_lengths.data_ptr<int32_t>(),
-                                                                       prefix_lengths.data_ptr<int32_t>(),
-                                                                       sequence_lengths_plus_1.data_ptr<int32_t>(),
-                                                                       lm_output_indexes.data_ptr<int32_t>(),
-                                                                       tokens_per_batch,
-                                                                       static_cast<int32_t>(batch_size));
+    mtpTargetVerifyPrepareKernel<<<grid_size, block_size, 0, stream>>>(
+        sequence_lengths.data_ptr<int32_t>(),
+        input_lengths.data_ptr<int32_t>(),
+        prefix_lengths.data_ptr<int32_t>(),
+        sequence_lengths_plus_1.data_ptr<int32_t>(),
+        lm_output_indexes.data_ptr<int32_t>(),
+        tokens_per_batch,
+        static_cast<int32_t>(batch_size));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,

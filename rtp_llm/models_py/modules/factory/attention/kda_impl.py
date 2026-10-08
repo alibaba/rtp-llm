@@ -14,6 +14,8 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from rtp_llm.device.device_type import is_cuda
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import LinearAttentionConfig, ParallelismConfig
@@ -534,6 +536,40 @@ class KdaDecode(KdaBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+
+        if (
+            is_target_verify
+            and attn_inputs.linear_replay is not None
+            and mixed_qkv.is_cuda
+            and is_cuda()
+        ):
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_v_heads * self.head_v_dim,
+                ],
+                dim=-1,
+            )
+            return linear_serial_replay(
+                query,
+                key,
+                value,
+                forget_gate,
+                beta,
+                self.conv_weights,
+                self.alog,
+                self.dt_bias,
+                self._get_ssm_states(kv_cache_tensor),
+                self._get_conv_states(kv_cache_tensor),
+                kv_cache.linear_replay,
+                attn_inputs.linear_replay,
+                group_id=kv_cache.group_id,
+                vector_gate=True,
+                state_v_first=False,
+                lower_bound=self.gate_lower_bound,
+            )
 
         mixed_qkv = self._conv1d(
             mixed_qkv,
