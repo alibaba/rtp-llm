@@ -888,6 +888,9 @@ def forward_prefill(
                 dtype=torch.int32,
                 device=input_ids.device,
             )
+    # Native PyAttentionInputs exposes a host mirror; Triton metadata kernels
+    # need device-accessible boundaries even when that mirror is not pinned.
+    cu_seqlens = cu_seqlens.to(device=input_ids.device, non_blocking=True)
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
