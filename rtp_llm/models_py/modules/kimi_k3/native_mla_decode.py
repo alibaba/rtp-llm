@@ -65,10 +65,14 @@ class NativeMlaDecode:
         self.q_scale = q_scale
         self.kv_scale = torch.full((), kv_scale, dtype=torch.float32, device=workspace.device)
         self.query_buffer = None
+        self.absorbed_query_buffer = None
         if fp8_compute:
+            query_shape = (max_tokens or max_batch, num_heads, kv_lora_rank + pe_dim)
+            self.absorbed_query_buffer = torch.empty(
+                query_shape, dtype=torch.bfloat16, device=workspace.device,
+            )
             self.query_buffer = torch.empty(
-                (max_tokens or max_batch, num_heads, kv_lora_rank + pe_dim),
-                dtype=torch.float8_e4m3fn, device=workspace.device,
+                query_shape, dtype=torch.float8_e4m3fn, device=workspace.device,
             )
         self.counter = None
         if self.backend == "trtllm-gen":
@@ -94,19 +98,28 @@ class NativeMlaDecode:
             raise ValueError("Unexpected K3 MLA query layout")
         if slot_mapping.numel() != q.shape[0] or slot_mapping.dtype != torch.int64:
             raise ValueError("K3 MLA requires one int64 cache slot per physical query")
-        latent_q = torch.bmm(q[..., :self.nope_dim].transpose(0, 1), k_weight)
         if self.fp8_compute:
-            if self.query_buffer is None or q.shape[0] > self.query_buffer.shape[0]:
+            if (self.query_buffer is None or self.absorbed_query_buffer is None
+                    or q.shape[0] > self.query_buffer.shape[0]):
                 raise ValueError("FP8 MLA query exceeds reserved graph buffer")
+            absorbed_q = self.absorbed_query_buffer[:q.shape[0]]
+            # As in feat/k3_dev's TokenSpeed path, write both parts into the
+            # graph-stable BF16 query before quantization. This avoids a cat
+            # allocation and its full-query copy on every Verify replay.
+            absorbed_q[..., self.kv_lora_rank:].copy_(q[..., self.nope_dim:])
+            torch.bmm(
+                q[..., :self.nope_dim].transpose(0, 1), k_weight,
+                out=absorbed_q[..., :self.kv_lora_rank].transpose(0, 1),
+            )
             compute_ops.concat_and_cache_mla(
                 kv, k_pe, cache.view(-1, self.page_size, self.kv_lora_rank + self.pe_dim),
                 slot_mapping, "fp8", self.kv_scale,
             )
-            absorbed_q = torch.cat((latent_q.transpose(0, 1), q[..., self.nope_dim:]), dim=-1)
             return quantize_fp8(
                 absorbed_q, self.q_scale, self.query_buffer[:q.shape[0]],
                 name="decode_query",
             )
+        latent_q = torch.bmm(q[..., :self.nope_dim].transpose(0, 1), k_weight)
         absorbed_q = torch.empty(
             (q.shape[0], self.num_heads, self.kv_lora_rank + self.pe_dim),
             dtype=q.dtype, device=q.device,

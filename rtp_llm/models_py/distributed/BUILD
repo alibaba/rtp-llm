@@ -1,4 +1,18 @@
 py_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "custom_all_gather",
+    srcs = ["custom_all_gather.py"],
+    deps = [":push_reduce_scatter", "//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
@@ -8,6 +22,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        ":custom_all_gather",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],

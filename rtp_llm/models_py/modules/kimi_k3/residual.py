@@ -25,6 +25,10 @@ class KimiK3AttentionResidual(nn.Module):
         # consumes a dense vector, and graph replay must not repack weights.
         self.projection_weight = projection_weight.reshape(-1).contiguous()
         self.eps = float(eps)
+        self._verify_fp8 = False
+
+    def configure_verify_fp8(self, enabled: bool) -> None:
+        self._verify_fp8 = bool(enabled)
 
     def forward_fp8(
         self,
@@ -35,6 +39,8 @@ class KimiK3AttentionResidual(nn.Module):
         output_norm_eps: float,
         num_blocks: int,
         block_write_idx: int = -1,
+        delta: Optional[torch.Tensor] = None,
+        metadata=None,
     ):
         from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import (
             kimi_k3_attn_res_fp8,
@@ -50,6 +56,7 @@ class KimiK3AttentionResidual(nn.Module):
             output_norm_eps=output_norm_eps,
             num_blocks=num_blocks,
             block_write_idx=block_write_idx,
+            delta=delta,
         )
 
     def forward(
@@ -62,7 +69,17 @@ class KimiK3AttentionResidual(nn.Module):
         delta: Optional[torch.Tensor] = None,
         num_blocks: Optional[int] = None,
         block_write_idx: int = -1,
+        metadata=None,
     ) -> torch.Tensor:
+        if self._verify_fp8 and getattr(metadata, "is_target_verify", False):
+            return self.forward_fp8(
+                prefix_sum, block_residual,
+                output_norm_weight=output_norm_weight,
+                output_norm_eps=output_norm_eps,
+                delta=delta,
+                num_blocks=(block_residual.shape[1] if num_blocks is None else num_blocks),
+                block_write_idx=block_write_idx,
+            )
         if prefix_sum.ndim != 2:
             raise ValueError("AttnRes prefix_sum must have shape [tokens, hidden]")
         if (

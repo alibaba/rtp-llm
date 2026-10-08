@@ -1,6 +1,7 @@
 """Kimi K3 text target. Cache ownership remains in RTP's tagged cache groups."""
 
 from collections.abc import Mapping
+from functools import partial
 from math import gcd
 import logging
 import os
@@ -24,7 +25,9 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.modules import Embedding, RMSNorm
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear, profile_scope
+from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE, situ
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
@@ -45,7 +48,34 @@ class KimiK3DenseMLP(nn.Module):
     def __init__(self, config, parallelism, weights, hardware):
         super().__init__()
         self.gate_up = None
-        if weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16:
+        decode_bf16 = (
+            parallelism is not None
+            and parallelism.role_type == RoleType.DECODE
+            and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16
+        )
+        tp_dense = decode_bf16 and parallelism.tp_size > 1
+        if tp_dense:
+            gate, up, down = (weights[W.ffn_w1], weights[W.ffn_w3], weights[W.ffn_w2])
+            if (gate.shape != up.shape or gate.shape[1] != down.shape[0]
+                    or gate.shape[0] != down.shape[1]
+                    or gate.shape[1] % parallelism.tp_size):
+                raise ValueError("Decode TP dense MLP has incompatible weight dimensions")
+            width = gate.shape[1] // parallelism.tp_size
+            start = parallelism.tp_rank * width
+            stop = start + width
+            weights[W.ffn_w1] = gate[:, start:stop].contiguous()
+            weights[W.ffn_w3] = up[:, start:stop].contiguous()
+            weights[W.ffn_w2] = down[start:stop, :].contiguous()
+        self.input_transition = (
+            partial(all_gather, group=Group.TP) if tp_dense else lambda value: value
+        )
+        self.output_transition = (
+            partial(reduce_scatter, group=Group.TP) if tp_dense else lambda value: value
+        )
+        if (
+            (parallelism is None or parallelism.role_type != RoleType.DECODE)
+            and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16
+        ):
             gate_weight, up_weight = weights[W.ffn_w1], weights[W.ffn_w3]
             if gate_weight.shape != up_weight.shape:
                 raise ValueError("Dense gate and up projections must have the same shape")
@@ -57,13 +87,28 @@ class KimiK3DenseMLP(nn.Module):
             weights[W.ffn_w1] = merged.narrow(0, 0, width).T
             weights[W.ffn_w3] = merged.narrow(0, width, width).T
         else:
-            self.gate = linear(weights, W.ffn_w1, hardware)
-            self.up = linear(weights, W.ffn_w3, hardware)
-        self.down = linear(weights, W.ffn_w2, hardware)
+            if decode_bf16:
+                self.gate = LinearFactory.create_linear_from_weights(
+                    weights, W.ffn_w1, quant_config=None, hw_kernel_config=hardware
+                )
+                self.up = LinearFactory.create_linear_from_weights(
+                    weights, W.ffn_w3, quant_config=None, hw_kernel_config=hardware
+                )
+            else:
+                self.gate = linear(weights, W.ffn_w1, hardware)
+                self.up = linear(weights, W.ffn_w3, hardware)
+        self.down = (
+            LinearFactory.create_linear_from_weights(
+                weights, W.ffn_w2, quant_config=None, hw_kernel_config=hardware
+            )
+            if decode_bf16 and weights[W.ffn_w2].dtype == torch.bfloat16
+            else linear(weights, W.ffn_w2, hardware)
+        )
         self.beta = config.k3_runtime_config.activation_situ_beta
         self.linear_beta = config.k3_runtime_config.activation_situ_linear_beta
 
     def forward(self, hidden, valid_mask=None):
+        hidden = self.input_transition(hidden)
         if self.gate_up is not None:
             with profile_scope("RTP::mlp.dense.gate_up_proj"):
                 gate, up = self.gate_up(hidden).chunk(2, dim=-1)
@@ -82,7 +127,7 @@ class KimiK3DenseMLP(nn.Module):
             )
         del gate, up
         with profile_scope("RTP::mlp.dense.down_proj"):
-            return self.down(activated)
+            return self.output_transition(self.down(activated))
 
 
 class KimiK3DecoderLayer(nn.Module):
@@ -118,6 +163,17 @@ class KimiK3DecoderLayer(nn.Module):
             if index in config.moe_layer_index
             else KimiK3DenseMLP(config, parallelism, weights, hardware)
         )
+        self.apply_mlp = (
+            self._apply_fused_shared_mlp
+            if getattr(self.mlp, "fuses_layer_residual", False)
+            else self._apply_regular_mlp
+        )
+
+    def _apply_regular_mlp(self, hidden, mlp_input, valid_mask):
+        return hidden + self.mlp(mlp_input, valid_mask)
+
+    def _apply_fused_shared_mlp(self, hidden, mlp_input, valid_mask):
+        return self.mlp(mlp_input, valid_mask, residual=hidden)
 
     def forward(
         self, hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
@@ -148,6 +204,7 @@ class KimiK3DecoderLayer(nn.Module):
                     block_write_idx=previous if writes else -1,
                     output_norm_weight=self.attention_norm.weight,
                     output_norm_eps=self.attention_norm.variance_epsilon,
+                    metadata=metadata,
                 )
             with profile_scope(f"RTP::layers.{self.index}.attention"):
                 attended = self.attention(
@@ -167,7 +224,7 @@ class KimiK3DecoderLayer(nn.Module):
                 )
             mlp_input = self.mlp_norm(hidden)
         with profile_scope(f"RTP::layers.{self.index}.mlp"):
-            return hidden + self.mlp(mlp_input, valid_mask)
+            return self.apply_mlp(hidden, mlp_input, valid_mask)
 
 
 class KimiK3Model(GptModelBase):
@@ -216,6 +273,7 @@ class KimiK3Model(GptModelBase):
         if (self.fp8_collective_max_tokens <= 0
                 or self.fp8_collective_max_tokens % self.tp_size):
             raise ValueError("FP8 collective capacity must be positive and divisible by TP")
+        self._max_generate_batch_size = int(max_generate_batch_size)
         # The scheduler bound is global; SP routes only the local token shard.
         global_prefill = model_config.moe_prefill_max_tokens_per_rank
         if global_prefill is None:
@@ -280,10 +338,10 @@ class KimiK3Model(GptModelBase):
         # Native MTP subclasses this model but keeps its projections in BF16.
         if (
             type(self) is not KimiK3Model
-            or self.parallelism_config.role_type != RoleType.PREFILL
             or self.tp_size == 1
         ):
             return ready
+        decode_staging = self.parallelism_config.role_type == RoleType.DECODE
         enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
         enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
         if not (enable_ag or enable_rs):
@@ -299,18 +357,27 @@ class KimiK3Model(GptModelBase):
         )
 
         device = self.layers[0].attention.input.weight.device
+        max_m = self.fp8_collective_max_tokens
+        if decode_staging:
+            rows = self._max_generate_batch_size * max(int(self.config.gen_num_per_cycle) + 1, 1)
+            max_m = (rows + self.tp_size - 1) // self.tp_size * self.tp_size
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP), device,
-            max_m=self.fp8_collective_max_tokens,
+            max_m=max_m,
             hidden_size=self.config.hidden_size,
             enable_ag=enable_ag,
             enable_rs=enable_rs,
+            decode_staging=decode_staging,
         )
         for layer in self.layers:
             layer.attention._fp8_collective = self._fp8_collective
+            if layer.block_size:
+                layer.attention_residual.configure_verify_fp8(decode_staging and enable_ag)
+            if decode_staging and enable_rs and isinstance(layer.mlp, KimiK3DenseMLP):
+                layer.mlp.output_transition = self._fp8_collective.reduce_scatter_bf16
         logging.info(
             "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
-            enable_ag, enable_rs, self.fp8_collective_max_tokens,
+            enable_ag, enable_rs, max_m,
         )
         return ready
 

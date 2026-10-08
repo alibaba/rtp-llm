@@ -167,7 +167,9 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             batch, queries = self.page_rr_metadata.local_causal_lens.shape
             dimension = self.native.kv_lora_rank + self.native.pe_dim
             partial, lse = tokenspeed_mla_page_rr_decode(
-                gathered.transpose(0, 1).contiguous().view(
+                # TokenSpeed accepts the gathered head-major strides, as in
+                # feat/k3_dev. Avoid copying the entire FP8 query after AG.
+                gathered.transpose(0, 1).view(
                     batch, queries, self.page_rr_communicator.heads, dimension
                 ),
                 kv_cache.kv_cache_base.view(-1, self.native.page_size, dimension),
