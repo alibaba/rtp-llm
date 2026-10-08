@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from collections import Counter
+from contextlib import nullcontext
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -306,10 +307,14 @@ def load_checkpoint(reference, root, admitted):
     )
 
 
-def sample(module, root, args, tokenizer, admitted, prompts, new_tokens):
+def sample(
+    module, root, args, tokenizer, admitted, prompts, new_tokens, trace_dir=None
+):
     """Run inside a CUDA default-device scope, as required by the official code."""
     import torch
     import torch.distributed as dist
+
+    from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 
     with torch.device("cuda"):
         reference = module.Transformer(args, tokenizer)
@@ -329,7 +334,7 @@ def sample(module, root, args, tokenizer, admitted, prompts, new_tokens):
     torch.cuda.synchronize()
     dist.barrier()
     results = []
-    for prompt in prompts:
+    for prompt_index, prompt in enumerate(prompts):
         ids = tokenizer.encode(prompt, add_special_tokens=False)
         if not ids or len(ids) + new_tokens > args.max_seq_len:
             raise ValueError("Prompt and output must fit the admitted context")
@@ -337,8 +342,31 @@ def sample(module, root, args, tokenizer, admitted, prompts, new_tokens):
         generated, top_values, top_ids = [], [], []
         start = 0
         started = time.monotonic()
-        for _ in range(new_tokens):
-            output, logits, _ = reference(tokens, start)
+        for step in range(new_tokens):
+            tracing = trace_dir is not None and dist.get_rank() == 0
+            with (
+                capture_model_boundaries(reference) if tracing else nullcontext({})
+            ) as snapshots:
+                output, logits, _ = reference(tokens, start)
+            if tracing:
+                snapshots["logits_fp32"] = logits.detach().cpu()
+                last = snapshots["final_norm"][:, -1].to(device)
+                snapshots["local_logits_bf16_head"] = (
+                    torch.nn.functional.linear(
+                        last.bfloat16(), reference.head.weight.bfloat16()
+                    )
+                    .float()
+                    .cpu()
+                )
+                save_model_trace(
+                    trace_dir / f"reference-prompt{prompt_index}-step{step}.pt",
+                    snapshots,
+                    {
+                        "prompt": prompt,
+                        "input_ids": tokens.tolist(),
+                        "start_pos": start,
+                    },
+                )
             if not torch.isfinite(logits).all():
                 raise ValueError("Official reference produced nonfinite logits")
             next_token = int(output.reshape(-1)[-1])
@@ -379,6 +407,7 @@ def main():
     parser.add_argument("--new-tokens", type=int, default=9)
     parser.add_argument("--prompt", action="append")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--trace-dir", type=Path)
     cli = parser.parse_args()
     root = cli.checkpoint.resolve()
     sys.path[0:0] = [str(root / "inference"), *cli.extra_package_path]
@@ -450,6 +479,7 @@ def main():
                     admitted,
                     cli.prompt or ["The capital of France is", "2 + 2 ="],
                     cli.new_tokens,
+                    cli.trace_dir,
                 )
         if cli.report and rank == 0:
             cli.report.write_text(json.dumps(report, indent=2) + "\n")

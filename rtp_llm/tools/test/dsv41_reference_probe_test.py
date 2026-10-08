@@ -19,9 +19,37 @@ from rtp_llm.tools.dsv41_reference_probe import (
     shard_spec,
     text_name,
 )
+from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 
 
 class ReferenceLoaderTest(unittest.TestCase):
+    def test_trace_snapshots_survive_aliases_and_hooks_are_removed(self):
+        layer = SimpleNamespace(layer_id=2, ffn=torch.nn.ReLU(inplace=True))
+        model = SimpleNamespace(layers=[layer], norm=torch.nn.Identity())
+        value = torch.tensor([[-1.0, 2.0]])
+        with capture_model_boundaries(model) as tensors:
+            model.norm(layer.ffn(value))
+        value.zero_()
+        self.assertEqual(tensors["layer02.ffn.input"].tolist(), [[-1, 2]])
+        self.assertEqual(tensors["layer02.ffn.output"].tolist(), [[0, 2]])
+        self.assertEqual(tensors["final_norm"].tolist(), [[0, 2]])
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            with capture_model_boundaries(model):
+                raise RuntimeError("injected")
+        self.assertFalse(layer.ffn._forward_pre_hooks)
+        self.assertFalse(layer.ffn._forward_hooks)
+        self.assertFalse(model.norm._forward_hooks)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.pt"
+            save_model_trace(path, tensors, {"start_pos": 0})
+            result = torch.load(path, weights_only=True)
+            self.assertEqual(result["metadata"], {"start_pos": 0})
+            self.assertTrue(
+                torch.equal(result["tensors"]["final_norm"], tensors["final_norm"])
+            )
+            with self.assertRaises(FileExistsError):
+                save_model_trace(path, tensors, {})
+
     def test_meta_audit_does_not_reuse_or_pollute_device_cache(self):
         @lru_cache(2)
         def frequencies(size):

@@ -38,6 +38,7 @@ from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     plan_stage_engram_tables,
 )
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
+from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 from rtp_llm.utils.model_weight import W
 
 
@@ -145,7 +146,33 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
                 if stop.item():
                     engine.request_stop()
                     stopped.set()
-                hidden = forward(request, fmha_impl).hidden_states
+                trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
+                tracing = bool(trace_directory) and rank == 0 and calls["active"] < 3
+                with (
+                    capture_model_boundaries(model.v4) if tracing else nullcontext({})
+                ) as snapshots:
+                    hidden = forward(request, fmha_impl).hidden_states
+                if tracing and hidden.numel():
+                    snapshots["hidden"] = hidden.detach().cpu()
+                    snapshots["logits_fp32"] = torch.nn.functional.linear(
+                        hidden[-1:].float(), head.float()
+                    ).cpu()
+                    snapshots["logits_bf16_head"] = (
+                        torch.nn.functional.linear(
+                            hidden[-1:].bfloat16(), head.bfloat16()
+                        )
+                        .float()
+                        .cpu()
+                    )
+                    save_model_trace(
+                        Path(trace_directory)
+                        / f"native-prompt0-step{calls['active']}.pt",
+                        snapshots,
+                        {
+                            "input_ids": request.input_ids.tolist(),
+                            "cache_spans": request.v41_cache_spans.tolist(),
+                        },
+                    )
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
                 assert bool(hidden.isfinite().all())
                 if request.input_ids.numel():
@@ -324,6 +351,14 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
     )
     def test_full_nas_checkpoint_decode_liveness(self):
         self.run_full_checkpoint(9)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
+        and os.environ.get("DSV41_TEST_TRACE_DIR"),
+        "full checkpoint trace requires explicit admission and a trace directory",
+    )
+    def test_full_nas_checkpoint_accuracy_trace(self):
+        self.run_full_checkpoint(3)
 
     def run_full_checkpoint(self, new_tokens):
         from transformers import AutoTokenizer

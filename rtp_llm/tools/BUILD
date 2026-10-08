@@ -1,9 +1,15 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "dsv41_trace",
+    srcs = ["dsv41_trace.py"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_library(
     name = "dsv41_reference_probe",
     srcs = ["dsv41_reference_probe.py"],
-    deps = ["//rtp_llm:safetensors_header", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    deps = [":dsv41_trace", "//rtp_llm:safetensors_header", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_library(
