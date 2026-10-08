@@ -7,8 +7,9 @@ import pytest
 
 from cases.config import configure_program
 from flexlb_cfg import (
-    ConfigOverride, ProfileIdentityError, PROFILES, SCHEDULING_TYPE_FIELDS,
-    render_env,
+    ConfigOverride, DispatcherPolicy, FifoOrdering, FixedWindowDecision,
+    PreemptionPolicy, PriorityOrdering, ProfileIdentityError, PROFILES,
+    SingleDecision, render_env,
 )
 from scenario import ScenarioError, compile_scenarios, load_scenarios
 from scenario.compiler import (
@@ -230,16 +231,61 @@ def test_optional_scalar_declarations_preserve_presence_and_extend_in_one_row():
     assert normalized['new_positive_integer'] == 3
 
 
-def test_strict_type_field_table_matches_functional_and_stress_documents():
+def test_typed_scheduling_blocks_match_functional_and_stress_documents():
+    expected_fields = {
+        'FIFO': {'type'},
+        'PRIORITY': {'type', 'defaultPriority', 'preemption'},
+        'SINGLE': {'type'},
+        'FIXED_WINDOW': {'type', 'maxRequests', 'maxCollectionWaitMs',
+                         'maxPredictedExecutionMs'},
+        'BATCH': {'type', 'maxInflightPerPrefillWorker'},
+        'NON_BATCH': {'type', 'maxInflightPerPrefillWorker'},
+    }
     for profile in PROFILES:
         doc = json.loads(render_env(profile))
-        for group, block in (
-            ('ordering', doc['scheduler']['ordering']),
-            ('decision', doc['scheduler']['decision']),
-            ('dispatcher', doc['dispatcher']),
-        ):
-            assert tuple(block) == ('type', *SCHEDULING_TYPE_FIELDS[group][block['type'].lower()])
+        for block in (doc['scheduler']['ordering'], doc['scheduler']['decision'],
+                      doc['dispatcher']):
+            assert set(block) <= expected_fields[block['type']]
     for decision in ('single', 'fixed_window'):
         doc = json.loads(render_env('stress-na130', ConfigOverride(decision=decision)))
         block = doc['scheduler']['decision']
-        assert tuple(block) == ('type', *SCHEDULING_TYPE_FIELDS['decision'][decision])
+        assert set(block) == expected_fields[block['type']]
+
+
+def test_scheduling_value_objects_reject_invalid_combinations():
+    assert FifoOrdering().to_json() == {'type': 'FIFO'}
+    assert SingleDecision().to_json() == {'type': 'SINGLE'}
+    assert PriorityOrdering().to_json() == {'type': 'PRIORITY'}
+    assert FixedWindowDecision(32, 10, 550).to_json()['maxRequests'] == 32
+    assert DispatcherPolicy('non_batch', 64).to_json() == {
+        'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 64,
+    }
+    with pytest.raises(ValueError, match='default_priority'):
+        PriorityOrdering(default_priority=0)
+    with pytest.raises(ValueError, match='dispatcher'):
+        DispatcherPolicy('unknown', 1)
+    with pytest.raises(ValueError, match='max_requests'):
+        FixedWindowDecision(0, 10, 550)
+    with pytest.raises(ValueError, match='max_inflight_per_prefill_worker'):
+        DispatcherPolicy('batch', 0)
+    preemption = PreemptionPolicy.from_input({
+        'allowed_victim_stages': ['DECODE_ENGINE_OWNED'], 'timeout_ms': 1000,
+    })
+    assert PreemptionPolicy.from_json(preemption.to_json()) == preemption
+    assert PriorityOrdering(50, preemption).to_json()['preemption'] == {
+        'allowedVictimStages': ['DECODE_ENGINE_OWNED'], 'timeoutMs': 1000,
+    }
+    with pytest.raises(ValueError, match='requires DECODE_ENGINE_OWNED'):
+        PreemptionPolicy(('PREFILL_QUEUED',), 1000)
+    with pytest.raises(TypeError, match='PreemptionPolicy'):
+        PriorityOrdering(preemption={'allowedVictimStages': ['PREFILL_QUEUED']})
+
+
+def test_stress_scheduling_overrides_are_serialized_by_value_objects():
+    doc = json.loads(render_env('stress-na130', ConfigOverride(
+        decision='single', dispatcher='non_batch', max_inflight_per_prefill_worker=7,
+    )))
+    assert doc['scheduler']['decision'] == SingleDecision().to_json()
+    assert doc['dispatcher'] == DispatcherPolicy('non_batch', 7).to_json()
+    with pytest.raises(ValueError, match='profile document has no scheduler.decision.maxRequests'):
+        render_env('stress-na130', ConfigOverride(decision='single', max_requests=64))

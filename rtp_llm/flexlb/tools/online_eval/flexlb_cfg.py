@@ -60,28 +60,10 @@ from flexlb_profile_data import (
 )
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
-# (flexlb-common VictimStage.java; see _build_preemption_cfg).
+# (flexlb-common VictimStage.java; see PreemptionPolicy).
 VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 
 _RENDER_PROFILES = PROFILES + (STRESS_PROFILE,)
-
-# JSON keys owned by each strict scheduling subtype. Adding a subtype also
-# requires its constructor/retype branch, profile registration and Java schema.
-SCHEDULING_TYPE_FIELDS = {
-    "ordering": {
-        "fifo": (),
-        "priority": ("defaultPriority", "preemption"),
-    },
-    "decision": {
-        "single": (),
-        "fixed_window": ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs"),
-    },
-    "dispatcher": {
-        "batch": ("maxInflightPerPrefillWorker",),
-        "non_batch": ("maxInflightPerPrefillWorker",),
-    },
-}
-
 
 class ProfileIdentityError(ValueError):
     """A functional profile's decision or dispatcher was changed."""
@@ -93,15 +75,6 @@ def validate_profile_identity(profile: str, overrides: Mapping[str, object]) -> 
         value = overrides.get(axis)
         if value is not None and value != expected:
             raise ProfileIdentityError(f"{axis} is a profile identity field for {profile}")
-
-
-def _typed_block(group: str, kind: str, values: Mapping[str, object]) -> dict:
-    """Emit only the JSON fields owned by the selected strict subtype."""
-    allowed = SCHEDULING_TYPE_FIELDS[group][kind]
-    unknown = set(values) - set(allowed)
-    if unknown:
-        raise ValueError(f"{group}={kind} does not allow {sorted(unknown)}")
-    return {"type": kind.upper(), **{key: values[key] for key in allowed if key in values}}
 
 
 def profile_dispatches_batch(profile: str) -> bool:
@@ -191,61 +164,138 @@ class ConfigOverride:
 # ===========================================================================
 
 
-def _build_preemption_cfg(preemption: dict) -> dict:
-    """Render the schema-v3 reclamation policy without legacy ACK settings."""
-    unknown_keys = set(preemption) - {"allowed_victim_stages", "timeout_ms"}
-    if unknown_keys:
-        raise ValueError(f"unknown preemption keys: {sorted(unknown_keys)}")
-    stages = list(preemption.get("allowed_victim_stages") or [])
-    if not stages or any(stage not in VICTIM_STAGES for stage in stages):
-        raise ValueError(
-            f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}"
-        )
-    result = {"allowedVictimStages": stages}
-    if "timeout_ms" in preemption:
-        value = preemption["timeout_ms"]
-        if "DECODE_ENGINE_OWNED" not in stages:
-            raise ValueError("timeout_ms requires DECODE_ENGINE_OWNED")
-        if type(value) is not int or value <= 0:
-            raise ValueError("preemption.timeout_ms must be a positive integer")
-        result["timeoutMs"] = value
-    return result
+@dataclass(frozen=True)
+class PreemptionPolicy:
+    allowed_victim_stages: tuple[str, ...]
+    timeout_ms: Optional[int] = None
+
+    def __post_init__(self):
+        if (type(self.allowed_victim_stages) is not tuple
+                or not self.allowed_victim_stages
+                or any(stage not in VICTIM_STAGES for stage in self.allowed_victim_stages)):
+            raise ValueError(
+                f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}"
+            )
+        if self.timeout_ms is not None:
+            if "DECODE_ENGINE_OWNED" not in self.allowed_victim_stages:
+                raise ValueError("timeout_ms requires DECODE_ENGINE_OWNED")
+            if type(self.timeout_ms) is not int or self.timeout_ms <= 0:
+                raise ValueError("preemption.timeout_ms must be a positive integer")
+
+    @classmethod
+    def from_input(cls, value: dict) -> PreemptionPolicy:
+        unknown = set(value) - {"allowed_victim_stages", "timeout_ms"}
+        if unknown:
+            raise ValueError(f"unknown preemption keys: {sorted(unknown)}")
+        return cls(tuple(value.get("allowed_victim_stages") or ()), value.get("timeout_ms"))
+
+    @classmethod
+    def from_json(cls, value: dict) -> PreemptionPolicy:
+        unknown = set(value) - {"allowedVictimStages", "timeoutMs"}
+        if unknown:
+            raise ValueError(f"unknown preemption keys: {sorted(unknown)}")
+        return cls(tuple(value.get("allowedVictimStages") or ()), value.get("timeoutMs"))
+
+    def to_json(self) -> dict:
+        result = {"allowedVictimStages": list(self.allowed_victim_stages)}
+        if self.timeout_ms is not None:
+            result["timeoutMs"] = self.timeout_ms
+        return result
 
 
-def _build_ordering_cfg(
-    ordering: str,
-    default_priority: Optional[int],
-    preemption: Optional[dict],
-) -> dict:
-    """scheduler.ordering block (strict schema-v3).
+@dataclass(frozen=True)
+class FifoOrdering:
+    def to_json(self) -> dict:
+        return {"type": "FIFO"}
 
-    FIFO carries only ``{"type": "FIFO"}`` — FifoOrderingConfig has no
-    other fields and the strict parser rejects defaultPriority /
-    preemption under it.  Under PRIORITY both keys are optional: omitted
-    defaultPriority keeps the Java default (50); an omitted preemption
-    block enables the Java default policy (all victim stages).
-    """
-    if isinstance(ordering, str):
-        ordering = ordering.lower()
-    if ordering not in SCHEDULING_TYPE_FIELDS["ordering"]:
-        raise ValueError(f"ordering must be 'fifo' or 'priority', got {ordering!r}")
-    if ordering == "fifo":
+
+@dataclass(frozen=True)
+class PriorityOrdering:
+    default_priority: Optional[int] = None
+    preemption: Optional[PreemptionPolicy] = None
+
+    def __post_init__(self):
+        if self.default_priority is not None and (
+            type(self.default_priority) is not int or not 1 <= self.default_priority <= 100
+        ):
+            raise ValueError(
+                f"default_priority must be in [1, 100], got {self.default_priority}"
+            )
+        if self.preemption is not None and not isinstance(self.preemption, PreemptionPolicy):
+            raise TypeError("preemption must be a PreemptionPolicy")
+
+    def to_json(self) -> dict:
+        result = {"type": "PRIORITY"}
+        if self.default_priority is not None:
+            result["defaultPriority"] = self.default_priority
+        if self.preemption is not None:
+            result["preemption"] = self.preemption.to_json()
+        return result
+
+
+@dataclass(frozen=True)
+class SingleDecision:
+    def to_json(self) -> dict:
+        return {"type": "SINGLE"}
+
+
+@dataclass(frozen=True)
+class FixedWindowDecision:
+    max_requests: int
+    max_collection_wait_ms: int
+    max_predicted_execution_ms: int
+
+    def __post_init__(self):
+        for name, value, minimum in (
+            ("max_requests", self.max_requests, 1),
+            ("max_collection_wait_ms", self.max_collection_wait_ms, 0),
+            ("max_predicted_execution_ms", self.max_predicted_execution_ms, 1),
+        ):
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+
+    def to_json(self) -> dict:
+        return {
+            "type": "FIXED_WINDOW",
+            "maxRequests": self.max_requests,
+            "maxCollectionWaitMs": self.max_collection_wait_ms,
+            "maxPredictedExecutionMs": self.max_predicted_execution_ms,
+        }
+
+
+@dataclass(frozen=True)
+class DispatcherPolicy:
+    kind: str
+    max_inflight_per_prefill_worker: int
+
+    def __post_init__(self):
+        if self.kind not in ("batch", "non_batch"):
+            raise ValueError("dispatcher must be batch or non_batch")
+        if (type(self.max_inflight_per_prefill_worker) is not int
+                or not 1 <= self.max_inflight_per_prefill_worker <= 2_147_483_647):
+            raise ValueError("max_inflight_per_prefill_worker must be a positive Java integer")
+
+    def to_json(self) -> dict:
+        return {
+            "type": self.kind.upper(),
+            "maxInflightPerPrefillWorker": self.max_inflight_per_prefill_worker,
+        }
+
+
+def _ordering_policy(ordering, default_priority, preemption):
+    """Parse Python arguments into an ordering with no invalid field mix."""
+    kind = ordering.lower() if isinstance(ordering, str) else ordering
+    if kind not in ("fifo", "priority"):
+        raise ValueError(f"ordering must be 'fifo' or 'priority', got {kind!r}")
+    if kind == "fifo":
         if default_priority is not None or preemption is not None:
             raise ValueError(
                 "default_priority/preemption apply only to ordering='priority' "
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
-        return _typed_block("ordering", "fifo", {})
-    if default_priority is not None and not 1 <= default_priority <= 100:
-        raise ValueError(
-            f"default_priority must be in [1, 100], got {default_priority}"
-        )
-    values = {}
-    if default_priority is not None:
-        values["defaultPriority"] = default_priority
-    if preemption is not None:
-        values["preemption"] = _build_preemption_cfg(preemption)
-    return _typed_block("ordering", "priority", values)
+        return FifoOrdering()
+    return PriorityOrdering(default_priority,
+                            PreemptionPolicy.from_input(preemption) if preemption is not None else None)
 
 
 # ===========================================================================
@@ -285,8 +335,9 @@ def build_flexlb_config(
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
-    if (decision not in SCHEDULING_TYPE_FIELDS["decision"]
-            or dispatcher not in SCHEDULING_TYPE_FIELDS["dispatcher"]):
+    if decision not in ("single", "fixed_window") or dispatcher not in (
+        "batch", "non_batch"
+    ):
         raise ValueError("unsupported decision or dispatcher")
     for name, value in (
         ("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
@@ -309,21 +360,14 @@ def build_flexlb_config(
         or decision_lifetime < 1
     ):
         raise ValueError("decision_lifetime must be finite and at least 1")
-    decision_values = {}
-    if decision == "fixed_window":
-        decision_values = {
-            "maxRequests": max_requests,
-            "maxCollectionWaitMs": max_collection_wait_ms,
-            "maxPredictedExecutionMs": max_predicted_execution_ms,
-        }
-    decision_cfg = _typed_block("decision", decision, decision_values)
-    dispatcher_cfg = _typed_block("dispatcher", dispatcher, {
-        "maxInflightPerPrefillWorker": max_inflight_per_prefill_worker,
-    })
+    decision_policy = (
+        FixedWindowDecision(max_requests, max_collection_wait_ms, max_predicted_execution_ms)
+        if decision == "fixed_window" else SingleDecision()
+    )
     scheduler_cfg: dict = {
         "type": "QUEUE",
-        "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
-        "decision": decision_cfg,
+        "ordering": _ordering_policy(ordering, default_priority, preemption).to_json(),
+        "decision": decision_policy.to_json(),
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
@@ -331,7 +375,7 @@ def build_flexlb_config(
         {
             "schemaVersion": 3,
             "scheduler": scheduler_cfg,
-            "dispatcher": dispatcher_cfg,
+            "dispatcher": DispatcherPolicy(dispatcher, max_inflight_per_prefill_worker).to_json(),
             "requestLifecycle": {
                 "request": {"timeoutMs": request_timeout_ms},
                 "decision": {"lifetime": decision_lifetime},
@@ -378,9 +422,6 @@ _STRESS_DOC_PATHS = {
     "cache_affinity_max_extra_ttft_ms": ("router", "roles", "prefill", "cacheAffinity", "maxExtraTtftMs"),
     "cache_affinity_min_prefix_hit_percent": ("router", "roles", "prefill", "cacheAffinity", "minPrefixHitPercent"),
     "prefill_expression": ("router", "roles", "prefill", "executionTimeEstimator", "expression"),
-    "max_requests": ("scheduler", "decision", "maxRequests"),
-    "max_collection_wait_ms": ("scheduler", "decision", "maxCollectionWaitMs"),
-    "max_predicted_execution_ms": ("scheduler", "decision", "maxPredictedExecutionMs"),
     "queue_timeout_ms": ("scheduler", "queueTimeoutMs"),
     "status_rpc_ms": ("workerRegistry", "health", "statusRpcTimeoutMs"),
     "decode_max_engine_requests": (
@@ -397,7 +438,6 @@ _STRESS_DOC_PATHS = {
         "availability",
         "maxKvUsagePercent",
     ),
-    "max_inflight_per_prefill_worker": ("dispatcher", "maxInflightPerPrefillWorker"),
     "request_timeout_ms": ("requestLifecycle", "request", "timeoutMs"),
     "decision_lifetime": ("requestLifecycle", "decision", "lifetime"),
     "status_stale_after_ms": ("workerRegistry", "health", "statusStaleAfterMs"),
@@ -435,11 +475,11 @@ def _edit_doc(doc: dict, path: tuple, value, field_name: str) -> None:
 def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
     """ordering / default_priority / preemption handling for the stress base."""
     scheduler = doc["scheduler"]
-    ordering_block = scheduler["ordering"]
-    current_type = str(ordering_block.get("type", "")).lower()
+    current = scheduler["ordering"]
+    current_type = str(current.get("type", "")).lower()
     if overrides.ordering is not None:
         new_type = overrides.ordering.lower()
-        if new_type not in SCHEDULING_TYPE_FIELDS["ordering"]:
+        if new_type not in ("fifo", "priority"):
             raise ValueError(
                 f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}"
             )
@@ -450,47 +490,76 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
                 "default_priority/preemption apply only to ordering='priority' "
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
-        scheduler["ordering"] = _typed_block("ordering", new_type, {})
-        ordering_block = scheduler["ordering"]
-        current_type = new_type
-    if current_type == "fifo":
+        policy = FifoOrdering() if new_type == "fifo" else PriorityOrdering()
+    elif current_type == "priority":
+        policy = PriorityOrdering(
+            current.get("defaultPriority"),
+            PreemptionPolicy.from_json(current["preemption"])
+            if "preemption" in current else None,
+        )
+    else:
+        policy = FifoOrdering()
+    if isinstance(policy, FifoOrdering):
+        scheduler["ordering"] = policy.to_json()
         return
-    if overrides.default_priority is not None:
-        if not 1 <= overrides.default_priority <= 100:
-            raise ValueError(
-                f"default_priority must be in [1, 100], got {overrides.default_priority}"
-            )
-        ordering_block["defaultPriority"] = overrides.default_priority
+    priority = (policy.default_priority if overrides.default_priority is None
+                else overrides.default_priority)
+    preemption = policy.preemption
     if overrides.preemption is not None and overrides.preemption is not OMIT:
-        ordering_block["preemption"] = _build_preemption_cfg(overrides.preemption)
+        preemption = PreemptionPolicy.from_input(overrides.preemption)
     if overrides.strip_preemption:
-        ordering_block.pop("preemption", None)
+        preemption = None
+    scheduler["ordering"] = PriorityOrdering(
+        priority, preemption,
+    ).to_json()
 
 
 def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
     decision = doc["scheduler"]["decision"]
-    if overrides.decision is not None:
-        new_type = overrides.decision.lower()
-        if new_type not in SCHEDULING_TYPE_FIELDS["decision"]:
-            raise ValueError(
-                "decision must be 'fixed_window' or 'single', got "
-                f"{overrides.decision!r}"
-            )
-        values = {}
-        for key in SCHEDULING_TYPE_FIELDS["decision"][new_type]:
-            values[key] = decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key])
-        doc["scheduler"]["decision"] = _typed_block("decision", new_type, values)
+    if overrides.decision is None and all(
+        getattr(overrides, name) is None or getattr(overrides, name) is OMIT
+        for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms")
+    ):
+        return
+    new_type = overrides.decision.lower() if overrides.decision is not None else decision["type"].lower()
+    if new_type not in ("single", "fixed_window"):
+        raise ValueError(
+            "decision must be 'fixed_window' or 'single', got "
+            f"{overrides.decision!r}"
+        )
+    if new_type == "single":
+        doc["scheduler"]["decision"] = SingleDecision().to_json()
+        for field, key in (("max_requests", "maxRequests"),
+                           ("max_collection_wait_ms", "maxCollectionWaitMs"),
+                           ("max_predicted_execution_ms", "maxPredictedExecutionMs")):
+            value = getattr(overrides, field)
+            if value is not None and value is not OMIT:
+                _edit_doc(doc, ("scheduler", "decision", key), value, field)
+        return
+    values = {}
+    for field, key in (("max_requests", "maxRequests"),
+                       ("max_collection_wait_ms", "maxCollectionWaitMs"),
+                       ("max_predicted_execution_ms", "maxPredictedExecutionMs")):
+        value = getattr(overrides, field)
+        values[key] = (
+            decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key])
+            if value is None or value is OMIT else value
+        )
+    doc["scheduler"]["decision"] = FixedWindowDecision(
+        values["maxRequests"], values["maxCollectionWaitMs"],
+        values["maxPredictedExecutionMs"],
+    ).to_json()
 
 
 def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
-    if overrides.dispatcher is not None:
-        if overrides.dispatcher not in SCHEDULING_TYPE_FIELDS["dispatcher"]:
-            raise ValueError("dispatcher must be batch or non_batch")
-        doc["dispatcher"] = _typed_block("dispatcher", overrides.dispatcher, {
-            key: doc["dispatcher"][key]
-            for key in SCHEDULING_TYPE_FIELDS["dispatcher"][overrides.dispatcher]
-            if key in doc["dispatcher"]
-        })
+    if overrides.dispatcher is None and overrides.max_inflight_per_prefill_worker is None:
+        return
+    cap = overrides.max_inflight_per_prefill_worker
+    if cap is None or cap is OMIT:
+        cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
+    doc["dispatcher"] = DispatcherPolicy(
+        overrides.dispatcher or doc["dispatcher"]["type"].lower(), cap,
+    ).to_json()
 
 
 def _render_stress(overrides: Optional[ConfigOverride]) -> str:
