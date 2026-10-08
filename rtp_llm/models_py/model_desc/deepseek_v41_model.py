@@ -366,9 +366,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
             or int(lengths.sum()) != inputs.input_ids.numel()
         ):
             raise ValueError("V4.1 prefill lengths must cover nonempty requests")
-        if bool(((prefixes + lengths) > min(256, self._v4_args.max_seq_len)).any()):
+        if bool(((prefixes + lengths) > min(512, self._v4_args.max_seq_len)).any()):
             raise NotImplementedError(
-                "V4.1 prefill currently requires the first 256-token page"
+                "V4.1 prefill requires positions within the qualified 512-token context"
             )
         cu = attn.cu_seqlens
         expected_cu = torch.cat((torch.zeros(1, dtype=torch.int64), lengths.cumsum(0)))
@@ -423,9 +423,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
         # Token count and sequence_lengths determine the one-token batch.
         if bool(((lengths.cpu() <= 0) | (lengths.cpu() > starts.cpu())).any()):
             raise ValueError("V4.1 decode requires valid original prompt lengths")
-        if bool(((starts < 1) | (starts >= min(256, self._v4_args.max_seq_len))).any()):
+        if bool(((starts < 1) | (starts >= min(512, self._v4_args.max_seq_len))).any()):
             raise ValueError(
-                "V4.1 decode requires prompt positions within the first page"
+                "V4.1 decode requires prompt positions within the qualified 512-token context"
             )
         positions = attn.combo_position_ids
         if (

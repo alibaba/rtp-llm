@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_native_prefill_sm120 impor
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     checkpoint,
+    context_tables,
     decode_inputs,
     inputs,
     model_config,
@@ -32,7 +33,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
 from rtp_llm.ops.compute_ops import PyModelOutputs
 
 
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, context=256):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     os.environ.update(
@@ -41,7 +42,7 @@ def run_rank(rank, port, config):
             "DSV41_ENGRAM_HOST_BYTES": str(2**20),
             "DSV4_MOE_STRATEGY": "auto",
             "DSV4_MOE_CHUNK_PREFILL": "1",
-            "DSV4_MOE_CHUNK_TOKENS": "4",
+            "DSV4_MOE_CHUNK_TOKENS": "32" if context > 256 else "4",
             "DSV4_MOE_EXTENT_COUNT_FUSE": "1",
             "RTP_LLM_STREAM_ASYNC": "0",
             "RTP_LLM_DEVICE_INPUT": "0",
@@ -59,7 +60,7 @@ def run_rank(rank, port, config):
     model = reference = native = None
     try:
         with torch.inference_mode():
-            model, reference = make_workers(rank, config)
+            model, reference = make_workers(rank, config, max_seq_len=context)
             torch.manual_seed(41950)
             head = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
             native = NativePrefill(
@@ -69,25 +70,37 @@ def run_rank(rank, port, config):
                 head,
             )
             assert type(model.kv_cache).__name__ == "KVCache"
-            for phase, lengths in enumerate(
+            phases = (
                 (
+                    (253, 503) if rank == 0 else (),
+                    (254 + rank % 2, 500) if rank % 2 else (254,),
+                    (503,) if rank == 7 else (),
+                )
+                if context > 256
+                else (
                     (3, 5) if rank == 0 else (),
                     (3 + rank, 125) if rank % 2 else (3 + rank,),
                     (5,) if rank == 7 else (),
                 )
-            ):
+            )
+            for phase, lengths in enumerate(phases):
                 sequences = [
                     [(rank * 7 + phase * 13 + row * 3 + i) % 128 for i in range(n)]
                     for row, n in enumerate(lengths)
                 ]
                 requests = [row.copy() for row in sequences]
                 before = cache_snapshot(model.kv_cache)
-                reference.kv_cache = tagged_cache(reference)
+                reference.kv_cache = tagged_cache(
+                    reference, pages=8 if context > 256 else 4
+                )
+                tables = context_tables(reference.kv_cache) if context > 256 else None
+                previous_pages = {}
+                saw_growth = False
                 step = 0
                 forward = model.forward
 
                 def checked_forward(request, fmha_impl=None):
-                    nonlocal step
+                    nonlocal step, saw_growth
                     expected_ids = (
                         [token for row in sequences for token in row]
                         if step == 0
@@ -95,7 +108,7 @@ def run_rank(rank, port, config):
                     )
                     assert request.input_ids.tolist() == expected_ids
                     assert request.v41_cache_spans.shape == (len(lengths), 6)
-                    for attn in request.attention_inputs.values():
+                    for tag, attn in request.attention_inputs.items():
                         assert attn.is_prefill == (step == 0)
                         assert attn.input_lengths.tolist() == list(lengths)
                         assert attn.sequence_lengths.tolist() == (
@@ -104,10 +117,27 @@ def run_rank(rank, port, config):
                         assert attn.kv_cache_kernel_block_id_device.shape[0] == len(
                             lengths
                         )
+                        pages = attn.kv_cache_kernel_block_id_device.tolist()
+                        retained = tag in ("swa_kv", "csa_state")
+                        for row, sequence in enumerate(sequences):
+                            needed = 1 if retained else (len(sequence) + 255) // 256
+                            current = pages[row][:needed]
+                            assert len(current) == needed and all(
+                                page > 0 for page in current
+                            )
+                            assert len(set(current)) == needed
+                            old = previous_pages.get((tag, row), [])
+                            assert current[: len(old)] == old
+                            if old and len(current) > len(old):
+                                assert not retained
+                                saw_growth = True
+                            previous_pages[tag, row] = current
+                            if retained:
+                                assert len(pages[row]) == 1
                     if lengths:
                         if step == 0:
                             oracle_request = inputs(
-                                reference.kv_cache, expected_ids, lengths
+                                reference.kv_cache, expected_ids, lengths, tables=tables
                             )
                         else:
                             history = [
@@ -121,6 +151,7 @@ def run_rank(rank, port, config):
                                 [len(row) - 1 for row in sequences],
                                 history,
                                 prompt_lengths=lengths,
+                                tables=tables,
                             )
                         torch.testing.assert_close(
                             request.engram_token_windows.cpu(),
@@ -158,6 +189,10 @@ def run_rank(rank, port, config):
                 assert step == 9
                 assert result["tokens"] == sequences
                 assert result["free_before"] == result["free_after"]
+                if context > 256 and lengths and lengths[0] < 256:
+                    assert (
+                        saw_growth
+                    ), "native GLOBAL/index pages never grew across token 256"
                 assert_released(model)
                 if not lengths:
                     after = cache_snapshot(model.kv_cache)
@@ -166,7 +201,7 @@ def run_rank(rank, port, config):
                 dist.barrier()
             if rank == 0:
                 print(
-                    "V4.1 native DP8 full-schedule decode: real prefill, eight decode steps, Engram history, EP1 parity, sampling, idle phase and reclamation PASS",
+                    f"V4.1 native DP8 full-schedule decode context={context}: real prefill, eight decode steps, Engram history, stable page growth, EP1 parity, sampling, idle phase and reclamation PASS",
                     flush=True,
                 )
     except BaseException:
@@ -182,7 +217,7 @@ def run_rank(rank, port, config):
 
 
 class V41NativeDecodeSM120Test(unittest.TestCase):
-    def test_full_schedule_eight_rank_native_decode(self):
+    def run_case(self, context):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
@@ -190,7 +225,13 @@ class V41NativeDecodeSM120Test(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             sock.close()
-            mp.spawn(run_rank, args=(port, config), nprocs=8, join=True)
+            mp.spawn(run_rank, args=(port, config, context), nprocs=8, join=True)
+
+    def test_full_schedule_eight_rank_native_decode(self):
+        self.run_case(256)
+
+    def test_two_page_full_schedule_eight_rank_native_decode(self):
+        self.run_case(512)
 
 
 if __name__ == "__main__":

@@ -147,10 +147,21 @@ public:
         const auto free_before = manager_->freeBlocksNum();
         std::list<GenerateStreamPtr> live;
         for (const auto& tokens : requests) {
-            RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= 256);
+            RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= 512
+                          && tokens.size() + new_tokens <= static_cast<size_t>(model_config_.max_seq_len));
             live.push_back(makeStream(tokens, false, new_tokens));
         }
         for (int step = 0; step < new_tokens; ++step) {
+            // The direct executor fixture must perform the scheduler's cache
+            // growth before gathering metadata for each decode step.
+            if (step > 0) {
+                for (const auto& stream : live) {
+                    auto status = stream->streamCacheResource().incrKVBlock();
+                    if (!status.ok()) {
+                        throw std::runtime_error(status.ToString());
+                    }
+                }
+            }
             ScheduleOutput schedule;
             schedule.streams = live;
             if (schedule.streams.empty()) {

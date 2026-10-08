@@ -142,9 +142,11 @@ def resources(cache=None, **kwargs):
     )
 
 
-def tagged_cache(model):
+def tagged_cache(model, *, pages=4):
     cache = NativeTaggedCache(
-        [layer.attn for layer in model.v4.layers], gen=model._gen_num_per_cycle
+        [layer.attn for layer in model.v4.layers],
+        gen=model._gen_num_per_cycle,
+        pages=pages,
     )
     cache.group_tags = list(cache.layouts)
     cache.layer_count = len(model.v4.layers)
@@ -154,7 +156,20 @@ def tagged_cache(model):
     return cache
 
 
-def inputs(cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=None):
+def context_tables(cache):
+    return {
+        tag: torch.tensor(
+            [[6], [4]] if tag in ("swa_kv", "csa_state") else [[7, 2], [5, 3]],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        for tag in cache.group_tags
+    }
+
+
+def inputs(
+    cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=None, tables=None
+):
     ids = torch.tensor(ids, device="cuda", dtype=torch.int32)
     lens = torch.tensor(lengths, dtype=torch.int32)
     pref = torch.tensor(prefixes or [0] * len(lengths), dtype=torch.int32)
@@ -166,8 +181,12 @@ def inputs(cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=No
         attn.input_lengths = lens
         attn.prefix_lengths = pref
         attn.cu_seqlens = cu
-        attn.kv_cache_kernel_block_id_device = torch.tensor(
-            [[2], [1]][: len(lengths)], device="cuda", dtype=torch.int32
+        attn.kv_cache_kernel_block_id_device = (
+            tables[tag][: len(lengths)].clone()
+            if tables is not None
+            else torch.tensor(
+                [[2], [1]][: len(lengths)], device="cuda", dtype=torch.int32
+            )
         )
         tagged[tag] = attn
     lookback = torch.tensor(history or [[-1] * 3] * len(lengths), dtype=torch.int32)
@@ -177,7 +196,9 @@ def inputs(cache, ids=(3, 4, 5, 6, 7), lengths=(3, 2), prefixes=None, history=No
     )
 
 
-def decode_inputs(cache, ids, starts, history, order=None, prompt_lengths=None):
+def decode_inputs(
+    cache, ids, starts, history, order=None, prompt_lengths=None, tables=None
+):
     order = list(range(len(ids))) if order is None else order
     prompt_lengths = starts if prompt_lengths is None else prompt_lengths
     request = inputs(
@@ -186,6 +207,7 @@ def decode_inputs(cache, ids, starts, history, order=None, prompt_lengths=None):
         [1] * len(ids),
         [starts[i] for i in order],
         [history[i] for i in order],
+        tables,
     )
     for attn in request.attention_inputs.values():
         attn.is_prefill = False
@@ -222,9 +244,9 @@ class V41WorkerSM120Test(unittest.TestCase):
         Dsv4SharedRuntimeBufferStore._reset_for_test()
         self.addCleanup(Dsv4SharedRuntimeBufferStore._reset_for_test)
 
-    def worker(self, initialize=True, engram=None):
-        args, weights = fixture()
-        cfg = model_config(args, self.config if engram is None else engram)
+    def worker(self, initialize=True, engram=None, *, max_seq_len=256, gen=0):
+        args, weights = fixture(max_seq_len=max_seq_len)
+        cfg = model_config(args, self.config if engram is None else engram, gen)
         parallelism = ParallelismConfig()
         parallelism.role_type = RoleType.PREFILL
         model = DeepSeekV41Model(cfg, parallelism, weights, None, 2)
@@ -232,8 +254,12 @@ class V41WorkerSM120Test(unittest.TestCase):
         if initialize:
             self.assertTrue(model.initialize(resources()))
             for layer in model.v4.layers:
-                self.assertEqual(layer.attn._cache_layouts["csa_state"].entries, 2)
-                self.assertEqual(layer.attn._cache_layouts["swa_kv"].entries, 128)
+                self.assertEqual(
+                    layer.attn._cache_layouts["csa_state"].entries, 2 + 2 * gen
+                )
+                self.assertEqual(
+                    layer.attn._cache_layouts["swa_kv"].entries, 128 + 2 * gen
+                )
             self.assertTrue(model.initialize(resources(tagged_cache(model))))
         return model
 
@@ -416,6 +442,153 @@ class V41WorkerSM120Test(unittest.TestCase):
             bool(torch.isfinite(model.forward(request()).hidden_states).all())
         )
         self.assert_released(model)
+
+    def test_two_page_prefill_decode_reordering_and_generation_layouts(self):
+        for gen in (0, 1):
+            model = self.worker(max_seq_len=512, gen=gen)
+            results = []
+            lengths = [253, 504]
+            prompt = [(i * 7 + 3) % 128 for i in range(sum(lengths))]
+            for reverse in (False, True):
+                model.kv_cache = tagged_cache(model, pages=8)
+                tables = context_tables(model.kv_cache)
+                output = model.forward(
+                    inputs(model.kv_cache, prompt, lengths, tables=tables)
+                ).hidden_states.clone()
+                self.assert_released(model)
+                starts = lengths.copy()
+                history = [list(reversed(prompt[250:253])), list(reversed(prompt[-3:]))]
+                outputs = [output]
+                for step in range(8):
+                    ids = [8 + step, 24 + step]
+                    order = [1, 0] if reverse and step % 2 == 0 else [0, 1]
+                    request = decode_inputs(
+                        model.kv_cache,
+                        ids,
+                        starts,
+                        history,
+                        order,
+                        prompt_lengths=lengths,
+                        tables=tables,
+                    )
+                    hidden = model.forward(request).hidden_states
+                    self.assertTrue(bool(hidden.isfinite().all()))
+                    outputs.append(hidden[order].clone())
+                    self.assert_released(model)
+                    starts = [start + 1 for start in starts]
+                    history = [[ids[i], *history[i][:2]] for i in range(2)]
+                self.assertEqual(starts, [261, 512])
+                results.append(
+                    (
+                        outputs,
+                        {
+                            key: raw.clone()
+                            for key, raw in model.kv_cache.storage.items()
+                        },
+                    )
+                )
+            for left, right in zip(results[0][0], results[1][0]):
+                torch.testing.assert_close(left, right, rtol=0, atol=0)
+            for key, raw in results[0][1].items():
+                torch.testing.assert_close(raw, results[1][1][key], rtol=0, atol=0)
+            model.close()
+
+    def test_two_page_chunk_continuation_fast_and_normal_paths(self):
+        model = self.worker(max_seq_len=512)
+        lengths, prefixes = [258, 257], [125, 129]
+        sequences = [
+            [(row * 11 + token) % 128 for token in range(p + n)]
+            for row, (p, n) in enumerate(zip(prefixes, lengths))
+        ]
+        results = []
+        for fast in ("0", "1"):
+            model.kv_cache = tagged_cache(model, pages=8)
+            tables = context_tables(model.kv_cache)
+            with patch.dict(os.environ, {"DSV4_PREFILL_FAST_PATH": fast}):
+                model.forward(
+                    inputs(
+                        model.kv_cache,
+                        [
+                            token
+                            for row, count in zip(sequences, prefixes)
+                            for token in row[:count]
+                        ],
+                        prefixes,
+                        tables=tables,
+                    )
+                )
+                self.assert_released(model)
+                output = model.forward(
+                    inputs(
+                        model.kv_cache,
+                        [
+                            token
+                            for row, count in zip(sequences, prefixes)
+                            for token in row[count:]
+                        ],
+                        lengths,
+                        prefixes,
+                        [
+                            list(reversed(row[count - 3 : count]))
+                            for row, count in zip(sequences, prefixes)
+                        ],
+                        tables,
+                    )
+                ).hidden_states.clone()
+                self.assertTrue(bool(output.isfinite().all()))
+                self.assert_released(model)
+            results.append(
+                (
+                    output,
+                    {key: raw.clone() for key, raw in model.kv_cache.storage.items()},
+                )
+            )
+        torch.testing.assert_close(results[0][0], results[1][0], rtol=0, atol=0)
+        for key, raw in results[0][1].items():
+            torch.testing.assert_close(raw, results[1][1][key], rtol=0, atol=0)
+
+    def test_two_page_invalid_later_pages_and_limit_reject_before_writes(self):
+        model = self.worker(max_seq_len=1024)
+        model.kv_cache = tagged_cache(model, pages=8)
+        tables = context_tables(model.kv_cache)
+        saved = {key: raw.clone() for key, raw in model.kv_cache.storage.items()}
+        for tag in model.kv_cache.group_tags:
+            for defect in ("missing", "reserved", "out_of_range", "alias"):
+                bad = {key: table.clone() for key, table in tables.items()}
+                if defect == "missing":
+                    bad[tag] = bad[tag][:, :0]
+                elif defect == "reserved":
+                    bad[tag][0, -1] = 0
+                elif defect == "out_of_range":
+                    bad[tag][0, -1] = 8
+                else:
+                    bad[tag][0, -1] = bad[tag][1, -1]
+                for decode in (False, True):
+                    with self.subTest(tag=tag, defect=defect, decode=decode):
+                        request = (
+                            decode_inputs(
+                                model.kv_cache,
+                                [8, 9],
+                                [300, 300],
+                                [[3, 2, 1]] * 2,
+                                tables=bad,
+                            )
+                            if decode
+                            else inputs(
+                                model.kv_cache, [3] * 600, [300, 300], tables=bad
+                            )
+                        )
+                        with self.assertRaises((ValueError, NotImplementedError)):
+                            model.forward(request)
+                        self.assert_released(model)
+        with self.assertRaisesRegex(NotImplementedError, "512-token"):
+            model.forward(inputs(model.kv_cache, [3] * 513, [513], tables=tables))
+        with self.assertRaisesRegex(ValueError, "512-token"):
+            model.forward(
+                decode_inputs(model.kv_cache, [3], [512], [[3, 2, 1]], tables=tables)
+            )
+        for key, raw in saved.items():
+            torch.testing.assert_close(raw, model.kv_cache.storage[key], rtol=0, atol=0)
 
     def test_failure_after_engram_clears_request_state_and_allows_retry(self):
         model = self.worker()

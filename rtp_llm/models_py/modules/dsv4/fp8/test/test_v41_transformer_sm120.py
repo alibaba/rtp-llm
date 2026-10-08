@@ -40,7 +40,7 @@ def fp8(n, k, block=32):
     return weight, scales
 
 
-def fixture(experts=4, *, full_schedule=False):
+def fixture(experts=4, *, full_schedule=False, max_seq_len=256):
     ratios = [0, 0] + [2] * 18 + [1] * 20 if full_schedule else [0, 0, 2, 2, 1, 1]
     kv_sources = [2, 8, 14, 20] if full_schedule else [2, 4]
     index_sources = [2, 8, 14, 20, 24, 28, 32, 36] if full_schedule else [2, 4]
@@ -61,8 +61,8 @@ def fixture(experts=4, *, full_schedule=False):
         n_hash_layers=0,
         norm_eps=1e-20,
         max_batch_size=2,
-        max_seq_len=256,
-        max_tokens_per_rank=256,
+        max_seq_len=max_seq_len,
+        max_tokens_per_rank=max_seq_len,
         v41_config={
             "num_hidden_layers": len(ratios),
             "head_dim": 512,
