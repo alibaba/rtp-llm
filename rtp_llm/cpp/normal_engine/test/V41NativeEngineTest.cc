@@ -27,6 +27,7 @@ public:
             initRuntime(static_cast<int>(parallelism.local_rank), false, false, MlaOpsType::AUTO);
         });
         RTP_LLM_CHECK(config.num_layers == 40 && config.gen_num_per_cycle == 0);
+        max_seq_len_ = static_cast<size_t>(config.max_seq_len);
         config.model_type = "deepseek_v41";
         config.input_vocab_size = config.vocab_size;
         config.special_tokens.eos_token_id = -1;
@@ -39,7 +40,7 @@ public:
         params.runtime_config.warm_up = false;
         params.runtime_config.max_generate_batch_size = 2;
         params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-        params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 256;
+        params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = max_seq_len_;
         params.runtime_config.use_batch_decode_scheduler = false;
         params.kv_cache_config.test_block_num = 8 + parallelism.world_rank;
         params.kv_cache_config.seq_size_per_block = params.kv_cache_config.kernel_seq_size_per_block = 256;
@@ -62,7 +63,8 @@ public:
     void enqueue(const std::vector<std::vector<int32_t>>& requests, int new_tokens = 1) {
         RTP_LLM_CHECK(new_tokens > 0 && new_tokens <= 16);
         for (const auto& tokens : requests) {
-            RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= 256);
+            RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= 512
+                          && tokens.size() + new_tokens <= max_seq_len_);
             auto input = std::make_shared<GenerateInput>();
             input->input_ids = torch::tensor(tokens, torch::kInt32);
             input->request_id = ++request_id_;
@@ -130,6 +132,7 @@ private:
     std::vector<GenerateStreamPtr> streams_;
     int64_t request_id_{0};
     size_t free_before_{0};
+    size_t max_seq_len_{0};
 };
 
 }  // namespace test

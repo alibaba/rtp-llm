@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_dp_worker_sm120 import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     checkpoint,
+    context_tables,
     decode_inputs,
     inputs,
     model_config,
@@ -32,7 +33,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 
 
-def run_rank(rank, port, config, initialize_model, new_tokens=1):
+def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     os.environ.update(
@@ -42,7 +43,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
             "DSV41_ENGRAM_CACHE_DIR": str(Path(config["checkpoint_path"]) / "cache"),
             "DSV4_MOE_STRATEGY": "auto",
             "DSV4_MOE_CHUNK_PREFILL": "1",
-            "DSV4_MOE_CHUNK_TOKENS": "4",
+            "DSV4_MOE_CHUNK_TOKENS": "32" if context > 256 else "4",
             "DSV4_MOE_EXTENT_COUNT_FUSE": "1",
             "RTP_LLM_STREAM_ASYNC": "0",
             "RTP_LLM_DEVICE_INPUT": "0",
@@ -67,7 +68,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
     try:
         with torch.inference_mode():
             model, reference = make_workers(
-                rank, config, initialize_model=initialize_model
+                rank, config, initialize_model=initialize_model, max_seq_len=context
             )
             assert model._materialized == initialize_model
             torch.manual_seed(41950)
@@ -113,6 +114,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
             continuations = {}
             calls = {"idle": 0, "active": 0, "decode": 0, "idle_decode": 0}
             injection = {"baseline": 0, "pending": {}, "deferred": False}
+            growth = {"pages": 0, "long_prefill": 0}
 
             def continuation_reference(request):
                 attn = next(iter(request.attention_inputs.values()))
@@ -127,14 +129,23 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
                         assert start == 0 and count == lengths[row]
                         prompt = ids[offset : offset + count]
                         state = {
-                            "cache": tagged_cache(reference),
+                            "cache": tagged_cache(
+                                reference, pages=8 if context > 256 else 4
+                            ),
                             "prompt": tuple(prompt),
                             "tokens": prompt.copy(),
+                            "pages": {},
                         }
+                        state["tables"] = (
+                            context_tables(state["cache"]) if context > 256 else None
+                        )
                         assert request_id not in continuations
                         continuations[request_id] = state
                         reference.kv_cache = state["cache"]
-                        oracle = inputs(reference.kv_cache, prompt, [count])
+                        oracle = inputs(
+                            reference.kv_cache, prompt, [count], tables=state["tables"]
+                        )
+                        growth["long_prefill"] += int(count > 256)
                     else:
                         state = continuations[request_id]
                         sequence = state["tokens"]
@@ -153,7 +164,24 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
                             [start],
                             [history],
                             prompt_lengths=[lengths[row]],
+                            tables=state["tables"],
                         )
+                    if context > 256:
+                        for tag, tagged in request.attention_inputs.items():
+                            table = tagged.kv_cache_kernel_block_id_device[row].tolist()
+                            retained = tag in ("swa_kv", "csa_state")
+                            needed = 1 if retained else (start + count + 255) // 256
+                            pages = table[:needed]
+                            assert len(pages) == needed and min(pages) > 0
+                            assert len(set(pages)) == needed
+                            previous = state["pages"].get(tag, [])
+                            assert pages[: len(previous)] == previous
+                            growth["pages"] += int(
+                                bool(previous) and len(pages) > len(previous)
+                            )
+                            state["pages"][tag] = pages
+                            if retained:
+                                assert len(table) == 1
                     torch.testing.assert_close(
                         request.engram_token_windows[offset : offset + count].cpu(),
                         oracle.engram_token_windows.cpu(),
@@ -289,15 +317,24 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
                 peers = [None] * 8
                 dist.all_gather_object(peers, identities, group=control)
                 assert all(peer == identities for peer in peers)
-                for phase, lengths in enumerate(
+                phases = (
                     (
+                        (253, 255) if rank == 0 else (),
+                        (253 + rank % 3,),
+                        (503,) if rank % 2 else (),
+                        (503,),
+                        (257,) if rank == 7 else (),
+                    )
+                    if context > 256
+                    else (
                         (3, 2) if rank == 0 else (),
                         (125 if new_tokens > 1 else rank + 1,),
                         (2, 1) if rank % 2 else (),
                         (1,),
                         (2,) if rank == 7 else (),
                     )
-                ):
+                )
+                for phase, lengths in enumerate(phases):
                     requests = [
                         [(rank * 7 + phase * 13 + row * 3 + i) % 128 for i in range(n)]
                         for row, n in enumerate(lengths)
@@ -319,16 +356,24 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
                 if new_tokens > 1:
                     injection["baseline"] = calls["decode"]
                     inject_armed.set()
-                    requests = [[31, 32, 33]] if rank == 0 else []
+                    requests = (
+                        [[(31 + i) % 128 for i in range(253 if context > 256 else 3)]]
+                        if rank == 0
+                        else []
+                    )
                     engine.enqueue(requests, new_tokens)
                     assert inject_boundary.wait(
                         60
                     ), "decode did not reach injection boundary"
-                    late = (
-                        [[43, 44]]
-                        if rank == 0
-                        else ([[103, 104, 105]] if rank == 7 else [])
-                    )
+                    late = []
+                    if rank in (0, 7):
+                        first = 43 if rank == 0 else 103
+                        count = (
+                            (503 if rank == 0 else 501)
+                            if context > 256
+                            else (2 if rank == 0 else 3)
+                        )
+                        late = [[(first + i) % 128 for i in range(count)]]
                     engine.enqueue(late, new_tokens)
                     dist.barrier(group=control)
                     inject_release.set()
@@ -351,6 +396,8 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
             assert calls["active"] >= 2 and calls["idle"] >= 1, calls
             if new_tokens > 1:
                 assert calls["decode"] >= 16 and calls["idle_decode"] >= 1, calls
+            if context > 256:
+                assert growth["pages"] > 0 and growth["long_prefill"] > 0, growth
             assert bridge_calls["stage"] == 1
             assert bridge_calls["phase"] == calls["active"] + calls["idle"]
             reference.close()
@@ -361,7 +408,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
                 assert not list(model._engram_cache_dir.glob("*.lease.*"))
                 print(
                     "V4.1 40-layer native DP8 NormalEngine "
-                    f"new_tokens={new_tokens} prematerialized={initialize_model} PASS",
+                    f"new_tokens={new_tokens} context={context} prematerialized={initialize_model} PASS",
                     flush=True,
                 )
     except BaseException:
@@ -379,7 +426,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1):
 
 
 class V41NativeEngineSM120Test(unittest.TestCase):
-    def run_engine(self, initialize_model, new_tokens=1):
+    def run_engine(self, initialize_model, new_tokens=1, context=256):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
@@ -390,7 +437,7 @@ class V41NativeEngineSM120Test(unittest.TestCase):
             sock.close()
             mp.spawn(
                 run_rank,
-                args=(port, config, initialize_model, new_tokens),
+                args=(port, config, initialize_model, new_tokens, context),
                 nprocs=8,
                 join=True,
             )
@@ -403,6 +450,9 @@ class V41NativeEngineSM120Test(unittest.TestCase):
 
     def test_cold_pdfusion_prefill_and_eight_decode_steps(self):
         self.run_engine(initialize_model=False, new_tokens=9)
+
+    def test_two_page_cold_pdfusion_and_late_prefill(self):
+        self.run_engine(initialize_model=False, new_tokens=9, context=512)
 
 
 if __name__ == "__main__":
