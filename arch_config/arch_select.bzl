@@ -223,7 +223,9 @@ def cuda13_test_exec_properties(gpu_count = 1):
 
     Coverage map: x86 tests execute on B300 (L20D_TEST, sm_103 cubins) and on
     L20 (L20_CU13, sm_86/sm_89 cubins); ARM tests execute on GB200
-    (SM100_ARM_CU13, sm_100).
+    (SM100_ARM_CU13, sm_100).  sm8x tests moved off A10 because legacy A10
+    workers run host driver 535/550, below the r580 floor CUDA 13.2 requires
+    (CUDA init fails with error 803), while L20 runs 580.105.
     The sm_120 (x86) and sm_103 (ARM) cubins built by the configs have no
     matching pool yet and are compiled for forward compatibility only.
     """
