@@ -6,6 +6,16 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "linear_replay_inputs_test",
+    srcs = ["LinearReplayInputsTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+cc_test(
     name = "generic_sampler_batch_fallback_test",
     srcs = ["GenericSamplerBatchFallbackTest.cc"],
     deps = [

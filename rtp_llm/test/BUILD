@@ -217,6 +217,12 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_linear_replay_wiring_test",
+    srcs = ["kimi_k3_linear_replay_wiring_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "kimi_k3_rope_test",
     srcs = ["kimi_k3_rope_test.py"],
     deps = ["//rtp_llm:testlib"],

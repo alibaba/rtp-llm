@@ -358,6 +358,7 @@ cc_library(
     hdrs = [
         "KVCacheManager.h",
         "KVCacheMetrics.h",
+        "LinearReplayPool.h",
     ],
     copts = copts() + select({
         "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
@@ -374,6 +375,8 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+        "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps() + select({
         "//:using_remote_kv_cache": [

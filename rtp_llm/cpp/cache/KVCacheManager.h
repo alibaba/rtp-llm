@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -15,6 +16,8 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -111,6 +114,20 @@ public:
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
 
+    const std::map<std::string, std::vector<std::optional<torch_ext::LinearReplayLayerCache>>>&
+    linearReplayByTag() const {
+        return linear_replay_by_tag_;
+    }
+    std::shared_ptr<LinearReplayLease> acquireLinearReplaySlot();
+    // A nonnegative token position retains exactly its canonical state block
+    // per group; -1 retains the complete active tail.
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                  int state_token_position = -1);
+    bool makeLinearReplayTailsPrivate(const BatchKVCacheResourcePtr& resource,
+                                      int                            min_processed_length                      = -1,
+                                      const std::vector<std::shared_ptr<LinearReplayBlockHold>>& request_holds = {});
+    void markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length);
+
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;
     size_t      availableBlocksNum() const;
@@ -152,6 +169,7 @@ public:
     }
 
 private:
+    void initLinearReplayPool();
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
@@ -161,6 +179,9 @@ private:
     // 成员变量
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
+    std::map<std::string, std::vector<std::optional<torch_ext::LinearReplayLayerCache>>> linear_replay_by_tag_;
+    std::shared_ptr<LinearReplaySlotPool>        linear_replay_slots_;
+    std::shared_ptr<LinearReplayRetirementQueue> linear_replay_retirement_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

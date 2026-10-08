@@ -588,8 +588,11 @@ class Runner:
         ):
             if not isinstance(case.prompt, str):
                 raise SmokeFailure("64K profile requires a text prompt")
-            input_ids = self.tokenize(case.prompt)
-            self.save_token_fixture(case.prompt, input_ids)
+            enable_thinking = (
+                False if case.preparation_only or case.thinking_disabled else None
+            )
+            input_ids = self.tokenize(case.prompt, enable_thinking=enable_thinking)
+            self.save_token_fixture(case.prompt, input_ids, enable_thinking=enable_thinking)
             audit["verified_input_len"] = len(input_ids)
             persist()
             if len(input_ids) > 65536 or case.require_chunk:
@@ -736,6 +739,7 @@ class Runner:
             result,
             time.time() - started,
             request_max_tokens,
+            verified_input_len=audit.get("verified_input_len"),
         )
 
     def validate(
@@ -744,6 +748,8 @@ class Runner:
         response: dict[str, Any],
         elapsed_s: float,
         request_max_tokens: int,
+        *,
+        verified_input_len: int | None = None,
     ) -> dict[str, Any]:
         try:
             choice = response["choices"][0]
@@ -809,6 +815,11 @@ class Runner:
             )
 
         input_len = int(aux.get("input_len", 0))
+        if verified_input_len is not None and input_len != verified_input_len:
+            raise SmokeFailure(
+                f"{case.name}: rendered input length {input_len} differs from "
+                f"/tokenize length {verified_input_len}"
+            )
         raw_reuse = int(aux.get("reuse_len", 0))
         prefill_reuse_value = aux.get("prefill_total_reuse_len")
         effective_reuse = (
@@ -1069,7 +1080,7 @@ class Runner:
             if not isinstance(case.prompt, str):
                 raise SmokeFailure("PD group cache smoke requires text prompts")
             role = self.decode_role_addrs[case.decode_owner_rank]
-            token_ids = self.tokenize(case.prompt)
+            token_ids = self.tokenize(case.prompt, enable_thinking=False)
             if len(token_ids) > 65536:
                 raise SmokeFailure(f"{case.name}: grouped input exceeds 64K")
             request_id = group_id + index
@@ -1221,7 +1232,11 @@ class Runner:
             )
             try:
                 row = self.validate(
-                    case, response, time.time() - started, payload["max_tokens"]
+                    case,
+                    response,
+                    time.time() - started,
+                    payload["max_tokens"],
+                    verified_input_len=len(inputs[request_id][1]),
                 )
                 row["phase"] = artifact["phase"]
                 artifact.update(passed=True, result=row)
@@ -1359,12 +1374,13 @@ class Runner:
             f"skipped={stage.get('skipped', False)} owners={stage['decode_owner_ranks']}"
         )
 
-    def tokenize(self, prompt: str) -> list[int]:
+    def tokenize(self, prompt: str, *, enable_thinking: bool | None = None) -> list[int]:
+        payload = {"model": "kimi-k3", "messages": [{"role": "user", "content": prompt}]}
+        if enable_thinking is not None:
+            payload["enable_thinking"] = enable_thinking
         request = urllib.request.Request(
             self.args.base_url.rstrip("/") + "/tokenize",
-            data=json.dumps(
-                {"model": "kimi-k3", "messages": [{"role": "user", "content": prompt}]}
-            ).encode(),
+            data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
         )
         with self.opener.open(request, timeout=self.args.timeout) as response:
@@ -1377,12 +1393,15 @@ class Runner:
             raise SmokeFailure("tokenizer returned invalid token IDs")
         return tokens
 
-    def save_token_fixture(self, prompt: str, tokens: list[int]) -> None:
+    def save_token_fixture(
+        self, prompt: str, tokens: list[int], *, enable_thinking: bool | None = None
+    ) -> None:
         if self.args.output is None:
             return
         directory = self.args.output.parent / "token-fixtures"
         directory.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(prompt.encode()).hexdigest()
+        prompt_digest = hashlib.sha256(prompt.encode()).hexdigest()
+        digest = hashlib.sha256(f"{enable_thinking!r}\0{prompt}".encode()).hexdigest()
         with gzip.open(
             directory / f"{digest}.json.gz", "wt", encoding="utf-8"
         ) as output:
@@ -1391,22 +1410,30 @@ class Runner:
                     "messages": [{"role": "user", "content": prompt}],
                     "input_ids": tokens,
                     "input_len": len(tokens),
-                    "prompt_sha256": digest,
+                    "prompt_sha256": prompt_digest,
+                    "enable_thinking": enable_thinking,
                 },
                 output,
                 ensure_ascii=False,
             )
 
-    def fit_prompt(self, head: str, tail: str, target: int) -> tuple[str, list[int]]:
+    def fit_prompt(
+        self,
+        head: str,
+        tail: str,
+        target: int,
+        *,
+        enable_thinking: bool | None = None,
+    ) -> tuple[str, list[int]]:
         # Query the serving tokenizer, including its exact chat template. The
         # filler is inert; all authoritative records and instructions are last.
         lo, hi = 0, target * 2
         while lo <= hi:
             count = (lo + hi) // 2
             prompt = head + " x" * count + tail
-            tokens = self.tokenize(prompt)
+            tokens = self.tokenize(prompt, enable_thinking=enable_thinking)
             if len(tokens) == target:
-                self.save_token_fixture(prompt, tokens)
+                self.save_token_fixture(prompt, tokens, enable_thinking=enable_thinking)
                 return prompt, tokens
             if len(tokens) < target:
                 lo = count + 1
@@ -1417,9 +1444,9 @@ class Runner:
         for count in range(max(0, hi - 8), lo + 9):
             for suffix in ("\n", " ", " a", "\n\n"):
                 prompt = head + " x" * count + suffix + tail
-                tokens = self.tokenize(prompt)
+                tokens = self.tokenize(prompt, enable_thinking=enable_thinking)
                 if len(tokens) == target:
-                    self.save_token_fixture(prompt, tokens)
+                    self.save_token_fixture(prompt, tokens, enable_thinking=enable_thinking)
                     return prompt, tokens
         raise SmokeFailure(f"cannot construct exact chat input length {target}")
 
@@ -2170,7 +2197,7 @@ class Runner:
             memory_value = f"MEM-{attempt}"
             memory_tail = f'\n只输出 JSON {{"value":"{memory_value}"}}。'
             memory_prompt, _ = self.fit_prompt(
-                f"CACHE:{tag}:memory\n", memory_tail, target
+                f"CACHE:{tag}:memory\n", memory_tail, target, enable_thinking=False
             )
             memory_seed = self._orthogonal_answer(
                 f"tier-memory-seed-{attempt}", memory_prompt, memory_value, "miss"
@@ -2195,7 +2222,10 @@ class Runner:
         witness_value = "WIT"
         witness_tail = f'\n只输出 JSON {{"value":"{witness_value}"}}。'
         witness_prompt, _ = self.fit_prompt(
-            f"CACHE:{self.args.namespace}:witness\n", witness_tail, target
+            f"CACHE:{self.args.namespace}:witness\n",
+            witness_tail,
+            target,
+            enable_thinking=False,
         )
         self._memory_witness = self._orthogonal_answer(
             "tier-witness-seed", witness_prompt, witness_value, "miss"
@@ -2231,7 +2261,7 @@ class Runner:
             device_value = f"DEV-{attempt}"
             device_tail = f'\n只输出 JSON {{"value":"{device_value}"}}。'
             device_prompt, _ = self.fit_prompt(
-                f"CACHE:{tag}:device\n", device_tail, target
+                f"CACHE:{tag}:device\n", device_tail, target, enable_thinking=False
             )
             self._required_stage(
                 f"tier-device-seed-{attempt}",
@@ -2248,10 +2278,13 @@ class Runner:
             seed_tail = f'\n只输出 JSON {{"value":"{partial_seed_value}"}}。'
             query_tail = f'\n只输出 JSON {{"value":"{partial_value}"}}。'
             partial_seed_prompt, seed_ids = self.fit_prompt(
-                f"CACHE:{tag}:partial\n", seed_tail, target + 256
+                f"CACHE:{tag}:partial\n",
+                seed_tail,
+                target + 256,
+                enable_thinking=False,
             )
             partial_prompt = partial_seed_prompt[: -len(seed_tail)] + query_tail
-            query_ids = self.tokenize(partial_prompt)
+            query_ids = self.tokenize(partial_prompt, enable_thinking=False)
             common = next(
                 (
                     index
@@ -2277,7 +2310,9 @@ class Runner:
             )
             miss_value = f"MISS-{attempt}"
             miss_tail = f'\n只输出 JSON {{"value":"{miss_value}"}}。'
-            miss_prompt, _ = self.fit_prompt(f"CACHE:{tag}:cold\n", miss_tail, target)
+            miss_prompt, _ = self.fit_prompt(
+                f"CACHE:{tag}:cold\n", miss_tail, target, enable_thinking=False
+            )
             mixed = [
                 self._orthogonal_answer(
                     f"tier-mixed-{attempt}-device",
@@ -2375,6 +2410,7 @@ class Runner:
                 f"CACHE-PRESSURE:{self.args.namespace}:{index}\n",
                 "\nReply 1.",
                 32769,
+                enable_thinking=False,
             )
             case = Case(
                 f"tier-pressure-{index:02d}",
@@ -2397,11 +2433,7 @@ class Runner:
                 case = self.record_case(
                     f"{name}_{index:02d}",
                     index % owner_count,
-                    words=(
-                        112
-                        if size == 63 and not diagnostic
-                        else 56 if size >= 64 and not diagnostic else 12
-                    ),
+                    words=112 if size >= 63 and not diagnostic else 12,
                 )
                 if diagnostic:
                     # Four-layer Decode can finish 512 tokens before all PD
@@ -2414,26 +2446,23 @@ class Runner:
                         max_tokens=2560 if size >= 8 else 512,
                     )
                 else:
-                    # Keep all 32 rows of the larger DP owner alive while
-                    # the other owner's 31 rows join the same Verify step.
+                    # Keep both owners' boundary batches alive while later
+                    # RDMA handoffs join. A shorter batch-64 answer can finish
+                    # before its owner has all 32 requests in one Verify step.
                     case = replace(
                         case,
-                        max_tokens=(
-                            2560 if size == 63 else 1280 if size >= 64 else 256
-                        ),
+                        max_tokens=2560 if size >= 63 else 256,
                         require_mtp_draft=True,
                         thinking_disabled=True,
                     )
                 cases.append(case)
-            # Group every multi-request case into one Prefill forward. HTTP
-            # arrivals can serialize a small batch on the full model before
-            # the second DP owner reaches its intended Decode bucket.
-            # Large boundary cases also use longer exact answers.
+            # Group admission makes the requested owner-local batch size a
+            # reliable Graph assertion. Independent HTTP requests can arrive
+            # in different scheduler iterations even when sent concurrently.
+            # The longer exact answer keeps all Decode rows alive until both
+            # owners reach their intended Graph buckets.
             self._required_stage(
-                name,
-                cases,
-                concurrent=size > 1,
-                grouped_pd=size > 1,
+                name, cases, concurrent=size > 1, grouped_pd=size > 1
             )
 
     def _orthogonal_page_boundaries(self) -> None:
@@ -2444,7 +2473,10 @@ class Runner:
                 value = f"PAGE-{boundary}-{delta:+d}"
                 tail = f'\n只输出 JSON {{"value":"{value}"}}。'
                 prompt, ids = self.fit_prompt(
-                    f"PAGE:{self.args.namespace}:{value}\n", tail, target
+                    f"PAGE:{self.args.namespace}:{value}\n",
+                    tail,
+                    target,
+                    enable_thinking=False,
                 )
                 case = self._orthogonal_answer(
                     f"orthogonal_page_{boundary}_{delta:+d}",
@@ -2458,8 +2490,8 @@ class Runner:
 
     def _orthogonal_chunk_kv(self) -> None:
         base = f"Long KV pressure test {self.args.namespace}. "
-        overhead = len(self.tokenize(base))
-        if len(self.tokenize(base + " x" * 16)) - overhead != 16:
+        overhead = len(self.tokenize(base, enable_thinking=False))
+        if len(self.tokenize(base + " x" * 16, enable_thinking=False)) - overhead != 16:
             raise SmokeFailure("long-KV seed filler is not one token per repeat")
         # 589824 cached tokens exceed the 6 GiB FP8 MLA expansion budget's
         # 557056-token aligned launch cap, while every seed adds <= 65536 Q.
@@ -2574,7 +2606,10 @@ class Runner:
             value = f"CANCEL-RECOVER-{attempt}"
             tail = f'\n只输出 JSON {{"value":"{value}"}}。'
             prompt, _ = self.fit_prompt(
-                f"CACHE:{self.args.namespace}:cancel:{attempt}\n", tail, 32769
+                f"CACHE:{self.args.namespace}:cancel:{attempt}\n",
+                tail,
+                32769,
+                enable_thinking=False,
             )
             seed = self._orthogonal_answer(
                 f"cancel-memory-seed-{attempt}", prompt, value, "miss"
@@ -2612,7 +2647,10 @@ class Runner:
         independent_value = "CANCEL-INDEPENDENT"
         independent_tail = f'\n只输出 JSON {{"value":"{independent_value}"}}。'
         independent_prompt, _ = self.fit_prompt(
-            f"CACHE:{self.args.namespace}:independent\n", independent_tail, 8193
+            f"CACHE:{self.args.namespace}:independent\n",
+            independent_tail,
+            8193,
+            enable_thinking=False,
         )
         independent = self._orthogonal_answer(
             "cancel-independent-recovery", independent_prompt, independent_value, "miss"
@@ -2684,7 +2722,9 @@ class Runner:
         )
         request = GenerateInput(
             request_id=request_id,
-            token_ids=torch.tensor(self.tokenize(seed.prompt), dtype=torch.int32),
+            token_ids=torch.tensor(
+                self.tokenize(seed.prompt, enable_thinking=False), dtype=torch.int32
+            ),
             mm_inputs=[],
             generate_config=config,
             request_info=RequestInfo(request_id=f"cancel-during-host-load-{attempt}"),

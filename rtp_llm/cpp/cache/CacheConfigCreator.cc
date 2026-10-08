@@ -53,6 +53,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
+    addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay_reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -425,6 +426,115 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     }
 
     return config;
+}
+
+void CacheConfigCreator::configureDecodeLinearPool(CacheConfig&             config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   const RuntimeConfig&     runtime_config) {
+    if (parallelism_config.role_type != RoleType::DECODE) {
+        return;
+    }
+    auto groups = config.topology().groups();
+    bool changed = false;
+    for (auto& group : groups) {
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.policy.explicit_block_num > 0) {
+            continue;
+        }
+        constexpr uint64_t kTailBlocksPerStream = 2;
+        constexpr uint64_t kReserveStreams = 4;
+        RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
+                                "Decode LINEAR pool requires positive concurrency, got %ld",
+                                static_cast<long>(runtime_config.max_generate_batch_size));
+        const uint64_t concurrency = static_cast<uint64_t>(runtime_config.max_generate_batch_size);
+        RTP_LLM_CHECK_WITH_INFO(concurrency <= std::numeric_limits<uint32_t>::max() / kTailBlocksPerStream
+                                                  - kReserveStreams,
+                                "Decode LINEAR pool block count overflows uint32: concurrency=%lu",
+                                static_cast<unsigned long>(concurrency));
+        group.policy.explicit_block_num = static_cast<uint32_t>(kTailBlocksPerStream * (concurrency + kReserveStreams));
+        group.policy.charge_to_paged_budget = true;
+        RTP_LLM_LOG_INFO("Decode LINEAR pool tag=%s concurrency=%lu blocks=%u",
+                         group.tag.c_str(),
+                         static_cast<unsigned long>(concurrency),
+                         group.policy.explicit_block_num);
+        changed = true;
+    }
+    if (changed) {
+        const auto layers = config.topology().layers();
+        config.setTopology(std::move(groups), layers);
+    }
+}
+
+void CacheConfigCreator::configureLinearReplay(CacheConfig&                                      config,
+                                               const ModelConfig&                                model_config,
+                                               const ParallelismConfig&                          parallelism_config,
+                                               const RuntimeConfig&                              runtime_config,
+                                               const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                               bool                                              is_mtp) {
+    if (!is_mtp || parallelism_config.role_type == RoleType::PREFILL || !sp_config
+        || sp_config->type != SP_TYPE_MTP || sp_config->gen_num_per_cycle <= 0) {
+        return;
+    }
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const auto layers = config.layerIdsForGroup(group.tag);
+        if (std::any_of(layers.begin(), layers.end(),
+                        [&](int layer) { return layer >= 0 && static_cast<size_t>(layer) < config.layer_num; })) {
+            config.linear_replay_group_ids.push_back(static_cast<int>(group_id));
+        }
+    }
+    if (config.linear_replay_group_ids.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0
+                                && runtime_config.max_generate_batch_size <= std::numeric_limits<int>::max(),
+                            "LINEAR replay requires a positive slot count fitting int");
+    RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
+                            "LINEAR replay verify width overflows int");
+    const auto& linear = model_config.linear_attention_config;
+    config.linear_replay_slot_count = static_cast<int>(runtime_config.max_generate_batch_size);
+    config.linear_replay_max_steps  = static_cast<int>(sp_config->gen_num_per_cycle) + 1;
+    config.linear_replay_key_heads  = linear.linear_num_key_heads;
+    config.linear_replay_value_heads = linear.linear_num_value_heads;
+    config.linear_replay_key_dim    = linear.linear_key_head_dim;
+    config.linear_replay_value_dim  = linear.linear_value_head_dim;
+    config.linear_replay_conv_width = linear.linear_conv_kernel_dim;
+    config.linear_replay_conv_dtype = linear.conv_state_dtype;
+    config.linear_replay_vector_gate = linear.replay_vector_gate;
+    const size_t slots = static_cast<size_t>(config.linear_replay_slot_count);
+    const size_t steps = static_cast<size_t>(config.linear_replay_max_steps);
+    const size_t tp = static_cast<size_t>(std::max<int64_t>(1, parallelism_config.get_attn_tp_size()));
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+                                && linear.linear_num_key_heads % static_cast<int64_t>(tp) == 0
+                                && linear.linear_num_value_heads % static_cast<int64_t>(tp) == 0,
+                            "LINEAR replay requires head counts divisible by attention TP");
+    const size_t key_heads = static_cast<size_t>(linear.linear_num_key_heads) / tp;
+    const size_t value_heads = static_cast<size_t>(linear.linear_num_value_heads) / tp;
+    const size_t key_dim = static_cast<size_t>(linear.linear_key_head_dim);
+    const size_t value_dim = static_cast<size_t>(linear.linear_value_head_dim);
+    const size_t gate_dim = config.linear_replay_vector_gate ? key_dim : 1;
+    size_t bytes_per_slot = 2 * sizeof(int64_t) + 2 * sizeof(int32_t);
+    for (const int group_id : config.linear_replay_group_ids) {
+        const auto& group = config.groups().at(static_cast<size_t>(group_id));
+        const auto layers = config.layerIdsForGroup(group.tag);
+        const size_t layer_count = static_cast<size_t>(std::count_if(
+            layers.begin(), layers.end(),
+            [&](int layer) { return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num; }));
+        size_t floats_per_step = 0;
+        addBudgetBytes(floats_per_step, key_heads * key_dim);
+        addBudgetBytes(floats_per_step, value_heads * value_dim);
+        addBudgetBytes(floats_per_step, value_heads * gate_dim);
+        size_t layer_bytes = 0;
+        addBudgetBytes(layer_bytes, floats_per_step * sizeof(float), steps);
+        const size_t channels = 2 * key_heads * key_dim + value_heads * value_dim;
+        addBudgetBytes(layer_bytes, channels * getTypeSize(linear.conv_state_dtype), steps);
+        addBudgetBytes(bytes_per_slot, layer_bytes, layer_count);
+    }
+    addBudgetBytes(config.linear_replay_reserve_bytes, bytes_per_slot, slots);
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,

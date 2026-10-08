@@ -1,7 +1,7 @@
 """Launch one BF16-compute PD endpoint; FP8 operands are explicit options.
 
-Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
-a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
+Run as the workspace owner in a verified RDMA runtime container after a fresh
+same-cluster fleet selection. Build independently on each selected host.
 This launcher does not select hosts or certify runtime precision/Graph/RDMA.
 """
 
@@ -10,7 +10,6 @@ import csv
 import json
 import math
 import os
-import pwd
 import re
 import socket
 import subprocess
@@ -464,9 +463,9 @@ def main():
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return
-    if pwd.getpwuid(os.getuid()).pw_name != "luohaocheng.lhc":
+    if os.geteuid() == 0:
         raise ValueError(
-            "Must run as luohaocheng.lhc inside the verified runtime container"
+            "Run as the workspace owner inside the verified runtime container"
         )
     run = Path(args.run_dir).resolve()
     require_local(run.parent)

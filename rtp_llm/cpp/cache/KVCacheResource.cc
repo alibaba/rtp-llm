@@ -58,6 +58,8 @@ std::vector<std::string> GroupBlockIds::orderedTags() const {
 }
 
 void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) {
+    linear_replay_prefix_limits_.clear();
+    linear_replay_active_begins_.clear();
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     GroupBlockIds candidate;
     const auto& groups = topology->groups();

@@ -111,6 +111,11 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
     }
     out.sp_logical_requests = requests;
     out.sp_logical_tokens = tokens;
+    if (source.linear_replay) {
+        RTP_LLM_CHECK_WITH_INFO(source.is_target_verify && !prefill,
+                                "LINEAR replay metadata is only valid for target verification");
+        out.linear_replay = source.linear_replay->padToBatch(requests + extra_requests);
+    }
     if (!extra_tokens) {
         return out;
     }
@@ -273,6 +278,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
+    py_attn_inputs.linear_replay = inputs.linear_replay;
 
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
         if (!tensor.defined()) {
@@ -892,7 +898,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs, bo
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
         attention_inputs = buildPyAttentionInputs(inputs);
     }
-    if (!inputs.warmup && inputs.pd_separation) {
+    if (!inputs.warmup && inputs.pd_separation && !inputs.is_target_verify) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(raw_inputs);
         if (attention_inputs.cache_store_inputs.has_value()) {
             attention_inputs.cache_store_writer = cache_store_async_writer_;
@@ -977,6 +983,17 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& raw_inputs
     }
 }
 
+void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
+    if (!inputs.linear_replay) {
+        return;
+    }
+    const auto batch = inputs.linear_replay->slot_ids.numel();
+    RTP_LLM_CHECK_WITH_INFO(inputs.is_target_verify && batch > 0 && inputs.combo_tokens.numel() % batch == 0,
+                            "LINEAR replay metadata requires a uniform target verification batch");
+    py::gil_scoped_acquire gil;
+    py_model_.attr("finalize_linear_replay")(*inputs.linear_replay, inputs.combo_tokens.numel() / batch);
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
     auto padded_inputs = sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs) : GptModelInputs{};
     const auto& inputs = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
@@ -1010,7 +1027,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
-            return with_generation_prefill_cuda_graph_status(forwardMicroBatched(inputs));
+            auto outputs = forwardMicroBatched(inputs);
+            finalizeLinearReplay(inputs);
+            return with_generation_prefill_cuda_graph_status(std::move(outputs));
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
@@ -1126,6 +1145,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
                     .narrow(0, 0, raw_inputs.combo_tokens.numel()).clone();
             }
         }
+        finalizeLinearReplay(inputs);
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

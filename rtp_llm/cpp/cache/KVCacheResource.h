@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <sstream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -178,6 +179,29 @@ public:
 
     void swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs);
 
+    void restrictLinearReplayPrefix(std::string_view tag, size_t canonical_slots) {
+        auto [it, inserted] = linear_replay_prefix_limits_.try_emplace(std::string(tag), canonical_slots);
+        if (!inserted) {
+            it->second = std::min(it->second, canonical_slots);
+        }
+    }
+    bool canPublishLinearReplayBlock(std::string_view tag, size_t position) const {
+        const auto it = linear_replay_prefix_limits_.find(std::string(tag));
+        return it == linear_replay_prefix_limits_.end() || position < it->second;
+    }
+    size_t linearReplayPrefixLimit(std::string_view tag) const {
+        const auto it = linear_replay_prefix_limits_.find(std::string(tag));
+        return it == linear_replay_prefix_limits_.end() ? std::numeric_limits<size_t>::max() : it->second;
+    }
+    void setLinearReplayActiveBegin(std::string_view tag, size_t begin) {
+        linear_replay_active_begins_[std::string(tag)] = begin;
+    }
+    size_t linearReplayActiveBegin(std::string_view tag, size_t allocated_end) const {
+        const size_t tail_begin = allocated_end > 2 ? allocated_end - 2 : 0;
+        const auto it = linear_replay_active_begins_.find(std::string(tag));
+        return it == linear_replay_active_begins_.end() ? tail_begin : std::min(tail_begin, it->second);
+    }
+
     std::string debugString() const;
 
 private:
@@ -188,6 +212,8 @@ private:
     GroupBlockIds         group_block_ids;
     CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
+    std::unordered_map<std::string, size_t> linear_replay_prefix_limits_;
+    std::unordered_map<std::string, size_t> linear_replay_active_begins_;
     bool                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};

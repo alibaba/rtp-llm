@@ -598,6 +598,31 @@ public:
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
 
+    struct LinearReplayWindow {
+        int64_t verify_epoch = 0;
+        int32_t produced_steps = 0;
+        torch::Tensor accept_len_gpu;
+        torch::Tensor anchor_block_ids_gpu;
+        torch::Tensor anchor_processed_len_gpu;
+        std::shared_ptr<LinearReplayLease> lease;
+        std::shared_ptr<LinearReplayBlockHold> state_block_hold;
+        std::shared_ptr<torch::Event> device_ready;
+    };
+
+    struct LinearReplayRound {
+        int64_t verify_epoch = 0;
+        std::shared_ptr<LinearReplayLease> lease;
+        std::shared_ptr<const LinearReplayWindow> previous_window;
+        std::shared_ptr<LinearReplayBlockHold> state_block_hold;
+        std::vector<int32_t> initial_block_ids;
+        std::shared_ptr<LinearReplayBlockHold> initial_state_hold;
+    };
+
+    absl::StatusOr<LinearReplayRound> prepareLinearReplayRound();
+    void publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window);
+    std::shared_ptr<LinearReplayBlockHold> linearReplayStateBlockHold() const;
+    void clearLinearReplayWindow();
+
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
     // next_seq_len, propose_tokens; epoch guards stale clears in tests.
@@ -976,6 +1001,8 @@ protected:
     // their corresponding async/sync publisher installs a usable state.
     std::shared_ptr<std::mutex>        mtp_async_state_mutex_ = std::make_shared<std::mutex>();
     MtpAsyncDeviceState                mtp_async_state_;
+    int64_t linear_replay_epoch_counter_ = 0;
+    std::shared_ptr<const LinearReplayWindow> linear_replay_window_;
     uint64_t                           mtp_async_epoch_counter_ = 0;
     NormalAsyncDeviceState             normal_async_state_;
     uint64_t                           normal_async_epoch_counter_       = 0;

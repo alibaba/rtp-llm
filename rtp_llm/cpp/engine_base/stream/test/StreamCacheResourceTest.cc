@@ -381,6 +381,30 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequestFlags) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay_group_ids = {0};
+    config.linear_replay_slot_count = 2;
+    config.linear_replay_max_steps = 4;
+    config.linear_replay_key_heads = 1;
+    config.linear_replay_value_heads = 1;
+    config.linear_replay_key_dim = 1;
+    config.linear_replay_value_dim = 1;
+    config.linear_replay_conv_width = 2;
+    config.linear_replay_conv_dtype = DataType::TYPE_FP16;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    stream_->generate_input_->generate_config->force_disable_sp_run = true;
+
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_NE(resource.linearReplayLease(), nullptr);
+    EXPECT_TRUE(stream_->prepareLinearReplayRound().ok());
+}
+
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
         auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
@@ -437,6 +461,38 @@ TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapUsesGroupCheckpointSpan) {
                   group.policy.group_type == CacheGroupType::LINEAR ?
                       (BlockIndicesType{0, 1, 3, 2, 4, 5}) :
                       (BlockIndicesType{0, 1, 2, 3, 4, 5}));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapSkipsReplayGroupsAcrossCheckpointBoundary) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    auto groups = config.topology().groups();
+    const auto layers = config.topology().layers();
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        auto& group = groups[group_id];
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            auto spec = group.spec->clone();
+            spec->seq_size_per_block = 32768;
+            group.spec = std::move(spec);
+            config.linear_replay_group_ids.push_back(static_cast<int>(group_id));
+        }
+    }
+    ASSERT_EQ(config.linear_replay_group_ids.size(), 1);
+    config.setTopology(std::move(groups), layers);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(config);
+    StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+    resource.init(1);
+    auto& batch = resource.kvCacheMutable();
+    for (const auto& group : config.topology().groups()) {
+        batch.mutableBlockIds(0, group.tag).assign({0, 1, 2, 3, 4});
+    }
+
+    // At 65538 -> 65542 the legacy swap would access slot 5, but replay
+    // groups publish the accepted state separately and retain this table.
+    resource.updateLinearBlocks(0, 65538, 65542);
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(batch.blocks(0, group.tag), (BlockIndicesType{0, 1, 2, 3, 4}));
     }
 }
 

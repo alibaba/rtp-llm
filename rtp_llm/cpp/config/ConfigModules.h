@@ -696,6 +696,9 @@ struct LinearAttentionConfig {
     int         linear_value_head_dim  = 0;
     DataType    ssm_state_dtype        = DataType::TYPE_BF16;
     DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    // The gate is per key channel for some LINEAR implementations and scalar
+    // per value head for others. Replay uses this model property, not a model name.
+    bool        replay_vector_gate      = false;
     std::string to_string() const;
 };
 

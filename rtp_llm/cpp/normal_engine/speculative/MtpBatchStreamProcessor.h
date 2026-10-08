@@ -21,7 +21,8 @@ public:
         fixed_mtp_update_layout_(model_config.model_type == "kimi_k3" && sp_config.type == SP_TYPE_MTP),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
-        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
+        linear_replay_group_ids_(cache_config.linear_replay_group_ids) {}
 
     // Native K3 modeling uses request-major Q slots even with synchronous
     // scheduling. Accept lengths select outputs, never the forward shape.
@@ -51,6 +52,11 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+    absl::Status gatherLinearReplayInputs(const StreamGroups& stream_groups,
+                                          const CacheConfig& cache_config,
+                                          GptModelInputs& model_input,
+                                          TensorHolder& host_holder,
+                                          std::vector<GenerateStream::LinearReplayRound>& rounds) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
@@ -201,6 +207,7 @@ protected:
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;
     bool    dspark_sample_from_anchor_ = true;
+    std::vector<int> linear_replay_group_ids_;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

@@ -1482,6 +1482,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              draft_token_ids_t;
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
+    std::vector<GenerateStream::LinearReplayRound> replay_rounds;
+    std::optional<LinearReplayInputs> target_linear_replay;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
     auto                       spec_logits_result     = std::make_shared<SpecLogitsVerifyRunner::LaunchResult>();
     int64_t                    model_forward_us       = 0;
@@ -1582,6 +1584,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 } else {
                     batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input, buffer_holder_);
                 }
+                if (cache_manager_ && !cache_manager_->cacheConfig().linear_replay_group_ids.empty()) {
+                    RETURN_IF_STATUS_ERROR(batch_stream_processor_->gatherLinearReplayInputs(
+                        stream_groups, cache_manager_->cacheConfig(), model_input, buffer_holder_, replay_rounds));
+                }
                 ensureModelInputsOnCuda(model_input, "decode.prepare_decode_input");
             }
             tpSyncModelInputs(model_input, parallelism_config_);
@@ -1590,6 +1596,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
         }
+        target_linear_replay = std::move(model_input.linear_replay);
+        model_input.linear_replay.reset();
         batch_size = model_input.input_lengths.size(0);
 
         releaseAllModelBuffers();
@@ -1662,7 +1670,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output          = runTargetVerifyForward(model_input, stream_groups);
+        model_input.linear_replay = target_linear_replay;
+        try {
+            model_output = runTargetVerifyForward(model_input, stream_groups);
+        } catch (...) {
+            recordLinearReplayLastUse(replay_rounds);
+            throw;
+        }
+        recordLinearReplayLastUse(replay_rounds);
+        model_input.linear_replay.reset();
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1882,6 +1898,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                 model_input.kv_cache_kernel_block_id,
                                 std::move(draft_prefill_model_output),
                                 std::move(draft_prefill_sampler_output),
+                                target_linear_replay,
+                                replay_rounds,
                                 std::move(rejection_event),
                                 std::move(draft_event));
 }
@@ -2373,6 +2391,8 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                                const torch::Tensor&                         kv_cache_kernel_block_id,
                                                GptModelOutputs                              draft_prefill_model_output,
                                                SamplerOutput                 draft_prefill_sampler_output,
+                                               const std::optional<LinearReplayInputs>& linear_replay,
+                                               const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                                std::shared_ptr<torch::Event> rejection_event,
                                                std::shared_ptr<torch::Event> draft_event) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
@@ -2393,6 +2413,12 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                           std::move(draft_prefill_sampler_output)};
         result =
             batch_stream_processor_->dispatchDecode(stream_groups, speculative_sampler_output, draft_prefill_output);
+        if (result.ok() && linear_replay) {
+            publishLinearReplayWindows(stream_groups,
+                                       *linear_replay,
+                                       replay_rounds,
+                                       speculative_sampler_output.accept_len.clone());
+        }
         if (result.ok() && useAsyncDeviceState()) {
             publishSyncMtpDeviceState(
                 stream_groups, speculative_sampler_output, verify_position_ids, draft_prefill_output);
@@ -2768,7 +2794,9 @@ bool MtpExecutor::useStreamAsync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
     }();
-    return enabled;
+    // LINEAR replay keeps accepted-prefix publication in one ordered decode
+    // stream until the grouped cache allocator has committed the new tail.
+    return enabled && !(cache_manager_ && !cache_manager_->cacheConfig().linear_replay_group_ids.empty());
 }
 
 bool MtpExecutor::useAsyncDeviceState() const {
@@ -2786,6 +2814,9 @@ bool MtpExecutor::useDropBroadSync() const {
 }
 
 bool MtpExecutor::useAsyncPrepare() const {
+    if (cache_manager_ && !cache_manager_->cacheConfig().linear_replay_group_ids.empty()) {
+        return false;
+    }
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
     }();
@@ -2815,6 +2846,52 @@ torch::Tensor MtpExecutor::advanceDSparkPositionIds(const torch::Tensor& verify_
     auto verify_positions = verify_position_ids.reshape({batch_size, verify_width, position_factor});
     auto accept_offsets   = accept_len.to(torch::kInt32).reshape({batch_size, 1});
     return (verify_positions.select(1, 0) + accept_offsets).to(torch::kInt32).contiguous();
+}
+
+void MtpExecutor::recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds) {
+    if (rounds.empty()) {
+        return;
+    }
+    auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(cuda_graph::graphGetCurrentStream());
+    for (const auto& round : rounds) {
+        if (round.lease) round.lease->recordLastUse(ready);
+        if (round.state_block_hold) round.state_block_hold->recordLastUse(ready);
+        if (round.initial_state_hold) round.initial_state_hold->recordLastUse(ready);
+        if (round.previous_window && round.previous_window->state_block_hold) {
+            round.previous_window->state_block_hold->recordLastUse(ready);
+        }
+    }
+}
+
+void MtpExecutor::publishLinearReplayWindows(
+    const StreamGroups& stream_groups,
+    const LinearReplayInputs& replay,
+    const std::vector<GenerateStream::LinearReplayRound>& rounds,
+    const torch::Tensor& accept_lengths) {
+    const auto streams = stream_groups.allStreams();
+    RTP_LLM_CHECK_WITH_INFO(rounds.size() == streams.size(), "LINEAR replay round batch mismatch");
+    auto anchors = replay.active_block_ids.clone();
+    auto processed_lengths = replay.anchor_processed_lengths.clone();
+    auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(cuda_graph::graphGetCurrentStream());
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        const auto& round = rounds[static_cast<size_t>(row)];
+        if (round.lease) {
+            auto window = std::make_shared<GenerateStream::LinearReplayWindow>();
+            window->verify_epoch = round.verify_epoch;
+            window->produced_steps = static_cast<int32_t>(propose_step_ + 1);
+            window->accept_len_gpu = accept_lengths.narrow(0, row, 1);
+            window->anchor_block_ids_gpu = anchors.narrow(1, row, 1);
+            window->anchor_processed_len_gpu = processed_lengths.narrow(0, row, 1);
+            window->lease = round.lease;
+            window->state_block_hold = round.state_block_hold;
+            window->device_ready = ready;
+            stream->publishLinearReplayWindow(std::move(window));
+        }
+        ++row;
+    }
 }
 
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,

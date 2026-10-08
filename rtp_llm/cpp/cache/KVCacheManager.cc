@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -29,6 +30,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -294,6 +296,7 @@ bool KVCacheManager::init() {
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
+    initLinearReplayPool();
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
@@ -603,6 +606,213 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
         global_layer_ids.push_back(global_layer_id);
     }
     return projectLayout(coordinator_manager_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
+}
+
+void KVCacheManager::initLinearReplayPool() {
+    if (config_.linear_replay_group_ids.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK(config_.linear_replay_slot_count > 0 && config_.linear_replay_max_steps > 0);
+    const auto layout = coordinator_manager_->allLayerCacheBase();
+    const auto tp = std::max<int64_t>(1, parallelism_config_.get_attn_tp_size());
+    RTP_LLM_CHECK(config_.linear_replay_key_heads > 0 && config_.linear_replay_value_heads > 0
+                  && config_.linear_replay_key_heads % tp == 0 && config_.linear_replay_value_heads % tp == 0
+                  && config_.linear_replay_key_dim > 0 && config_.linear_replay_value_dim > 0
+                  && config_.linear_replay_conv_width > 1);
+    const int64_t slots = config_.linear_replay_slot_count;
+    const int64_t steps = config_.linear_replay_max_steps;
+    const int64_t key_heads = config_.linear_replay_key_heads / tp;
+    const int64_t value_heads = config_.linear_replay_value_heads / tp;
+    const int64_t key_dim = config_.linear_replay_key_dim;
+    const int64_t value_dim = config_.linear_replay_value_dim;
+    const int64_t gate_dim = config_.linear_replay_vector_gate ? key_dim : 1;
+    const int64_t channels = 2 * key_heads * key_dim + value_heads * value_dim;
+    torch::Device log_device(torch::kCUDA);
+    for (const int group_id : config_.linear_replay_group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        auto& layers = linear_replay_by_tag_[group.tag];
+        layers.resize(config_.layer_num);
+        for (const int layer_id : config_.layerIdsForGroup(group.tag)) {
+            if (layer_id < 0 || layer_id >= static_cast<int>(config_.layer_num)) {
+                continue;
+            }
+            const auto& base = layout.at(group.tag, static_cast<size_t>(layer_id)).kv_addr;
+            RTP_LLM_CHECK_WITH_INFO(base.defined(), "LINEAR replay layer %d tag=%s has no cache buffer",
+                                    layer_id, group.tag.c_str());
+            log_device = base.device();
+            auto f32 = torch::TensorOptions().device(log_device).dtype(torch::kFloat32);
+            torch_ext::LinearReplayLayerCache replay;
+            replay.k = torch::empty({slots, steps, key_heads, key_dim}, f32);
+            replay.u = torch::empty({slots, steps, value_heads, value_dim}, f32);
+            replay.g = torch::empty({slots, steps, value_heads, gate_dim}, f32);
+            replay.conv_inputs = torch::empty({slots, steps, channels},
+                                              f32.dtype(dataTypeToTorchType(config_.linear_replay_conv_dtype)));
+            layers[static_cast<size_t>(layer_id)] = std::move(replay);
+        }
+    }
+    const auto i64 = torch::TensorOptions().device(log_device).dtype(torch::kInt64);
+    const auto generations = torch::zeros({slots}, i64);
+    const auto epochs = torch::zeros({slots}, i64);
+    const auto counts = torch::zeros({slots}, i64.dtype(torch::kInt32));
+    const auto errors = torch::zeros({slots}, i64.dtype(torch::kInt32));
+    for (auto& [tag, layers] : linear_replay_by_tag_) {
+        for (auto& layer : layers) {
+            if (layer) {
+                layer->slot_generations = generations;
+                layer->log_epochs = epochs;
+                layer->valid_counts = counts;
+                layer->error_flags = errors;
+            }
+        }
+    }
+    linear_replay_slots_ = std::make_shared<LinearReplaySlotPool>(static_cast<size_t>(slots));
+    linear_replay_retirement_ = std::make_shared<LinearReplayRetirementQueue>();
+}
+
+std::shared_ptr<LinearReplayLease> KVCacheManager::acquireLinearReplaySlot() {
+    if (!linear_replay_slots_) {
+        return nullptr;
+    }
+    linear_replay_retirement_->reap();
+    return linear_replay_slots_->acquire();
+}
+
+std::shared_ptr<LinearReplayBlockHold> KVCacheManager::holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                              int state_token_position) {
+    if (!resource || config_.linear_replay_group_ids.empty()) {
+        return nullptr;
+    }
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> held;
+    for (const int group_id : config_.linear_replay_group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const auto& pool = coordinator_manager_->groupBlockPools().at(static_cast<size_t>(group_id));
+        std::unordered_set<BlockIdxType> unique;
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, group.tag);
+            size_t begin = resource->cacheResource(batch).linearReplayActiveBegin(group.tag, blocks.size());
+            size_t      end    = blocks.size();
+            if (state_token_position >= 0) {
+                begin = static_cast<size_t>(state_token_position) / group.seqSizePerBlock();
+                RTP_LLM_CHECK_WITH_INFO(begin < end, "LINEAR replay state position exceeds its block table");
+                end = begin + 1;
+            }
+            for (size_t position = begin; position < end; ++position) {
+                if (blocks[position] > 0) {
+                    unique.insert(blocks[position]);
+                }
+            }
+        }
+        BlockIndicesType ids(unique.begin(), unique.end());
+        if (!ids.empty()) {
+            pool->incRef(ids);
+            held.emplace_back(pool, std::move(ids));
+        }
+    }
+    auto* block_hold = new LinearReplayBlockHold;
+    for (const auto& [pool, ids] : held) {
+        block_hold->blocks_by_pool[pool.get()].insert(ids.begin(), ids.end());
+    }
+    return std::shared_ptr<LinearReplayBlockHold>(
+        block_hold,
+        [retirement = linear_replay_retirement_, held = std::move(held)](LinearReplayBlockHold* value) mutable {
+            const auto event = value->lastUse();
+            delete value;
+            retirement->retire(event, [held = std::move(held)] {
+                for (const auto& [pool, ids] : held) {
+                    pool->decRef(ids);
+                }
+            });
+        });
+}
+
+bool KVCacheManager::makeLinearReplayTailsPrivate(
+    const BatchKVCacheResourcePtr&                             resource,
+    int                                                        min_processed_length,
+    const std::vector<std::shared_ptr<LinearReplayBlockHold>>& request_holds) {
+    if (!resource || config_.linear_replay_group_ids.empty()) {
+        return true;
+    }
+    linear_replay_retirement_->reap();
+    std::unordered_set<const LinearReplayBlockHold*> owned_holds;
+    for (const auto& hold : request_holds) {
+        if (hold) {
+            owned_holds.insert(hold.get());
+        }
+    }
+    struct Replacement {
+        int batch;
+        std::string tag;
+        size_t position;
+        BlockIdxType source;
+        BlockIdxType destination;
+        DeviceBlockPoolPtr pool;
+    };
+    std::vector<Replacement> replacements;
+    struct ActiveBegin { int batch; std::string tag; size_t begin; };
+    std::vector<ActiveBegin> active_begins;
+    for (const int group_id : config_.linear_replay_group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const auto& pool = coordinator_manager_->groupBlockPools().at(static_cast<size_t>(group_id));
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, group.tag);
+            size_t begin = blocks.size() > 2 ? blocks.size() - 2 : 0;
+            if (min_processed_length >= 0) {
+                begin = std::min(begin, static_cast<size_t>(min_processed_length) / group.seqSizePerBlock());
+            }
+            active_begins.push_back({batch, group.tag, begin});
+            for (size_t position = begin; position < blocks.size(); ++position) {
+                const auto source = blocks[position];
+                uint32_t   owned_references = 1;
+                for (const auto* hold : owned_holds) {
+                    owned_references += hold->contains(pool.get(), source);
+                }
+                // Verify and rebuild are ordered on the same compute stream.
+                // Our own retained anchor is safe to update in place; external
+                // request/tree references still require a private destination.
+                if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
+                    continue;
+                }
+                const auto destination = pool->malloc();
+                if (!destination) {
+                    RTP_LLM_LOG_WARNING("LINEAR replay tail copy failed tag=%s batch=%d position=%zu free=%zu "
+                                        "total=%zu staged=%zu",
+                                        group.tag.c_str(), batch, position, pool->freeBlocksNum(),
+                                        pool->totalBlocksNum(), replacements.size());
+                    for (const auto& item : replacements) {
+                        item.pool->decRef(item.destination);
+                    }
+                    return false;
+                }
+                pool->incRef(*destination);
+                replacements.push_back({batch, group.tag, position, source, *destination, pool});
+            }
+        }
+    }
+    for (const auto& item : replacements) {
+        resource->mutableBlockIds(item.batch, item.tag).setAt(item.position, item.destination);
+        resource->cacheResource(item.batch).restrictLinearReplayPrefix(item.tag, item.position);
+        if (item.source > 0) {
+            item.pool->decRef(item.source);
+        }
+    }
+    for (const auto& item : active_begins) {
+        resource->cacheResource(item.batch).setLinearReplayActiveBegin(item.tag, item.begin);
+        resource->cacheResource(item.batch).restrictLinearReplayPrefix(item.tag, item.begin);
+    }
+    return true;
+}
+
+void KVCacheManager::markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length) {
+    if (!resource) {
+        return;
+    }
+    for (const int group_id : config_.linear_replay_group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const size_t position = static_cast<size_t>(std::max(0, processed_length)) / group.seqSizePerBlock();
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            resource->cacheResource(batch).restrictLinearReplayPrefix(group.tag, position);
+        }
+    }
 }
 
 // 资源统计和信息查询

@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 from rtp_llm.ops.compute_ops import (
     BertEmbeddingInputs,
+    LinearReplayInputs,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -69,6 +70,24 @@ class TaggedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class LinearReplayMetadataModel:
+    """Expose all live Verify rows and any stale graph bucket tail."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        replay = inputs.attention_inputs["full"].linear_replay
+        valid = replay.slot_ids >= 0
+        signature = (
+            torch.where(valid, replay.slot_ids, 0).sum()
+            + 10 * torch.where(valid, replay.active_block_ids[1], 0).sum()
+            + 100 * torch.where(valid, replay.verify_epochs, 0).sum()
+            + torch.where(valid, replay.prev_accept_lengths, 0).sum()
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.to(torch.bfloat16))
 
 
 class TaggedDecodePaddingModel:
@@ -505,6 +524,65 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_target_linear_replay_metadata_tracks_growing_and_shrinking_batches(self):
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            LinearReplayMetadataModel(),
+            HIDDEN_SIZE,
+            64,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            GROUP_TAGS,
+            True,
+            2,
+            0,
+            2,
+        )
+        for batch, first_block, epoch in ((4, 10, 1), (2, 20, 2), (3, 30, 3)):
+            with self.subTest(batch=batch):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 2, "aux": 1},
+                    batch_size=batch,
+                    query_len=2,
+                    prefix_len=1,
+                )
+                replay = LinearReplayInputs()
+                device = "cuda"
+                replay.slot_ids = torch.arange(1, batch + 1, dtype=torch.int32, device=device)
+                replay.slot_generations = torch.ones(batch, dtype=torch.int64, device=device)
+                replay.active_block_ids = torch.zeros((2, batch), dtype=torch.int32, device=device)
+                replay.active_block_ids[1] = torch.arange(
+                    first_block, first_block + batch, dtype=torch.int32, device=device
+                )
+                replay.prev_accept_lengths = torch.ones(batch, dtype=torch.int32, device=device)
+                replay.history_valid_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+                replay.history_epochs = torch.zeros(batch, dtype=torch.int64, device=device)
+                replay.verify_epochs = torch.full((batch,), epoch, dtype=torch.int64, device=device)
+                replay.init_kinds = torch.zeros(batch, dtype=torch.int32, device=device)
+                replay.state_read_block_ids = torch.zeros((2, batch), dtype=torch.int32, device=device)
+                replay.anchor_processed_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+                tagged_inputs = inputs.attention_inputs
+                for tag_inputs in tagged_inputs.values():
+                    tag_inputs.linear_replay = replay
+                inputs.attention_inputs = tagged_inputs
+
+                self.assertTrue(runner.canRun(inputs))
+                result = runner.forward(inputs)
+                expected = (
+                    batch * (batch + 1) // 2
+                    + 10 * (batch * first_block + batch * (batch - 1) // 2)
+                    + 100 * batch * epoch
+                    + batch
+                )
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    result.hidden_states,
+                    torch.full_like(result.hidden_states, expected),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()

@@ -167,6 +167,7 @@ class KimiLinear(BaseModel):
         config.linear_attention_config.linear_num_key_heads = num_heads
         config.linear_attention_config.linear_num_value_heads = num_heads
         config.linear_attention_config.linear_conv_kernel_dim = conv_kernel_size
+        config.linear_attention_config.replay_vector_gate = True
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:

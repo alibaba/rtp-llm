@@ -69,6 +69,7 @@ py_library(
 
 py_library(
     name = "triton_kernels",
+    srcs = ["linear_replay.py"],
     deps = [
         ":autotune_cache",
         ":fla",
