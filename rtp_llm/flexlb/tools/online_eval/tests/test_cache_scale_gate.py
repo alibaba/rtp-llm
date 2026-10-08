@@ -216,6 +216,9 @@ class CacheGateTest(unittest.TestCase):
                                      [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
             self.assertIn("缺少监控序列", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
+            self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
+            self.assertIn("缺少 Prometheus queries.json 归档",
+                          html)
             self.assertEqual(analyze(e), result)
 
     def test_report_uses_friendly_monitor_labels_and_audits_missing_series(self):

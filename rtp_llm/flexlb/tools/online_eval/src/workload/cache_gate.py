@@ -353,6 +353,7 @@ def prepare_report(directory, evidence):
     rows = evidence["samples"]
     anchor = rows[0]["epoch_s"] - rows[0]["t"] if rows else 0
     series, sources, gaps, errors = archived_series(directory, anchor)
+    archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
     metric_defs = CACHE_METRICS
     curves = []
     audit = []
@@ -416,6 +417,8 @@ def prepare_report(directory, evidence):
     success = values("Client success QPS", baseline_start, baseline_end)
     failures = values("Client error QPS", baseline_start, baseline_end)
     monitor_warnings = [str(error) for error in errors]
+    if not archive_paths:
+        monitor_warnings.append("缺少 Prometheus queries.json 归档；监控曲线不可用")
     if sent and success and median(sent) > 0 and median(success) / median(sent) < 0.9:
         monitor_warnings.append(
             f"缩容前客户端成功率偏低：success/send 中位数 {median(success) / median(sent):.1%}"
