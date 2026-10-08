@@ -5753,8 +5753,26 @@ class AttentionFP8(nn.Module):
                 f"({s_q}, {self.dim}), got {tuple(out.shape)}"
             )
 
-        for start in range(0, s_q, chunk_rows):
-            end = min(start + chunk_rows, s_q)
+        request_rows = (s_q,)
+        cp_chunks = getattr(
+            getattr(self, "_cp_ctx", None), "chunk_lengths_per_req", None
+        )
+        if use_sm120 and cp_chunks is not None and len(cp_chunks) > 1:
+            if any(length < 0 for length in cp_chunks) or sum(cp_chunks) != s_q:
+                raise ValueError("CP request chunks must cover sparse query rows")
+            # SM120 switches sparse kernels with query-row count. Keep each
+            # request's standalone dispatch and output projection numerics.
+            request_rows = cp_chunks
+        query_ranges = []
+        offset = 0
+        for rows in request_rows:
+            query_ranges.extend(
+                (start, min(start + chunk_rows, offset + rows))
+                for start in range(offset, offset + rows, chunk_rows)
+            )
+            offset += rows
+
+        for start, end in query_ranges:
             with record_function_range(profile_name):
                 if use_sm120:
                     assert sm120_cache is not None

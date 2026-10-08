@@ -231,6 +231,85 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
     def test_csa_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("csa")
 
+    def test_cp_batch_preserves_standalone_sparse_dispatch(self) -> None:
+        heads, dim = 64, 512
+        sink = torch.linspace(-0.3, 0.4, heads, device=self.device)
+        for lengths in ((10, 10), (10,) * 7, (16, 54, 66), (0, 10)):
+            with self.subTest(lengths=lengths):
+                tokens = sum(lengths)
+                ws = PrefillWorkspace(
+                    self.device,
+                    q_rows=tokens,
+                    q_dim=heads * dim,
+                    reserve_cp=False,
+                    align_bytes=1,
+                )
+                query = ws.prefill_q(tokens).view(tokens, heads, dim)
+                query.copy_(torch.randn_like(query))
+                values = torch.randn(
+                    35 * len(lengths), dim, device=self.device, dtype=torch.bfloat16
+                )
+                cache = self._packed_cache(values, block_size=64)
+                indices = torch.zeros(
+                    tokens, 128, device=self.device, dtype=torch.int32
+                )
+                lens = torch.zeros(tokens, device=self.device, dtype=torch.int32)
+                offset = 0
+                for request, rows in enumerate(lengths):
+                    indices[offset : offset + rows, :35] = (
+                        torch.arange(35, device=self.device) + request * 35
+                    )
+                    lens[offset : offset + rows] = (
+                        torch.arange(rows, device=self.device) % 35 + 1
+                    )
+                    offset += rows
+                layer = AttentionFP8.__new__(AttentionFP8)
+                torch.nn.Module.__init__(layer)
+                layer.n_heads, layer.head_dim, layer.dim = heads, dim, heads * dim
+                layer.softmax_scale, layer.attn_sink = dim**-0.5, sink
+                layer._prefill_output_proj_into = (
+                    lambda attention, _freqs, *, out: out.copy_(
+                        attention.reshape(-1, heads * dim)
+                    )
+                )
+                layer._prefill_output_all_reduce = lambda _out: None
+                freqs = torch.zeros(
+                    tokens, 1, dtype=torch.complex64, device=self.device
+                )
+
+                def forward(start, end):
+                    return layer._flash_mla_sparse_fwd_chunked_projected(
+                        q=query[start:end],
+                        kv=values.unsqueeze(1),
+                        indices=indices[start:end].unsqueeze(1),
+                        topk_length=lens[start:end],
+                        freqs_cis=freqs[start:end],
+                        prefill_workspace=ws,
+                        profile_name="sm120.prefill.cp_batch_regression",
+                        sm120_swa_cache=cache,
+                        sm120_swa_indices=indices[start:end],
+                        sm120_swa_lens=lens[start:end],
+                    )
+
+                expected = []
+                offset = 0
+                for rows in lengths:
+                    if rows:
+                        # The production workspace contract requires Q at its base.
+                        original = query.clone()
+                        query[:rows].copy_(original[offset : offset + rows])
+                        saved_indices, saved_lens = indices.clone(), lens.clone()
+                        indices[:rows].copy_(saved_indices[offset : offset + rows])
+                        lens[:rows].copy_(saved_lens[offset : offset + rows])
+                        expected.append(forward(0, rows))
+                        query.copy_(original)
+                        indices.copy_(saved_indices)
+                        lens.copy_(saved_lens)
+                    offset += rows
+                layer._cp_ctx = SimpleNamespace(chunk_lengths_per_req=lengths)
+                actual = forward(0, tokens)
+                self.assertTrue(torch.equal(actual, torch.cat(expected)))
+
     def test_hca_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("hca")
 

@@ -999,6 +999,29 @@ class CompressorFP8(PoolBackedModule):
     #     (e.g. CSA: nested indexer + main) is required for FIFO ordering
     #     of NCCL collectives within the ProcessGroup.
     # ----------------------------------------------------------------------
+    def _project_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.utils.arch import is_sm120
+
+        lengths = getattr(self._cp_ctx, "chunk_lengths_per_req", None)
+        if (
+            x.ndim == 2
+            and lengths is not None
+            and len(lengths) > 1
+            and is_sm120(x.device)
+        ):
+            if any(length < 0 for length in lengths) or sum(lengths) != x.shape[0]:
+                raise ValueError("CP request chunks must cover compressor input rows")
+            # SM120 cuBLAS changes FP32 accumulation order with the batch M.
+            # Preserve each request's standalone projection before FP8 packing.
+            return torch.cat(
+                [
+                    _linear_bf16_bf16_fp32(part, self._wkv_wgate_fused)
+                    for part in x.split(lengths, dim=0)
+                ],
+                dim=0,
+            )
+        return _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+
     def start_prefill(
         self,
         x: torch.Tensor,
@@ -1048,7 +1071,7 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1260,7 +1283,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
