@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SuiteOwnershipTest(unittest.TestCase):
     def test_retained_functional_variant_is_selected_without_mutation(self):
-        docs = load_scenarios(ROOT / 'config/scenarios/master_lifecycle.yaml')
+        docs = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')
         original = copy.deepcopy(docs)
         functional = preselect_documents(docs, 'functional')
         workload = preselect_documents(docs, 'workload')

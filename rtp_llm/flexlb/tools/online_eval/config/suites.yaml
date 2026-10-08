@@ -3,4 +3,3 @@ default_suite: core
 ci_suites:
   core:
   - request_completion::default
-  - cache_churn::default

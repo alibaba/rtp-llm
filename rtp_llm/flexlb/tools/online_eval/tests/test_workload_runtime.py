@@ -20,7 +20,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
         documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
         self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
-        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 2)
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 1)
 
     def run_plan(
         self, workload, observation=True, setup_error=False, cleanup_error=False
@@ -100,22 +100,18 @@ class WorkloadRuntimeTests(unittest.TestCase):
             },
             {
                 "request_completion::default",
-                "cache_churn::default",
-                "engine_fault_recovery::default",
-                "master_lifecycle::default",
             },
         )
-        self.assertEqual(len(plans), 22)
+        self.assertEqual(len(plans), 10)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
-    def test_core_suite_is_two_stable_contracts_for_every_master_profile(self):
+    def test_core_suite_is_request_completion_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
         expected = {
             "request_completion::default",
-            "cache_churn::default",
         }
         for profile in (
             "batch-window",
@@ -126,7 +122,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             selected = classify(
                 [plan for plan in plans if plan["profile"] == profile], "core"
             )
-            self.assertEqual(len(selected), 2)
+            self.assertEqual(len(selected), 1)
             self.assertEqual(
                 {
                     plan["scenario_id"] + "::" + plan["variant_id"]

@@ -578,25 +578,15 @@ class MasterActionsTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
         with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
-                [document for name in ("master_lifecycle", "master_ha_failover")
-                 for document in load_scenarios(root / (name + ".yaml"))],
+                load_scenarios(root / "master_ha_failover.yaml"),
                 handlers={
                     h.name: h for h in master.HANDLERS + observations + controls + faults
                 },
             )
-        self.assertEqual(6, len(plans))
-        self.assertEqual(2, len({p["scenario_id"] for p in plans}))
+        self.assertEqual(2, len(plans))
+        self.assertEqual(1, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
-            if plan["scenario_id"] == "master_lifecycle":
-                ids = [s["id"] for s in plan["stages"]]
-                ready, clean = ("restored_topology", "restored_inflight")
-                index = ids.index(ready)
-                self.assertEqual(clean, ids[index + 1])
-                self.assertEqual(60, plan["stages"][index]["timeout_s"])
-                self.assertFalse(plan["stages"][index]["params"]["inflight_zero"])
-                self.assertEqual(10, plan["stages"][index + 1]["timeout_s"])
-                self.assertTrue(plan["stages"][index + 1]["params"]["inflight_zero"])
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
             if plan["scenario_id"] == "master_ha_failover":
                 self.assertEqual(

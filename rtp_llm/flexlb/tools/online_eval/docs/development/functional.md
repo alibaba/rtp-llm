@@ -1,6 +1,6 @@
 # 功能测试
 
-功能回归覆盖请求完成、缓存亲和与驱逐、Engine 代际隔离和 Master 重启。默认 `core` 只选择请求完成与缓存亲和两个合同；`functional` 选择所有功能实例。它们使用少量可控请求，任一前置步骤失败会阻断依赖步骤。复杂行为由持续负载场景覆盖。
+功能回归覆盖请求完成合同。默认 `core` 选择请求完成合同；`functional` 选择所有功能实例。它们使用少量可控请求，任一前置步骤失败会阻断依赖步骤。复杂行为由持续负载场景覆盖。
 
 先完成[编译与运行底座](build-and-runtime.md)，再从 `rtp_llm/flexlb` 执行。
 
@@ -12,7 +12,7 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
   --profile batch-window --suite core --list-json > /tmp/flexlb-core.json
 ```
 
-该命令列出当前 profile 的 2 个核心实例。`--suite functional` 选择当前 profile 支持的全部功能实例；清单以 `config/suites.yaml` 和各场景 YAML 为准。
+该命令列出当前 profile 的 1 个核心实例。`--suite functional` 选择当前 profile 支持的全部功能实例；清单以 `config/suites.yaml` 和各场景 YAML 为准。
 
 实例 ID 形如 `<case>::<variant>::<profile>`。按 category 选一组，或用 `--instances` 精确选择。精确选择可避免一次运行混入无关场景。
 
@@ -41,7 +41,7 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 
 常用选择：
 
-- `--suite core`：默认的 2 个核心实例。
+- `--suite core`：默认的 1 个核心实例。
 - `--suite functional`：全部功能合同。
 - `--suite workload`：复杂场景和持续负载测试。
 - `--instances id1,id2`：运行精确实例，优先级高于广泛分类。
