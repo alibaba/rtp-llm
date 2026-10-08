@@ -1,5 +1,8 @@
 """Native K3 MLA with RTP cache metadata and CacheStore publication."""
 
+import logging
+import os
+
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
@@ -13,10 +16,12 @@ from rtp_llm.utils.model_weight import W
 
 
 _workspaces = {}
+_audit_contracts = set()
+_AUDIT_CONTRACTS = os.environ.get("KIMI_K3_SMOKE_EVIDENCE", "0") == "1"
 
 
 class KimiK3MlaVerifyImpl(MlaImplBase):
-    """Decode and compact native-MTP queries, with fixed replay metadata."""
+    """Paged Decode, Target Verify and fixed-width Native MTP update."""
 
     def __init__(self, config, parallelism, weights, inputs, fmha_config, is_cuda_graph):
         attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
@@ -98,9 +103,35 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         )
         self.prepare(inputs)
 
+    def _record_input_contract(self, inputs):
+        if not _AUDIT_CONTRACTS:
+            return
+        phase = ("target_verify" if inputs.is_target_verify else
+                 "mtp_update" if inputs.is_mtp_draft_update else "proposal_or_decode")
+        logical = inputs.logical_request_count or self.batch
+        width = self.tokens // self.batch
+        dtype = torch.float8_e4m3fn if self.native.fp8_compute else torch.bfloat16
+        backend = "tokenspeed_page_rr" if self.page_rr else self.native.backend
+        workspace = self.native.workspace.data_ptr()
+        contract = (phase, self.graph_mode, logical, self.batch, self.tokens,
+                    dtype, backend, bool(inputs.is_fake_stream), workspace)
+        if contract in _audit_contracts:
+            return
+        _audit_contracts.add(contract)
+        # Shape/dtype/address inspection only: no CUDA tensor value read or
+        # synchronization, and no repeated log for the same hot input contract.
+        logging.info(
+            "[K3_MLA_PAGED_INPUT] phase=%s graph=%d logical_batch=%d "
+            "physical_batch=%d q=%d physical_tokens=%d operand_dtype=%s "
+            "projection_dtype=bf16 backend=%s fake=%d workspace=0x%x",
+            phase, self.graph_mode, logical, self.batch, width, self.tokens,
+            dtype, backend, inputs.is_fake_stream, workspace,
+        )
+
     def prepare(self, inputs, forbid_realloc=False):
         if inputs.input_lengths.numel() != self.batch or inputs.physical_token_count != self.tokens:
             raise ValueError("K3 MLA replay requires the captured physical shape")
+        self._record_input_contract(inputs)
         if self.page_rr:
             self.attn_inputs = inputs
             self.page_rr_metadata.prepare(inputs, forbid_realloc)
