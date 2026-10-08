@@ -41,6 +41,7 @@ def decode_metadata(layer, cache, starts, tables):
             tag: layout.entries for tag, layout in cache.layouts.items()
         },
         paged_pool_tokens_per_block={tag: 256 for tag in cache.layouts},
+        swa_single_block_per_request=True,
     )
 
 

@@ -262,6 +262,8 @@ def build_metadata_eager(
             paged_block_tables=paged_block_tables or None,
             paged_pool_entries_per_block=paged_entries_per_block or None,
             paged_pool_tokens_per_block=paged_tokens_per_block or None,
+            swa_single_block_per_request=getattr(v4_args, "v41_config", None)
+            is not None,
         )
 
     # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``

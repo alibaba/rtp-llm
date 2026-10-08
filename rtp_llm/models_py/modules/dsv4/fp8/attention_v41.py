@@ -603,6 +603,7 @@ class AttentionV41FP8(AttentionFP8):
         super().__init__(*args, **kwargs)
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
+        self.swa_single_block_per_request = True
         self.v41_config = v41_config
         # Read once: changing this policy in a running cache namespace is unsafe.
         self.swa_bounded_replay = bounded_replay_enabled() and self.layer_id >= 21
@@ -1148,10 +1149,23 @@ class AttentionV41FP8(AttentionFP8):
             ),
             state=region == CSA_STATE,
             seq_ends=state_end,
+            single_block_per_request=region == CSA_STATE and not sharded,
         )
         if slots is not None:
             return slots
         if region == CSA_STATE:
+            if not sharded:
+                if bt.shape[1] != 1:
+                    raise ValueError("V4.1 state requires a single retained block")
+                valid = (positions >= 0) & (req_ids >= 0) & (req_ids < bt.shape[0])
+                requests = req_ids.clamp(0, bt.shape[0] - 1).long()
+                blocks = bt[requests, 0].long()
+                if state_end is not None:
+                    ends = state_end[requests]
+                    valid &= (positions < ends) & (positions + eb >= ends)
+                return torch.where(
+                    valid & (blocks > 0), blocks * eb + positions.remainder(eb), -1
+                )
             return cp_state_slot_mapping(
                 positions,
                 bt,
@@ -2364,9 +2378,9 @@ class AttentionV41FP8(AttentionFP8):
                 "V4.1 prefill requires nonempty requests and valid prefixes"
             )
         ends = prefix_lengths.long() + input_lengths.long()
-        if bool((ends > 256).any()):
+        if bool((ends > min(512, self._rope_max_seq_len)).any()):
             raise NotImplementedError(
-                "V4.1 prefill beyond the first 256-token page is not integrated"
+                "V4.1 attention beyond the qualified two-page context is not integrated"
             )
         if (
             self.compress_ratio
@@ -2398,8 +2412,20 @@ class AttentionV41FP8(AttentionFP8):
                     or not table.is_contiguous()
                 ):
                     raise ValueError(f"Invalid V4.1 {region} block table layout")
-                if bool(((table[:, 0] < 0) | (table[:, 0] >= base.shape[0])).any()):
+                single_block = region in (SWA_KV, CSA_STATE)
+                required = (
+                    torch.ones_like(ends) if single_block else (ends + 255) // 256
+                )
+                if (single_block and table.shape[1] != 1) or bool(
+                    (required > table.shape[1]).any()
+                ):
+                    raise ValueError(f"Invalid V4.1 {region} block table coverage")
+                columns = torch.arange(table.shape[1], device=table.device)
+                pages = table[columns[None] < required[:, None]]
+                if bool(((pages <= 0) | (pages >= base.shape[0])).any()):
                     raise ValueError(f"Invalid V4.1 {region} block table page")
+                if pages.unique().numel() != pages.numel():
+                    raise ValueError(f"Aliased V4.1 {region} block table pages")
 
     def forward_decode(self, x, attn_metadata, kv_cache=None):
         from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache

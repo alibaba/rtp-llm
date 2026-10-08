@@ -1215,6 +1215,21 @@ def update_decode_metadata_in_place_fp8(
             )
 
 
+def _single_block_swa_slots(block_table, positions, entries):
+    if block_table.shape[1] != 1:
+        raise ValueError("Single-block SWA requires exactly one table column")
+    pages = (
+        block_table[:, 0]
+        .long()
+        .reshape(block_table.shape[0], *([1] * (positions.ndim - 1)))
+    )
+    return torch.where(
+        (positions >= 0) & (pages > 0),
+        pages * entries + positions.long().remainder(entries),
+        -1,
+    )
+
+
 def build_decode_metadata_fp8(
     attention_inputs: Any,
     q_len: int,
@@ -1229,6 +1244,7 @@ def build_decode_metadata_fp8(
     paged_block_tables: Optional[Dict[str, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[str, int]] = None,
     paged_pool_tokens_per_block: Optional[Dict[str, int]] = None,
+    swa_single_block_per_request: bool = False,
 ) -> DSv4DecodeAttnMetadataFP8:
     """Top-level builder. Call ONCE per decode forward step.
 
@@ -1402,13 +1418,18 @@ def build_decode_metadata_fp8(
         if SWA_KV in pool_block_tables:
             E = paged_pool_entries_per_block[SWA_KV]
             swa_tokens_per_block = paged_pool_tokens_per_block_resolved[SWA_KV]
-            pool_write_slot_mappings[SWA_KV] = compute_kv_pool_slot_mapping(
-                pool_block_tables[SWA_KV],
-                position_ids_flat,
-                pool_entries_per_block=E,
-                pool_tokens_per_block=swa_tokens_per_block,
-                ring_entries=E,
-            )
+            if swa_single_block_per_request:
+                pool_write_slot_mappings[SWA_KV] = _single_block_swa_slots(
+                    pool_block_tables[SWA_KV], position_ids_2d, E
+                ).reshape(-1)
+            else:
+                pool_write_slot_mappings[SWA_KV] = compute_kv_pool_slot_mapping(
+                    pool_block_tables[SWA_KV],
+                    position_ids_flat,
+                    pool_entries_per_block=E,
+                    pool_tokens_per_block=swa_tokens_per_block,
+                    ring_entries=E,
+                )
 
         for ratio_key, attn_type_writers in (
             (4, [CSA_KV, INDEXER_KV]),
@@ -1492,13 +1513,22 @@ def build_decode_metadata_fp8(
         if SWA_KV in pool_block_tables:
             swa_eb = paged_pool_entries_per_block[SWA_KV]
             swa_tokens_per_block = paged_pool_tokens_per_block_resolved[SWA_KV]
-            swa_global_slots = translate_local_to_global_slots(
-                req_id_per_token,
-                pool_block_tables[SWA_KV],
-                swa_abs_idx.reshape(T_total, window_size),
-                entries_per_block=swa_eb,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-            )
+            if swa_single_block_per_request:
+                swa_global_slots = (
+                    _single_block_swa_slots(
+                        pool_block_tables[SWA_KV], swa_abs_idx, swa_eb
+                    )
+                    .reshape(T_total, window_size)
+                    .int()
+                )
+            else:
+                swa_global_slots = translate_local_to_global_slots(
+                    req_id_per_token,
+                    pool_block_tables[SWA_KV],
+                    swa_abs_idx.reshape(T_total, window_size),
+                    entries_per_block=swa_eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                )
 
         if HCA_KV in pool_block_tables and 128 in topk_total_by_ratio:
             hca_eb = paged_pool_entries_per_block[HCA_KV]

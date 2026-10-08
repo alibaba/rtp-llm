@@ -4956,6 +4956,9 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
+            single_block_per_request=getattr(
+                self, "swa_single_block_per_request", False
+            ),
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -5263,6 +5266,9 @@ class AttentionFP8(nn.Module):
             pool_entries_per_block=eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=eb,
+            single_block_per_request=getattr(
+                self, "swa_single_block_per_request", False
+            ),
         )
         slot_compaction = self._build_swa_cp_byte_compaction(
             slot_mapping,
@@ -5344,6 +5350,9 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
+                single_block_per_request=getattr(
+                    self, "swa_single_block_per_request", False
+                ),
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
