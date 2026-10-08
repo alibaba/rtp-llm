@@ -453,7 +453,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #endif
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens, bool prefill) {
     RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
@@ -462,7 +462,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
-    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+    if (!prefill && (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE)) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
         StreamUpdateInfo update_info{new_tokens,
@@ -663,7 +663,7 @@ absl::Status NormalEngine::step() try {
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            mayAddFakeStream(streams);
+            mayAddFakeStream(streams, coordinated && coordinated->plan() == PDFusionPlan::PREFILL);
         }
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
@@ -877,7 +877,7 @@ bool NormalEngine::isDSpark() {
     return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
@@ -921,7 +921,10 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
         }
     } else {
         if (streams.empty()) {
-            streams.emplace_back(createMinFakeStream(1));
+            // All EP ranks must execute the same prefill collectives/chunk rounds.
+            // A fake decode would replay its CUDA graph and skip the eager token-count
+            // all-reduce, while real prefill ranks wait before their first MoE launch.
+            streams.emplace_back(createMinFakeStream(1, global_prefill));
         }
     }
 }

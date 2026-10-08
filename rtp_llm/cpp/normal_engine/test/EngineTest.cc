@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -23,16 +24,42 @@ public:
 };
 
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
     EXPECT_ANY_THROW(
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
+TEST_F(NormalEngineTest, testFakePrefillParticipatesAsContextWhileDecodeRemainsDecode) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->pd_sep_config.role_type = RoleType::PDFUSION;
+
+    std::list<GenerateStreamPtr> prefill;
+    engine->mayAddFakeStream(prefill, /*global_prefill=*/true);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_TRUE(prefill.front()->isFakeStream());
+    EXPECT_TRUE(prefill.front()->isContextStream());
+    EXPECT_EQ(prefill.front()->currentExecuteTokenSize(), 1u);
+    StreamGroups prefill_groups(prefill);
+    EXPECT_EQ(prefill_groups.totalContextBatchSize(), 1u);
+    EXPECT_EQ(prefill_groups.totalDecodeBatchSize(), 0u);
+
+    std::list<GenerateStreamPtr> decode;
+    engine->mayAddFakeStream(decode, /*global_prefill=*/false);
+    ASSERT_EQ(decode.size(), 1u);
+    EXPECT_TRUE(decode.front()->isFakeStream());
+    EXPECT_FALSE(decode.front()->isContextStream());
+    StreamGroups decode_groups(decode);
+    EXPECT_EQ(decode_groups.totalContextBatchSize(), 0u);
+    EXPECT_EQ(decode_groups.totalDecodeBatchSize(), 1u);
+
+    auto existing = prefill.front();
+    engine->mayAddFakeStream(prefill, /*global_prefill=*/true);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill.front(), existing);
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {

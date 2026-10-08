@@ -47,7 +47,7 @@ public:
 
 private:
     void                            initScheduler();
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool prefill = false);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
@@ -59,7 +59,7 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
-    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill = false);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
