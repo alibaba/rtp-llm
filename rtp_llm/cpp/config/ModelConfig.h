@@ -144,6 +144,10 @@ public:
     std::string extra_data_path       = "";
     std::string local_extra_data_path = "";
     std::string model_type            = "";
+    // Recurrent native drafts may reuse one module/cache across all proposal steps.
+    bool reuse_single_mtp_module = false;
+    // Token positions may be needed for native MTP even when attention is NoPE.
+    bool requires_token_position_ids = false;
     std::string ptuning_path          = "";
 
     ModelConfig() = default;

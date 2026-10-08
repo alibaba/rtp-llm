@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-inline void getPaddingOffset(
+inline int32_t getPaddingOffset(
     int32_t* padding_offset, int32_t* input_lengths, int32_t* prefix_length, int32_t batch_size, int32_t max_seq_len) {
     // do cumulated sum
     int32_t cum_offset = 0;
@@ -22,6 +22,7 @@ inline void getPaddingOffset(
         }
         cum_offset += max_seq_len - seq_len;
     }
+    return index;
 }
 
 // for `FusedRopKVCache` kernel
@@ -37,14 +38,18 @@ inline void calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs)
     // padding_offsets: [0,1,1,1,2]
     int  max_seq_len = py_attn_inputs.input_lengths.max().item<int32_t>();
     auto padding_offset_host =
-        torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        torch::empty({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
     if (total_tokens > 0) {
-        getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),
-                         py_attn_inputs.input_lengths.data_ptr<int32_t>(),
-                         nullptr,
-                         batch_size,
-                         max_seq_len);
+        int32_t written = getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),
+                                           py_attn_inputs.input_lengths.data_ptr<int32_t>(),
+                                           nullptr,
+                                           batch_size,
+                                           max_seq_len);
+        RTP_LLM_CHECK_WITH_INFO(written == total_tokens,
+                                "padding_offset wrote %d tokens, expected %d",
+                                written,
+                                total_tokens);
     }
 
     py_attn_inputs.padding_offset = padding_offset_host;

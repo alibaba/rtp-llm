@@ -8,6 +8,12 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
+sm103_cuda_copts = select({
+    "@//:using_cuda13_x86": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "@//:using_cuda13_arm": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "//conditions:default": [],
+})
+
 # The DeepSeek V4 TopK uses CTA clusters and requires SM90+. CUDA Runtime reports
 # this host as SM103, so emit an exact SM103 cubin alongside production SM100.
 dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
@@ -26,6 +32,30 @@ cuda_deps = [
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ]
+
+cc_library(
+    name = "custom_all_gather",
+    srcs = ["custom_all_gather.cu"],
+    hdrs = ["custom_all_gather.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.cu"],
+    hdrs = ["push_reduce_scatter.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "cuda_utils_common",
@@ -335,4 +365,69 @@ cc_library(
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
+)
+
+# Native K3 AttnRes uses Blackwell TMEM instructions. Keep its architecture
+# flags local so other operators and model defaults retain their build policy.
+cc_library(
+    name = "kimi_k3_attn_res",
+    srcs = ["kimi_k3_attn_res.cu"],
+    hdrs = ["kimi_k3_attn_res.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        # Match the pinned vLLM AttnRes translation unit's math and arch flags.
+        # These affect reciprocal/RMSNorm rounding; do not apply globally.
+        "-nvcc_options=use_fast_math",
+        "-nvcc_options=extended-lambda",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)
+
+# vLLM native fused sigmoid/grouped-top-k, with K3-only Tensor bindings.
+# Keep scoring arithmetic and PDL dispatch local to this translation unit.
+cc_library(
+    name = "kimi_k3_topk",
+    srcs = ["kimi_k3_topk.cu"],
+    hdrs = ["kimi_k3_topk.h", "kimi_k3_topk_native.cuh"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)
+
+cc_library(
+    name = "kimi_k3_rms_norm",
+    srcs = ["kimi_k3_rms_norm.cu"],
+    hdrs = ["kimi_k3_rms_norm.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)
+
+
+cc_library(
+    name = "kimi_k3_fused_a_gemm",
+    srcs = ["kimi_k3_fused_a_gemm.cu"],
+    hdrs = ["kimi_k3_fused_a_gemm.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        "--cuda-gpu-arch=sm_100f",
+    ],
 )

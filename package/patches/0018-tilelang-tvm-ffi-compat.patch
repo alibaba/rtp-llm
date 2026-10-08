@@ -1,0 +1,34 @@
+diff --git a/tilelang/3rdparty/tvm/python/tvm/ir/attrs.py b/tilelang/3rdparty/tvm/python/tvm/ir/attrs.py
+--- a/tilelang/3rdparty/tvm/python/tvm/ir/attrs.py
++++ b/tilelang/3rdparty/tvm/python/tvm/ir/attrs.py
+@@ -77,6 +77,16 @@
+ class DictAttrs(Attrs):
+     """Dictionary attributes."""
+
++    @property
++    def __dict__(self):
++        """Return the underlying key-value map as a Python dict.
++
++        Defining this property explicitly prevents tvm_ffi from trying to
++        install the reflected C++ field named ``__dict__``.  Python reserves
++        that class attribute, so installing it via ``setattr`` fails.
++        """
++        return dict(self._dict())
++
+     def _dict(self):
+         """Get internal dict"""
+         return _ffi_api.DictAttrsGetDict(self)
+diff --git a/tilelang/3rdparty/tvm/python/tvm/runtime/_tensor.py b/tilelang/3rdparty/tvm/python/tvm/runtime/_tensor.py
+--- a/tilelang/3rdparty/tvm/python/tvm/runtime/_tensor.py
++++ b/tilelang/3rdparty/tvm/python/tvm/runtime/_tensor.py
+@@ -71,6 +71,10 @@
+     how can we use TVM in existing project which might have their own array containers.
+     """
+
++    # FFI 0.1.13 rejects a larger wrapper after ffi.Tensor has been registered.
++    # Preserve the core Tensor layout when CuTe or FlashInfer imports first.
++    __slots__ = ()
++
+     def __setitem__(self, in_slice, value):
+         """Set ndarray value"""
+         if (

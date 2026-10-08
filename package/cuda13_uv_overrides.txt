@@ -1,0 +1,4 @@
+# Communication versions required by the CUDA13 DeepEP build.
+nvidia-nccl-cu13==2.30.4
+nvidia-nvshmem-cu13==3.5.19
+nvidia-cuda-cccl==13.2.86

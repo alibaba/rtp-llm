@@ -37,6 +37,7 @@ py_library(
         ":autotune_cache",
         ":common",
         ":fla",
+        "//rtp_llm/models_py/distributed:collective_torch",
     ],
     visibility = ["//visibility:public"]
 )

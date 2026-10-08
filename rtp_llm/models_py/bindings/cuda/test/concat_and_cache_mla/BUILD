@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_fused_mla_decode",
+    srcs = ["test_fused_mla_decode.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "test_dpsk_bf16",
     srcs = [
         "test_dpsk_bf16.py",

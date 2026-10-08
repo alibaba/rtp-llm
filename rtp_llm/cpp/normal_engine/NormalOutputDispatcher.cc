@@ -47,7 +47,7 @@ void syncPinnedCpuCopies(bool need_sync) {
 }  // namespace
 
 NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids, int async_worker_count):
-    output_vocab_ids_(std::move(output_vocab_ids)) {
+    output_vocab_ids_(std::move(output_vocab_ids)), async_debug_enabled_(asyncDebugEnabled()) {
     if (async_worker_count < 0) {
         throw std::invalid_argument("output_dispatcher_worker_count must be non-negative");
     }
@@ -482,7 +482,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                                "custom output processor failed: " + model_output.custom_output_error);
     }
-    if (asyncDebugEnabled() && success_cpu.defined()) {
+    if (async_debug_enabled_ && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
                 const auto& state = stream->getNormalAsyncDeviceState();

@@ -32,6 +32,16 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           const std::string& kv_cache_dtype,
                           torch::Tensor&     scale);
 
+// Concatenate already absorbed/rotated queries and insert unquantized latent KV.
+// Negative cache slots skip insertion while still producing the query output.
+void fused_mla_decode_q_concat_kv_cache_insert(const torch::Tensor& q_latent,
+                                               const torch::Tensor& q_pe,
+                                               const torch::Tensor& kv_c,
+                                               const torch::Tensor& k_pe,
+                                               torch::Tensor&       q_out,
+                                               torch::Tensor&       kv_cache,
+                                               const torch::Tensor& slot_mapping);
+
 // Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
 // src_cache: [num_blocks, block_size, 656] uint8 (512 fp8 + 16 scale + 128 rope bf16)
 // dst_compressed_kv: [total_tokens, 512] bfloat16

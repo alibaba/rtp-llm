@@ -1,20 +1,58 @@
+import importlib
+import importlib.metadata
+import importlib.util
 import sys
 from pathlib import Path
 
 
+def _import_from(packages: Path) -> None:
+    expected = (packages / "cutlass").resolve(strict=True)
+    value = str(packages)
+    if value not in sys.path:
+        sys.path.insert(0, value)
+    selected = importlib.import_module("cutlass")
+    actual = Path(selected.__file__).parent.resolve(strict=True)
+    if actual != expected:
+        raise RuntimeError(
+            f"CUTLASS was already imported from {actual}; expected {expected}. "
+            "Initialize CUTLASS before importing dependent kernels."
+        )
+
+
 def setup_cutlass_import_path() -> None:
-    """Expose the ``cutlass`` package bundled by ``nvidia-cutlass-dsl``."""
+    """Select the complete Bazel or pip CUTLASS installation before kernel imports."""
     try:
         import nvidia_cutlass_dsl
     except ImportError:
         return
 
-    for package_root in nvidia_cutlass_dsl.__path__:
-        python_packages = Path(package_root) / "python_packages"
-        if not python_packages.is_dir():
-            continue
+    # The Bazel assembly target exposes cutlass directly through PyInfo.imports.
+    # Prefer it to the incomplete namespaces of the individual pip repositories.
+    spec = importlib.util.find_spec("cutlass")
+    if spec is not None and spec.origin:
+        packages = Path(spec.origin).parent.parent
+        if (
+            packages.name in ("dsl_packages", "python_packages")
+            and packages.parent.name == "nvidia_cutlass_dsl"
+        ):
+            _import_from(packages)
+            selected = sys.modules["cutlass"]
+            try:
+                version = importlib.metadata.version("nvidia-cutlass-dsl")
+            except importlib.metadata.PackageNotFoundError:
+                return
+            actual_version = getattr(selected, "__version__", version)
+            if actual_version != version:
+                raise RuntimeError(
+                    f"CUTLASS version {actual_version} differs from installed {version}"
+                )
+            return
 
-        python_packages_path = str(python_packages)
-        if python_packages_path not in sys.path:
-            sys.path.insert(0, python_packages_path)
-        return
+    # Installed wheels and older DSL releases can require exposing their nested
+    # Python package directory. Their files already share one installation root.
+    for root in nvidia_cutlass_dsl.__path__:
+        for directory in ("dsl_packages", "python_packages"):
+            packages = Path(root) / directory
+            if (packages / "cutlass" / "__init__.py").is_file():
+                _import_from(packages)
+                return

@@ -1,0 +1,11 @@
+{
+  "revision": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "path": "vllm/model_executor/layers/mamba/ops/causal_conv1d.py",
+  "sha256": "cb16cc9250c4195c09d6d83b43bba607c2d749b621d8d135a920443d1577265f",
+  "adaptations": [
+    "K3 width-four BF16/FP32 contract",
+    "Merged QKV native computation",
+    "RTP block map, partial-prefix checkpoint ownership, null and unretained block stores",
+    "Use existing RTP convolution launch metadata; no extra checkpoint kernel"
+  ]
+}

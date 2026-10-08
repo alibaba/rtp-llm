@@ -47,6 +47,11 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
 elif device_type == DeviceType.Cuda:
+    from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+    # Select the installed DSL before optional kernels import a fallback.
+    setup_cutlass_import_path()
+
     # currently append early means impl has higher priority
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
         HeadWisePrefillImpl,

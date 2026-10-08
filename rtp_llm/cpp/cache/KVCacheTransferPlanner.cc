@@ -1,8 +1,36 @@
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace rtp_llm {
+
+bool supportsHeadShardTransfer(int source_tp, int destination_tp) {
+    return source_tp > 0 && destination_tp > 0
+           && (source_tp % destination_tp == 0 || destination_tp % source_tp == 0);
+}
+
+HeadShardLoadPlan planHeadShardLoad(int source_tp, int destination_tp,
+                                    int source_rank, int destination_rank) {
+    if (!supportsHeadShardTransfer(source_tp, destination_tp)
+        || source_rank < 0 || source_rank >= source_tp
+        || destination_rank < 0 || destination_rank >= destination_tp) {
+        throw std::invalid_argument("invalid attention-head shard transfer coordinates");
+    }
+    if (source_tp >= destination_tp) {
+        const int count = source_tp / destination_tp;
+        return {source_rank / count == destination_rank, 1, 0, count, source_rank % count};
+    }
+    const int count = destination_tp / source_tp;
+    return {destination_rank / count == source_rank, count, destination_rank % count, 1, 0};
+}
+
+bool pageOwnedBySource(size_t logical_page, int source_rank, int source_tp) {
+    if (source_tp <= 0 || source_rank < 0 || source_rank >= source_tp) {
+        throw std::invalid_argument("invalid PageRR source coordinates");
+    }
+    return logical_page % static_cast<size_t>(source_tp) == static_cast<size_t>(source_rank);
+}
 
 std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
                                                    size_t         reuse_block_size,

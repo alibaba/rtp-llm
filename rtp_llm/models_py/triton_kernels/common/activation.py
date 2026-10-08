@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -66,6 +66,76 @@ def silu_and_mul(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
     return output_tensor
+
+
+@triton.jit(do_not_specialize=["elements"])
+def _situ_and_mul_kernel(
+    gate,
+    up,
+    output,
+    elements,
+    width,
+    gate_row_stride,
+    up_row_stride,
+    beta: tl.constexpr,
+    linear_beta: tl.constexpr,
+    has_linear_beta: tl.constexpr,
+    block: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block + tl.arange(0, block)
+    mask = offsets < elements
+    row = offsets // width
+    column = offsets % width
+    gate_offsets = row * gate_row_stride + column
+    up_offsets = row * up_row_stride + column
+    gate_value = tl.load(gate + gate_offsets, mask=mask).to(tl.float32)
+    up_value = tl.load(up + up_offsets, mask=mask).to(tl.float32)
+
+    gate_tanh = 2.0 * tl.sigmoid(2.0 * gate_value / beta) - 1.0
+    activated = beta * gate_tanh * tl.sigmoid(gate_value)
+    if has_linear_beta:
+        up_tanh = 2.0 * tl.sigmoid(2.0 * up_value / linear_beta) - 1.0
+        up_value = linear_beta * up_tanh
+    tl.store(output + offsets, activated * up_value, mask=mask)
+
+
+@torch.compiler.disable
+def situ_and_mul(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    beta: float,
+    linear_beta: Optional[float] = None,
+) -> torch.Tensor:
+    """Apply parameterized SiTU to gate/up views without copying either view."""
+
+    if gate.shape != up.shape or gate.dtype != up.dtype or gate.device != up.device:
+        raise ValueError("SiTU requires matching gate/up tensors")
+    if not gate.is_cuda:
+        gate_float = gate.float()
+        up_float = up.float()
+        activated_gate = beta * torch.tanh(gate_float / beta) * torch.sigmoid(gate_float)
+        if linear_beta is not None:
+            up_float = linear_beta * torch.tanh(up_float / linear_beta)
+        return (activated_gate * up_float).to(dtype=gate.dtype)
+    if gate.ndim != 2 or gate.stride(1) != 1 or up.stride(1) != 1:
+        raise ValueError("CUDA SiTU requires 2-D gate/up tensors with contiguous columns")
+    output = torch.empty(gate.shape, dtype=gate.dtype, device=gate.device)
+    block = 1024
+    _situ_and_mul_kernel[(triton.cdiv(gate.numel(), block),)](
+        gate,
+        up,
+        output,
+        gate.numel(),
+        gate.shape[1],
+        gate.stride(0),
+        up.stride(0),
+        beta=float(beta),
+        linear_beta=0.0 if linear_beta is None else float(linear_beta),
+        has_linear_beta=linear_beta is not None,
+        block=block,
+        num_warps=4,
+    )
+    return output
 
 
 @triton.jit

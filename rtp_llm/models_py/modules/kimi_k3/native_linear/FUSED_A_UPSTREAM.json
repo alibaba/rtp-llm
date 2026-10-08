@@ -1,0 +1,12 @@
+{
+  "revision": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "source": "csrc/libtorch_stable/dsv3_fused_a_gemm.cu",
+  "sha256": "2dc028028da15ef2a4766be28c073b9d58821e5e6efbbf675f44d058b0e8ec38",
+  "destination": "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_fused_a_gemm.cu",
+  "adaptations": [
+    "ATen Tensor, CUDA stream/device guard and validation",
+    "rtp_llm namespace with qualified arrive_barrier",
+    "CUDA13 RTP pybind registration"
+  ],
+  "dispatch": "K3 latent down SM103/SM107 M2..8; M1 uses native skinny GEMM"
+}

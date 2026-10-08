@@ -306,9 +306,8 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 tests use the matching cubins from the pip lock.
-        # The jit-cache wheel is installed through Requires-Dist in runtime images.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
+        # CUDA13 uses the versioned JIT path without older release cache wheels.
+        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
@@ -469,6 +468,7 @@ py_library(
     name = "sdk",
     srcs = [
         '__init__.py',
+        'kimi_k3_runtime.py',
         'model_factory.py',
         'start_server.py',
         'start_frontend_server.py',
@@ -605,6 +605,26 @@ py_library(
     ]
 )
 
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ] + select({
+        # database.py imports these lazily for LOAD_METHOD=fastsafetensors.
+        "@//:using_cuda13_x86": [":fastsafetensors", ":fast-safetensors"],
+        "@//:using_cuda12_9_x86": [":fastsafetensors", ":fast-safetensors"],
+        "//conditions:default": [],
+    }),
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [
@@ -724,7 +744,7 @@ rename_wheel(
 # Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
 py_library(
     name = "dash_sc_grpc_standalone_lib",
-    srcs = ["__init__.py"],
+    srcs = ["__init__.py", "kimi_k3_runtime.py"],
     deps = [
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
     ],
