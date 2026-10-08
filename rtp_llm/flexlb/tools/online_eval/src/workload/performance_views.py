@@ -15,7 +15,7 @@ def panel(directory, evidence, result):
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
     duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
-    axes = performance_axes()
+    axes = performance_axes(include_hit_pct=True)
 
     def add(name, group, axis, points, description, hidden=True):
         curves.append(
@@ -133,11 +133,29 @@ def panel(directory, evidence, result):
         labels = json.loads(label_json)
         role = {"prefill": "P", "decode": "D"}.get(labels.pop("role", ""), "")
         name, group, axis, primary = performance_metric_style(source, metric, role)
+        special = {
+            ("mock", "rtp_llm_context_tps_engine_mean", "P"):
+                ("P context TPS", "Prefill TPS", "forward", 1),
+            ("mock", "rtp_llm_context_tps_with_cache_engine_mean", "P"):
+                ("P context TPS（含缓存）", "Prefill TPS", "forward", 1),
+            ("mock", "rtp_llm_generate_tps_engine_mean", "D"):
+                ("D generate TPS", "Decode TPS", "forward", 1),
+            ("mock", "cache_hit_ratio", "P"):
+                ("P 实际 token 命中率", "缓存命中率", "hit_pct", 100),
+            ("mock", "simulated_prefill_ms_avg", "P"):
+                ("P model forward 均值", "延迟", "ms", 1),
+            ("client-performance", "schedule_p99_seconds", ""):
+                ("调度等待 p99", "延迟", "ms", 1000),
+        }.get((source, metric, role))
+        scale = 1
+        if special:
+            name, group, axis, scale = special
         if labels:
             name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
         if any(c["name"] == name for c in curves):
             name += " · epoch " + epoch
-        visible = [(t, v) for t, v in points if 0 <= t <= duration]
+        visible = [(t, v * scale if v is not None else None)
+                   for t, v in points if 0 <= t <= duration]
         add(name, group, axis, visible, sources[key]["promql"], not primary)
         audit.append(
             dict(
@@ -158,6 +176,12 @@ def panel(directory, evidence, result):
         raw_curves = raw_engine_curves(evidence, name, role)
         group = "Prefill TPS" if role == "prefill" else "Decode TPS"
         for label, points, mean in raw_curves:
+            if mean:
+                label = {
+                    "rtp_llm_context_tps": "P context TPS",
+                    "rtp_llm_context_tps_with_cache": "P context TPS（含缓存）",
+                    "rtp_llm_generate_tps": "D generate TPS",
+                }[name]
             add(label, group if mean else group.replace(" TPS", " 逐引擎 TPS"),
                 "forward", points, "engine_tps_samples: 同一抓取点 priority 求和，再按引擎等权平均；缺失不补零", not mean)
         if raw_curves:
@@ -181,6 +205,47 @@ def panel(directory, evidence, result):
         caption="Prefill TPS 按引擎/DP 汇总 priority，与线上 context TPS、with cache TPS 口径对应；不对引擎执行速率求集群总和。时间按测量起点对齐。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
         + (" 本报告缺少监控归档，只有请求级曲线。" if not series and not raw_available else ""),
     ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series) or raw_available)
+
+
+def report_panels(curves, criteria, presentation):
+    """Show the four measured views; keep gate floors separate from measurements."""
+    panels = []
+    duration = criteria.get("measure_s", 1)
+    floor_names = {
+        "P context TPS": "rtp_llm_context_tps",
+        "P context TPS（含缓存）": "rtp_llm_context_tps_with_cache",
+        "D generate TPS": "rtp_llm_generate_tps",
+    }
+    for descriptor in presentation["panels"]:
+        selected = [dict(curve, hidden=False) for name in descriptor["names"]
+                    for curve in curves if curve["name"] == name]
+        # A monitoring query may exist but contain only NaNs. Show an explicit
+        # gap rather than a 0% line or an apparently valid empty panel.
+        populated = [curve for curve in selected if any(
+            point["y"] is not None for point in curve["points"])]
+        missing = [name for name in descriptor["names"]
+                   if not any(curve["name"] == name for curve in populated)]
+        caption = descriptor["caption"] if populated else descriptor["empty_caption"]
+        if populated and missing:
+            caption += " 缺少有效曲线：" + "、".join(missing) + "。"
+        if descriptor["id"] == "engine-tps":
+            floors = criteria.get("engine_tps", {})
+            for name in descriptor["names"]:
+                metric = floor_names[name]
+                if metric in floors:
+                    source = next((curve for curve in selected if curve["name"] == name), None)
+                    selected.append(dict(
+                        name=name + " 门禁线", group="门禁", axis="forward",
+                        unit="执行 tok/s", color=source["color"] if source else COLORS[len(selected) % len(COLORS)],
+                        dash=[6, 4], hidden=False,
+                        points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
+                        description="场景配置中的绝对下界；不是实测值",
+                    ))
+        panels.append(dict(
+            id=descriptor["id"], title=descriptor["title"], caption=caption,
+            overlay=True, timeX=True, axes=descriptor["axes"], series=selected,
+        ))
+    return panels
 
 
 def raw_engine_curves(evidence, metric, role):

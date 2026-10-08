@@ -217,9 +217,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
                             {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}})
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(spec["title"], "YAML performance title")
-            self.assertEqual(spec["panels"][0]["title"], presentation["panel"]["title"])
-            self.assertEqual(spec["panels"][0]["presets"]["核心"], ["P throughput"])
-            self.assertEqual(spec["panels"][0]["presets"]["Decode 逐引擎 TPS"], ["D detail"])
+            self.assertEqual([panel["title"] for panel in spec["panels"]],
+                             [panel["title"] for panel in presentation["panels"]])
+            self.assertEqual([panel["id"] for panel in spec["panels"]],
+                             ["engine-tps", "client-qps", "latency", "cache-hit"])
 
 
 if __name__ == "__main__":

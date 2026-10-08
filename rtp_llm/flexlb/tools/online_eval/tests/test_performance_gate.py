@@ -153,6 +153,32 @@ class PerformanceGateTest(unittest.TestCase):
             bundle = report(d, e)
             self.assertTrue((bundle / "report.html").is_file())
 
+    def test_archived_actual_hit_ratio_is_shown_as_percent(self):
+        from workload.performance_views import panel, report_panels
+        from reporting.view_config import view
+
+        e = evidence()
+        with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps(dict(
+                start=100, end=110, step=1, targets={},
+                queries={"mock/cache_hit_ratio": dict(
+                    promql="sum(rate(hit)) / sum(rate(context))",
+                    result=[dict(metric=dict(role="prefill"),
+                                 values=[[100, "0.42"], [101, "NaN"]])],
+                )},
+            )))
+            chart, _ = panel(d, e, analyze(e))
+            panels = report_panels(chart["series"], e["criteria"],
+                                   view("master_performance.yaml"))
+            hit = panels[3]
+            self.assertEqual(hit["id"], "cache-hit")
+            self.assertEqual([series["name"] for series in hit["series"]],
+                             ["P 实际 token 命中率"])
+            self.assertEqual(hit["series"][0]["points"][:2],
+                             [dict(x=0, y=42), dict(x=1, y=None)])
+
     def test_observer_gap_retains_request_metrics_without_promoting_verdict(self):
         e = self.engine_evidence()
         e["samples"] = [dict(epoch_ms=100000), dict(epoch_ms=110000)]
@@ -194,11 +220,13 @@ class PerformanceGateTest(unittest.TestCase):
             path = report(d, e)
             self.assertTrue((path / "report.html").is_file())
             spec = json.loads((path / "report-spec.json").read_text())
-            self.assertEqual(len(spec["panels"]), 1)
+            self.assertEqual([p["id"] for p in spec["panels"]],
+                ["engine-tps", "client-qps", "latency", "cache-hit"])
             for panel in spec["panels"]:
                 self.assertTrue(panel["overlay"])
-                self.assertTrue(panel["series"][0]["points"])
-                self.assertIn(panel["series"][0]["axis"], panel["axes"])
+                for series in panel["series"]:
+                    self.assertTrue(series["points"])
+                    self.assertIn(series["axis"], panel["axes"])
             self.assertEqual(
                 analyze(
                     json.loads((Path(d) / "performance-gate-evidence.json").read_text())

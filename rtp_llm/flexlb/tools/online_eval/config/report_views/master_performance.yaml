@@ -3,22 +3,35 @@ report: master-performance
 producer: performance-gate
 title: Master 性能绝对门禁
 subtitle: '{verdict}'
-panel:
-  title: 性能与运行状态
-  presets:
-    核心: {visible: true}
-    Prefill TPS: {groups: [Prefill TPS]}
-    Prefill 逐引擎 TPS: {groups: [Prefill 逐引擎 TPS]}
-    Decode TPS: {groups: [Decode TPS]}
-    Decode 逐引擎 TPS: {groups: [Decode 逐引擎 TPS]}
-    缓存命中率: {groups: [缓存命中率]}
-    客户端吞吐: {groups: [客户端吞吐]}
-    延迟: {groups: [延迟]}
-    流量: {groups: [流量]}
-    队列: {groups: [队列]}
-    规模: {groups: [规模]}
-    KV: {groups: [KV]}
-    模拟执行: {groups: [模拟执行]}
+panels:
+- id: engine-tps
+  title: 三项引擎 TPS 与门禁线
+  names: [P context TPS, P context TPS（含缓存）, D generate TPS]
+  axes:
+    forward: {title: 单引擎平均 tokens/s, position: left}
+  caption: 三项均为同一采样点按引擎等权平均的执行 TPS；虚线为各自的绝对下界，不是集群 TPS。
+  empty_caption: 缺少引擎 TPS 采样；门禁结果仍以原始证据判定。
+- id: client-qps
+  title: 发送 / 成功 / 失败 QPS
+  names: [发送 QPS, 成功 QPS, 错误 QPS]
+  axes:
+    qps: {title: 请求 / 秒, position: left}
+  caption: 发送按请求发出时间分桶，成功和失败按终态时间分桶，均为每秒请求数。
+  empty_caption: 缺少逐请求终态证据，无法绘制 QPS。
+- id: latency
+  title: TTFT / 调度等待 / Model forward
+  names: [TTFT p99, 调度等待 p99, P model forward 均值]
+  axes:
+    ms: {title: 毫秒, position: left}
+  caption: TTFT 为 1 秒到达 cohort 的逐请求 p99；调度等待为客户端 schedule 直方图的 10 秒窗口 p99，包含调度处理；Model forward 为 Mock Prefill 引擎均值。三条曲线采样口径不同，不能相减。
+  empty_caption: 缺少延迟采样，无法绘制延迟曲线。
+- id: cache-hit
+  title: Prefill 实际 token 命中率
+  names: [P 实际 token 命中率]
+  axes:
+    hit_pct: {title: 命中率 %, position: left}
+  caption: Prefill 的 mock_hit_tokens_total 与 mock_context_tokens_total 在同一 10 秒窗口的速率之比；分母为零或缺采时断线。
+  empty_caption: 缺少有效的 Prefill token 命中率采样；不补零，也不使用理论路由命中率替代。
 sections:
   criteria: 绝对标准
   monitoring: 监控曲线来源与缺采

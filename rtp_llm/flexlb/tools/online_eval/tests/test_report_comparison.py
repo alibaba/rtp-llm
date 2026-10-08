@@ -170,7 +170,11 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['PASS', 'FAIL'])
         self.assertTrue(result['controls']['comparisons']['B']['differences'])
-        self.assertEqual(len(self.spec()['panels']), 3)
+        self.assertEqual(len(self.spec()['panels']), 12)
+        self.assertEqual({panel['id'] for panel in self.spec()['panels']
+                          if panel['id'].startswith('overlay:')},
+                         {'overlay:engine-tps', 'overlay:client-qps',
+                          'overlay:latency', 'overlay:cache-hit'})
 
     def test_cache_outcomes_and_prepared_curves_are_frozen(self):
         paths, expected = [], []

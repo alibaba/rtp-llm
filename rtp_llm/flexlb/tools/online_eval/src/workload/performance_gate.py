@@ -431,7 +431,7 @@ def write_evidence(path, evidence):
 
 
 def report(directory, evidence, result=None, telemetry_directory=None):
-    from reporting.view_config import select_presets, view
+    from reporting.view_config import view
 
     presentation = view("master_performance.yaml")
     result = analyze(evidence) if result is None else result
@@ -439,16 +439,15 @@ def report(directory, evidence, result=None, telemetry_directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     write_evidence(directory / "performance-gate-evidence.json", evidence)
     p = evidence.get("provenance", {})
-    from workload.performance_views import panel
+    from workload.performance_views import panel, report_panels
 
     chart, monitoring = panel(telemetry_directory or directory, evidence, result)
-    chart["title"] = presentation["panel"]["title"]
-    chart["presets"] = select_presets(chart["series"], presentation["panel"]["presets"])
+    panels = report_panels(chart["series"], evidence.get("criteria", {}), presentation)
     spec = dict(
         title=presentation["title"],
         subtitle=presentation["subtitle"].format(verdict=result["verdict"]),
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
-        panels=[chart],
+        panels=panels,
         sections=[
             table(
                 presentation["sections"]["criteria"],
