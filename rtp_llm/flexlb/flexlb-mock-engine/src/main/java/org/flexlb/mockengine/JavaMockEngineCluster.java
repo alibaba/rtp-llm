@@ -867,6 +867,13 @@ public final class JavaMockEngineCluster {
         @Override
         public StreamObserver<EngineRpcService.GenerateRequestPB> remoteGenerate(
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
+            if (!admitRpc(observer)) {
+                return new StreamObserver<>() {
+                    public void onNext(EngineRpcService.GenerateRequestPB ignored) { }
+                    public void onError(Throwable ignored) { }
+                    public void onCompleted() { }
+                };
+            }
             if (!whaleRemote || roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 return super.remoteGenerate(observer);
             }
@@ -1315,6 +1322,46 @@ public final class JavaMockEngineCluster {
 
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
+        private volatile boolean admissionClosed;
+        private long admissionClosedEpochMs;
+        private long admittedRpcs;
+        private long admittedRpcsAtClose;
+        private long rejectedRpcs;
+
+        synchronized void closeAdmission() {
+            if (!admissionClosed) {
+                admissionClosed = true;
+                admissionClosedEpochMs = System.currentTimeMillis();
+                admittedRpcsAtClose = admittedRpcs;
+            }
+        }
+
+        synchronized void reopenAdmissionAfterFailedRemoval() {
+            admissionClosed = false;
+            admissionClosedEpochMs = 0;
+        }
+
+        synchronized Map<String, Object> admissionSnapshot() {
+            return Map.of("admission_open", admissionClosed ? 0 : 1,
+                    "admitted_rpcs_total", admittedRpcs,
+                    "rejected_rpcs_total", rejectedRpcs,
+                    "admission_closed_epoch_ms", admissionClosedEpochMs,
+                    "admitted_rpcs_at_close", admittedRpcsAtClose);
+        }
+
+        private boolean admitRpc(StreamObserver<?> observer) {
+            synchronized (this) {
+                if (!admissionClosed) {
+                    admittedRpcs++;
+                    return true;
+                }
+                rejectedRpcs++;
+            }
+            observer.onError(io.grpc.Status.UNAVAILABLE
+                    .withDescription("engine admission closed for removal").asRuntimeException());
+            return false;
+        }
+
         private volatile boolean stopped = false;
         // ── crash_after true-crash semantics ──
         // Epoch fence against in-flight scheduler callbacks: prefill batch
@@ -1446,6 +1493,7 @@ public final class JavaMockEngineCluster {
         @Override
         public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
                                  StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
+            if (!admitRpc(observer)) return;
             stats.enqueueRpcs.increment();
             rpcEnqueueBatch.incrementAndGet();
             EngineRpcService.EnqueueBatchResponsePB.Builder response =
@@ -2021,6 +2069,7 @@ public final class JavaMockEngineCluster {
         @Override
         public void generateStreamCall(EngineRpcService.GenerateInputPB request,
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
+            if (!admitRpc(observer)) return;
             stats.generateStreamRpcs.increment();
             rpcGenerateStream.incrementAndGet();
             // Per-RPC gRPC context, captured on the handler thread (the only
@@ -2223,6 +2272,7 @@ public final class JavaMockEngineCluster {
         @Override
         public void fetchResponse(EngineRpcService.FetchRequestPB request,
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
+            if (!admitRpc(observer)) return;
             stats.fetchResponseRpcs.increment();
             rpcFetchResponse.incrementAndGet();
             // Same client-gone capture as generateStreamCall: under the BATCH
@@ -2771,7 +2821,7 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
             }
             synchronized (decode.decodeQueueLock) {
-                if (decode.stopped || decode.shuttingDown) {
+                if (decode.admissionClosed || decode.stopped || decode.shuttingDown) {
                     decode.deliverLinkBreak(requestId, this);
                     return;
                 }
@@ -4167,11 +4217,11 @@ public final class JavaMockEngineCluster {
             long id = shape.input().getRequestId();
             // Retry without decodeQueueLock: existing completions must be able
             // to release KV while ALLOCATE waits for capacity.
-            if (decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shapeForDecode(decode, shape))) {
+            if (decode.admissionClosed || decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shapeForDecode(decode, shape))) {
                 return false;
             }
             synchronized (decode.decodeQueueLock) {
-                if (decode.stopped || decode.shuttingDown || cancelledRequests.containsKey(id)
+                if (decode.admissionClosed || decode.stopped || decode.shuttingDown || cancelledRequests.containsKey(id)
                         || decode.cancelledRequests.containsKey(id)) {
                     decode.releaseBlockLease(id);
                     return false;
@@ -6603,6 +6653,7 @@ public final class JavaMockEngineCluster {
             }
             // Python cluster.snapshot() adds "stopped" per engine.
             snap.put("stopped", stopped);
+            snap.putAll(admissionSnapshot());
             // Java-only fields retained (do not rename Python fields above).
             snap.put("port", grpcPort);
             // Cumulative per-engine busy time (ms): prefill batches (resp. decode

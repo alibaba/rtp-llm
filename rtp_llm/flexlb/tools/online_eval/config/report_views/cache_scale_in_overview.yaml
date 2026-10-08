@@ -5,7 +5,7 @@ title: P scale-in cache-collapse gate
 subtitle: '{verdict} · monitoring {monitoring_status}'
 time_origin: Seconds since observation began
 meta:
-  sampling: Prometheus queries only
+  sampling: Archived Prometheus curves and frozen gate windows
   aggregate: Prometheus queries.json
   engine_dist: not used
 kpis:
@@ -14,19 +14,19 @@ kpis:
 panels:
 - id: cache-hit
   title: Prefill 缓存命中率 · P 数量
-  names: [P cache hit ratio, P engine count]
+  names: [Survivor window hit ratio, P cache hit ratio, P engine count]
   axes:
     ratio: {title: 命中率（0–1）, position: left}
-    count: {title: P 数量, position: right}
-  caption: 命中率使用左轴，P 数量使用右轴；竖线标出缩容事件。缺采保留断线，不补零。
+    count: {title: 上报 P 数量, position: right}
+  caption: Survivor window hit ratio 是幸存者门禁窗口命中率，点位在窗口结束时刻；P cache hit ratio 是全局监控。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。过渡期不判定，缺采不补零。
   empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
 - id: client-qps
   title: 请求发出 / 成功 / 失败 QPS · P 数量
   names: [Client sent QPS, Client success QPS, Client error QPS, P engine count]
   axes:
     qps: {title: 请求 / 秒, position: left}
-    count: {title: P 数量, position: right}
-  caption: 客户端发出、成功和失败 QPS 使用左轴，P 数量使用右轴；竖线标出缩容事件。缺采保留断线，不补零。
+    count: {title: 上报 P 数量, position: right}
+  caption: 左轴是全局客户端发出、成功和失败 QPS，不等于幸存者成功 QPS；各请求归属见下方证据。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
   empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
 sections:
   audit: 监控曲线审计

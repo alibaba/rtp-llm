@@ -62,8 +62,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  *   <li>remove → port refuses connections, discovery entry gone, services map
  *       free of residue, and the response reports the engine's in-flight
  *       counters at removal time — in GRACEFUL mode (default) the call also
- *       waits bounded for in-flight work to finish without failing any
- *       request (user ruling 2026-09: planned scale-in = zero failures),
+ *       closes new RPC admission immediately and waits bounded for accepted
+ *       work; late Fetch attaches are new RPCs and are rejected,
  *       while mode=abrupt keeps the legacy immediate teardown for chaos
  *       cases;</li>
  *   <li>graceful specifics → in-flight request completes normally, drain
@@ -471,6 +471,23 @@ class DynamicEngineScaleTest {
             assertTrue(services.containsKey(victimPort),
                     "a draining engine stays hosted until the teardown");
 
+            var victim = services.get(victimPort);
+            long admittedBefore = ((Number) victim.admissionSnapshot().get("admitted_rpcs_total")).longValue();
+            StreamCollector<EngineRpcService.GenerateOutputsPB> lateGenerate = new StreamCollector<>();
+            victim.generateStreamCall(input(7001, 10), lateGenerate);
+            StreamCollector<EngineRpcService.GenerateOutputsPB> lateFetch = new StreamCollector<>();
+            victim.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder().setRequestId(6004).build(), lateFetch);
+            StreamCollector<EngineRpcService.EnqueueBatchResponsePB> lateEnqueue = new StreamCollector<>();
+            victim.enqueueBatch(EngineRpcService.EnqueueBatchRequestPB.getDefaultInstance(), lateEnqueue);
+            StreamCollector<EngineRpcService.GenerateOutputsPB> lateRemote = new StreamCollector<>();
+            victim.remoteGenerate(lateRemote);
+            for (Throwable failure : List.of(lateGenerate.error, lateFetch.error, lateEnqueue.error, lateRemote.error)) {
+                assertEquals(io.grpc.Status.Code.UNAVAILABLE, io.grpc.Status.fromThrowable(failure).getCode());
+            }
+            assertEquals(admittedBefore, victim.admissionSnapshot().get("admitted_rpcs_total"));
+            assertEquals(4L, victim.admissionSnapshot().get("rejected_rpcs_total"));
+            assertFalse(victim.isStopped(), "admission closure must allow accepted work to drain");
+
             // Concurrent add mid-drain: its file rewrite must not resurrect
             // the victim, and must include the new engine.
             JsonNode added = postOk("/add_engine", "{\"role\":\"prefill\"}");
@@ -485,6 +502,9 @@ class DynamicEngineScaleTest {
             JsonNode removed = removal.get(30, TimeUnit.SECONDS);
             assertTrue(removed.path("drained").asBoolean(),
                     "the 1.5s request must finish inside the drain bound");
+            assertEquals(removed.path("admission").path("admitted_rpcs_at_close"),
+                         removed.path("admission").path("admitted_rpcs_total"));
+            assertEquals(4L, removed.path("admission").path("rejected_rpcs_total").asLong());
         } finally {
             pool.shutdownNow();
         }

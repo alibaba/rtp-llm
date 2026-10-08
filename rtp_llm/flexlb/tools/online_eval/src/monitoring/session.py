@@ -485,6 +485,10 @@ def engine_sample(url, timeout=5):
 
     engines = {}
     reverse = {value: key for key, value in ENGINE_FIELDS.items()}
+    # Additive contract: historical exporters remain readable; removal-aware
+    # observations explicitly require these fields before starting post windows.
+    reverse.update({"mock_engine_" + field: field for field in
+                    ("admission_open", "admitted_rpcs_total", "rejected_rpcs_total")})
     for name, labels, value in parse_prometheus_samples(
         telemetry.http_text(url, timeout), ""
     ):

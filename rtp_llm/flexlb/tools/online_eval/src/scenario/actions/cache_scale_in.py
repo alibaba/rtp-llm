@@ -1,4 +1,4 @@
-"""Continuous Java traffic across a concurrent graceful Prefill scale-in."""
+"""Continuous Java traffic across a concurrent Prefill scale-in."""
 
 import json
 import math
@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.actions.elastic import _validate, _http
-from workload.cache_gate import align_send_counters, analyze, window, write_report
+from workload.cache_gate import (MEASUREMENT_POLICY, align_send_counters, analyze,
+                                 attribute_client, scope_contract, topology_ready, window, write_report)
 
 FIELDS = {
     "flow",
@@ -33,24 +34,27 @@ FIELDS = {
     "drain_timeout_ms",
     "topology_timeout_s",
 }
-OPTIONAL_FIELDS = {"intermediate_p", "intermediate_hold_s"}
+INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
+OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode"}
 
 
 def validate(params, plan):
     p = _validate(params, plan, FIELDS | OPTIONAL_FIELDS, FIELDS)
+    if p.get("removal_mode", "graceful") not in ("graceful", "abrupt"):
+        raise ValueError("removal_mode must be graceful or abrupt")
     plan.reference(p["flow"], "java_flow")
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
     for k in FIELDS - {"flow"}:
         if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or p[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")
-    for k in ("target_p", "min_completed", "min_waiting", "drain_timeout_ms"):
+    for k in ("target_p", "min_completed", "min_waiting"):
         if type(p[k]) is not int or p[k] < 1:
             raise ValueError(k + " must be a positive integer")
     if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
         raise ValueError("scale-in requires fewer target P and at most 512 initial P")
-    if OPTIONAL_FIELDS & p.keys():
-        if not OPTIONAL_FIELDS <= p.keys():
+    if INTERMEDIATE_FIELDS & p.keys():
+        if not INTERMEDIATE_FIELDS <= p.keys():
             raise ValueError(
                 "intermediate P and hold duration must be specified together"
             )
@@ -85,24 +89,19 @@ def validate(params, plan):
         raise ValueError("insufficient warmup or sample gap budget")
     if p["observe_s"] < p["window_s"] + p["sustain_s"] or p["qps"] <= 0:
         raise ValueError("observation cannot cover sustained collapse")
-    if p["drain_timeout_ms"] > 30000 or p["topology_timeout_s"] <= 0:
+    if (type(p["drain_timeout_ms"]) is not int
+            or not 0 <= p["drain_timeout_ms"] <= 30000
+            or (p.get("removal_mode", "graceful") == "graceful" and p["drain_timeout_ms"] == 0)
+            or p["topology_timeout_s"] <= 0):
         raise ValueError("removal must have bounded drain and topology budgets")
-    # Reserve time after the full per-engine drain for transport shutdown,
-    # discovery updates and at least one final sample.
-    minimum_topology_s = p["drain_timeout_ms"] / 1000 + 2 + p["max_gap_s"]
-    if p["topology_timeout_s"] < minimum_topology_s:
-        raise ValueError("topology_timeout_s must cover drain timeout + transport close + sampling slack")
     from scenario.compiler import environment
 
     for profile in plan.profiles:
         resolved = environment(plan.environment, plan.path, profile)["resolved_config"]
         stale_ms = resolved["workerRegistry"]["health"]["statusStaleAfterMs"]
-        if (
-            p["drain_timeout_ms"] <= stale_ms
-            or p["topology_timeout_s"] * 1000 <= stale_ms
-        ):
+        if p["topology_timeout_s"] * 1000 <= stale_ms:
             raise ValueError(
-                "drain and topology budgets must exceed Master status staleness"
+                "topology budget must exceed Master status staleness"
             )
     return p
 
@@ -125,6 +124,7 @@ def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     origin = ctx.clock()
     evidence = dict(
+        measurement_policy=MEASUREMENT_POLICY,
         criteria={k: v for k, v in p.items() if k != "flow"},
         samples=[],
         events=[],
@@ -264,7 +264,7 @@ def observe(ctx, p, deadline):
                         deadline,
                         dict(
                             engine=name,
-                            mode="graceful",
+                            mode=p.get("removal_mode", "graceful"),
                             drain_timeout_ms=p["drain_timeout_ms"],
                         ),
                     )
@@ -274,7 +274,7 @@ def observe(ctx, p, deadline):
                 while True:
                     deadline.sleep(p["sample_s"])
                     row = sample()
-                    if set(row["engines"]) == set(initial[:intermediate]):
+                    if topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
                         event("intermediate_topology_observed")
                         break
                     if ctx.clock() >= topology_end:
@@ -283,7 +283,7 @@ def observe(ctx, p, deadline):
                 while row["t"] < hold_end:
                     deadline.sleep(min(p["sample_s"], hold_end - row["t"]))
                     row = sample()
-                    if set(row["engines"]) != set(initial[:intermediate]):
+                    if not topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
                         raise ValueError(
                             "intermediate topology changed during hold"
                         )
@@ -298,13 +298,6 @@ def observe(ctx, p, deadline):
                     future.result(timeout=max(0.01, deadline.remaining()))
                     for future in intermediate_futures
                 ]
-                if any(
-                    not removal.get("drained", False)
-                    for removal in intermediate_removals
-                ):
-                    evidence["errors"].append(
-                        "intermediate graceful drain timed out; continuing observation"
-                    )
             initial = initial[:intermediate]
 
         removed = initial[p["target_p"] :]
@@ -320,7 +313,7 @@ def observe(ctx, p, deadline):
                 ctx.ops,
                 "remove_engine",
                 deadline,
-                dict(engine=n, mode="graceful", drain_timeout_ms=p["drain_timeout_ms"]),
+                dict(engine=n, mode=p.get("removal_mode", "graceful"), drain_timeout_ms=p["drain_timeout_ms"]),
             )
             for n in removed
         ]
@@ -328,7 +321,7 @@ def observe(ctx, p, deadline):
         while True:
             deadline.sleep(p["sample_s"])
             row = sample()
-            if set(row["engines"]) == set(evidence["survivors"]):
+            if topology_ready(row, evidence["survivors"], evidence["initial_engines"]):
                 evidence["post_start"] = row["t"]
                 event("target_topology_observed")
                 break
@@ -343,10 +336,6 @@ def observe(ctx, p, deadline):
         evidence["removals"] = intermediate_removals + [
             f.result(timeout=max(0.01, deadline.remaining())) for f in futures
         ]
-        if any(not r.get("drained", False) for r in evidence["removals"]):
-            evidence["errors"].append(
-                "graceful drain timed out; removal introduced request loss"
-            )
     except Exception as exc:
         evidence["errors"].append(str(exc))
     finally:
@@ -360,10 +349,7 @@ def observe(ctx, p, deadline):
                 evidence["removals"].append(future.result())
             except Exception as exc:
                 evidence.setdefault("removal_errors", []).append(dict(index=index, error=str(exc)))
-        if any(not r.get("drained", False) for r in evidence["removals"]):
-            error = "graceful drain timed out; removal introduced request loss"
-            if error not in evidence["errors"]:
-                evidence["errors"].append(error)
+        evidence["measurement_scope"] = scope_contract(evidence)
         path.write_text(json.dumps(evidence, indent=2))
     return StageOutput(
         {"evidence": ctx.register_resource("snapshot", evidence, historical=True)},
@@ -386,6 +372,13 @@ def check(ctx, p, deadline):
         evidence["errors"].extend(snapshot["errors"])
     else:
         align_send_counters(evidence, snapshot["issued"])
+    attribute_client(evidence, snapshot)
+    from traffic.traffic_source import sha256_file
+    evidence["client_attribution"]["artifacts"] = [
+        dict(path=str(path.resolve()), sha256=sha256_file(path))
+        for path in (flow.directory / "client_lifecycle.jsonl", flow.directory / "control/status.json")
+        if path.is_file()
+    ]
     times = [r["epoch_s"] for r in evidence["samples"]]
     issued = [
         r

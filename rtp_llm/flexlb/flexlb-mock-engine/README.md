@@ -112,14 +112,17 @@ The control server listens on `baseGrpcPort - 1` of the mock cluster.
 `/remove_engine` — a running cluster can be scaled up/down over HTTP without a
 restart. New engines register on the next port, write into the endpoints/
 discovery files, and are picked up by the master's file-discovery watcher;
-removal defaults to a graceful drain matching production rolling scale-in:
-the discovery entry is stripped first (the master stops routing new requests),
+removal closes new work RPC admission immediately, then strips the discovery
+entry. The default graceful mode lets accepted work drain independently:
 the engine keeps serving everything already accepted, and the gRPC server is
 torn down only after all in-flight work finishes (bounded by
 `drain_timeout_ms`, default 60000 — on expiry the removal falls back to the
 abrupt teardown and reports `drained=false`). Optional body fields:
 `mode` (`graceful`|`abrupt`) and `drain_timeout_ms`; the response reports
-`running_at_removal`/`waiting_at_removal` plus `drained`/`drain_ms`.
+`running_at_removal`/`waiting_at_removal` plus `drained`/`drain_ms` and an
+`admission` snapshot (closure time, admitted count at closure/final, rejected count).
+Both modes reject late Generate, Enqueue, RemoteGenerate and Fetch RPCs with
+UNAVAILABLE. Existing streams can progress; status and cleanup remain available.
 
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the

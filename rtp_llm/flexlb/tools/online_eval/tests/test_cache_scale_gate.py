@@ -203,8 +203,10 @@ class CacheGateTest(unittest.TestCase):
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
             curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
-            self.assertEqual(curves, {})
-            self.assertIn("缺少监控数据", spec["panels"][0]["caption"])
+            self.assertEqual(curves, {"Survivor window hit ratio":
+                                     [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
+            self.assertIn("缺少监控序列", spec["panels"][0]["caption"])
+            self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(analyze(e), result)
 
     def test_report_uses_friendly_monitor_labels_and_audits_missing_series(self):
@@ -225,7 +227,8 @@ class CacheGateTest(unittest.TestCase):
                 }},
             }))
             spec = write_report(root, e, analyze(e))
-            self.assertEqual(spec["panels"][0]["series"], [])
+            self.assertEqual([s["name"] for s in spec["panels"][0]["series"]],
+                             ["Survivor window hit ratio"])
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "INVALID")
@@ -260,15 +263,92 @@ class CacheGateTest(unittest.TestCase):
         )
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
-    def test_topology_budget_includes_drain_close_and_sampling(self):
+    def test_topology_budget_is_independent_of_drain(self):
         import yaml
         from cases.config import configure_program
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
-        for seconds in (30, 31, 36):
+        for mode in ("graceful", "abrupt"):
             changed = copy.deepcopy(case)
-            changed["parameters"]["gate"]["topology_timeout_s"] = seconds
-            with self.assertRaisesRegex(Exception, "must cover drain timeout"):
-                compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
+            changed["parameters"]["gate"].update(topology_timeout_s=31, removal_mode=mode)
+            if mode == "abrupt":
+                changed["parameters"]["gate"]["drain_timeout_ms"] = 0
+            with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+                plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
+            self.assertEqual(len(plans), 2)
+        changed["parameters"]["gate"]["removal_mode"] = "silent"
+        with self.assertRaisesRegex(Exception, "removal_mode"):
+            compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
+
+    def test_drain_outcome_does_not_change_survivor_windows(self):
+        evidence = self.evidence()
+        before = analyze(evidence)
+        evidence.setdefault("errors", []).append("graceful drain timed out; removal introduced request loss")
+        evidence["removals"] = [dict(drained=False, remaining_work={"owners": 12})]
+        after = analyze(evidence)
+        self.assertEqual(after["verdict"], before["verdict"])
+        self.assertEqual(after["windows"], before["windows"])
+        self.assertEqual(len(after["excluded_drain_diagnostics"]), 1)
+        evidence["errors"].append("real collection failure")
+        self.assertEqual(analyze(evidence)["verdict"], "INVALID")
+
+    def test_draining_victim_does_not_supply_survivor_overload(self):
+        from workload.cache_gate import MEASUREMENT_POLICY, attribute_client, topology_ready
+        evidence = self.evidence()
+        evidence["measurement_policy"] = MEASUREMENT_POLICY
+        for row in evidence["samples"]:
+            for engine in row["engines"].values():
+                engine["admission_open"] = 1
+            if row["t"] > 20:
+                row["engines"]["p0"]["waiting"] = 0
+                row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1",
+                                                waiting=9999, admission_open=0)
+        self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
+        evidence["events"] = [dict(name="withdraw_start", epoch_s=1020)]
+        records = [dict(rid=1, prefill="p1", status="exception", error="removed",
+                        send_start_epoch_ms=1021000, total_ms=200)]
+        attribute_client(evidence, dict(complete=True, records=records))
+        evidence["removals"] = [dict(engine="p1", admission=dict(admission_open=0, admission_closed_epoch_ms=1020000,
+                admitted_rpcs_total=42, admitted_rpcs_at_close=42), drained=False)]
+        result = analyze(evidence)
+        self.assertEqual(result["errors"], ["overload not exercised"])
+        self.assertEqual(result["windows"][0]["waiting"], 0)
+        self.assertGreater(result["windows"][0]["client_cohorts"]["removed"]["failed_qps"], 0)
+        for row in evidence["samples"]:
+            if row["t"] > 20:
+                row["engines"]["p0"]["waiting"] = 100
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
+        evidence["removals"][0]["admission"]["admitted_rpcs_total"] += 1
+        self.assertIn("removal admission proof unavailable or violated", analyze(evidence)["errors"])
+        evidence["removals"][0]["admission"]["admitted_rpcs_total"] -= 1
+        records[0]["send_start_epoch_ms"] = 1019000
+        attribute_client(evidence, dict(complete=True, records=records))
+        self.assertIn("removed engine failures predate withdrawal or lack timing proof", analyze(evidence)["errors"])
+        records[0]["send_start_epoch_ms"] = 1021000
+        records[0]["prefill"] = ""
+        attribute_client(evidence, dict(complete=True, records=records))
+        self.assertIn("unknown client failures are not exempt", analyze(evidence)["errors"])
+        records[0]["prefill"] = "p0"
+        attribute_client(evidence, dict(complete=True, records=records))
+        self.assertIn("survivor client failures are not exempt", analyze(evidence)["errors"])
+        evidence["samples"][-1]["engines"]["p1"]["admission_open"] = 1
+        self.assertFalse(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
+
+    def test_reinterpretation_preserves_frozen_input_and_requires_new_output(self):
+        import sys
+        from workload.cache_gate import main
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "evidence.json"
+            source.write_text(json.dumps(self.evidence()))
+            frozen = source.read_bytes()
+            destination = Path(directory) / "new"
+            argv = ["cache_gate", str(source), "--reinterpret", "--output", str(destination)]
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(main(), 2)  # no historical journal: no invented attribution
+            self.assertEqual(source.read_bytes(), frozen)
+            result = json.loads((destination / "reports/run/cache-scale-in/analysis.json").read_text())
+            self.assertIn("historical client attribution unavailable", result["result"]["errors"])
+            with mock.patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+                main()
 
     def test_staircase_validates_order_hold_and_traffic_budget(self):
         import yaml

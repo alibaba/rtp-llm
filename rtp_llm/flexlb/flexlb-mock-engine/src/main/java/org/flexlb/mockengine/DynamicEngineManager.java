@@ -27,15 +27,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       services map, starts the gRPC server, and appends it to the discovery
  *       file so a master running {@code LocalServiceDiscovery} picks it up
  *       within one sync interval.</li>
- *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes
- *       (user ruling 2026-09: a PLANNED scale-in under load must not lose or
- *       fail any request):
+ *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes.
+ *       Both close new RPC admission at the removal decision:
  *       <ul>
- *       <li><b>graceful</b> (default) — the production rolling scale-in
- *           order. Phase 1 strips the engine's discovery-file entry FIRST so
- *           the master stops routing NEW requests to it (the engine keeps
- *           serving everything already accepted, including stragglers that
- *           race past the strip window). Phase 2 waits a BOUNDED interval
+ *       <li><b>graceful</b> (default) — phase 1 closes admission and strips
+ *           the discovery-file entry. Accepted work can keep progressing;
+ *           late dispatch/retry/Fetch RPCs are explicitly rejected.
+ *           Phase 2 waits a BOUNDED interval
  *           (drainTimeoutMs) for all in-flight work to finish (running
  *           tasks, both pending queues, cross-engine P→D ownership). Phase 3
  *           tears the gRPC server down and removes every bookkeeping entry.
@@ -67,7 +65,7 @@ final class DynamicEngineManager {
      * STARTS (the "at removal time" report), plus the drain result. */
     record RemovedEngine(String engineName, int grpcPort, int runningAtRemoval,
                          int waitingAtRemoval, String mode, boolean drained, long drainMs, long withdrawalMs, long teardownMs,
-                         long totalMs, Map<String, Integer> remainingWork) {
+                         long totalMs, Map<String, Integer> remainingWork, Map<String, Object> admission) {
     }
 
     /** Thrown for caller-input problems (bad role, port conflict, unknown engine). */
@@ -209,16 +207,15 @@ final class DynamicEngineManager {
                 }
                 runningAtRemoval = service.getRunningCount();
                 waitingAtRemoval = removalWaitingCount(service);
-                // Phase 1 (lock held): strip the discovery entry FIRST so the
-                // master stops routing new requests; the engine keeps serving
-                // everything it already accepted (production rolling scale-in
-                // order — the in-flight set, not the admission gate, is what
-                // the drain below waits on).
+                // Close new RPC admission at the removal decision, independently
+                // of execution/drain state. Existing accepted work may continue.
+                service.closeAdmission();
                 pendingRemovalPorts.add(port);
                 try {
                     rewriteDiscoveryFileLocked();
                 } catch (IOException e) {
                     pendingRemovalPorts.remove(port);
+                    service.reopenAdmissionAfterFailedRemoval();
                     throw new IOException("engine " + service.getEngineName()
                             + " removal aborted (engine NOT removed): discovery file rewrite failed: "
                             + e.getMessage(), e);
@@ -289,7 +286,7 @@ final class DynamicEngineManager {
             RemovedEngine result = new RemovedEngine(service.getEngineName(), service.getGrpcPort(),
                     runningAtRemoval, waitingAtRemoval, mode, drained, drainMs, withdrawalMs,
                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - teardownStart),
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), remainingWork);
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), remainingWork, service.admissionSnapshot());
             synchronized (mutationLock) {
                 drainingFutures.remove(service.getGrpcPort(), outcome);
             }

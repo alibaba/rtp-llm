@@ -165,3 +165,9 @@ Verification on 2026-09-21:
   long-step silence, first sample, independent observers and crash reset.
   Integration tests cover HTTP role sums, cancellation and Whale parity.
 - No live GPU comparison or production TPS benchmark was run.
+
+### 移除时的新 RPC 准入
+
+`mock_engine_admission_open` 表示入口是否接受新工作 RPC。`mock_engine_admitted_rpcs_total` 统计通过入口闸门的 RPC，`mock_engine_rejected_rpcs_total` 统计移除闸门拒绝的 RPC；一次 batch 算一次 RPC，并非 batch 内请求数。三者带引擎身份标签，关闭闸门不暂停已有任务推进。
+
+`remove_engine` 两种模式都先关闭准入，再撤销 discovery。返回的 `admission` 保存关闭时间、关闭时和最终受理计数及拒绝计数；受理计数在关闭后必须不增长。Generate、Enqueue、RemoteGenerate 和迟到 Fetch 以 UNAVAILABLE 拒绝。既有流、状态与清理接口保留；`drained`、`remaining_work` 描述关停结果，与业务测量的有效性分别解释。

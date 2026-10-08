@@ -946,6 +946,7 @@ final class MockControlServer {
             response.put("teardown_ms", removed.teardownMs());
             response.put("total_ms", removed.totalMs());
             response.put("remaining_work", removed.remainingWork());
+            response.put("admission", removed.admission());
             sendJson(exchange, 200, response);
         } catch (DynamicEngineManager.EngineOperationException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
@@ -1008,6 +1009,9 @@ final class MockControlServer {
                 {"mock_context_tokens_total", "cumulative input tokens including hits", "counter"},
                 {"mock_hit_tokens_total", "cache hit tokens of completed prefill requests", "counter"},
                 {"mock_context_requests_total", "completed prefill requests", "counter"},
+                {"mock_engine_admission_open", "whether new work RPCs may enter", "gauge"},
+                {"mock_engine_admitted_rpcs_total", "work RPCs admitted at entry before removal", "counter"},
+                {"mock_engine_rejected_rpcs_total", "work RPCs rejected by removal admission gate", "counter"},
                 {"mock_prefill_batches_total", "executed prefill batches", "counter"},
                 {"mock_prefill_batch_requests_total", "requests in executed prefill batches", "counter"},
                 {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
@@ -1073,6 +1077,9 @@ final class MockControlServer {
             sb.append(String.format("rtp_llm_wait_stream_size{%s} %s%n", labels, snap.get("waiting")));
             sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
             sb.append(String.format("mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
+            for (String field : List.of("admission_open", "admitted_rpcs_total", "rejected_rpcs_total")) {
+                sb.append(String.format("mock_engine_%s{%s} %s%n", field, labels, snap.get(field)));
+            }
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
             if ("prefill".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));

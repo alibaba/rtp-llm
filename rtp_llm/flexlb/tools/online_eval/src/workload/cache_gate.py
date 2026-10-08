@@ -1,7 +1,8 @@
 """Offline cache-collapse adjudication from identity-preserving counter samples.
 
 No HTTP, wall-clock waits or implicit threshold tuning. The same JSON supplies
-both CI checks and the existing Chart.js renderer. Queues are diagnostic only.
+both CI checks and the existing Chart.js renderer. Queue pressure is measured
+on the selected engine population.
 """
 
 import argparse
@@ -11,7 +12,7 @@ import json
 import math
 from pathlib import Path
 
-from reporting.catalog import CACHE_METRICS
+from reporting.catalog import CACHE_METRICS, PALETTE
 from reporting.view_config import view
 from reporting import (
     details,
@@ -55,6 +56,106 @@ def align_send_counters(evidence, issued):
     )
 
 
+MEASUREMENT_POLICY = "survivor-cache-with-attributed-client-load"
+DRAIN_DIAGNOSTICS = {
+    "graceful drain timed out; removal introduced request loss",
+    "intermediate graceful drain timed out; continuing observation",
+}
+
+
+def topology_ready(row, names, initial):
+    """Serving population, not the set of processes still draining."""
+    engines, names, initial = row["engines"], set(names), set(initial)
+    return (row.get("master_p") == len(names)
+            and names <= set(engines) <= initial
+            and all(engines[n].get("admission_open") == 1 for n in names)
+            and all(engines[n].get("admission_open") == 0 for n in set(engines) - names))
+
+
+def attribute_client(evidence, snapshot):
+    """Freeze send/terminal cohorts using the completed client journal.
+
+    A missing route is unknown, never inferred from an error string or timing.
+    Client load remains global; per-cohort counters expose victim contributions.
+    """
+    addresses = {}
+    for row in evidence["samples"]:
+        for name, engine in row["engines"].items():
+            address = engine.get("grpc_addr")
+            if address:
+                addresses.setdefault(address, set()).add(name)
+    cohorts = {group: {kind: [] for kind in ("sent", "terminal", "failed")}
+               for group in ("survivor", "removed", "unknown")}
+    failures, invalid, before_removal = [], [], []
+    withdrawal = min((event["epoch_s"] * 1000 for event in evidence.get("events", [])
+                      if event.get("name") in {"withdraw_start", "intermediate_withdraw_start"}),
+                     default=None)
+    closed_at = {r.get("engine"): r.get("admission", {}).get("admission_closed_epoch_ms")
+                 for r in evidence.get("removals", [])}
+    for record in snapshot.get("records", []):
+        names = addresses.get(record.get("prefill"), set())
+        name = next(iter(names)) if len(names) == 1 else None
+        group = ("survivor" if name in evidence["survivors"] else
+                 "removed" if name in evidence["initial_engines"] else "unknown")
+        start, duration = record.get("send_start_epoch_ms"), record.get("total_ms")
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0
+               for v in (start, duration)):
+            invalid.append(record.get("rid"))
+            continue
+        cohorts[group]["sent"].append(start)
+        cohorts[group]["terminal"].append(start + duration)
+        if record.get("status") != "ok":
+            cohorts[group]["failed"].append(start + duration)
+            cutoff = closed_at.get(name) or withdrawal
+            if group == "removed" and (cutoff is None or start + duration < cutoff):
+                before_removal.append(record.get("rid"))
+            failures.append({key: record.get(key) for key in
+                             ("rid", "request_id", "prefill", "status", "error",
+                              "send_start_epoch_ms", "total_ms")} | {"cohort": group})
+    for counts in cohorts.values():
+        for times in counts.values():
+            times.sort()
+    for row in evidence["samples"]:
+        row["client_cohorts"] = {group: {kind: bisect_right(times, row["epoch_s"] * 1000)
+                                        for kind, times in counts.items()}
+                                 for group, counts in cohorts.items()}
+        row.setdefault("journal_observed_terminal", row["terminal"])
+        row["terminal"] = sum(c["terminal"] for c in row["client_cohorts"].values())
+    evidence["client_attribution"] = dict(
+        complete=bool(snapshot.get("complete")) and not invalid,
+        source="completed client journal; prefill matched to sampled grpc_addr",
+        accounting=snapshot.get("status"), issued_count=len(snapshot.get("issued", [])),
+        terminal_count=len(snapshot.get("records", [])),
+        terminal_time="send_start_epoch_ms + total_ms",
+        counts={group: {kind: len(times) for kind, times in counts.items()}
+                for group, counts in cohorts.items()},
+        failures=failures, invalid_timestamps=invalid,
+        removed_failures_without_intervention=before_removal,
+    )
+
+
+def scope_contract(evidence):
+    return dict(
+        policy=MEASUREMENT_POLICY,
+        baseline_engines=evidence["initial_engines"], post_engines=evidence["survivors"],
+        baseline_scope="full initial population for predeclared warmup and threshold; survivor-filtered fields below apply post-removal",
+        transition="withdraw_start through post_start excluded from cache adjudication",
+        post_start="first sample with survivor admission open, victims closed/absent and Master count converged",
+        hit=dict(scope="survivor-filtered", counters=["hit_tokens_total", "context_tokens_total"],
+                 calculation="sum counter deltas / sum context token deltas"),
+        completed=dict(scope="survivor-filtered", counters=["context_requests_total"]),
+        waiting=dict(scope="survivor-filtered", counters=["waiting"], calculation="max sample sum"),
+        running=dict(scope="survivor-filtered", counters=["running"], calculation="max sample sum; diagnostic"),
+        sent_qps=dict(scope="aggregate-with-attribution", source="issued send_start_epoch_ms",
+                      calculation="global offered load; cohort deltas shown separately, target unchanged"),
+        terminal_qps=dict(scope="aggregate-with-attribution", source="client terminal journal",
+                          calculation="global terminal delta; diagnostic, not successful prefill QPS"),
+        client_pacing=dict(scope="aggregate-with-attribution", source="issued pacing_lag_ms", calculation="global maximum"),
+        accounting="all submitted requests require terminal records; only known victim failures are exempt",
+        drain="diagnostic only; no verdict contribution",
+    )
+
+
 def window(rows, start, end, names, max_gap_s):
     selected = select_window(rows, start, end, time=lambda r: r["t"], include_end=True)
     result = dict(
@@ -83,6 +184,15 @@ def window(rows, start, end, names, max_gap_s):
     ):
         result["errors"].append("sampling gap or non-increasing clock")
         return result
+    result["source"] = dict(engines=list(names), first_sample_t=selected[0]["t"],
+                            last_sample_t=selected[-1]["t"], elapsed_s=elapsed,
+                            counters=list(COUNTERS), population="selected engines")
+    if all("client_cohorts" in r for r in selected):
+        result["client_cohorts"] = {
+            group: {kind + "_qps": (selected[-1]["client_cohorts"][group][kind]
+                                    - selected[0]["client_cohorts"][group][kind]) / elapsed
+                    for kind in ("sent", "terminal", "failed")}
+            for group in ("survivor", "removed", "unknown")}
     totals = dict.fromkeys(COUNTERS, 0)
     for name in names:
         values = [r["engines"].get(name) for r in selected]
@@ -134,7 +244,32 @@ def window(rows, start, end, names, max_gap_s):
 
 def analyze(evidence):
     p, rows = evidence["criteria"], evidence["samples"]
-    errors = list(evidence.get("errors", []))
+    errors = [e for e in evidence.get("errors", []) if e not in DRAIN_DIAGNOSTICS]
+    scoped = evidence.get("measurement_policy") == MEASUREMENT_POLICY
+    if scoped:
+        attribution = evidence.get("client_attribution", {})
+        if not attribution.get("complete"):
+            errors.append("complete client attribution unavailable")
+        if attribution.get("removed_failures_without_intervention"):
+            errors.append("removed engine failures predate withdrawal or lack timing proof")
+        for group in ("survivor", "unknown"):
+            if attribution.get("counts", {}).get(group, {}).get("failed", 0):
+                errors.append(group + " client failures are not exempt")
+        if attribution.get("counts", {}).get("unknown", {}).get("sent", 0):
+            errors.append("client route attribution incomplete")
+        expected_removed = set(evidence["initial_engines"]) - set(evidence["survivors"])
+        removals = evidence.get("removals", [])
+        if (len(removals) != len(expected_removed)
+                or {r.get("engine") for r in removals} != expected_removed
+                or evidence.get("removal_errors")):
+            errors.append("removal outcomes incomplete")
+        for removal in evidence.get("removals", []):
+            gate = removal.get("admission", {})
+            if (gate.get("admission_open") != 0 or not gate.get("admission_closed_epoch_ms")
+                    or type(gate.get("admitted_rpcs_total")) is not int
+                    or type(gate.get("admitted_rpcs_at_close")) is not int
+                    or gate.get("admitted_rpcs_total") != gate.get("admitted_rpcs_at_close")):
+                errors.append("removal admission proof unavailable or violated")
     if any(b["t"] <= a["t"] for a, b in zip(rows, rows[1:])):
         errors.append("sample clock must increase")
     baseline = window(
@@ -178,7 +313,9 @@ def analyze(evidence):
         )
     post = [r for r in rows if start < r["t"] <= end]
     survivors = set(evidence["survivors"])
-    if not post or any(set(r["engines"]) != survivors for r in post):
+    stable = (all(topology_ready(r, survivors, evidence["initial_engines"]) for r in post)
+              if scoped else all(set(r["engines"]) == survivors for r in post))
+    if not post or not stable:
         errors.append("target topology not stable")
     if (
         not windows
@@ -209,6 +346,9 @@ def analyze(evidence):
     )
     return dict(
         schema_version=1,
+        measurement_scope=scope_contract(evidence) if scoped else {
+            "policy": "historical-detach-window", "drain": "diagnostic only"},
+        excluded_drain_diagnostics=[e for e in evidence.get("errors", []) if e in DRAIN_DIAGNOSTICS],
         verdict=verdict,
         errors=sorted(set(errors)),
         threshold=threshold,
@@ -329,7 +469,12 @@ def report_panels(curves, presentation):
 def build_spec(directory, evidence, result, prepared):
     presentation = view("cache_scale_in_overview.yaml")
     rows = evidence["samples"]
-    curves = prepared["curves"]
+    curves = list(prepared["curves"])
+    curves.append(dict(name="Survivor window hit ratio", group="缓存", axis="ratio",
+                       unit="", color=PALETTE[0],
+                       description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
+                       points=[dict(x=w["end"], y=w["hit"] if not w["errors"] else None)
+                               for w in result["windows"]]))
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
@@ -360,6 +505,10 @@ def build_spec(directory, evidence, result, prepared):
             table(presentation["sections"]["audit"], presentation["audit_columns"], audit),
             details(presentation["sections"]["monitoring"], dict(status=monitoring_status, warnings=monitor_warnings)),
             details(presentation["sections"]["verdict"], result),
+            details("测量口径与请求归属", dict(scope=result["measurement_scope"],
+                    client_attribution=evidence.get("client_attribution"),
+                    removals=evidence.get("removals"),
+                    reinterpretation=evidence.get("reinterpretation"))),
             details(presentation["sections"]["sources"], dict(queries=sources, gaps=gaps, errors=errors)),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
@@ -412,11 +561,46 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--reinterpret", action="store_true",
+                        help="explicitly re-adjudicate historical evidence into a NEW output directory")
+    parser.add_argument("--client-snapshot", type=Path,
+                        help="complete java_flow evidence_snapshot JSON for historical attribution")
     args = parser.parse_args()
     evidence = json.loads(args.evidence.read_text())
+    if not args.reinterpret:
+        parser.error("offline adjudication requires --reinterpret; comparisons use frozen bundles")
+    if args.output.exists() and any(args.output.iterdir()):
+        parser.error("reinterpretation requires an empty output directory; frozen reports cannot be overwritten")
+    original_errors = list(evidence.get("errors", []))
+    if args.client_snapshot:
+        snapshot = json.loads(args.client_snapshot.read_text())
+        if snapshot.get("complete"):
+            align_send_counters(evidence, snapshot["issued"])
+        attribute_client(evidence, snapshot)
+    attribution = evidence.get("client_attribution", {})
+    if not attribution.get("complete"):
+        evidence.setdefault("errors", []).append("historical client attribution unavailable")
+    elif (attribution["counts"]["unknown"]["sent"]
+          or attribution["counts"]["survivor"]["failed"]
+          or attribution.get("removed_failures_without_intervention")):
+        evidence.setdefault("errors", []).append("historical failures or routes are not attributable to removed engines")
+    evidence["reinterpretation"] = dict(
+        source=str(args.evidence.resolve()),
+        source_sha256=hashlib.sha256(args.evidence.read_bytes()).hexdigest(),
+        analyzer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        client_snapshot=(dict(path=str(args.client_snapshot.resolve()),
+                              sha256=hashlib.sha256(args.client_snapshot.read_bytes()).hexdigest())
+                         if args.client_snapshot else None),
+        original_errors=original_errors,
+        excluded_drain_diagnostics=[e for e in original_errors if e in DRAIN_DIAGNOSTICS],
+        window_policy="preserve archived baseline/post windows and all thresholds",
+        limitations=[] if evidence.get("measurement_policy") == MEASUREMENT_POLICY else
+            ["historical admission timing cannot be reconstructed; detach-based windows retained"],
+    )
     args.output.mkdir(parents=True, exist_ok=True)
     result = analyze(evidence)
-    write_report(args.output, evidence, result)
+    write_report(args.output, evidence, result,
+                 prepared=prepare_report(args.evidence.parent, evidence))
     print(result["verdict"])
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[result["verdict"]]
 
