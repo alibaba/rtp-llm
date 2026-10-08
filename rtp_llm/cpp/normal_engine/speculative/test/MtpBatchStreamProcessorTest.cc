@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <list>
 #include <limits>
 #include "torch/all.h"
 #include "gtest/gtest.h"
@@ -1325,48 +1326,52 @@ TEST_F(MtpBatchStreamProcessorTest, K3SyncUpdateKeepsFixedSlotsForEveryAcceptLen
     PDSepConfig pd;
     ProfilingDebugLoggingConfig logging;
     auto cache = makeProcessorCacheConfig();
-    for (int steps : {1, 3}) {
-        const int width = steps + 1;
-        SpeculativeExecutionConfig spec;
-        spec.type = SP_TYPE_MTP;
-        spec.gen_num_per_cycle = steps;
-        MtpBatchStreamProcessor processor(config, pd, logging, cache, spec, false);
-        ASSERT_TRUE(processor.usesFixedMtpUpdateLayout());
-        for (int batch : {1, 2, 4, 31, 32, 63, 64}) {
-            GptModelInputs input;
-            input.is_target_verify = true;
-            input.input_lengths = torch::full({batch}, width, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-            input.prefix_lengths = torch::full({batch}, 65535, torch::kInt32);
-            input.sequence_lengths = torch::empty({0}, torch::kInt32);
-            input.combo_position_ids = torch::arange(batch * width, torch::kInt32);
-            input.kv_cache_kernel_block_id = torch::arange(2 * batch * 3, torch::kInt32).reshape({2, batch, 3});
-            const auto positions = input.combo_position_ids.clone();
-            const auto blocks = input.kv_cache_kernel_block_id.clone();
-            speculative::SpeculativeSamplerOutput accepted;
-            accepted.accept_len = (torch::arange(batch, torch::kInt32) % width + 1).cuda();
-            accepted.accept_tokens = torch::arange(batch * width, torch::kInt32).reshape({batch, width}).cuda();
-            GptModelOutputs target;
-            target.all_hidden_states = torch::arange(batch * width * 2, torch::kFloat32).reshape({batch * width, 2}).cuda();
-            torch::Tensor recurrent;
-            TensorHolder holder;
-            processor.updateDecodePostDraftModelInput(input, target, accepted, batch, recurrent, holder);
-            EXPECT_FALSE(input.is_target_verify);
-            EXPECT_TRUE(input.is_mtp_draft_update);
-            EXPECT_EQ(input.combo_tokens.numel(), batch * width);
-            EXPECT_TRUE(torch::equal(input.combo_tokens, accepted.accept_tokens.reshape({-1})));
-            EXPECT_TRUE(torch::equal(input.last_hidden_states, target.all_hidden_states));
-            EXPECT_TRUE(torch::equal(input.combo_position_ids, positions));
-            EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id, blocks));
-            EXPECT_TRUE(input.input_lengths.is_pinned());
-            EXPECT_EQ(toVec<int>(input.input_lengths), std::vector<int>(batch, width));
-            const auto expected_indexes = torch::arange(batch, torch::kInt32).cuda() * width + accepted.accept_len - 1;
-            EXPECT_TRUE(torch::equal(input.lm_output_indexes, expected_indexes));
-            // The next proposal must select each request's last accepted row,
-            // including after a cache-page crossing at prefix 65535.
-            EXPECT_TRUE(torch::equal(recurrent.index_select(0, input.lm_output_indexes.to(torch::kInt64)),
-                                     target.all_hidden_states.index_select(0, expected_indexes.to(torch::kInt64))));
+    for (bool device_state : {false, true}) {
+        setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", device_state ? "1" : "0", 1);
+        for (int steps : {1, 3}) {
+            const int width = steps + 1;
+            SpeculativeExecutionConfig spec;
+            spec.type = SP_TYPE_MTP;
+            spec.gen_num_per_cycle = steps;
+            MtpBatchStreamProcessor processor(config, pd, logging, cache, spec, false);
+            ASSERT_TRUE(processor.usesFixedMtpUpdateLayout());
+            for (int batch : {1, 2, 4, 31, 32, 63, 64}) {
+                GptModelInputs input;
+                input.is_target_verify = true;
+                input.input_lengths = torch::full({batch}, width, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+                input.prefix_lengths = torch::full({batch}, 65535, torch::kInt32);
+                input.sequence_lengths = torch::empty({0}, torch::kInt32);
+                input.combo_position_ids = torch::arange(batch * width, torch::kInt32);
+                input.kv_cache_kernel_block_id = torch::arange(2 * batch * 3, torch::kInt32).reshape({2, batch, 3});
+                const auto positions = input.combo_position_ids.clone();
+                const auto blocks = input.kv_cache_kernel_block_id.clone();
+                speculative::SpeculativeSamplerOutput accepted;
+                accepted.accept_len = (torch::arange(batch, torch::kInt32).remainder(width) + 1).cuda();
+                accepted.accept_tokens = torch::arange(batch * width, torch::kInt32).reshape({batch, width}).cuda();
+                GptModelOutputs target;
+                target.all_hidden_states = torch::arange(batch * width * 2, torch::kFloat32).reshape({batch * width, 2}).cuda();
+                torch::Tensor recurrent;
+                TensorHolder holder;
+                processor.updateDecodePostDraftModelInput(input, target, accepted, batch, recurrent, holder);
+                EXPECT_FALSE(input.is_target_verify);
+                EXPECT_TRUE(input.is_mtp_draft_update);
+                EXPECT_EQ(input.combo_tokens.numel(), batch * width);
+                EXPECT_TRUE(torch::equal(input.combo_tokens, accepted.accept_tokens.reshape({-1})));
+                EXPECT_TRUE(torch::equal(input.last_hidden_states, target.all_hidden_states));
+                EXPECT_TRUE(torch::equal(input.combo_position_ids, positions));
+                EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id, blocks));
+                EXPECT_TRUE(input.input_lengths.is_pinned());
+                EXPECT_EQ(toVec<int>(input.input_lengths), std::vector<int>(batch, width));
+                const auto expected_indexes = torch::arange(batch, torch::kInt32).cuda() * width + accepted.accept_len - 1;
+                EXPECT_TRUE(torch::equal(input.lm_output_indexes, expected_indexes));
+                // The next proposal must select each request's last accepted row,
+                // while keeping the original 65535-token prefix metadata.
+                EXPECT_TRUE(torch::equal(recurrent.index_select(0, input.lm_output_indexes.to(torch::kInt64)),
+                                         target.all_hidden_states.index_select(0, expected_indexes.to(torch::kInt64))));
+            }
         }
     }
+    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 
 TEST_F(MtpBatchStreamProcessorTest, K3SyncBookkeepingSelectsRequestMajorRecurrentHidden) {
@@ -1386,7 +1391,7 @@ TEST_F(MtpBatchStreamProcessorTest, K3SyncBookkeepingSelectsRequestMajorRecurren
     auto cache = makeProcessorCacheConfig();
     ResourceContext resources;
     resources.cache_manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 10, 2, TYPE_INT8, 128, 256));
-    std::vector<GenerateStreamPtr> streams;
+    std::list<GenerateStreamPtr> streams;
     for (int i = 0; i < 4; ++i) {
         streams.push_back(createContextStream(config, runtime, resources, {1}, i + 1));
     }
@@ -1402,7 +1407,7 @@ TEST_F(MtpBatchStreamProcessorTest, K3SyncBookkeepingSelectsRequestMajorRecurren
     ASSERT_EQ(updates.size(), 4);
     for (int i = 0; i < 4; ++i) {
         EXPECT_EQ(updates[i].new_tokens.size(1), i + 1);
-        EXPECT_TRUE(torch::equal(updates[i].last_hidden_states,
+        EXPECT_TRUE(torch::equal(updates[i].draft_hidden_states,
                                 output.model_output.all_hidden_states.narrow(0, i * 4 + i, 1)));
     }
 }

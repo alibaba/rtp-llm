@@ -1174,6 +1174,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d)",
+                static_cast<int>(role_), inputs.attention_inputs.logical_request_count,
+                inputs.attention_inputs.input_lengths.numel(),
+                inputs.attention_inputs.physical_token_count / inputs.attention_inputs.input_lengths.numel(),
+                state.current_real_graph_seq_len);
             replayPrefill(state.current_real_graph_seq_len);
         }
         static const bool smoke_prefill_evidence = [] {
@@ -1214,6 +1220,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "cuda_graph.forward(replayDecode,B=%d,capture=%d,Q=%d,T=%d,fake=0)",
                 state.current_batch_size, state.current_real_graph_bs, num_tokens_per_bs_, state.seq_len_sum);
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d)",
+                static_cast<int>(role_), inputs.attention_inputs.logical_request_count,
+                inputs.attention_inputs.input_lengths.numel(),
+                inputs.attention_inputs.physical_token_count / inputs.attention_inputs.input_lengths.numel(),
+                state.current_real_graph_bs);
             replayDecode(state.current_real_graph_bs);
         }
         static const bool smoke_evidence = [] {
@@ -1463,13 +1475,27 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
                && table_rows_fit(source.kv_cache_kernel_block_id_device,
                                  destination.kv_cache_kernel_block_id_device);
     };
+    const auto report_table_fallback = [&](const char* tag) {
+        if (!observe_fallback) return;
+        const FallbackTick tick = tickFallback(cache_table_fallback_count_);
+        if (tick.should_log) {
+            RTP_LLM_LOG_WARNING("CUDA graph fallback reason=cache_table_capacity role=%d tag=%s "
+                                "physical_batch=%ld physical_tokens=%ld bucket=%d fallback_count=%llu",
+                                static_cast<int>(role_), tag,
+                                inputs.attention_inputs.input_lengths.numel(),
+                                inputs.attention_inputs.physical_token_count, graph_key,
+                                static_cast<unsigned long long>(tick.count));
+        }
+    };
     if (!cache_tables_fit(inputs.attention_inputs, captured_inputs.attention_inputs)) {
+        report_table_fallback("primary");
         return false;
     }
     for (const auto& [tag, source] : inputs.attention_inputs_by_tag) {
         const auto destination = captured_inputs.attention_inputs_by_tag.find(tag);
         if (destination == captured_inputs.attention_inputs_by_tag.end()
             || !cache_tables_fit(source, destination->second)) {
+            report_table_fallback(tag.c_str());
             return false;
         }
     }

@@ -279,6 +279,7 @@ private:
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
     mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t>              cache_table_fallback_count_{0};
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =
         static_cast<size_t>(GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>

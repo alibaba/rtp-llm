@@ -135,6 +135,69 @@ class CacheStoreForwardModel:
         return [self._forward_one(model_inputs) for model_inputs in inputs]
 
 
+class K3RequestPaddingTest(unittest.TestCase):
+    def test_request_padding_keeps_complete_rows_and_null_cache(self):
+        import math
+
+        for tp in (4, 8):
+            for batch in (1, 2, 3, 7, 8, 31, 32, 63, 64):
+                for width, prefill, update in ((1, False, False), (4, False, False),
+                                               (4, False, True), (3, True, False)):
+                    for grouped in (False, True):
+                        with self.subTest(tp=tp, batch=batch, width=width, prefill=prefill,
+                                          update=update, grouped=grouped):
+                            result = run_scenario(CacheStoreForwardModel(),
+                                f"request_padding {tp} {batch} {width} {int(prefill)} {int(grouped)} {int(update)}")
+                            logical_tokens = batch * width + int(prefill)
+                            unit = tp // math.gcd(tp, width)
+                            physical_batch = (batch + unit - 1) // unit * unit
+                            physical_tokens = physical_batch * width
+                            if prefill:
+                                physical_tokens = (logical_tokens + tp - 1) // tp * tp
+                                physical_batch = batch + int(physical_tokens > logical_tokens)
+                            self.assertEqual(result["logical_requests"], batch)
+                            self.assertEqual(result["logical_tokens"], logical_tokens)
+                            self.assertEqual(result["tokens"].numel(), physical_tokens)
+                            self.assertEqual(result["input_lengths"].numel(), physical_batch)
+                            self.assertEqual(result["hidden"].shape, (physical_tokens, 2))
+                            torch.testing.assert_close(result["tokens"][:logical_tokens].cpu(),
+                                                       torch.arange(logical_tokens, dtype=torch.int32), rtol=0, atol=0)
+                            torch.testing.assert_close(result["positions"][:logical_tokens].cpu(),
+                                                       torch.arange(logical_tokens, dtype=torch.int32), rtol=0, atol=0)
+                            self.assertFalse(result["tokens"][logical_tokens:].count_nonzero())
+                            self.assertFalse(result["hidden"][logical_tokens:].count_nonzero())
+                            self.assertFalse(result["positions"][logical_tokens:].count_nonzero())
+                            self.assertEqual(result["output_indexes"].numel(), batch)
+                            torch.testing.assert_close(result["output_indexes"].cpu(),
+                                torch.arange(batch, dtype=torch.int32) * width + width - 1 + int(prefill), rtol=0, atol=0)
+                            torch.testing.assert_close(result["hidden"][:logical_tokens].cpu(),
+                                torch.arange(logical_tokens * 2, dtype=torch.float32).reshape(logical_tokens, 2), rtol=0, atol=0)
+                            self.assertTrue((result["mask"] == 1).all())
+                            lengths = torch.full((physical_batch,), width, dtype=torch.int32)
+                            if prefill:
+                                lengths[0] += 1
+                                if physical_batch > batch:
+                                    lengths[-1] = physical_tokens - logical_tokens
+                            torch.testing.assert_close(result["input_lengths"].cpu(), lengths, rtol=0, atol=0)
+                            for key, present in (("prefix_lengths", prefill or width > 1),
+                                                 ("sequence_lengths", not prefill and width == 1)):
+                                expected = torch.cat((torch.full((batch,), 65535, dtype=torch.int32),
+                                                      torch.zeros(physical_batch - batch, dtype=torch.int32))) if present else torch.empty(0, dtype=torch.int32)
+                                torch.testing.assert_close(result[key].cpu(), expected, rtol=0, atol=0)
+                            torch.testing.assert_close(result["sequence_lengths_plus_1"].cpu(),
+                                torch.cat((torch.full((batch,), 65536, dtype=torch.int32),
+                                           torch.ones(physical_batch - batch, dtype=torch.int32))), rtol=0, atol=0)
+                            for key in ("physical_table", "kernel_table"):
+                                table = result[key]
+                                self.assertEqual(table.shape[-2], physical_batch)
+                                self.assertFalse(table.narrow(table.ndim - 2, batch, physical_batch - batch).count_nonzero())
+                            if not prefill:
+                                self.assertTrue((result["input_lengths"] == width).all())
+                                if batch == 32 and width == 4:
+                                    self.assertEqual(physical_batch, 32)
+
+
+
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
 
