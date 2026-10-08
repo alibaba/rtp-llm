@@ -417,9 +417,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         g = forget_gate_2d.view(
             batch, seq, self.local_num_v_heads, self.head_k_dim
         ).contiguous()
-        # beta: [batch*seq, H] -> sigmoid in float32 -> [batch, seq, H]
-        beta_out = beta.reshape(batch * seq, -1).float().sigmoid()
-        beta_out = beta_out.view(batch, seq, self.local_num_v_heads)
+        # Apply sigmoid in the recurrent kernel to avoid a separate producer.
+        beta_out = beta.reshape(batch, seq, self.local_num_v_heads)
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
 
@@ -437,6 +436,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            state_v_first=False,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
