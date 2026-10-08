@@ -182,7 +182,7 @@ int main() {
         c.role_type = RoleType::DECODE;
         check(!c.local_cp_enabled(), "native method executed in decode");
     }
-    // New DSpARK allowance is explicit, PREFILL-only, and proxy-only. All old
+    // DSpARK allowance is explicit and PREFILL-only at the exact CEP profiles. All old
     // four-argument resolutions above still fail closed on speculation.
     c           = makeProxy();
     c.role_type = RoleType::PREFILL;
@@ -211,10 +211,57 @@ int main() {
         bad.role_type = role;
         reject_dspark(bad);
     }
-    auto bad      = makeCompat(true);  // CEP4PP2 has not been qualified for this feature.
-    bad.role_type = RoleType::PREFILL;
-    reject_dspark(bad);
-    bad                                    = c;
+    // Exercise both stages and every lane of the eight-rank serving profile.
+    for (int rank = 0; rank < 8; ++rank) {
+        auto target       = makeCompat(true);
+        target.role_type  = RoleType::PREFILL;
+        target.world_rank = rank;
+        target.pp_rank    = rank / 4;
+        target.tp_rank = target.ep_rank = target.ffn_tp_rank = rank % 4;
+        target.prefill_cp_config.prefill_cp_size             = 4;
+        target.resolve_local_cp("deepseek_v4", true, false, false, true);
+        check(target.local_cp_enabled() && target.dsv4_dspark_prefill_compat, "DSpARK CEP4PP2 capability missing");
+        check(target.get_attn_tp_size() == 1 && target.get_attn_tp_rank() == 0 && target.get_ffn_tp_size() == 1
+                  && target.get_ffn_tp_rank() == 0,
+              "DSpARK CEP4PP2 weights must retain local CP geometry");
+        reject(target, "deepseek_v4", true);
+        reject_dspark(target, false);
+        reject_dspark(target, true, true);
+        reject_dspark(target, true, false, true);
+        for (auto role : {RoleType::PDFUSION, RoleType::DECODE}) {
+            auto wrong_role      = target;
+            wrong_role.role_type = role;
+            reject_dspark(wrong_role);
+        }
+        target.resolve_local_cp("deepseek_v4", false, false, false);
+        check(!target.dsv4_dspark_prefill_compat, "CEP4 MTP capability survived re-resolution");
+    }
+    for (auto profile : {makeProxy(), makeCompat(true)}) {
+        profile.role_type = RoleType::PREFILL;
+        auto bad          = profile;
+        bad.tp_size = bad.ep_size = 3;
+        bad.world_size            = 6;
+        reject_dspark(bad);
+        bad            = profile;
+        bad.world_size = profile.world_size == 4 ? 8 : 4;
+        reject_dspark(bad);
+        bad         = profile;
+        bad.dp_size = 2;
+        reject_dspark(bad);
+        bad         = profile;
+        bad.pp_size = 4;
+        reject_dspark(bad);
+        bad               = profile;
+        bad.pp_ep_backend = "unknown";
+        reject_dspark(bad);
+        bad                                    = profile;
+        bad.prefill_cp_config.kv_cache_sharded = true;
+        reject_dspark(bad);
+        bad                                   = profile;
+        bad.prefill_cp_config.prefill_cp_size = profile.tp_size == 2 ? 4 : 2;
+        reject_dspark(bad);
+    }
+    auto bad                               = c;
     bad.prefill_cp_config.kv_cache_sharded = true;
     reject_dspark(bad);
     bad                          = c;

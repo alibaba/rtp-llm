@@ -633,7 +633,7 @@ class ModelFactory:
                 and parallelism_config.local_cp_enabled()
             ):
                 raise ValueError(
-                    "DSpARK PP requires the opt-in CEP2PP2 PREFILL commit profile"
+                    "DSpARK PP requires an opt-in CEP2PP2 or CEP4PP2 PREFILL commit profile"
                 )
             # The current checkpoint captures [40, 41, 42], all on the last
             # target stage. Do not silently consume unwritten shared-buffer

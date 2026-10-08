@@ -24,18 +24,18 @@ ModelConfig targetConfig() {
     return model;
 }
 
-ParallelismConfig prefillStage(int rank) {
+ParallelismConfig prefillStage(int rank, int cp_size = 2) {
     ParallelismConfig pc;
     pc.pp_size                           = 2;
     pc.pp_rank                           = rank;
     pc.pp_stage_layer_counts             = {2, 2};
-    pc.tp_size                           = 2;
-    pc.ep_size                           = 2;
-    pc.world_size                        = 4;
-    pc.world_rank                        = 2 * rank;
+    pc.tp_size                           = cp_size;
+    pc.ep_size                           = cp_size;
+    pc.world_size                        = 2 * cp_size;
+    pc.world_rank                        = cp_size * rank;
     pc.role_type                         = RoleType::PREFILL;
     pc.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
-    pc.prefill_cp_config.prefill_cp_size = 2;
+    pc.prefill_cp_config.prefill_cp_size = cp_size;
     return pc;
 }
 
@@ -86,6 +86,39 @@ TEST(PPSpeculativeCacheLayout, AbsentSpeculativeConfigKeepsNonSpeculativeLayout)
     EXPECT_EQ(stride(config, "swa_kv"), 74880u);
     EXPECT_EQ(stride(config, "hca_state"), 524288u);
     EXPECT_TRUE(config.mtp_sub_configs.empty());
+}
+
+TEST(PPSpeculativeCacheLayout, CEP4StagesMatchRemoteCP4DecodePayloads) {
+    const auto model = targetConfig();
+    auto       draft = model;
+    draft.num_layers = 3;
+    setDsv4KvCacheSpecs(draft, {0, 0, 0});
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 3;
+
+    const auto first =
+        CacheConfigCreator::createConfig(model, prefillStage(0, 4), RuntimeConfig{}, pageConfig(), std::nullopt, sp);
+    const auto last = CacheConfigCreator::createSpConfig(
+        model, draft, prefillStage(1, 4), RuntimeConfig{}, pageConfig(), sp, std::nullopt, true, false);
+    ParallelismConfig decode;
+    decode.role_type = RoleType::DECODE;
+    decode.dp_size = decode.ep_size = decode.world_size = 8;
+    decode.prefill_cp_config.method                     = CPRotateMethod::PREFILL_CP;
+    decode.prefill_cp_config.prefill_cp_size            = 4;
+    const auto remote                                   = CacheConfigCreator::createSpConfig(
+        model, draft, decode, RuntimeConfig{}, pageConfig(), sp, std::nullopt, true, false);
+    EXPECT_TRUE(first.mtp_sub_configs.empty());
+    ASSERT_EQ(last.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(remote.mtp_sub_configs.size(), 1u);
+    for (const auto& group : first.topology().groups()) {
+        EXPECT_EQ(stride(first, group.tag), stride(last, group.tag)) << group.tag;
+        EXPECT_EQ(stride(first, group.tag), stride(remote, group.tag)) << group.tag;
+    }
+    for (const auto& group : last.mtp_sub_configs.front()->topology().groups()) {
+        EXPECT_EQ(stride(*last.mtp_sub_configs.front(), group.tag), stride(*remote.mtp_sub_configs.front(), group.tag))
+            << group.tag;
+    }
 }
 
 TEST(PPSpeculativeCacheLayout, DisabledSpeculativeConfigIgnoresStaleWidth) {

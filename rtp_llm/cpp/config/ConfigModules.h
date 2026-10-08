@@ -95,14 +95,13 @@ struct ParallelismConfig {
     // The raw method also describes remote KV on DECODE and is not a capability.
     // Set only by resolve_local_cp(), before weight partitioning.
     bool dsv4_prefill_cp_compat = false;
-    // Resolved, default-off DSpARK COMMIT capability for the four-rank CEP proxy.
+    // Resolved, default-off DSpARK COMMIT capability for CEP2PP2 and CEP4PP2.
     // The draft stays whole on the last PREFILL stage; no PP decode is admitted.
     bool dsv4_dspark_prefill_compat = false;
 
     bool dsv4_dspark_prefill_profile_valid() const {
-        return dsv4_prefill_cp_profile_valid() && role_type == RoleType::PREFILL && pp_size == 2 && tp_size == 2
-               && ep_size == 2 && world_size == 4 && !enable_sp && ffn_sp_size == 1 && !use_ub_comm
-               && !ffn_disaggregate_config.enable_ffn_disaggregate;
+        return dsv4_prefill_cp_profile_valid() && pp_ep_experimental_ok() && role_type == RoleType::PREFILL
+               && !enable_sp && ffn_sp_size == 1 && !use_ub_comm && !ffn_disaggregate_config.enable_ffn_disaggregate;
     }
 
     bool dsv4_prefill_cp_profile_valid() const {
@@ -132,8 +131,9 @@ struct ParallelismConfig {
         if (dspark_prefill
             && (model_type != "deepseek_v4" || !speculative || !dsv4_dspark_prefill_profile_valid() || cuda_graph
                 || layer_micro_batch)) {
-            throw std::invalid_argument("DSpARK PP prefill opt-in requires the exact unsharded CEP2PP2 PREFILL "
-                                        "profile, speculative DSV4 and no graphs or layer micro-batching");
+            throw std::invalid_argument(
+                "DSpARK PP prefill opt-in requires an exact unsharded CEP2PP2 or CEP4PP2 PREFILL "
+                "profile, speculative DSV4 and no graphs or layer micro-batching");
         }
         if (pp_size > 1 && prefill_cp_config.is_enabled() && role_type != RoleType::PREFILL) {
             throw std::invalid_argument("native PP context parallelism requires PREFILL role");
