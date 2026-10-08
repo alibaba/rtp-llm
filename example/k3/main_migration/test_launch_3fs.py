@@ -26,7 +26,7 @@ class CheckpointSourceTest(unittest.TestCase):
             args = SimpleNamespace(
                 checkpoint=str(target), draft_checkpoint=str(draft),
                 start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="DECODE", server="/bin/true", orthogonal_smoke=False,
+                role="DECODE", server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=False,
             )
             _, command = launch.launch_config(args)
             options = dict(zip(command[1::2], command[2::2]))
@@ -51,7 +51,7 @@ class CheckpointSourceTest(unittest.TestCase):
                 args = SimpleNamespace(
                     checkpoint=str(target), draft_checkpoint=str(draft),
                     start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", orthogonal_smoke=True,
+                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
                     tp_size=tp, dp_size=dp, ep_size=tp * dp,
                     prefill_source_tp_size=source_tp,
                 )
@@ -64,6 +64,8 @@ class CheckpointSourceTest(unittest.TestCase):
                 if role == "DECODE":
                     self.assertEqual(options["--prefill_cp_size"], str(source_tp))
                     self.assertEqual(options["--decode_capture_config"], capture)
+                    self.assertEqual(int(options["--max_context_batch_size"]),
+                                     max(map(int, capture.split(","))))
 
     def test_gpu_process_placeholder_is_not_an_occupier(self):
         gpu_rows = "".join(f"{index}, GPU-{index}, 274114\n" for index in range(8))
@@ -86,7 +88,7 @@ class CheckpointSourceTest(unittest.TestCase):
                 args = SimpleNamespace(
                     checkpoint=str(target), draft_checkpoint=str(draft),
                     start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", orthogonal_smoke=True,
+                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
                     fp8_gemm=True, fp8_kv_cache=True,
                     memory_cache_size_mb=8192, kv_cache_mem_mb=4096,
                 )
@@ -134,7 +136,7 @@ class CheckpointSourceTest(unittest.TestCase):
                 args = SimpleNamespace(
                     checkpoint=str(target), draft_checkpoint=str(draft),
                     start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", orthogonal_smoke=True,
+                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
                 )
                 _, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
@@ -164,7 +166,7 @@ class CheckpointSourceTest(unittest.TestCase):
             args = SimpleNamespace(
                 checkpoint=str(target), draft_checkpoint=str(draft),
                 start_port=28000, peer_port=29000, peer_ip="11.163.39.115",
-                role="PREFILL", server="/bin/true", allow_hf3fs_root=str(root),
+                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
             )
             with patch.object(launch.socket, "socket") as route_socket:
                 route_socket.return_value.getsockname.return_value = ("11.163.39.114", 54321)
@@ -184,7 +186,7 @@ class CheckpointSourceTest(unittest.TestCase):
             args = SimpleNamespace(
                 checkpoint=str(target), draft_checkpoint=str(draft),
                 start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="PREFILL", server="/bin/true", allow_hf3fs_root=str(root),
+                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
             )
             environment, _ = launch.launch_config(args)
             self.assertEqual(environment["FASTSAFETENSORS_NOGDS"], "0")
@@ -201,7 +203,7 @@ class CheckpointSourceTest(unittest.TestCase):
             args = SimpleNamespace(
                 checkpoint=str(target), draft_checkpoint=str(draft),
                 start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="PREFILL", server="/bin/true", allow_hf3fs_root=str(root),
+                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
             )
             with patch.dict(launch.os.environ, {"MEGA_MOE_INPUT_PACKER_IMPL": "optimized"}):
                 environment, _ = launch.launch_config(args)
