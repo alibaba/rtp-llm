@@ -36,7 +36,7 @@ def dual_master_cycle(case):
     case.step("both_start", "master_mark", params=case.value(f"{root}.settle"))
     case.step("both_end", "master_mark", params=case.value(f"{root}.both_wait"))
     case.step("finish", "master_client_finish", timeout_s=case.value(f"{root}.finish_timeout_s"),
-              params={"client": output("flow", "client")})
+              params={"client": output("flow", "client"), "stop_sending": True})
 
     windows = {
         "baseline": {"until": output("baseline_end", "epoch_s"), "until_offset_s": -2},

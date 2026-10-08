@@ -102,6 +102,23 @@ class PrefillFetchLifecycleTest {
         }
     }
 
+    @Test void retryOnSamePrefillCannotReplaceUnfetchedDecodeReservation() throws Exception {
+        try (var c = MockEngineTestCluster.create(
+                performanceModel(tempDir, "30", 1, 5), 62100, 1, 2)) {
+            submit(c, 101, 1000);
+            c.awaitNoInflight(c.prefill(0), 1000);
+            var retry = enqueue(c.prefill(0), batch(102, slot(0,
+                    inputWithDecode(101, 2048, c.decode(1).getGrpcPort(), 8)))
+                    .toBuilder().setFetchAttachTimeoutMs(1000).build());
+            assertEquals(0, retry.getSuccessesCount(), "active context must reject duplicate request ID");
+            assertEquals(1, retry.getErrorsCount());
+            assertEquals(Status.Code.ALREADY_EXISTS.value(), retry.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(0, c.decode(1).getAcceptedCount());
+            released(c);
+            assertEquals(1, value(c.prefill(0), "fetch_attach_expirations"));
+        }
+    }
+
     @Test void missingFetchExpiresWithoutAnyDecodeExecution() throws Exception {
         try (var c = cluster("30")) {
             submit(c, 3, 200);

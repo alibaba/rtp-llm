@@ -58,7 +58,7 @@ parameters:
     b_ready: {target: B, inflight_zero: false}
     a_ready: {target: A, inflight_zero: false}
     restart_timeout_s: 300
-    finish_timeout_s: 360
+    finish_timeout_s: 150
     checks:
       baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
       b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}

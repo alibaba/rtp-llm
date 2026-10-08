@@ -42,7 +42,9 @@ sequenceDiagram
 | D 计算槽 | KV 就绪后获准执行 | 不占用 | Decode 终态 |
 | Master 调度记账 | 调度/ACK | 按上报和 master 自己的规则更新 | 与引擎上下文 TTL 分属不同机制 |
 
-真实 BATCH 的 Fetch 附着 TTL 从成功入队、准备发布 ACK 时开始，默认 600 秒；请求里的 `fetch_attach_timeout_ms` 或剩余请求超时可缩短它。不能把“没有 Fetch”理解成“P 计算槽一直不释放”。
+真实 BATCH 的 Fetch 附着 TTL 从成功入队、准备发布 ACK 时开始，默认 600 秒；请求里的 `fetch_attach_timeout_ms` 或剩余请求超时可缩短它。Master 的 `dispatcher.fetchAttachTimeoutMs` 默认传入 3000 ms，因此由 Master 发起的 batch 通常采用 3 秒附着期限。TTL 到期由 P 取消下游 RPC，D 释放预留；不依赖故障 Master 存活。不能把“没有 Fetch”理解成“P 计算槽一直不释放”。
+
+Frontend 遇到连接失败会使用同一请求 ID 尝试备用 Master；deadline 或客户端取消时发送 best-effort Cancel，无法保证已退出的 Master 收到它。P 的 active context 注册必须拒绝仍存活的重复 ID，不能让重试覆盖已有 D 预留和清理关系。
 
 ## Mock 的对应实现
 

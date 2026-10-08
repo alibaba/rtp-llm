@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 import time
 from pathlib import Path
 from typing import Optional
@@ -100,8 +101,8 @@ class HaTrafficRunner:
     Phase bookkeeping: the runner stamps wall-clock epoch seconds at
     ``mark()`` call sites; row windows are then sliced offline by
     send_start_epoch_ms (falling back to wall_clock_ts) — the assertions
-    compare pre/post-injection WINDOWS, never exact totals (rows buffered
-    at a SIGTERM instant may be lost; natural DURATION_S exit flushes all).
+    compare pre/post-injection WINDOWS. Controlled stop ends submission and
+    drains already submitted requests; final row accounting is validated.
     """
 
     def __init__(
@@ -165,7 +166,15 @@ class HaTrafficRunner:
                         last_ts = ts
                 if first_ts is None or (last_ts - first_ts) / replay_speed < duration_s * 1000:
                     raise ValueError("one-pass HA trace ends before the requested duration")
+        self.control = case_dir / f"{name}_control"
+        self.control.mkdir()
+        self.flow_identity = dict(run_id=uuid.uuid4().hex, group_id=name, phase_id="ha")
+        self.stop_command = None
         overrides = {
+            "FLOW_CONTROL_DIR": str(self.control),
+            "FLOW_RUN_ID": self.flow_identity["run_id"],
+            "FLOW_GROUP_ID": name,
+            "FLOW_PHASE_ID": "ha",
             "TRACE_FILE": str(trace),
             "LIVE_CLIENT_EVENTS": str(live_events).lower(),
             "GRPC_TARGETS": ",".join(self.targets),
@@ -178,6 +187,7 @@ class HaTrafficRunner:
             # cross-lap cache reuse; repeating it without relabeling invents
             # identical future users. HA defaults to one pass of a long trace.
             "LOOP": str(loop).lower(),
+            "REPLAY_UNIQUE_PREFIX": "false",
             "N_CHANNELS": "8" if source is not None else "2",
             "EVENT_LOOP_THREADS": "8" if source is not None else "4",
             "SKIP_SERVER_LATENCY": "true",
@@ -191,6 +201,28 @@ class HaTrafficRunner:
             overrides["ENDPOINTS_FILE"] = str(env.endpoint_file)
         self._overrides = overrides
         self.proc = None
+
+    def stop_sending(self):
+        """Ask the Java producer to drain naturally, without cancelling requests."""
+        if self.stop_command is None:
+            self.stop_command = uuid.uuid4().hex
+            command = dict(run_id=self.flow_identity["run_id"],
+                           group_id=self.flow_identity["group_id"],
+                           operation="stop_sending", command_id=self.stop_command)
+            temporary = self.control / "stop.json.tmp"
+            temporary.write_text(json.dumps(command))
+            temporary.replace(self.control / "stop.json")
+
+    def validate_drain(self, rows):
+        state = json.loads((self.control / "status.json").read_text())
+        if any(state.get(key) != value for key, value in self.flow_identity.items()):
+            raise ValueError("HA flow drain identity mismatch")
+        if (state.get("state") != "DRAINED"
+                or state.get("submitted") != state.get("terminal")
+                or state.get("terminal") != len(rows)):
+            raise ValueError("HA flow did not retain every submitted terminal result")
+        if self.stop_command and state.get("applied_command_id") != self.stop_command:
+            raise ValueError("HA flow ended before accepting the stop command")
 
     def start(self) -> None:
         self.state_sampler.start()

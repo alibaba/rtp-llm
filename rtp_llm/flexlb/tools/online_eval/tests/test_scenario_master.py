@@ -37,6 +37,21 @@ class MasterActionsTest(unittest.TestCase):
             {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
         ]}, json.loads(path.read_text()))
         self.assertEqual("false", runner._overrides["LOOP"])
+        self.assertEqual("false", runner._overrides["REPLAY_UNIQUE_PREFIX"])
+        runner.stop_sending()
+        command = json.loads((runner.control / "stop.json").read_text())
+        runner.stop_sending()
+        self.assertEqual(command, json.loads((runner.control / "stop.json").read_text()))
+        state = dict(runner.flow_identity, state="DRAINED", submitted=2, terminal=2,
+                     applied_command_id=command["command_id"])
+        (runner.control / "status.json").write_text(json.dumps(state))
+        runner.validate_drain([{}, {}])
+        with self.assertRaisesRegex(ValueError, "every submitted"):
+            runner.validate_drain([{}])
+        state["applied_command_id"] = "wrong"
+        (runner.control / "status.json").write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError, "stop command"):
+            runner.validate_drain([{}, {}])
 
     def test_ha_one_pass_rejects_trace_shorter_than_client_duration(self):
         root = Path(self.tmp.name)
@@ -599,6 +614,8 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertIn("rolling_errors", ids)
                 self.assertNotIn("to_b_balance", ids)
                 self.assertNotIn("to_a_balance", ids)
+                finish = next(s for s in plan["stages"] if s["id"] == "finish")
+                self.assertTrue(finish["params"]["stop_sending"])
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
                 self.assertEqual(20000, flow["params"]["max_requests"])

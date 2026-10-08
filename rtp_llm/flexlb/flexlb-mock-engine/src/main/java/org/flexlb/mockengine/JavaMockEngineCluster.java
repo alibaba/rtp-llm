@@ -1304,6 +1304,7 @@ public final class JavaMockEngineCluster {
          *  hand-off. Absent entry = no live reservation (idempotent release). */
         private final Map<Long, FastRpcService> decodeReservationOwners = new ConcurrentHashMap<>();
         private final Map<Long, MockPrefillSession> prefillSessions = new ConcurrentHashMap<>();
+        private final Set<Long> prefillRegistrations = ConcurrentHashMap.newKeySet();
         // Decode ALLOCATE has succeeded; KV is owned but no decode execution
         // slot has been claimed. Guarded by decodeQueueLock with runningTasks.
         private final Set<Long> decodeWaitingForKv = ConcurrentHashMap.newKeySet();
@@ -1508,221 +1509,239 @@ public final class JavaMockEngineCluster {
             }
 
             Runnable process = () -> {
-                // ── Enqueue-ACK fault pre-admission split (enqueue_ack_partial_fail /
-                // enqueue_ack_error_code) ──
-                // Rejected members are diverted to the ack errors BEFORE any
-                // engine state is created: a production engine that rejects an
-                // enqueue never saw the request, so the mock must not register,
-                // execute or complete it either. The previous implementation
-                // rewrote the ack AFTER admission (requests kept executing and
-                // their late completions kept surfacing via getWorkerStatus);
-                // with the ack already settled as FAILED by the master, those
-                // ghost completions desynced its bookkeeping — the confirmed/
-                // total_load decode-inflight view was inflated forever while
-                // the 30s endpoint TTL eviction (which only sweeps inflight
-                // entries) never reclaimed it (run-1788360948: scheduler
-                // inflight stuck at 33 with a fully idle engine).
-                FaultInjectionConfig ackFaultSnapshot = faultConfig;
-                int ackFaultBudget = ackFaultSnapshot.getEnqueueAckPartialFail();
-                if (ackFaultBudget <= 0
-                        && ackFaultSnapshot.getEnqueueAckErrorCode() != 0) {
-                    ackFaultBudget = Integer.MAX_VALUE;
-                }
-                long ackFaultCode = ackFaultSnapshot.getEnqueueAckErrorCode() != 0
-                        ? ackFaultSnapshot.getEnqueueAckErrorCode() : 13L;
-                String ackFaultMessage =
-                        ackFaultSnapshot.getEnqueueAckPartialFail() > 0
-                                ? "injected enqueue_ack_partial_fail"
-                                : "injected enqueue_ack_error_code " + ackFaultCode;
-                final int[] ackFaultCursor = {0};
-                for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
-                    List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
-                    // Phase 1: register per-request state the completion callback
-                    // depends on (responseQueues/requestStates) BEFORE admission so
-                    // an immediately-admitted batch can never complete against a
-                    // missing response queue.
-                    for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
-                        long requestId = input.getInput().getRequestId();
-                        // Arrival stamp at the batch-ingress point, BEFORE any
-                        // admission/scheduling decision (Phase 1.5 KV gate,
-                        // Phase 2 waiting cap, and the immediate-admission
-                        // runPrefillBatch that stamps start in this same call
-                        // stack a few frames below): arrival means "the request
-                        // reached the engine", so it must never land after
-                        // start. The former Phase-3 bookkeeping point stamped
-                        // arrival only after admission, so on the
-                        // immediately-admitted path start preceded arrival —
-                        // under load that inversion grew to a constant +2ms
-                        // and blew the engine_events arrival<=start<=done
-                        // invariant. First-arrival-wins (putIfAbsent) keeps a
-                        // master retry on the same requestId from re-booking.
-                        recordEventArrival(requestId);
-                        // Absent-fence rejection (production ABSENT_FENCE
-                        // contract): a Cancel for a rid this engine NEVER saw
-                        // fenced it; a racing later Enqueue of the same rid
-                        // is rejected pre-admission with the typed 8429
-                        // (PRIORITY_PREEMPTED) error — before the scheduler,
-                        // before any engine state is created (the fenced rid
-                        // stays unknown to every bookkeeping map).
-                        if (hasFencedRequestId(requestId)) {
-                            response.addErrorsBuilder()
-                                    .setRequestId(requestId)
-                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                            .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
-                                            .setErrorMessage("absent fence: cancel fenced this rid "
-                                                    + "before it was ever admitted")
-                                            .build());
-                            requestStates.put(requestId, "rejected");
-                            continue;
-                        }
-                        if (ackFaultBudget > 0
-                                && ackFaultCursor[0]++ < ackFaultBudget) {
-                            response.addErrorsBuilder()
-                                    .setRequestId(requestId)
-                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                            .setErrorCode(ackFaultCode)
-                                            .setErrorMessage(ackFaultMessage)
-                                            .build());
-                            requestStates.put(requestId, "rejected");
-                            continue;
-                        }
-                        MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(input.getInput(), cache));
-                        observeCacheDiagnostics(shape);
-                        // Key-level cache-hit accounting at the admission hit
-                        // computation point (recorded whether or not the request
-                        // later admits — a rejected request still observed the
-                        // engine's index state for its keys).
-                        cacheKeyHits.add(shape.hitBlocks());
-                        cacheKeysRequested.add(shape.blockKeys().size());
-                        // Phase 1.5 (KV capacity model v2): block-pool admission.
-                        // A request whose blocks cannot be provisioned (free + LRU
-                        // below need, or the reserve watermark would be breached) is
-                        // rejected SYNCHRONOUSLY in this ack with MALLOC_FAILED —
-                        // the engine-side KV gate the master turns into
-                        // EngineRejectedException on its dispatch path. Rejected
-                        // requests leave no residue (state rolled back below).
-                        MockLruBlockCache.BlockLease lease =
-                                acquireBlockLease(requestId, shape);
-                        if (lease == null) {
-                            prefillLackMemRejects.increment();
-                            String message = String.format(
-                                    "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
-                                    needBlocks(shape), cache.availableBlocks(), seqSizePerBlock);
-                            response.addErrorsBuilder()
-                                    .setRequestId(requestId)
-                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                            .setErrorCode(LACK_MEM_ERROR_CODE)
-                                            .setErrorMessage(message)
-                                            .build());
-                            requestStates.put(requestId, "rejected");
-                            continue;
-                        }
-                        // Phase 1.6 (P-enqueue decode-KV pre-alignment, 20260903):
-                        // production's prepare stage sends the ALLOCATE RPC to
-                        // the FlexLB-selected decode engine AT ENQUEUE TIME, so
-                        // the D pool is already reserved while the prefill
-                        // itself executes. Reserve the request's decode blocks
-                        // (net-demand caliber: ceil(il/spb) − own-LRU hits) on
-                        // the target D located from role_addrs — the same
-                        // routing source startDecode uses at hand-off. The D
-                        // engine retries the allocation inside its ALLOCATE
-                        // window first (production decode_retry_times=100 /
-                        // 1 ms / 100 ms, DecodeRpcServer.cc EXECUTE_WITH_RETRY
-                        // — see reserveDecodeLease); only a window-exhausted
-                        // reject reaches here. A reservation reject is the
-                        // ALLOCATE-rejection surface: a request-level
-                        // synchronous 8211 (DECODE_MALLOC_FAILED — production's
-                        // P-side closeGrpcStream rewrites the D-side 602 to
-                        // 8211 for the master/caller; the raw 602 stays in the
-                        // message text) in THIS ack, with the P lease released
-                        // and zero residue. The D-side failure counts on the
-                        // DECODE engine by family: RETRYABLE → kvAdmissionFails,
-                        // PERMANENT → its prefillLackMemRejects.
-                        // D not resolvable from role_addrs (single-engine /
-                        // no DECODE addr / D == self): no reservation — the
-                        // hand-off semantics are unchanged for such topologies.
-                        FastRpcService decodeEngine = findDecodeEngine(input.getInput());
-                        if (!prepareDecodeSession(decodeEngine, shape, request.getBatchId(), slot.getDpRank(), autoFetch)) {
-                            releaseBlockLease(requestId);
-                            EngineRpcService.ErrorDetailsPB error = decodePreparationError(decodeEngine, shape);
-                            response.addErrorsBuilder()
-                                    .setRequestId(requestId)
-                                    .setErrorInfo(error);
-                            requestStates.put(requestId, "rejected");
-                            continue;
-                        }
-                        shapes.add(shape);
-                        if (!autoFetch || !prefillSessions.containsKey(requestId)) {
-                            responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
-                        }
-                        requestStates.put(requestId, "running");
+                Set<Long> registrations = new java.util.HashSet<>();
+                try {
+                    // ── Enqueue-ACK fault pre-admission split (enqueue_ack_partial_fail /
+                    // enqueue_ack_error_code) ──
+                    // Rejected members are diverted to the ack errors BEFORE any
+                    // engine state is created: a production engine that rejects an
+                    // enqueue never saw the request, so the mock must not register,
+                    // execute or complete it either. The previous implementation
+                    // rewrote the ack AFTER admission (requests kept executing and
+                    // their late completions kept surfacing via getWorkerStatus);
+                    // with the ack already settled as FAILED by the master, those
+                    // ghost completions desynced its bookkeeping — the confirmed/
+                    // total_load decode-inflight view was inflated forever while
+                    // the 30s endpoint TTL eviction (which only sweeps inflight
+                    // entries) never reclaimed it (run-1788360948: scheduler
+                    // inflight stuck at 33 with a fully idle engine).
+                    FaultInjectionConfig ackFaultSnapshot = faultConfig;
+                    int ackFaultBudget = ackFaultSnapshot.getEnqueueAckPartialFail();
+                    if (ackFaultBudget <= 0
+                            && ackFaultSnapshot.getEnqueueAckErrorCode() != 0) {
+                        ackFaultBudget = Integer.MAX_VALUE;
                     }
-                    // Phase 2: admission. false = prefill waiting-queue cap hit
-                    // (batch-level backpressure, independent of the request-level
-                    // queue_depth_limit fault-injection gate checked at the RPC
-                    // entry above). Roll back phase-1 state so rejected requests
-                    // leave no residue (no pendingRequests/waitingPrefillRequests/
-                    // runningTasks were claimed — the cap check rejects before any
-                    // counter is touched).
-                    if (!schedulePrefillCompletion(shapes, request.getBatchId(), slot.getDpRank())) {
-                        String message = String.format(
-                                "prefill waiting queue full (backpressure): waiting=%d cap=%d",
-                                prefillPendingQueueSize(), performance.maxWaitingPrefillBatches());
+                    long ackFaultCode = ackFaultSnapshot.getEnqueueAckErrorCode() != 0
+                            ? ackFaultSnapshot.getEnqueueAckErrorCode() : 13L;
+                    String ackFaultMessage =
+                            ackFaultSnapshot.getEnqueueAckPartialFail() > 0
+                                    ? "injected enqueue_ack_partial_fail"
+                                    : "injected enqueue_ack_error_code " + ackFaultCode;
+                    final int[] ackFaultCursor = {0};
+                    for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
+                        List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
+                        // Phase 1: register per-request state the completion callback
+                        // depends on (responseQueues/requestStates) BEFORE admission so
+                        // an immediately-admitted batch can never complete against a
+                        // missing response queue.
                         for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                             long requestId = input.getInput().getRequestId();
-                            closePrefillSession(requestId);
-                            releaseReservedDecode(requestId);
-                            responseQueues.remove(requestId);
-                            requestStates.put(requestId, "rejected");
-                            response.addErrorsBuilder()
-                                    .setRequestId(requestId)
-                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                            .setErrorMessage(message)
-                                            .build());
+                            // Real Prefill registerActive rejects a live duplicate before
+                            // allocating D. Never overwrite the original continuation,
+                            // response queue or reservation when a Master retries.
+                            boolean claimed = prefillRegistrations.add(requestId);
+                            if (!claimed || prefillSessions.containsKey(requestId)
+                                    || downstreamDecodeOwners.containsKey(requestId)
+                                    || responseQueues.containsKey(requestId)
+                                    || runningTasks.containsKey(requestId)) {
+                                if (claimed) prefillRegistrations.remove(requestId);
+                                response.addErrorsBuilder().setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                .setErrorCode(io.grpc.Status.Code.ALREADY_EXISTS.value())
+                                                .setErrorMessage("request already exists in active context map"));
+                                continue;
+                            }
+                            registrations.add(requestId);
+                            // Arrival stamp at the batch-ingress point, BEFORE any
+                            // admission/scheduling decision (Phase 1.5 KV gate,
+                            // Phase 2 waiting cap, and the immediate-admission
+                            // runPrefillBatch that stamps start in this same call
+                            // stack a few frames below): arrival means "the request
+                            // reached the engine", so it must never land after
+                            // start. The former Phase-3 bookkeeping point stamped
+                            // arrival only after admission, so on the
+                            // immediately-admitted path start preceded arrival —
+                            // under load that inversion grew to a constant +2ms
+                            // and blew the engine_events arrival<=start<=done
+                            // invariant. First-arrival-wins (putIfAbsent) keeps a
+                            // master retry on the same requestId from re-booking.
+                            recordEventArrival(requestId);
+                            // Absent-fence rejection (production ABSENT_FENCE
+                            // contract): a Cancel for a rid this engine NEVER saw
+                            // fenced it; a racing later Enqueue of the same rid
+                            // is rejected pre-admission with the typed 8429
+                            // (PRIORITY_PREEMPTED) error — before the scheduler,
+                            // before any engine state is created (the fenced rid
+                            // stays unknown to every bookkeeping map).
+                            if (hasFencedRequestId(requestId)) {
+                                response.addErrorsBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                                                .setErrorMessage("absent fence: cancel fenced this rid "
+                                                        + "before it was ever admitted")
+                                                .build());
+                                requestStates.put(requestId, "rejected");
+                                continue;
+                            }
+                            if (ackFaultBudget > 0
+                                    && ackFaultCursor[0]++ < ackFaultBudget) {
+                                response.addErrorsBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                .setErrorCode(ackFaultCode)
+                                                .setErrorMessage(ackFaultMessage)
+                                                .build());
+                                requestStates.put(requestId, "rejected");
+                                continue;
+                            }
+                            MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(input.getInput(), cache));
+                            observeCacheDiagnostics(shape);
+                            // Key-level cache-hit accounting at the admission hit
+                            // computation point (recorded whether or not the request
+                            // later admits — a rejected request still observed the
+                            // engine's index state for its keys).
+                            cacheKeyHits.add(shape.hitBlocks());
+                            cacheKeysRequested.add(shape.blockKeys().size());
+                            // Phase 1.5 (KV capacity model v2): block-pool admission.
+                            // A request whose blocks cannot be provisioned (free + LRU
+                            // below need, or the reserve watermark would be breached) is
+                            // rejected SYNCHRONOUSLY in this ack with MALLOC_FAILED —
+                            // the engine-side KV gate the master turns into
+                            // EngineRejectedException on its dispatch path. Rejected
+                            // requests leave no residue (state rolled back below).
+                            MockLruBlockCache.BlockLease lease =
+                                    acquireBlockLease(requestId, shape);
+                            if (lease == null) {
+                                prefillLackMemRejects.increment();
+                                String message = String.format(
+                                        "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
+                                        needBlocks(shape), cache.availableBlocks(), seqSizePerBlock);
+                                response.addErrorsBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                .setErrorCode(LACK_MEM_ERROR_CODE)
+                                                .setErrorMessage(message)
+                                                .build());
+                                requestStates.put(requestId, "rejected");
+                                continue;
+                            }
+                            // Phase 1.6 (P-enqueue decode-KV pre-alignment, 20260903):
+                            // production's prepare stage sends the ALLOCATE RPC to
+                            // the FlexLB-selected decode engine AT ENQUEUE TIME, so
+                            // the D pool is already reserved while the prefill
+                            // itself executes. Reserve the request's decode blocks
+                            // (net-demand caliber: ceil(il/spb) − own-LRU hits) on
+                            // the target D located from role_addrs — the same
+                            // routing source startDecode uses at hand-off. The D
+                            // engine retries the allocation inside its ALLOCATE
+                            // window first (production decode_retry_times=100 /
+                            // 1 ms / 100 ms, DecodeRpcServer.cc EXECUTE_WITH_RETRY
+                            // — see reserveDecodeLease); only a window-exhausted
+                            // reject reaches here. A reservation reject is the
+                            // ALLOCATE-rejection surface: a request-level
+                            // synchronous 8211 (DECODE_MALLOC_FAILED — production's
+                            // P-side closeGrpcStream rewrites the D-side 602 to
+                            // 8211 for the master/caller; the raw 602 stays in the
+                            // message text) in THIS ack, with the P lease released
+                            // and zero residue. The D-side failure counts on the
+                            // DECODE engine by family: RETRYABLE → kvAdmissionFails,
+                            // PERMANENT → its prefillLackMemRejects.
+                            // D not resolvable from role_addrs (single-engine /
+                            // no DECODE addr / D == self): no reservation — the
+                            // hand-off semantics are unchanged for such topologies.
+                            FastRpcService decodeEngine = findDecodeEngine(input.getInput());
+                            if (!prepareDecodeSession(decodeEngine, shape, request.getBatchId(), slot.getDpRank(), autoFetch)) {
+                                releaseBlockLease(requestId);
+                                EngineRpcService.ErrorDetailsPB error = decodePreparationError(decodeEngine, shape);
+                                response.addErrorsBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(error);
+                                requestStates.put(requestId, "rejected");
+                                continue;
+                            }
+                            shapes.add(shape);
+                            if (!autoFetch || !prefillSessions.containsKey(requestId)) {
+                                responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
+                            }
+                            requestStates.put(requestId, "running");
                         }
-                        continue;
-                    }
-                    // Phase 3: success bookkeeping (only admitted requests count).
-                    // A member rejected pre-admission (ack-fault split or the
-                    // LACK_MEM gate above) must not ALSO be acked as a success:
-                    // it already carries an errors entry, and a production
-                    // engine that rejects a request never admits it — acking
-                    // it as success too would double-book the member and make
-                    // the master wait for a completion that never comes.
-                    for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
-                        long requestId = input.getInput().getRequestId();
-                        if ("rejected".equals(requestStates.get(requestId))) {
+                        // Phase 2: admission. false = prefill waiting-queue cap hit
+                        // (batch-level backpressure, independent of the request-level
+                        // queue_depth_limit fault-injection gate checked at the RPC
+                        // entry above). Roll back phase-1 state so rejected requests
+                        // leave no residue (no pendingRequests/waitingPrefillRequests/
+                        // runningTasks were claimed — the cap check rejects before any
+                        // counter is touched).
+                        if (!schedulePrefillCompletion(shapes, request.getBatchId(), slot.getDpRank())) {
+                            String message = String.format(
+                                    "prefill waiting queue full (backpressure): waiting=%d cap=%d",
+                                    prefillPendingQueueSize(), performance.maxWaitingPrefillBatches());
+                            for (MockPerformanceModel.RequestShape shape : shapes) {
+                                long requestId = shape.input().getRequestId();
+                                closePrefillSession(requestId);
+                                releaseReservedDecode(requestId);
+                                responseQueues.remove(requestId);
+                                requestStates.put(requestId, "rejected");
+                                response.addErrorsBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                .setErrorMessage(message)
+                                                .build());
+                            }
                             continue;
                         }
-                        stats.enqueuedRequests.increment();
-                        armFetchExpiry(requestId, request.getFetchAttachTimeoutMs());
-                        acceptedCount.incrementAndGet();
-                        response.addSuccessesBuilder().setRequestId(requestId);
-                        recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
-                        // Arrival was already stamped at the Phase-1 ingress
-                        // above (recordEventArrival) — before admission, so it
-                        // can never trail the immediate-admission start stamp.
+                        // Phase 3: success bookkeeping (only admitted requests count).
+                        // A member rejected pre-admission (ack-fault split or the
+                        // LACK_MEM gate above) must not ALSO be acked as a success:
+                        // it already carries an errors entry, and a production
+                        // engine that rejects a request never admits it — acking
+                        // it as success too would double-book the member and make
+                        // the master wait for a completion that never comes.
+                        for (MockPerformanceModel.RequestShape shape : shapes) {
+                            long requestId = shape.input().getRequestId();
+                            stats.enqueuedRequests.increment();
+                            armFetchExpiry(requestId, request.getFetchAttachTimeoutMs());
+                            acceptedCount.incrementAndGet();
+                            response.addSuccessesBuilder().setRequestId(requestId);
+                            recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
+                            // Arrival was already stamped at the Phase-1 ingress
+                            // above (recordEventArrival) — before admission, so it
+                            // can never trail the immediate-admission start stamp.
+                        }
                     }
-                }
-                // ── enqueue_ack_drop: all phases above ran exactly as
-                // usual (the engine really admitted and will execute every
-                // member); only the ACK content is dropped to empty, so the
-                // master must tolerate a dispatch-uncertain ack. The
-                // partial_fail / error_code rejections were already split
-                // pre-admission above (rejected members never execute — no
-                // ghost completions can desync master bookkeeping). ──
-                if (faultConfig.isEnqueueAckDrop()) {
-                    // enqueue_ack_drop: empty ack — no successes, no errors,
-                    // stopped stays false (unlike crash_after) so the engine
-                    // keeps serving subsequent RPCs normally.
-                    observer.onNext(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
-                            .setBatchId(request.getBatchId())
-                            .build());
+                    // ── enqueue_ack_drop: all phases above ran exactly as
+                    // usual (the engine really admitted and will execute every
+                    // member); only the ACK content is dropped to empty, so the
+                    // master must tolerate a dispatch-uncertain ack. The
+                    // partial_fail / error_code rejections were already split
+                    // pre-admission above (rejected members never execute — no
+                    // ghost completions can desync master bookkeeping). ──
+                    if (faultConfig.isEnqueueAckDrop()) {
+                        // enqueue_ack_drop: empty ack — no successes, no errors,
+                        // stopped stays false (unlike crash_after) so the engine
+                        // keeps serving subsequent RPCs normally.
+                        observer.onNext(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                                .setBatchId(request.getBatchId())
+                                .build());
+                        observer.onCompleted();
+                        return;
+                    }
+                    observer.onNext(response.build());
                     observer.onCompleted();
-                    return;
+                } finally {
+                    prefillRegistrations.removeAll(registrations);
                 }
-                observer.onNext(response.build());
-                observer.onCompleted();
             };
 
             lastEnqueueTime.set(System.nanoTime());

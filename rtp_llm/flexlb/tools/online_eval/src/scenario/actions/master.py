@@ -640,9 +640,11 @@ class OwnedHaClient:
                     process.proc.kill()
             process.proc.wait(timeout=deadline.remaining())
 
-    def finish(self, deadline):
+    def finish(self, deadline, *, stop_sending=False):
         if self.flow.proc is None:
             raise RuntimeError("HA client was not started")
+        if stop_sending:
+            self.flow.stop_sending()
         rc = self.flow.proc.proc.wait(timeout=deadline.remaining())
         sampler = getattr(self.flow, "state_sampler", None)
         if sampler is not None:
@@ -679,6 +681,8 @@ class OwnedHaClient:
                 or timestamp <= 0
             ):
                 raise ValueError("HA request has no valid issue timestamp")
+        if stop_sending:
+            self.flow.validate_drain(rows)
         self.finished = True
         return rows, path
 
@@ -730,14 +734,17 @@ def _ha_start(ctx, params, deadline):
 
 
 def _ha_finish_validate(params, plan):
-    p = _params(params, plan, {"client"}, {"client"})
+    p = _params(params, plan, {"client", "stop_sending"}, {"client"})
+    p.setdefault("stop_sending", False)
+    if type(p["stop_sending"]) is not bool:
+        raise ValueError("stop_sending must be boolean")
     plan.reference(p["client"], "ha_client")
     return p
 
 
 def _ha_finish(ctx, params, deadline):
     client = ctx.resource(params["client"], "ha_client")
-    rows, path = client.finish(deadline)
+    rows, path = client.finish(deadline, stop_sending=params.get("stop_sending", False))
     sampler = getattr(client.flow, "state_sampler", None)
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
