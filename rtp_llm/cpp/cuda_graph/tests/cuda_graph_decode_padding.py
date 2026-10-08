@@ -230,6 +230,62 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             print(f"success for batch size: {bs}")
 
 
+class TestCudaGraphDecodePaddingDiag(TestCudaGraphDecodePadding):
+    """TEMP DIAGNOSTIC (throwaway branch, do not merge).
+
+    Decomposes the sm89 padded-replay gate failure into three independent
+    ratios per batch size: graph-vs-eager at the real shape (the current
+    gate), eager-at-captured-shape vs eager-at-real-shape (shape
+    sensitivity with no graph involved), and graph-vs-eager at the captured
+    shape. Also compares graph replays across batch sizes sharing one
+    capture slot. Prints only; never asserts.
+    """
+
+    def _ratio(self, a_hidden, b_hidden, rows):
+        b = b_hidden.type(a_hidden.dtype)
+        close = torch.isclose(a_hidden[:rows], b[:rows], rtol=1e-2, atol=1e-2)
+        return close.float().mean().item()
+
+    def test_diag_shape_decomposition(self):
+        sizes = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 15, 16, 19, 20, 27, 28, 48, 64]
+        prev_graph = {}
+        for bs in sizes:
+            try:
+                g = self.op.forward(
+                    self.build_inputs(bs, self.max_seq_len, self.kernel_tokens_per_block)
+                )
+                torch.cuda.synchronize()
+                capture = self.op.getCurrentRealGraphSize()
+                e_real = self.normal_model.forward(
+                    self.build_inputs(bs, self.max_seq_len, self.kernel_tokens_per_block)
+                )
+                torch.cuda.synchronize()
+                e_same = self.normal_model.forward(
+                    self.build_inputs(capture, self.max_seq_len, self.kernel_tokens_per_block)
+                )
+                torch.cuda.synchronize()
+                g_h = g.hidden_states.detach()
+                r_ge = self._ratio(g_h, e_real.hidden_states, bs)
+                r_ee = self._ratio(e_same.hidden_states, e_real.hidden_states, bs)
+                r_gs = self._ratio(g_h, e_same.hidden_states, bs)
+                print(
+                    f"DIAG bs={bs} capture={capture} graph_vs_eager_real={r_ge:.5f} "
+                    f"eager_shape_vs_eager_real={r_ee:.5f} graph_vs_eager_same={r_gs:.5f}",
+                    flush=True,
+                )
+                if capture in prev_graph:
+                    p_h, p_bs = prev_graph[capture]
+                    rows = min(bs, p_bs)
+                    r_bb = self._ratio(g_h, p_h, rows)
+                    print(
+                        f"DIAG same_capture={capture} {p_bs}->{bs} real_rows_ratio={r_bb:.5f}",
+                        flush=True,
+                    )
+                prev_graph[capture] = (g_h, bs)
+            except Exception as exc:  # noqa: BLE001 - diagnostic must not abort
+                print(f"DIAG bs={bs} ERROR {type(exc).__name__}: {exc}", flush=True)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=print)
     unittest.main()
