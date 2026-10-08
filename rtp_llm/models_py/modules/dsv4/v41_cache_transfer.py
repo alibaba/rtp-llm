@@ -409,6 +409,14 @@ class V41L20ReplicaReceiver:
         ):
             raise ValueError("V4.1 L20 replica is not current for this chunk")
 
+    def block_tables(self, identity: V41CacheIdentity) -> dict[str, tuple[int, ...]]:
+        """Snapshot an active admission's page maps for stage-plan validation."""
+        self._usable()
+        state = self._state(identity)
+        if state.cancelled:
+            raise ValueError("V4.1 replica is cancelled")
+        return dict(state.tables)
+
     def apply(
         self, tensors: Mapping[str, torch.Tensor], expected_spans: Sequence[V41L20Span]
     ) -> None:

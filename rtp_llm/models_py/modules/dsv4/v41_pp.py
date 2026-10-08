@@ -159,13 +159,13 @@ def pack_v41_pp_frame(
     return result
 
 
-def import_v41_pp_frame(
+def validate_v41_pp_frame(
     tensors: Mapping[str, torch.Tensor],
     receiver: V41L20ReplicaReceiver,
     expected_spans: Sequence[V41L20Span],
     expected_rows: torch.Tensor,
 ) -> V41PPFrame:
-    """Reject an incomplete handoff before any cache write, then import deltas."""
+    """Decode and validate the forward frame without importing cache deltas."""
     if (
         not isinstance(expected_rows, torch.Tensor)
         or expected_rows.ndim != 2
@@ -217,6 +217,17 @@ def import_v41_pp_frame(
             for cache in receiver.caches.values()
         ):
             raise ValueError("V4.1 PP frame aliases replica storage")
+    return frame
+
+
+def import_v41_pp_frame(
+    tensors: Mapping[str, torch.Tensor],
+    receiver: V41L20ReplicaReceiver,
+    expected_spans: Sequence[V41L20Span],
+    expected_rows: torch.Tensor,
+) -> V41PPFrame:
+    """Reject an incomplete handoff before any cache write, then import deltas."""
+    frame = validate_v41_pp_frame(tensors, receiver, expected_spans, expected_rows)
     receiver.apply(tensors, expected_spans)
     for span in expected_spans:
         receiver.require_ready(span.identity, span.start + span.count, span.chunk_id)

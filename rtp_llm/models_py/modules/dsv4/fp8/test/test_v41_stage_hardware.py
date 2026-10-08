@@ -17,14 +17,25 @@ from rtp_llm.models_py.modules.dsv4.v41_block import (
     readout_v41_residual,
 )
 from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache
+from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import (
+    V41CacheIdentity,
+    V41L20Contract,
+    V41L20ReplicaReceiver,
+    V41L20Span,
+)
 from rtp_llm.models_py.modules.dsv4.v41_compressor import V41PairMetadata, V41PairState
 from rtp_llm.models_py.modules.dsv4.v41_engram_stage import V41EngramStage
 from rtp_llm.models_py.modules.dsv4.v41_projection import V41KVProjection
-from rtp_llm.models_py.modules.dsv4.v41_stage import V41Stage
+from rtp_llm.models_py.modules.dsv4.v41_stage import V41Stage, V41StageResult
 from rtp_llm.models_py.modules.dsv4.v41_stage_attention import (
     V41AttentionPlan,
     V41ForwardRows,
     V41StageAttention,
+)
+from rtp_llm.models_py.modules.dsv4.v41_stage_pp import (
+    V41PPDispatch,
+    export_v41_stage_result,
+    run_v41_pp_stage,
 )
 
 
@@ -245,6 +256,82 @@ class V41StageHardwareTest(unittest.TestCase):
             actual.selections.result.candidate_blocks, seed.result.candidate_blocks
         )
         self.assertTrue(bool(torch.isfinite(actual.hidden).all()))
+        contract = V41L20Contract("a" * 64, "b" * 64, "c" * 64, 256)
+        identity = V41CacheIdentity(0, 1, 4)
+        span = V41L20Span(identity, 0, 0, 2)
+        for empty in (False, True):
+            local = rows(empty)
+            row_map = (
+                torch.empty(0, 3, dtype=torch.int64)
+                if empty
+                else torch.tensor([[0, 0, 1], [0, 1, 1], [-1, -1, 0]])
+            )
+            dispatch = V41PPDispatch(local.invocation_id, 3, 0, (span,), row_map)
+            local_seed = dataclasses.replace(
+                seed,
+                rows=local,
+                result=dataclasses.replace(
+                    seed.result,
+                    **{
+                        name: value[:0] if empty else value
+                        for name, value in vars(seed.result).items()
+                    },
+                ),
+            )
+            local_state = V41ResidualState(
+                initial.residual[:0] if empty else initial.residual,
+                initial.previous_pre_mix[:0] if empty else initial.previous_pre_mix,
+                21,
+            )
+            result = V41StageResult(
+                local_state,
+                local,
+                local_seed,
+                None,
+                plan(source.attention.sources, local, memory=memory),
+            )
+            wire = export_v41_stage_result(
+                result,
+                dispatch,
+                contract,
+                {identity: {"hca_kv": [2], "indexer_kv": [1]}},
+            )
+            target = {"hca_kv": cache("hca_kv"), "indexer_kv": cache("indexer_kv")}
+            receiver = V41L20ReplicaReceiver(contract, 3, target)
+            receiver.begin_request(identity, {"hca_kv": [0], "indexer_kv": [2]})
+            replica_plans = {
+                op.layer_id: dataclasses.replace(
+                    plan(
+                        op.attention.sources,
+                        local,
+                        memory=(target["hca_kv"], target["indexer_kv"]),
+                    ),
+                    global_pages=torch.zeros(
+                        local.positions.numel(), 1, device="cuda", dtype=torch.int32
+                    ),
+                    index_pages=torch.full(
+                        (local.positions.numel(), 1),
+                        2,
+                        device="cuda",
+                        dtype=torch.int32,
+                    ),
+                )
+                for op in blocks
+            }
+            imported = run_v41_pp_stage(driver, wire, receiver, dispatch, replica_plans)
+            receiver.require_ready(identity, 2, 0)
+            torch.testing.assert_close(
+                imported.hidden,
+                actual.hidden[:0] if empty else actual.hidden,
+                rtol=0,
+                atol=0,
+            )
+            for tag, page in (("hca_kv", 0), ("indexer_kv", 2)):
+                copied = target[tag].gather(torch.arange(2, device="cuda") + page * 256)
+                key = (
+                    "v41_l20_global_delta" if tag == "hca_kv" else "v41_l20_index_delta"
+                )
+                torch.testing.assert_close(copied, wire[key], rtol=0, atol=0)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

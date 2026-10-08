@@ -36,6 +36,7 @@ class V41StageResult:
     rows: V41ForwardRows
     selections: V41Selections
     hidden: torch.Tensor | None
+    l20_plan: V41AttentionPlan | None = None
 
 
 def _same_cache(left, right):
@@ -249,7 +250,7 @@ class V41Stage:
                 )
         return V41ResidualState(residual, previous, self.begin)
 
-    def run(self, state, rows, plans, *, windows=None, selections=None):
+    def _check_execution(self):
         if self.device.type == "cuda":
             with torch.cuda.device(self.device):
                 if torch.cuda.is_current_stream_capturing():
@@ -258,6 +259,9 @@ class V41Stage:
                     )
             if torch.backends.cuda.matmul.allow_tf32:
                 raise RuntimeError("V4.1 stage FP32 operations require TF32 disabled")
+
+    def _prepare_forward(self, state, rows, plans, windows, selections):
+        self._check_execution()
         if not isinstance(rows, V41ForwardRows):
             raise ValueError("V4.1 stage requires explicit forward rows")
         rows = rows.snapshot()
@@ -271,6 +275,9 @@ class V41Stage:
             raise ValueError("V4.1 stage one must not receive Engram windows")
         hashes = self.engram.prepare(windows)
         self.engram.validate_forward(hashes, rows.valid_rows, dim=self.dim)
+        return state, rows, hashes
+
+    def _run_prepared(self, state, rows, plans, hashes, selections):
         for op, attention in zip(self.blocks, self.attentions):
             if op.layer_id in self.engram.layer_ids:
                 state = replace(
@@ -302,4 +309,12 @@ class V41Stage:
             if self.end == 40
             else None
         )
-        return V41StageResult(state, rows, selections, hidden)
+        return V41StageResult(
+            state, rows, selections, hidden, plans[20] if self.end == 21 else None
+        )
+
+    def run(self, state, rows, plans, *, windows=None, selections=None):
+        state, rows, hashes = self._prepare_forward(
+            state, rows, plans, windows, selections
+        )
+        return self._run_prepared(state, rows, plans, hashes, selections)
