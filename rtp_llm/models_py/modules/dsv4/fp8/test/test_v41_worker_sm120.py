@@ -26,7 +26,7 @@ from rtp_llm.ops import KvCacheDataType, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
-def checkpoint(root):
+def checkpoint(root, *, full_schedule=False):
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(
             WordLevel({f"token{i}": i for i in range(128)}, unk_token="token0")
@@ -42,19 +42,24 @@ def checkpoint(root):
         "q_weight": torch.ones(4, 512, dtype=torch.bfloat16),
         "k_weight": torch.ones(4, 512, dtype=torch.bfloat16),
     }
-    tensors = {f"layers.1.engram.{name}": value for name, value in tensors.items()}
+    layers = [1, 14] if full_schedule else [1]
+    tensors = {
+        f"layers.{layer}.engram.{name}": value.clone()
+        for layer in layers
+        for name, value in tensors.items()
+    }
     save_file(tensors, root / "engram.safetensors")
     (root / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": {name: "engram.safetensors" for name in tensors}})
     )
     return {
         "checkpoint_path": str(root),
-        "num_hidden_layers": 6,
+        "num_hidden_layers": 40 if full_schedule else 6,
         "hidden_size": 512,
         "hc_mult": 4,
         "rms_norm_eps": 1e-20,
-        "engram_layer_ids": [1],
-        "engram_num_embeddings": [4000],
+        "engram_layer_ids": layers,
+        "engram_num_embeddings": [4000] * len(layers),
         "engram_max_ngram_size": 4,
         "engram_n_heads": 4,
         "engram_head_dim": 32,
@@ -112,6 +117,12 @@ def model_config(args, engram, gen_num_per_cycle=0):
         "max_pos": args.original_seq_len,
     }.items():
         setattr(config.attn_config.rope_config, name, value)
+    if args.n_layers == 40:
+        from rtp_llm.models.dsv41_kv_cache import configure_dsv41_kv_cache
+
+        config.attn_config.tokens_per_block = 256
+        config.attn_config.kernel_tokens_per_block = 256
+        configure_dsv41_kv_cache(config)
     return config
 
 

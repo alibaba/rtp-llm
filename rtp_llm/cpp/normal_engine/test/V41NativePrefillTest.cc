@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -65,7 +66,20 @@ public:
         model_config_.data_type = DataType::TYPE_BF16;
         model_config_.attn_config.tokens_per_block = 256;
         model_config_.attn_config.kernel_tokens_per_block = 256;
-        auto config = smallV41CacheConfig(model_config_.gen_num_per_cycle);
+        CacheConfig config;
+        if (model_config_.num_layers == 40) {
+            RTP_LLM_CHECK(model_config_.gen_num_per_cycle == 0);
+            KVCacheConfig cache_options;
+            cache_options.test_block_num = 8;
+            cache_options.seq_size_per_block = cache_options.kernel_seq_size_per_block = 256;
+            RuntimeConfig runtime;
+            runtime.max_generate_batch_size = 2;
+            runtime.fifo_scheduler_config.max_context_batch_size = 2;
+            config = CacheConfigCreator::createConfig(
+                model_config_, parallelism, runtime, cache_options, std::nullopt, SpeculativeExecutionConfig{});
+        } else {
+            config = smallV41CacheConfig(model_config_.gen_num_per_cycle);
+        }
         manager_ = std::make_shared<KVCacheManager>(config);
         if (!manager_->init()) {
             throw std::runtime_error("V4.1 test cache manager initialization failed");

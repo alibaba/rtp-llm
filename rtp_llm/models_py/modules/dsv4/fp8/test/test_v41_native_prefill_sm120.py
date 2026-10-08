@@ -86,6 +86,23 @@ def run_rank(rank, port, config, gen_num_per_cycle):
                 head,
             )
             assert type(model.kv_cache).__name__ == "KVCache"
+            assert model.kv_cache.layer_count == config["num_hidden_layers"]
+            assert set(model._engram_tables) == set(config["engram_layer_ids"])
+            if config["num_hidden_layers"] == 40:
+                actual_tags = {
+                    layer: {
+                        group.tag
+                        for group in model.kv_cache.get_layer_cache_groups(layer)
+                    }
+                    for layer in range(40)
+                }
+                for layer, tags in actual_tags.items():
+                    expected_tags = {"swa_kv"}
+                    if layer in (2, 8, 14):
+                        expected_tags |= {"csa_kv", "csa_state", "indexer_kv"}
+                    elif layer == 20:
+                        expected_tags |= {"hca_kv", "indexer_kv"}
+                    assert tags == expected_tags, (layer, tags, expected_tags)
             expected_bytes = {
                 "swa_kv": 67584 if gen_num_per_cycle == 0 else 69120,
                 "csa_state": 8192 if gen_num_per_cycle == 0 else 16384,
@@ -195,7 +212,8 @@ def run_rank(rank, port, config, gen_num_per_cycle):
                 dist.barrier()
             if rank == 0:
                 print(
-                    f"V4.1 native DP8 prefill gen={gen_num_per_cycle}: "
+                    f"V4.1 native DP8 prefill layers={model.kv_cache.layer_count} "
+                    f"gen={gen_num_per_cycle}: "
                     "allocator, gather, wrapper, MoE and sampler PASS",
                     flush=True,
                 )
@@ -213,11 +231,17 @@ def run_rank(rank, port, config, gen_num_per_cycle):
 
 class V41NativePrefillSM120Test(unittest.TestCase):
     def test_eight_rank_native_executor(self):
+        self.run_fixture(full_schedule=False)
+
+    def test_full_schedule_eight_rank_native_executor(self):
+        self.run_fixture(full_schedule=True)
+
+    def run_fixture(self, *, full_schedule):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root:
             torch.manual_seed(41900)
-            config = checkpoint(Path(root))
-            for gen in (0, 1):
+            config = checkpoint(Path(root), full_schedule=full_schedule)
+            for gen in (0,) if full_schedule else (0, 1):
                 with self.subTest(gen_num_per_cycle=gen), socket.socket() as sock:
                     sock.bind(("127.0.0.1", 0))
                     port = sock.getsockname()[1]

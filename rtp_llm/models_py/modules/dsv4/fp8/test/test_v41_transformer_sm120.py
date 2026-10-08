@@ -40,17 +40,20 @@ def fp8(n, k, block=32):
     return weight, scales
 
 
-def fixture(experts=4):
+def fixture(experts=4, *, full_schedule=False):
+    ratios = [0, 0] + [2] * 18 + [1] * 20 if full_schedule else [0, 0, 2, 2, 1, 1]
+    kv_sources = [2, 8, 14, 20] if full_schedule else [2, 4]
+    index_sources = [2, 8, 14, 20, 24, 28, 32, 36] if full_schedule else [2, 4]
     args = V4Args(
         vocab_size=128,
         dim=512,
         n_heads=4,
-        n_layers=6,
+        n_layers=len(ratios),
         n_mtp_layers=0,
         q_lora_rank=256,
         o_groups=2,
         o_lora_rank=256,
-        compress_ratios=[0, 0, 2, 2, 1, 1],
+        compress_ratios=ratios,
         index_n_heads=32,
         moe_inter_dim=512,
         n_routed_experts=experts,
@@ -60,7 +63,18 @@ def fixture(experts=4):
         max_batch_size=2,
         max_seq_len=256,
         max_tokens_per_rank=256,
-        v41_config={"kv_source_layer_ids": [2, 4], "index_source_layer_ids": [2, 4]},
+        v41_config={
+            "num_hidden_layers": len(ratios),
+            "head_dim": 512,
+            "index_head_dim": 128,
+            "sliding_window": 128,
+            "compress_ratios": ratios,
+            "kv_source_layer_ids": kv_sources,
+            "index_source_layer_ids": index_sources,
+            "candidate_source_layer_id": kv_sources[-1],
+            "candidate_topk_blocks": 2048 if full_schedule else 0,
+            "candidate_block_size": 8 if full_schedule else 0,
+        },
     )
     weights = []
     for layer_id in range(args.n_layers):
@@ -100,7 +114,7 @@ def fixture(experts=4):
             w[getattr(W, f"v4_routed_{name}_s")] = torch.full(
                 (experts, 512, 16), 121, device="cuda", dtype=torch.uint8
             )
-        if layer_id in (2, 4):
+        if layer_id in kv_sources:
             w[W.v4_compressor_wkv] = (
                 torch.randn(512, 512, device="cuda") * 0.025
             ).bfloat16()
@@ -116,6 +130,7 @@ def fixture(experts=4):
             w[W.v41_indexer_k_norm] = torch.ones(
                 128, device="cuda", dtype=torch.bfloat16
             )
+        if layer_id in index_sources:
             w[W.v4_indexer_wq_b_w], w[W.v4_indexer_wq_b_s] = fp8(4096, 256)
             w[W.v4_indexer_weights_proj_w] = torch.randn(
                 32, 512, device="cuda", dtype=torch.bfloat16
