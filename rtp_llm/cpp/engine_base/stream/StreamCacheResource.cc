@@ -597,6 +597,13 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
+KVCacheAllocationLeasePtr StreamCacheResource::retainAllocation(int batch_id) const {
+    RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager && !resource_released_ && !fake_inited_
+                                && !stream_->isFakeStream() && curBlocksNum() > 0,
+                            "cache allocation lease requires a live allocated stream");
+    return resource_context_.cache_manager->retainAllocation(batch_kv_cache_resource_->cacheResource(batch_id));
+}
+
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
     return resource_context_.cache_manager->updateKVBlock(
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);

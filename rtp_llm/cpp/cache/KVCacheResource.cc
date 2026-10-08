@@ -8,6 +8,7 @@ namespace rtp_llm {
 
 void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
+    topology_ = topology;
     tag_to_group_id_.clear();
     layer_group_tags_.clear();
     transfer_layer_group_tags_.clear();

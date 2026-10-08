@@ -54,6 +54,8 @@ public:
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    // Call under scheduler ownership before cancellation/free can race admission.
+    KVCacheAllocationLeasePtr retainAllocation(int batch_id = 0) const;
 
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via

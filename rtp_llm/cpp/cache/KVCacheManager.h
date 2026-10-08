@@ -155,6 +155,7 @@ public:
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+    KVCacheAllocationLeasePtr retainAllocation(const KVCacheResource& resource) const;
 
     // CP page-level RR sharding context. Returns nullptr when sharding is not active
     // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to

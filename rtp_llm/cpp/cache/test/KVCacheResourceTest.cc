@@ -180,9 +180,11 @@ TEST(KVCacheResourceTest, InitializationDoesNotRetainTopology) {
 
     KVCacheResource resource;
     resource.initGroups(topology);
+    EXPECT_EQ(resource.topologyPtr(), topology);
     topology.reset();
 
     EXPECT_TRUE(weak_topology.expired());
+    EXPECT_EQ(resource.topologyPtr(), nullptr);
     EXPECT_EQ(resource.soleGroupTagForLayer(0), "group0");
     resource.mutableBlockIdsForLayer(0, "group0").add(BlockIndicesType{3});
     EXPECT_EQ(resource.blocksForLayer(0, "group0"), (BlockIndicesType{3}));

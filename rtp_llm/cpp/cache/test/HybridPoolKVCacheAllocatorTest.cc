@@ -408,6 +408,168 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
 }
 
+static CacheConfig makeV41LeaseConfig(bool stage_one) {
+    CacheConfig config;
+    config.dtype     = DataType::TYPE_INT8;
+    config.layer_num = config.layer_all_num = stage_one ? 19 : 21;
+    config.block_num                        = 5;
+    config.seq_size_per_block = config.kernel_seq_size_per_block = 256;
+    config.use_independent_block_pools                           = true;
+    std::vector<KVCacheSpecPtr>   specs;
+    std::vector<std::vector<int>> layers;
+    std::vector<CacheGroupType>   types;
+    std::vector<std::string>      tags;
+    std::vector<size_t>           strides;
+    auto                          add = [&](const std::string& tag, size_t bytes, bool state, std::vector<int> owners) {
+        specs.push_back(
+            makeResolvedOpaqueSpec(state, tag, state ? DataType::TYPE_FP32 : DataType::TYPE_INT8, bytes, 256));
+        layers.push_back(std::move(owners));
+        types.push_back(state || tag == "swa_kv" ? CacheGroupType::SWA : CacheGroupType::FULL);
+        tags.push_back(tag);
+        strides.push_back(bytes);
+    };
+    std::vector<int> all_layers(config.layer_num);
+    std::iota(all_layers.begin(), all_layers.end(), 0);
+    add("swa_kv", 69120, false, all_layers);
+    if (!stage_one) {
+        add("csa_state", 16384, true, {2, 8, 14});
+        add("csa_kv", 36864, false, {2, 8, 14});
+    }
+    add("hca_kv", 73728, false, {stage_one ? 0 : 20});
+    add("indexer_kv", 17408, false, stage_one ? std::vector<int>{0} : std::vector<int>{2, 8, 14, 20});
+    config.fromGroupedSpecs(specs, layers, types, tags);
+    config.setGroupBlockLayout(std::vector<uint32_t>(tags.size(), 5), strides, std::vector<size_t>(tags.size(), 0));
+    if (stage_one) {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            if (group.tag != "swa_kv") {
+                group.read_replica_source_layer_id = 20;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
+    return config;
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AllocationLeaseRetainsAllV41TagsWithoutCacheKeysAndSurvivesOwnerTeardown) {
+    for (const bool stage_one : {false, true}) {
+        auto config    = makeV41LeaseConfig(stage_one);
+        auto allocator = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+        KVCacheResource resource;
+        resource.initGroups(config.topologyPtr());
+        auto                          pools = allocator->groupBlockPools();
+        std::vector<BlockIndicesType> blocks;
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            const auto& tag = config.tagForGroup(gid);
+            blocks.push_back(pools[gid]->malloc(tag == "swa_kv" || tag == "csa_state" ? 1 : 4));
+            resource.mutableBlockIds(static_cast<int>(gid)).assign(blocks.back());
+        }
+        ASSERT_TRUE(resource.cacheKeys().empty());
+        auto lease = allocator->retainAllocation(resource);
+        ASSERT_EQ(lease->blockTables().size(), stage_one ? 3u : 5u);
+        if (stage_one) {
+            EXPECT_EQ(lease->topologyPtr()->group("hca_kv").read_replica_source_layer_id, 20);
+        }
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            EXPECT_EQ(lease->blockTables().at(config.tagForGroup(gid)), blocks[gid]);
+            pools[gid]->requestFree(blocks[gid]);
+            EXPECT_EQ(pools[gid]->freeBlocksNum(), pools[gid]->totalBlocksNum() - blocks[gid].size());
+        }
+        resource.resizeBlocks(0);
+        allocator.reset();
+        auto ticket = lease;
+        lease.reset();
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            const auto spare = pools[gid]->malloc(static_cast<int>(pools[gid]->freeBlocksNum()));
+            for (auto block : spare) {
+                EXPECT_EQ(std::count(blocks[gid].begin(), blocks[gid].end(), block), 0);
+            }
+            pools[gid]->requestFree(spare);
+        }
+        ticket.reset();
+        for (const auto& pool : pools) {
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
+        // Drop every owner of a fresh allocation except its lease.
+        allocator = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+        pools = allocator->groupBlockPools();
+        std::vector<std::weak_ptr<BlockPool>> weak_pools(pools.begin(), pools.end());
+        resource.initGroups(config.topologyPtr());
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            resource.mutableBlockIds(static_cast<int>(gid)).assign(pools[gid]->malloc(1));
+        }
+        lease = allocator->retainAllocation(resource);
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            pools[gid]->requestFree(resource.blocks(static_cast<int>(gid)));
+        }
+        resource.resizeBlocks(0);
+        allocator.reset();
+        pools.clear();
+        for (const auto& pool : weak_pools) {
+            EXPECT_FALSE(pool.expired());
+        }
+        lease.reset();
+        for (const auto& pool : weak_pools) {
+            EXPECT_TRUE(pool.expired());
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AllocationLeaseSnapshotsGrowthAndSparseTables) {
+    const auto config    = makeTinyMultiPoolHybridConfig();
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    const auto pools = allocator->groupBlockPools();
+    const auto first = pools[0]->malloc(1);
+    const auto full  = pools[1]->malloc(2);
+    resource.mutableBlockIds(0).assign({NULL_BLOCK_IDX, first[0]});
+    resource.mutableBlockIds(1).assign({full[0]});
+    auto earlier = allocator->retainAllocation(resource);
+    resource.mutableBlockIds(1).add({full[1]});
+    auto later = allocator->retainAllocation(resource);
+    EXPECT_EQ(earlier->blockTables().at("linear"), (BlockIndicesType{NULL_BLOCK_IDX, first[0]}));
+    EXPECT_EQ(earlier->blockTables().at("full"), (BlockIndicesType{full[0]}));
+    EXPECT_EQ(later->blockTables().at("full"), full);
+    pools[0]->requestFree(first);
+    pools[1]->requestFree(full);
+    resource.resizeBlocks(0);
+    later.reset();
+    EXPECT_EQ(pools[1]->freeBlocksNum(), pools[1]->totalBlocksNum() - 1);
+    earlier.reset();
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AllocationLeaseRejectsInvalidMetadataAndRollsBackPartialRetention) {
+    const auto config    = makeTinyMultiPoolHybridConfig();
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    const auto pools = allocator->groupBlockPools();
+    const auto first = pools[0]->malloc(1);
+    resource.mutableBlockIds(0).assign(first);
+    for (const int bad : {0, -2, 8}) {
+        resource.mutableBlockIds(1).assign({bad});
+        EXPECT_THROW(allocator->retainAllocation(resource), std::invalid_argument);
+    }
+    resource.mutableBlockIds(1).assign({1});
+    EXPECT_THROW(allocator->retainAllocation(resource), std::runtime_error);
+    EXPECT_EQ(pools[1]->freeBlocksNum(), pools[1]->totalBlocksNum());
+    KVCacheResource wrong;
+    wrong.initGroups(makeTinyMultiPoolHybridConfig().topologyPtr());
+    EXPECT_THROW(allocator->retainAllocation(wrong), std::invalid_argument);
+    pools[0]->requestFree(first);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), pools[0]->totalBlocksNum());
+    resource.mutableBlockIds(1).resize(0);
+    EXPECT_THROW(allocator->retainAllocation(resource), std::runtime_error);
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
     auto allocator = makeAllocator(config);

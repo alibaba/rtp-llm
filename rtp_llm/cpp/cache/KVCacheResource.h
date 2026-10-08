@@ -89,6 +89,9 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 class KVCacheResource {
 public:
     void initGroups(std::shared_ptr<const CacheTopology> topology);
+    std::shared_ptr<const CacheTopology> topologyPtr() const {
+        return topology_.lock();
+    }
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id) const;
@@ -174,6 +177,7 @@ public:
     std::string debugString() const;
 
 private:
+    std::weak_ptr<const CacheTopology> topology_;
     int  groupIdForTag(std::string_view tag) const;
     int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;

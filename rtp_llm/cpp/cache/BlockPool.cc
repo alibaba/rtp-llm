@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -544,6 +545,25 @@ void BlockPool::requestReference(const BlockIndicesType& block_ids) {
     for (const auto& block_id : block_ids) {
         free_block_ids_.erase(block_id);
     }
+}
+
+bool BlockPool::tryRetainRequestBlocks(const BlockIndicesType& block_ids) {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    BlockIdxType     previous = 0;
+    for (const auto block : block_ids) {
+        if (block <= previous || static_cast<uint32_t>(block) >= config_.block_num
+            || request_ref_counter_.getRefCounter(block) <= 0
+            || request_ref_counter_.getRefCounter(block) == std::numeric_limits<int>::max()
+            || req_con_ref_counter_.getRefCounter(block) == std::numeric_limits<int>::max()
+            || req_cache_ref_counter_.getRefCounter(block) == std::numeric_limits<int>::max()) {
+            return false;
+        }
+        previous = block;
+    }
+    request_ref_counter_.incrementRefCounter(block_ids);
+    req_con_ref_counter_.incrementRefCounter(block_ids);
+    req_cache_ref_counter_.incrementRefCounter(block_ids);
+    return true;
 }
 
 void BlockPool::connectorReference(BlockIdxType block_idx) {

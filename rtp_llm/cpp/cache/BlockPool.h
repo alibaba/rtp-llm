@@ -57,6 +57,8 @@ public:
     void   connectorFree(const BlockIndicesType& block_indices);
     void   requestReference(BlockIdxType block_idx);
     void   requestReference(const BlockIndicesType& block_indices);
+    // Atomically retain sorted unique blocks already held by a request. No mutation on failure.
+    bool   tryRetainRequestBlocks(const BlockIndicesType& block_indices);
     void   blockCacheReference(BlockIdxType block_idx);
     void   blockCacheReference(const BlockIndicesType& block_indices);
     void   connectorReference(BlockIdxType block_idx);
