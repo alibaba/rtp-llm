@@ -6,9 +6,15 @@ from pathlib import Path
 import pytest
 
 from cases.config import configure_program
-from flexlb_cfg import ConfigOverride, PROFILES, render_env
+from flexlb_cfg import (
+    ConfigOverride, ProfileIdentityError, PROFILES, SCHEDULING_TYPE_FIELDS,
+    render_env,
+)
 from scenario import ScenarioError, compile_scenarios, load_scenarios
-from scenario.compiler import environment
+from scenario.compiler import (
+    OPTIONAL_SCALARS, environment, environment_fields, optional_scalars,
+    variant_environment_fields,
+)
 from scenario.loader import load_document
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,3 +167,79 @@ def test_unused_variant_parameter_and_overlapping_paths_fail():
     data['variant_axis']['fields'] = ['parameters.completion', 'parameters.completion.expected']
     with pytest.raises(ScenarioError, match='overlapping'):
         compile_config(data)
+
+
+@pytest.mark.parametrize('profile,axis,wrong', [
+    ('batch-window', 'decision', 'single'),
+    ('single-nonbatch', 'dispatcher', 'batch'),
+])
+def test_identity_rejection_has_one_source(profile, axis, wrong):
+    with pytest.raises(ProfileIdentityError) as direct:
+        render_env(profile, ConfigOverride(**{axis: wrong}))
+    with pytest.raises(ScenarioError) as compiled:
+        environment({'config_overrides': {axis: wrong}}, 'case.environment', profile)
+    assert type(compiled.value.__cause__) is ProfileIdentityError
+    assert str(compiled.value.__cause__) == str(direct.value)
+    assert str(compiled.value) == f'case.environment: {direct.value}'
+
+
+def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monkeypatch):
+    from scenario.catalog import handlers
+    assert variant_environment_fields() == environment_fields() - {'backend'}
+    monkeypatch.setitem(OPTIONAL_SCALARS, 'new_boolean', (bool, False, None))
+    assert environment({'new_boolean': True}, 'env', 'batch-window')['new_boolean'] is True
+    document = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')[0][1]
+    document['variants'][0]['environment_overrides'] = {'new_boolean': True}
+    plans = compile_scenarios([('case.yaml', document)], handlers=handlers())
+    assert all(plan['environment']['new_boolean'] is True for plan in plans)
+    document['variants'][0]['environment_overrides'] = {'backend': 'java_mock'}
+    with pytest.raises(ScenarioError, match='backend'):
+        compile_scenarios([('case.yaml', document)], handlers=handlers())
+    with pytest.raises(ScenarioError, match='unknown fields'):
+        environment({'invented': 1}, 'env', 'batch-window')
+
+
+@pytest.mark.parametrize('field,invalid,error', [
+    ('debug_enabled', None, 'env.debug_enabled: expected boolean'),
+    ('mock_auto_fetch', 1, 'env.mock_auto_fetch: expected boolean'),
+    ('master_debug_log', 'true', 'env.master_debug_log: expected boolean'),
+    ('master_sync_log', None, 'env.master_sync_log: expected boolean'),
+    ('mock_fetch_attach_timeout_ms', 0, 'env.mock_fetch_attach_timeout_ms: expected integer >= 1'),
+    ('prefill_max_waiting_batches', -1, 'env.prefill_max_waiting_batches: expected integer >= 0'),
+])
+def test_optional_scalar_rejections_keep_their_exact_messages(field, invalid, error):
+    with pytest.raises(ScenarioError) as exc:
+        environment({field: invalid}, 'env', 'batch-window')
+    assert str(exc.value) == error
+
+
+def test_optional_scalar_declarations_preserve_presence_and_extend_in_one_row():
+    result = environment({}, 'env', 'batch-window')
+    assert result['debug_enabled'] is False and result['master_sync_log'] is False
+    for field in ('mock_auto_fetch', 'master_debug_log',
+                  'mock_fetch_attach_timeout_ms', 'prefill_max_waiting_batches'):
+        assert field not in result
+    assert environment({'prefill_max_waiting_batches': 0}, 'env', 'batch-window')[
+        'prefill_max_waiting_batches'] == 0
+    extra = {**OPTIONAL_SCALARS, 'new_boolean': (bool, False, None),
+             'new_positive_integer': (int, object(), 1)}
+    normalized = {}
+    optional_scalars({'new_boolean': True, 'new_positive_integer': 3},
+                     'env', normalized, declarations=extra)
+    assert normalized['new_boolean'] is True
+    assert normalized['new_positive_integer'] == 3
+
+
+def test_strict_type_field_table_matches_functional_and_stress_documents():
+    for profile in PROFILES:
+        doc = json.loads(render_env(profile))
+        for group, block in (
+            ('ordering', doc['scheduler']['ordering']),
+            ('decision', doc['scheduler']['decision']),
+            ('dispatcher', doc['dispatcher']),
+        ):
+            assert tuple(block) == ('type', *SCHEDULING_TYPE_FIELDS[group][block['type'].lower()])
+    for decision in ('single', 'fixed_window'):
+        doc = json.loads(render_env('stress-na130', ConfigOverride(decision=decision)))
+        block = doc['scheduler']['decision']
+        assert tuple(block) == ('type', *SCHEDULING_TYPE_FIELDS['decision'][decision])

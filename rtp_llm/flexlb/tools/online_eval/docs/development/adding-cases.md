@@ -65,6 +65,8 @@ L1 是 `FUNCTIONAL_DEFAULTS`；L2 是 `FUNCTIONAL_PROFILE_KWARGS`。L2 的窗口
 
 Profile 身份只由 decision × dispatcher 决定，四个组合以 `PROFILE_SPECS` 为准。L3 允许重述相同身份值，禁止改变任一轴；`ordering`、优先级、抢占策略、队列期限是可覆盖策略，不定义新的 profile。有效能力从最终配置计算，不能从 profile 名推断 priority 或 preemption。`queue_timeout_ms: {omit: true}` 表示使用 Java 自身的队列期限，不表示无限等待；故障用例需要在配置旁说明省略的测试意图。
 
+配置编译器使用一份环境字段目录：简单布尔/整数开关在 `OPTIONAL_SCALARS` 声明类型、缺省落值和数值下界；其余字段由专门校验分支处理。变体补丁从同一目录派生可用字段，但 `backend` 只允许在 case 顶层声明。功能 profile 的身份冲突由 `validate_profile_identity` 统一校验。调度子类型拥有的 JSON 字段列在 `SCHEDULING_TYPE_FIELDS`；新增 decision 或 dispatcher 类型时，需同时补充该表、Python 构造与重定型分支、profile 注册、Java 严格 schema 及对应契约测试。字段表只规定输出形状，输入检查和跨字段约束仍由显式校验执行。
+
 准入 cap 按 dispatcher 计数：BATCH 的单位是 batch，NON_BATCH 的单位是请求；SINGLE 决策不把 BATCH 的 cap 改成请求计数。L2 明示 BATCH 为 2、NON_BATCH 为 64。FIXED_WINDOW 的默认 `max_requests=32` 表示每批最多 32 个请求，2 个满批的请求数上界是 64；这不是吞吐等价保证，SINGLE+BATCH 也不保证形成满批。修改批大小不会隐式换算 cap，需要同时调整时在 YAML 明示两者。
 
 Case 的 `environment.config_overrides` 给出公共 L3 值，`environment.profile_overrides` 以完整 profile 名给出同层更具体的值：

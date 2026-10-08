@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, fields
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 
 from flexlb_profile_data import (
     DSV4_PREFILL_EXPRESSION,
@@ -64,6 +64,44 @@ from flexlb_profile_data import (
 VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 
 _RENDER_PROFILES = PROFILES + (STRESS_PROFILE,)
+
+# JSON keys owned by each strict scheduling subtype. Adding a subtype also
+# requires its constructor/retype branch, profile registration and Java schema.
+SCHEDULING_TYPE_FIELDS = {
+    "ordering": {
+        "fifo": (),
+        "priority": ("defaultPriority", "preemption"),
+    },
+    "decision": {
+        "single": (),
+        "fixed_window": ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs"),
+    },
+    "dispatcher": {
+        "batch": ("maxInflightPerPrefillWorker",),
+        "non_batch": ("maxInflightPerPrefillWorker",),
+    },
+}
+
+
+class ProfileIdentityError(ValueError):
+    """A functional profile's decision or dispatcher was changed."""
+
+
+def validate_profile_identity(profile: str, overrides: Mapping[str, object]) -> None:
+    """Validate the closed functional profile axes for all config entry points."""
+    for axis, expected in PROFILE_SPECS[profile].items():
+        value = overrides.get(axis)
+        if value is not None and value != expected:
+            raise ProfileIdentityError(f"{axis} is a profile identity field for {profile}")
+
+
+def _typed_block(group: str, kind: str, values: Mapping[str, object]) -> dict:
+    """Emit only the JSON fields owned by the selected strict subtype."""
+    allowed = SCHEDULING_TYPE_FIELDS[group][kind]
+    unknown = set(values) - set(allowed)
+    if unknown:
+        raise ValueError(f"{group}={kind} does not allow {sorted(unknown)}")
+    return {"type": kind.upper(), **{key: values[key] for key in allowed if key in values}}
 
 
 def profile_dispatches_batch(profile: str) -> bool:
@@ -189,7 +227,7 @@ def _build_ordering_cfg(
     """
     if isinstance(ordering, str):
         ordering = ordering.lower()
-    if ordering not in ("fifo", "priority"):
+    if ordering not in SCHEDULING_TYPE_FIELDS["ordering"]:
         raise ValueError(f"ordering must be 'fifo' or 'priority', got {ordering!r}")
     if ordering == "fifo":
         if default_priority is not None or preemption is not None:
@@ -197,17 +235,17 @@ def _build_ordering_cfg(
                 "default_priority/preemption apply only to ordering='priority' "
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
-        return {"type": "FIFO"}
+        return _typed_block("ordering", "fifo", {})
     if default_priority is not None and not 1 <= default_priority <= 100:
         raise ValueError(
             f"default_priority must be in [1, 100], got {default_priority}"
         )
-    cfg: dict = {"type": "PRIORITY"}
+    values = {}
     if default_priority is not None:
-        cfg["defaultPriority"] = default_priority
+        values["defaultPriority"] = default_priority
     if preemption is not None:
-        cfg["preemption"] = _build_preemption_cfg(preemption)
-    return cfg
+        values["preemption"] = _build_preemption_cfg(preemption)
+    return _typed_block("ordering", "priority", values)
 
 
 # ===========================================================================
@@ -247,10 +285,8 @@ def build_flexlb_config(
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
-    if decision not in ("single", "fixed_window") or dispatcher not in (
-        "batch",
-        "non_batch",
-    ):
+    if (decision not in SCHEDULING_TYPE_FIELDS["decision"]
+            or dispatcher not in SCHEDULING_TYPE_FIELDS["dispatcher"]):
         raise ValueError("unsupported decision or dispatcher")
     for name, value in (
         ("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
@@ -273,18 +309,17 @@ def build_flexlb_config(
         or decision_lifetime < 1
     ):
         raise ValueError("decision_lifetime must be finite and at least 1")
-    decision_cfg: dict = {"type": "SINGLE"}
+    decision_values = {}
     if decision == "fixed_window":
-        decision_cfg = {
-            "type": "FIXED_WINDOW",
+        decision_values = {
             "maxRequests": max_requests,
             "maxCollectionWaitMs": max_collection_wait_ms,
             "maxPredictedExecutionMs": max_predicted_execution_ms,
         }
-    dispatcher_cfg: dict = {
-        "type": dispatcher.upper(),
+    decision_cfg = _typed_block("decision", decision, decision_values)
+    dispatcher_cfg = _typed_block("dispatcher", dispatcher, {
         "maxInflightPerPrefillWorker": max_inflight_per_prefill_worker,
-    }
+    })
     scheduler_cfg: dict = {
         "type": "QUEUE",
         "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
@@ -404,7 +439,7 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
     current_type = str(ordering_block.get("type", "")).lower()
     if overrides.ordering is not None:
         new_type = overrides.ordering.lower()
-        if new_type not in ("fifo", "priority"):
+        if new_type not in SCHEDULING_TYPE_FIELDS["ordering"]:
             raise ValueError(
                 f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}"
             )
@@ -415,7 +450,7 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
                 "default_priority/preemption apply only to ordering='priority' "
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
-        scheduler["ordering"] = {"type": new_type.upper()}
+        scheduler["ordering"] = _typed_block("ordering", new_type, {})
         ordering_block = scheduler["ordering"]
         current_type = new_type
     if current_type == "fifo":
@@ -436,27 +471,26 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
     decision = doc["scheduler"]["decision"]
     if overrides.decision is not None:
         new_type = overrides.decision.lower()
-        if new_type == "single":
-            doc["scheduler"]["decision"] = {"type": "SINGLE"}
-        elif new_type == "fixed_window":
-            doc["scheduler"]["decision"] = {
-                "type": "FIXED_WINDOW",
-                "maxRequests": decision.get("maxRequests", STRESS_DECISION_RETYPE_DEFAULTS["maxRequests"]),
-                "maxCollectionWaitMs": decision.get("maxCollectionWaitMs", STRESS_DECISION_RETYPE_DEFAULTS["maxCollectionWaitMs"]),
-                "maxPredictedExecutionMs": decision.get("maxPredictedExecutionMs", STRESS_DECISION_RETYPE_DEFAULTS["maxPredictedExecutionMs"]),
-            }
-        else:
+        if new_type not in SCHEDULING_TYPE_FIELDS["decision"]:
             raise ValueError(
                 "decision must be 'fixed_window' or 'single', got "
                 f"{overrides.decision!r}"
             )
+        values = {}
+        for key in SCHEDULING_TYPE_FIELDS["decision"][new_type]:
+            values[key] = decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key])
+        doc["scheduler"]["decision"] = _typed_block("decision", new_type, values)
 
 
 def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     if overrides.dispatcher is not None:
-        if overrides.dispatcher not in ("batch", "non_batch"):
+        if overrides.dispatcher not in SCHEDULING_TYPE_FIELDS["dispatcher"]:
             raise ValueError("dispatcher must be batch or non_batch")
-        doc["dispatcher"]["type"] = overrides.dispatcher.upper()
+        doc["dispatcher"] = _typed_block("dispatcher", overrides.dispatcher, {
+            key: doc["dispatcher"][key]
+            for key in SCHEDULING_TYPE_FIELDS["dispatcher"][overrides.dispatcher]
+            if key in doc["dispatcher"]
+        })
 
 
 def _render_stress(overrides: Optional[ConfigOverride]) -> str:
@@ -496,10 +530,9 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         return _render_stress(overrides)
     kwargs = {**FUNCTIONAL_DEFAULTS, **FUNCTIONAL_PROFILE_KWARGS[profile]}
     if overrides is not None:
-        for axis, expected in PROFILE_SPECS[profile].items():
-            value = getattr(overrides, axis)
-            if value is not None and value != expected:
-                raise ValueError(f"{axis} is a profile identity field for {profile}")
+        validate_profile_identity(profile, {
+            axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]
+        })
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)
             if value is None:

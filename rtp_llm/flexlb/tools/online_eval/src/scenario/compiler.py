@@ -8,11 +8,12 @@ import re
 from flexlb_cfg import (
     OMIT,
     PROFILE_CAPS,
-    PROFILE_SPECS,
+    ProfileIdentityError,
     PROFILES,
     VICTIM_STAGES,
     ConfigOverride,
     render_env,
+    validate_profile_identity,
 )
 
 from runtime.resource_plan import VICTIM_OFFSETS
@@ -68,6 +69,53 @@ INTEGER_OVERRIDES = {
     "status_stale_after_ms",
     "max_inflight_per_prefill_worker",
 }
+
+# Specialized fields are validated by their dedicated branches below.
+_SPECIAL_ENVIRONMENT_FIELDS = frozenset({
+    "backend", "n_prefill", "n_decode", "prefill_cache_blocks",
+    "decode_cache_blocks", "config_overrides", "profile_overrides",
+    "discovery", "perf_preset", "model_override", "prefill_perf",
+    "prefill_cache_policy", "master_layout", "master_stable_window_s",
+    "metric_whitelist",
+})
+
+_ABSENT = object()
+# (type, default when omitted, minimum). _ABSENT preserves an omitted key.
+OPTIONAL_SCALARS = {
+    "debug_enabled": (bool, False, None),
+    "mock_auto_fetch": (bool, _ABSENT, None),
+    "master_debug_log": (bool, _ABSENT, None),
+    "master_sync_log": (bool, False, None),
+    "mock_fetch_attach_timeout_ms": (int, _ABSENT, 1),
+    "prefill_max_waiting_batches": (int, _ABSENT, 0),
+}
+
+
+def environment_fields():
+    """One vocabulary for both top-level fields and simple scalar declarations."""
+    return _SPECIAL_ENVIRONMENT_FIELDS | OPTIONAL_SCALARS.keys()
+
+
+def variant_environment_fields():
+    # A variant may change declared data, but never switch its case's backend.
+    return environment_fields() - {"backend"}
+
+
+def optional_scalars(value, path, result, declarations=None):
+    """Apply simple scalar rules; retain each field's old omission semantics."""
+    if declarations is None:
+        declarations = OPTIONAL_SCALARS
+    for key, (kind, default, minimum) in declarations.items():
+        if key not in value and default is _ABSENT:
+            continue
+        val = value.get(key, default)
+        if kind is bool:
+            if type(val) is not bool:
+                fail(path + "." + key, "expected boolean")
+            result[key] = val
+        else:
+            result[key] = number(val, path + "." + key, minimum=minimum, integer=True)
+
 CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
     "priority",
     "preemption",
@@ -143,29 +191,7 @@ def environment(value, path, profile):
     value = mapping(
         value,
         path,
-        {
-            "backend",
-            "n_prefill",
-            "n_decode",
-            "prefill_cache_blocks",
-            "decode_cache_blocks",
-            "config_overrides",
-            "profile_overrides",
-            "discovery",
-            "perf_preset",
-            "model_override",
-            "prefill_perf",
-            "prefill_cache_policy",
-            "prefill_max_waiting_batches",
-            "master_debug_log",
-            "debug_enabled",
-            "master_layout",
-            "master_stable_window_s",
-            "master_sync_log",
-            "metric_whitelist",
-            "mock_auto_fetch",
-            "mock_fetch_attach_timeout_ms",
-        },
+        environment_fields(),
     )
     if value.get("backend", "java_mock") != "java_mock":
         fail(
@@ -196,30 +222,7 @@ def environment(value, path, profile):
         if override["baseline"] != result["perf_preset"] or not isinstance(override["reason"], str) or not override["reason"].strip():
             fail(path + ".model_override", "baseline must name perf_preset and reason must be nonempty")
         result["model_override"] = dict(override)
-    if type(value.get("debug_enabled", False)) is not bool:
-        fail(path + ".debug_enabled", "expected boolean")
-    result["debug_enabled"] = value.get("debug_enabled", False)
-    if "mock_auto_fetch" in value:
-        if type(value["mock_auto_fetch"]) is not bool:
-            fail(path + ".mock_auto_fetch", "expected boolean")
-        result["mock_auto_fetch"] = value["mock_auto_fetch"]
-    if "mock_fetch_attach_timeout_ms" in value:
-        result["mock_fetch_attach_timeout_ms"] = number(
-            value["mock_fetch_attach_timeout_ms"],
-            path + ".mock_fetch_attach_timeout_ms",
-            minimum=1,
-            integer=True,
-        )
-    if "master_debug_log" in value:
-        if type(value["master_debug_log"]) is not bool:
-            fail(path + ".master_debug_log", "expected boolean")
-        result["master_debug_log"] = value["master_debug_log"]
-    if "prefill_max_waiting_batches" in value:
-        result["prefill_max_waiting_batches"] = number(
-            value["prefill_max_waiting_batches"],
-            path + ".prefill_max_waiting_batches",
-            integer=True,
-        )
+    optional_scalars(value, path, result)
     if "metric_whitelist" in value:
         whitelist = value["metric_whitelist"]
         if not isinstance(whitelist, str) or not re.fullmatch(
@@ -232,9 +235,6 @@ def environment(value, path, profile):
         if len(whitelist) > 1024:
             fail(path + ".metric_whitelist", "metric whitelist exceeds byte budget")
         result["metric_whitelist"] = whitelist
-    if type(value.get("master_sync_log", False)) is not bool:
-        fail(path + ".master_sync_log", "expected boolean")
-    result["master_sync_log"] = value.get("master_sync_log", False)
     if result["master_sync_log"] and result["master_layout"] != "single":
         fail(
             path + ".master_sync_log",
@@ -281,9 +281,10 @@ def environment(value, path, profile):
     if not isinstance(common, dict):
         fail(path + ".config_overrides", "expected mapping")
     for target, patch in [(profile, common), (profile, paired_master), *profile_overrides.items()]:
-        for axis, expected in PROFILE_SPECS[target].items():
-            if patch.get(axis) is not None and patch[axis] != expected:
-                fail(path, f"{axis} is a profile identity field for {target}")
+        try:
+            validate_profile_identity(target, patch)
+        except ProfileIdentityError as exc:
+            raise ScenarioError(f"{path}: {exc}") from exc
     overrides = mapping(
         {**common, **{k: v for k, v in profile_overrides.get(profile, {}).items() if v is not None}},
         path + ".config_overrides",
@@ -687,28 +688,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             patch = mapping(
                 variant.get("environment_overrides", {}),
                 loc + ".environment_overrides",
-                {
-                    "n_prefill",
-                    "n_decode",
-                    "prefill_cache_blocks",
-                    "decode_cache_blocks",
-                    "config_overrides",
-                    "profile_overrides",
-                    "discovery",
-                    "perf_preset",
-                    "model_override",
-                    "prefill_perf",
-                    "prefill_cache_policy",
-                    "prefill_max_waiting_batches",
-                    "master_debug_log",
-                    "debug_enabled",
-                    "master_layout",
-                    "master_stable_window_s",
-                    "master_sync_log",
-                    "metric_whitelist",
-                    "mock_auto_fetch",
-                    "mock_fetch_attach_timeout_ms",
-                },
+                variant_environment_fields(),
             )
             for key, value in patch.items():
                 if key == "config_overrides":
