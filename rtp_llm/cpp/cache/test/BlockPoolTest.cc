@@ -134,6 +134,61 @@ TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
     EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false));
 }
 
+TEST_F(BlockPoolTest, Hy4CompactsOnlyTargetIndexerStorage) {
+    auto model                                 = makeTestModelConfig(4);
+    model.model_type                           = "hy_v4";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.enable_glm52_shared_indexer_kv_cache = true;
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
+    ParallelismConfig parallelism;
+
+    auto target = SingleConfigCreator::createSingleConfig(model, parallelism, false);
+    EXPECT_EQ(target.layer_to_indexer_kv_slot, std::vector<int>({0, 1, 1, 1}));
+    EXPECT_EQ(target.kv_scale_size_bytes, 2u * target.kv_scale_stride_bytes);
+    EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model, parallelism, true));
+
+    target.block_num       = 8;
+    const auto pool_config = BlockPoolConfigHelper::createConfig(target);
+    EXPECT_EQ(pool_config.memory_layouts[0].scale_layer_num, 2u);
+    EXPECT_EQ(pool_config.memory_layouts[0].kv_scale_pool_size_bytes,
+              2u * target.block_num * target.kv_scale_stride_bytes);
+    EXPECT_EQ(pool_config.memory_layouts[0].kv_block_pool_size_bytes,
+              4u * target.block_num * target.kv_block_stride_bytes);
+
+    BlockPool pool(pool_config);
+    ASSERT_TRUE(pool.init());
+    const auto indexer = pool.allLayerScaleCacheBase();
+    const auto mla     = pool.allLayerCacheBase();
+    ASSERT_EQ(indexer.size(), 4u);
+    ASSERT_EQ(mla.size(), 4u);
+    EXPECT_TRUE(indexer[0].defined());
+    EXPECT_TRUE(indexer[1].defined());
+    EXPECT_FALSE(indexer[2].defined());
+    EXPECT_FALSE(indexer[3].defined());
+    for (int layer = 0; layer < 4; ++layer) {
+        EXPECT_TRUE(mla[layer].defined());
+        EXPECT_EQ(pool.convertIndexToBuffer(layer, 3).size(), layer < 2 ? 2u : 1u);
+        if (layer > 0) {
+            EXPECT_NE(mla[layer - 1].data_ptr(), mla[layer].data_ptr());
+        }
+    }
+
+    model.num_layers                           = 1;
+    model.model_type                           = "hy_v4_mtp";
+    model.enable_glm52_shared_indexer_kv_cache = false;
+    model.glm52_indexer_kv_slot_mapping.clear();
+    auto mtp = SingleConfigCreator::createSingleConfig(model, parallelism, true);
+    EXPECT_TRUE(mtp.layer_to_indexer_kv_slot.empty());
+    EXPECT_EQ(mtp.kv_scale_size_bytes, mtp.kv_scale_stride_bytes);
+    EXPECT_EQ(target.kv_block_stride_bytes, mtp.kv_block_stride_bytes);
+    EXPECT_EQ(target.kv_block_size_bytes, 4u * mtp.kv_block_size_bytes);
+}
+
 TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     auto model = makeTestModelConfig(4);
     model.model_type = "glm_5";
