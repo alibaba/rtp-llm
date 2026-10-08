@@ -17,6 +17,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConfigServiceTest {
 
     @Test
+    void should_select_least_load_decode_through_existing_config_surfaces() {
+        ConfigService fromEnv = new ConfigService(Map.of(
+                "DECODE_LOAD_BALANCE_STRATEGY", "LEAST_LOAD_DECODE"));
+        ConfigService fromJson = new ConfigService(Map.of(
+                "FLEXLB_CONFIG", "{\"decodeLoadBalanceStrategy\":\"LEAST_LOAD_DECODE\"}"));
+        assertEquals(LoadBalanceStrategyEnum.LEAST_LOAD_DECODE,
+                fromEnv.loadBalanceConfig().getStrategyForRoleType(org.flexlb.dao.route.RoleType.DECODE));
+        assertEquals(LoadBalanceStrategyEnum.LEAST_LOAD_DECODE,
+                fromJson.loadBalanceConfig().getStrategyForRoleType(org.flexlb.dao.route.RoleType.DECODE));
+        assertEquals(LoadBalanceStrategyEnum.WEIGHTED_CACHE,
+                new ConfigService(Map.of()).loadBalanceConfig()
+                        .getStrategyForRoleType(org.flexlb.dao.route.RoleType.DECODE));
+    }
+
+    @Test
     void should_load_traffic_policy_from_standalone_env_config() {
         ConfigService configService = new ConfigService(Map.of(
                 "TRAFFIC_POLICY_CONFIG", """

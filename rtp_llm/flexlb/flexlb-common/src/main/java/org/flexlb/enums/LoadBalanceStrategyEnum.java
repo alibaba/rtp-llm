@@ -11,7 +11,9 @@ public enum LoadBalanceStrategyEnum {
 
     CACHE_AFFINITY_FIRST("CacheAffinityFirst"),  // Cache affinity with a bounded TTFT cost
 
-    WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
+    WEIGHTED_CACHE("WeightedCache"),  // Lowest cache usage strategy
+
+    LEAST_LOAD_DECODE("LeastLoadDecode")  // Request count first, KV usage ratio second
 
     ;
     private final String name;

@@ -6,6 +6,7 @@ import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.balance.strategy.LeastLoadDecodeStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -24,13 +25,15 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "cacheAffinityFirstStrategy"})
+@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "cacheAffinityFirstStrategy", "leastLoadDecodeStrategy"})
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
@@ -135,7 +138,6 @@ public class DefaultRouter implements Router {
      * @return Routing result
      */
     public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
-        List<ServerStatus> serverStatusList = new ArrayList<>();
         GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
         String policyGroup = groupRoutingDecision.group();
         String group = policyGroup;
@@ -143,7 +145,7 @@ public class DefaultRouter implements Router {
         if (selectedVit != null) {
             ServerStatus validated = vitCacheDirectory.validate(balanceContext, policyGroup);
             if (!validated.isSuccess()) {
-                return RoutingResult.failure(serverStatusList, RoleType.VIT, validated.getMessage());
+                return RoutingResult.failure(List.of(), RoleType.VIT, validated.getMessage());
             }
             group = validated.getGroup();
         }
@@ -152,6 +154,38 @@ public class DefaultRouter implements Router {
                     balanceContext.getRequestId(), groupRoutingDecision.policyName(), group);
         }
 
+        // A deterministic Decode minimum can repeatedly choose a group whose other
+        // roles are unavailable. Retry other groups only when no affinity pins this route.
+        boolean retryOtherGroups = !roleTypeList.isEmpty() && roleTypeList.getFirst() == RoleType.DECODE
+                && getLoadBalancer(RoleType.DECODE) instanceof LeastLoadDecodeStrategy
+                && StringUtils.isBlank(group) && selectedVit == null;
+        int attempts = retryOtherGroups
+                ? Math.max(1, EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().size()) : 1;
+        Set<String> excludedGroups = new HashSet<>();
+        RoutingResult lastFailure = null;
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            RoutingResult result = routeGroup(balanceContext, roleTypeList, policyGroup, group, excludedGroups);
+            if (result.success()) {
+                return result;
+            }
+            if (result.serverStatusList().isEmpty()) {
+                // Preserve the downstream failure when all remaining Decode groups are exhausted.
+                return lastFailure != null ? lastFailure : result;
+            }
+            if (!retryOtherGroups || attempt + 1 == attempts) {
+                return result; // The caller rolls back the final failed attempt.
+            }
+            excludedGroups.add(result.serverStatusList().getFirst().getGroup());
+            rollBackRoutingFailure(balanceContext, result);
+            lastFailure = RoutingResult.failure(List.of(), result.failedRoleType(), result.errorMessage());
+        }
+        return lastFailure;
+    }
+
+    private RoutingResult routeGroup(BalanceContext balanceContext, List<RoleType> roleTypeList,
+                                     String policyGroup, String group, Set<String> excludedGroups) {
+        List<ServerStatus> serverStatusList = new ArrayList<>();
+        ServerStatus selectedVit = balanceContext.getRequest().getSelectedVit();
         for (RoleType roleType : roleTypeList) {
             if (roleType == RoleType.VIT && selectedVit != null) {
                 ServerStatus vit = vitCacheDirectory.validate(balanceContext, group);
@@ -162,7 +196,10 @@ public class DefaultRouter implements Router {
                 continue;
             }
             LoadBalancer loadBalancer = getLoadBalancer(roleType);
-            ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
+            ServerStatus serverStatus = roleType == RoleType.DECODE && !excludedGroups.isEmpty()
+                    && loadBalancer instanceof LeastLoadDecodeStrategy leastLoad
+                    ? leastLoad.select(balanceContext, roleType, group, excludedGroups)
+                    : loadBalancer.select(balanceContext, roleType, group);
 
             if (!serverStatus.isSuccess()) {
                 // Selection failed, return failure result

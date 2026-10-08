@@ -51,6 +51,31 @@ public class WorkerStatus {
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // Cache check in progress flag
     private AtomicLong statusVersion = new AtomicLong(-1L);
 
+    /** Reported requests plus local reservations, counted once across all states. */
+    public long getDecodeConcurrency() {
+        Map<String, TaskInfo> waiting = waitingTaskList;
+        Map<String, TaskInfo> running = runningTaskList;
+        long count = waiting == null ? 0 : waiting.size();
+        if (running != null) {
+            if (waiting == null || waiting.isEmpty()) {
+                count += running.size();
+            } else {
+                for (String id : running.keySet()) {
+                    if (!waiting.containsKey(id)) {
+                        count++;
+                    }
+                }
+            }
+        }
+        for (Long requestId : localTaskMap.keySet()) {
+            String id = String.valueOf(requestId);
+            if ((waiting == null || !waiting.containsKey(id)) && (running == null || !running.containsKey(id))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     /**
      * Add task to local running queue
      * @param requestId Request ID

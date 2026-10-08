@@ -83,6 +83,25 @@ class DefaultRouterTest {
         assertTrue(List.of(dependsOn.value()).contains("cacheAffinityFirstStrategy"));
     }
 
+    @Test
+    void should_route_decode_with_configured_least_load_strategy() {
+        when(loadBalanceConfig.getStrategyForRoleType(RoleType.DECODE))
+                .thenReturn(LoadBalanceStrategyEnum.LEAST_LOAD_DECODE);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.LEAST_LOAD_DECODE, decodeLoadBalancer);
+        DefaultRouter router = new DefaultRouter(configService, groupRoutingPolicy, vitCacheDirectory);
+        ServerStatus selected = new ServerStatus();
+        selected.setSuccess(true);
+        selected.setRole(RoleType.DECODE);
+        when(decodeLoadBalancer.select(balanceContext, RoleType.DECODE, null)).thenReturn(selected);
+
+        var result = router.routeByRoleType(balanceContext, List.of(RoleType.DECODE));
+
+        assertTrue(result.success());
+        assertEquals(List.of(selected), result.serverStatusList());
+        assertTrue(List.of(DefaultRouter.class.getAnnotation(DependsOn.class).value())
+                .contains("leastLoadDecodeStrategy"));
+    }
+
     @BeforeEach
     void setUp() {
         // Clear all status maps

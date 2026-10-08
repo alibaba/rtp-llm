@@ -7,9 +7,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.springframework.stereotype.Component;
 
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Decode role resource measure
@@ -40,8 +38,16 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (workerStatus == null || !workerStatus.isAlive()) {
             return false;
         }
+        return isResourceAvailable(workerStatus, concurrencyLimit > 0 ? workerStatus.getDecodeConcurrency() : 0);
+    }
 
-        if (isConcurrencyLimitReached(workerStatus)) {
+    /** Reuse the same request-count snapshot for admission and placement. */
+    public boolean isResourceAvailable(WorkerStatus workerStatus, long currentConcurrency) {
+        if (workerStatus == null || !workerStatus.isAlive()) {
+            return false;
+        }
+
+        if (concurrencyLimit > 0 && currentConcurrency >= concurrencyLimit) {
             return false;
         }
 
@@ -115,30 +121,11 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long currentConcurrency = calculateDecodeConcurrency(workerStatus);
+        long currentConcurrency = workerStatus.getDecodeConcurrency();
         if (currentConcurrency <= 0) {
             return 0.0;
         }
         return Math.min(100.0, currentConcurrency * 100.0 / concurrencyLimit);
     }
 
-    private boolean isConcurrencyLimitReached(WorkerStatus workerStatus) {
-        return concurrencyLimit > 0 && calculateDecodeConcurrency(workerStatus) >= concurrencyLimit;
-    }
-
-    private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
-        Set<String> requestIds = new HashSet<>();
-        if (MapUtils.isNotEmpty(workerStatus.getWaitingTaskList())) {
-            requestIds.addAll(workerStatus.getWaitingTaskList().keySet());
-        }
-        if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
-            requestIds.addAll(workerStatus.getRunningTaskList().keySet());
-        }
-        if (MapUtils.isNotEmpty(workerStatus.getLocalTaskMap())) {
-            workerStatus.getLocalTaskMap().keySet().stream()
-                    .map(String::valueOf)
-                    .forEach(requestIds::add);
-        }
-        return requestIds.size();
-    }
 }
