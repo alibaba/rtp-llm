@@ -11,6 +11,7 @@ environment:
     max_requests: 64
     max_collection_wait_ms: 350
     max_predicted_execution_ms: 350
+    cache_affinity_max_extra_ttft_ms: 1000000000
 execution:
   timeout_s: 1000
   stage_timeout_s: 60
