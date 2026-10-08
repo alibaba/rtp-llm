@@ -66,11 +66,11 @@ TEST(Dsv4DpPrefillPolicyTest, ProfileGating) {
 
 class Dsv4DpPrefillPhaseTest: public testing::TestWithParam<int> {};
 
-TEST(Dsv4DpPrefillPolicyTest, V41OnlyAdmitsEightRankPrefill) {
+TEST(Dsv4DpPrefillPolicyTest, V41OnlyAdmitsEightRankPrefillOrPDFusion) {
     for (const char* strategy : {static_cast<const char*>(nullptr), "auto", "v41_nccl_ep", "sm120_decode", "other"}) {
         for (RoleType role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
             for (int world : {1, 2, 4, 8}) {
-                const bool admitted = role == RoleType::PREFILL && world == 8
+                const bool admitted = (role == RoleType::PREFILL || role == RoleType::PDFUSION) && world == 8
                                       && (!strategy || std::string(strategy) == "auto"
                                           || std::string(strategy) == "v41_nccl_ep");
                 EXPECT_EQ(dsv4DpPrefillPhaseSyncEnabled(

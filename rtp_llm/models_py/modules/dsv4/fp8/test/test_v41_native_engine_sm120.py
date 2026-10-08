@@ -1,4 +1,4 @@
-"""Bounded 40-layer DP8 prefill through NormalEngine's live scheduler loop."""
+"""Bounded 40-layer DP8 generation through NormalEngine's live scheduler loop."""
 
 import os
 import socket
@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_dp_worker_sm120 import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     checkpoint,
+    decode_inputs,
     inputs,
     model_config,
     tagged_cache,
@@ -31,7 +32,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 
 
-def run_rank(rank, port, config, initialize_model):
+def run_rank(rank, port, config, initialize_model, new_tokens=1):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     os.environ.update(
@@ -43,6 +44,8 @@ def run_rank(rank, port, config, initialize_model):
             "DSV4_MOE_CHUNK_PREFILL": "1",
             "DSV4_MOE_CHUNK_TOKENS": "4",
             "DSV4_MOE_EXTENT_COUNT_FUSE": "1",
+            "RTP_LLM_STREAM_ASYNC": "0",
+            "RTP_LLM_DEVICE_INPUT": "0",
             "MOEDBG": "0",
         }
     )
@@ -58,6 +61,9 @@ def run_rank(rank, port, config, initialize_model):
     model = reference = engine = None
     stop_requested = threading.Event()
     stop_boundary = threading.Event()
+    inject_armed = threading.Event()
+    inject_boundary = threading.Event()
+    inject_release = threading.Event()
     try:
         with torch.inference_mode():
             model, reference = make_workers(
@@ -104,7 +110,61 @@ def run_rank(rank, port, config, initialize_model):
             initialize = model.initialize
             initialization_calls = []
             expected_tokens = {}
-            calls = {"idle": 0, "active": 0}
+            continuations = {}
+            calls = {"idle": 0, "active": 0, "decode": 0, "idle_decode": 0}
+            injection = {"baseline": 0, "pending": {}, "deferred": False}
+
+            def continuation_reference(request):
+                attn = next(iter(request.attention_inputs.values()))
+                lengths = attn.input_lengths.tolist()
+                ids = request.input_ids.tolist()
+                offset = 0
+                rows = []
+                keys = []
+                for row, span in enumerate(request.v41_cache_spans.tolist()):
+                    request_id, _, _, _, start, count = span
+                    if attn.is_prefill:
+                        assert start == 0 and count == lengths[row]
+                        prompt = ids[offset : offset + count]
+                        state = {
+                            "cache": tagged_cache(reference),
+                            "prompt": tuple(prompt),
+                            "tokens": prompt.copy(),
+                        }
+                        assert request_id not in continuations
+                        continuations[request_id] = state
+                        reference.kv_cache = state["cache"]
+                        oracle = inputs(reference.kv_cache, prompt, [count])
+                    else:
+                        state = continuations[request_id]
+                        sequence = state["tokens"]
+                        assert start == len(sequence) - 1 and count == 1
+                        assert ids[row] == sequence[-1]
+                        assert lengths[row] == len(state["prompt"])
+                        assert attn.sequence_lengths[row].item() == start
+                        history = list(
+                            reversed(sequence[max(0, len(sequence) - 4) : -1])
+                        )
+                        history += [-1] * (3 - len(history))
+                        reference.kv_cache = state["cache"]
+                        oracle = decode_inputs(
+                            reference.kv_cache,
+                            [sequence[-1]],
+                            [start],
+                            [history],
+                            prompt_lengths=[lengths[row]],
+                        )
+                    torch.testing.assert_close(
+                        request.engram_token_windows[offset : offset + count].cpu(),
+                        oracle.engram_token_windows.cpu(),
+                        rtol=0,
+                        atol=0,
+                    )
+                    rows.append(reference.forward(oracle).hidden_states.clone())
+                    keys.append(request_id)
+                    offset += count
+                assert offset == len(ids)
+                return torch.cat(rows), keys
 
             def checked_initialize(resource):
                 assert isinstance(resource, PyModelInitResources)
@@ -119,12 +179,18 @@ def run_rank(rank, port, config, initialize_model):
                     if stop.item():
                         engine.request_stop()
                         stop_boundary.set()
-                    lengths = next(
-                        iter(request.attention_inputs.values())
-                    ).input_lengths.tolist()
+                    attn = next(iter(request.attention_inputs.values()))
+                    lengths = attn.input_lengths.tolist()
                     ids = request.input_ids.tolist()
+                    if attn.is_prefill and injection["pending"]:
+                        for key, tokens in injection["pending"].items():
+                            assert continuations[key]["tokens"] == tokens
+                        injection["pending"].clear()
+                        injection["deferred"] = True
                     expected = None
-                    if ids:
+                    if ids and new_tokens > 1:
+                        expected, keys = continuation_reference(request)
+                    elif ids:
                         reference.kv_cache = tagged_cache(reference)
                         oracle_request = inputs(reference.kv_cache, ids, lengths)
                         torch.testing.assert_close(
@@ -142,19 +208,59 @@ def run_rank(rank, port, config, initialize_model):
                         torch.testing.assert_close(
                             actual, expected, rtol=0.03, atol=0.05
                         )
-                        last = torch.tensor(lengths, device="cuda").cumsum(0) - 1
+                        last = (
+                            torch.tensor(lengths, device="cuda").cumsum(0) - 1
+                            if attn.is_prefill
+                            else torch.arange(len(lengths), device="cuda")
+                        )
                         tokens = (
                             (actual[last].float() @ head.float().T).argmax(-1).tolist()
                         )
-                        start = 0
-                        for length, token in zip(lengths, tokens):
-                            expected_tokens[tuple(ids[start : start + length])] = token
-                            start += length
+                        if new_tokens > 1:
+                            for key, token in zip(keys, tokens):
+                                state = continuations[key]
+                                state["tokens"].append(token)
+                                expected_tokens[state["prompt"]] = state[
+                                    "tokens"
+                                ].copy()
+                        else:
+                            start = 0
+                            for length, token in zip(lengths, tokens):
+                                expected_tokens[tuple(ids[start : start + length])] = (
+                                    token
+                                )
+                                start += length
                         calls["active"] += 1
+                        calls["decode"] += int(not attn.is_prefill)
                     else:
                         assert actual.shape == (0, 512)
                         assert request.v41_cache_spans.shape == (0, 6)
                         calls["idle"] += 1
+                        calls["idle_decode"] += int(not attn.is_prefill)
+                    if new_tokens > 1:
+                        inject = torch.tensor(
+                            [
+                                int(
+                                    rank == 0
+                                    and inject_armed.is_set()
+                                    and calls["decode"] > injection["baseline"]
+                                )
+                            ],
+                            device="cuda",
+                        )
+                        dist.all_reduce(inject, op=dist.ReduceOp.MAX)
+                        if inject.item():
+                            inject_armed.clear()
+                            injection["pending"] = {
+                                key: state["tokens"].copy()
+                                for key, state in continuations.items()
+                                if len(state["tokens"])
+                                < len(state["prompt"]) + new_tokens
+                            }
+                            inject_boundary.set()
+                            assert inject_release.wait(
+                                60
+                            ), "late prompts were not enqueued"
                     return PyModelOutputs(actual)
                 except BaseException:
                     traceback.print_exc()
@@ -168,6 +274,7 @@ def run_rank(rank, port, config, initialize_model):
                     model_config(model._v4_args, config),
                     model.parallelism_config,
                     head,
+                    pdfusion=new_tokens > 1,
                 )
                 assert initialization_calls == [initialize_model]
                 assert model._materialized and not hasattr(model, "weight")
@@ -185,7 +292,7 @@ def run_rank(rank, port, config, initialize_model):
                 for phase, lengths in enumerate(
                     (
                         (3, 2) if rank == 0 else (),
-                        (rank + 1,),
+                        (125 if new_tokens > 1 else rank + 1,),
                         (2, 1) if rank % 2 else (),
                         (1,),
                         (2,) if rank == 7 else (),
@@ -195,14 +302,45 @@ def run_rank(rank, port, config, initialize_model):
                         [(rank * 7 + phase * 13 + row * 3 + i) % 128 for i in range(n)]
                         for row, n in enumerate(lengths)
                     ]
-                    engine.enqueue(requests)
+                    engine.enqueue(requests, new_tokens)
                     result = engine.outputs()
                     assert result["tokens"] == [
-                        row + [expected_tokens[tuple(row)]] for row in requests
+                        (
+                            expected_tokens[tuple(row)]
+                            if new_tokens > 1
+                            else row + [expected_tokens[tuple(row)]]
+                        )
+                        for row in requests
                     ]
-                    assert result["steps"] == [1] * len(requests)
+                    assert result["steps"] == [new_tokens] * len(requests)
                     # Main-thread control never competes with the live engine's
                     # WORLD NCCL collective sequence.
+                    dist.barrier(group=control)
+                if new_tokens > 1:
+                    injection["baseline"] = calls["decode"]
+                    inject_armed.set()
+                    requests = [[31, 32, 33]] if rank == 0 else []
+                    engine.enqueue(requests, new_tokens)
+                    assert inject_boundary.wait(
+                        60
+                    ), "decode did not reach injection boundary"
+                    late = (
+                        [[43, 44]]
+                        if rank == 0
+                        else ([[103, 104, 105]] if rank == 7 else [])
+                    )
+                    engine.enqueue(late, new_tokens)
+                    dist.barrier(group=control)
+                    inject_release.set()
+                    result = engine.outputs()
+                    assert result["tokens"] == [
+                        expected_tokens[tuple(row)] for row in requests + late
+                    ]
+                    assert result["steps"] == [new_tokens] * len(requests + late)
+                    if rank == 0:
+                        assert injection[
+                            "deferred"
+                        ], "live decode was not deferred for late prefill"
                     dist.barrier(group=control)
                 stop_requested.set()
                 assert stop_boundary.wait(60), "engine did not reach coordinated stop"
@@ -211,6 +349,8 @@ def run_rank(rank, port, config, initialize_model):
                 assert result["free_before"] == result["free_after"], result
                 assert result["cache_blocks"] == 8, result
             assert calls["active"] >= 2 and calls["idle"] >= 1, calls
+            if new_tokens > 1:
+                assert calls["decode"] >= 16 and calls["idle_decode"] >= 1, calls
             assert bridge_calls["stage"] == 1
             assert bridge_calls["phase"] == calls["active"] + calls["idle"]
             reference.close()
@@ -220,8 +360,8 @@ def run_rank(rank, port, config, initialize_model):
                 assert all(not path.exists() for path in table_paths)
                 assert not list(model._engram_cache_dir.glob("*.lease.*"))
                 print(
-                    "V4.1 40-layer native DP8 NormalEngine prefill "
-                    f"prematerialized={initialize_model} PASS",
+                    "V4.1 40-layer native DP8 NormalEngine "
+                    f"new_tokens={new_tokens} prematerialized={initialize_model} PASS",
                     flush=True,
                 )
     except BaseException:
@@ -239,7 +379,7 @@ def run_rank(rank, port, config, initialize_model):
 
 
 class V41NativeEngineSM120Test(unittest.TestCase):
-    def run_engine(self, initialize_model):
+    def run_engine(self, initialize_model, new_tokens=1):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
@@ -249,7 +389,10 @@ class V41NativeEngineSM120Test(unittest.TestCase):
             port = sock.getsockname()[1]
             sock.close()
             mp.spawn(
-                run_rank, args=(port, config, initialize_model), nprocs=8, join=True
+                run_rank,
+                args=(port, config, initialize_model, new_tokens),
+                nprocs=8,
+                join=True,
             )
 
     def test_eight_rank_scheduler_loop(self):
@@ -257,6 +400,9 @@ class V41NativeEngineSM120Test(unittest.TestCase):
 
     def test_engine_materializes_workers(self):
         self.run_engine(initialize_model=False)
+
+    def test_cold_pdfusion_prefill_and_eight_decode_steps(self):
+        self.run_engine(initialize_model=False, new_tokens=9)
 
 
 if __name__ == "__main__":
