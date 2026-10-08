@@ -181,7 +181,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         return (
             self._input_packer.name == "fused"
-            and pack_impl == "optimized"
+            and pack_impl in ("optimized", "fast_finite")
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 

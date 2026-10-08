@@ -93,6 +93,18 @@ cc_test(
 )
 
 cc_test(
+    name = "mla_fp8_cache_spec_test",
+    srcs = ["MlaFp8CacheSpecTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {},
+)
+
+cc_test(
     name = "cache_layer_layout_test",
     srcs = ["CacheLayerLayoutTest.cc"],
     copts = test_copts,

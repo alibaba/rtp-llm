@@ -1,4 +1,4 @@
-"""Launch one BF16 PD endpoint; four-layer debugging requires an explicit flag.
+"""Launch one BF16-compute PD endpoint; FP8 operands are explicit options.
 
 Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
 a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
@@ -19,6 +19,8 @@ import sys
 
 
 def launch_config(args):
+    fp8_gemm = bool(getattr(args, "fp8_gemm", False))
+    fp8_kv_cache = bool(getattr(args, "fp8_kv_cache", False))
     checkpoint = Path(args.checkpoint).resolve(strict=True)
     draft = Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
@@ -36,7 +38,22 @@ def launch_config(args):
     for port in (args.start_port, args.peer_port):
         if port < 1024 or port + 8 * 9 > 65535:
             raise ValueError("Invalid eight-rank service port range")
+    reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", 14336)
+    if reserve_runtime_mem_mb <= 0:
+        raise ValueError("Runtime memory reserve must be positive")
     socket.inet_aton(args.peer_ip)
+    route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        route.connect((args.peer_ip, args.peer_port))
+        local_ip = route.getsockname()[0]
+    finally:
+        route.close()
+    no_proxy = f"localhost,127.0.0.1,{local_ip},{args.peer_ip}"
+    # K3's post-norm BF16 MoE inputs are finite in the validated serving path.
+    # Keep the generic packer choice explicit in the emitted launch config.
+    packer_impl = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "fast_finite").strip().lower()
+    if packer_impl not in ("legacy", "optimized", "fast_finite"):
+        raise ValueError("MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite")
     environment = {
         "MODEL_TYPE": "kimi_k3",
         "CHECKPOINT_PATH": str(checkpoint),
@@ -48,11 +65,13 @@ def launch_config(args):
         "SP_MODEL_TYPE": "kimi_k3_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
+        "FT_DISABLE_CUSTOM_AR": "1",
         "GEN_NUM_PER_CIRCLE": "3",
         "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
-        "FP8_GEMM": "0",
-        "FP8_MLA": "0",
-        "FP8_KV_CACHE": "0",
+        "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
+        "SP_QUANTIZATION": "",
+        "FP8_KV_CACHE": str(int(fp8_kv_cache)),
+        "MEGA_MOE_INPUT_PACKER_IMPL": packer_impl,
         "START_PORT": str(args.start_port),
         "LOCAL_WORLD_SIZE": "8",
         "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
@@ -62,9 +81,13 @@ def launch_config(args):
         "THINK_START_TAG": "<|open|>think<|sep|>",
         "THINK_END_TAG": "<|close|>think<|sep|><|open|>response<|sep|>",
         "REMOTE_RPC_SERVER_IP": f"{args.peer_ip}:{args.peer_port + 1}",
-        "NO_PROXY": f"localhost,127.0.0.1,{args.peer_ip}",
-        "no_proxy": f"localhost,127.0.0.1,{args.peer_ip}",
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
     }
+    if getattr(args, "allow_hf3fs_root", None):
+        # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
+        # target and draft checkpoints; nogds failed during MoE scale conversion.
+        environment["FASTSAFETENSORS_NOGDS"] = "0"
     options = {
         "role_type": args.role,
         "tp_size": 8,
@@ -83,10 +106,10 @@ def launch_config(args):
         "max_batch_tokens_size": 65536,
         "concurrency_limit": 16,
         "seq_size_per_block": 4096,
-        "kernel_seq_size_per_block": 64,
+        "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
-        "fp8_kv_cache": 0,
+        "fp8_kv_cache": int(fp8_kv_cache),
         "reuse_cache": 1,
         "enable_device_cache": 1,
         "moe_strategy": "mega_moe",
@@ -99,6 +122,7 @@ def launch_config(args):
         "load_cache_timeout_ms": 7200000,
         "load_method": "fastsafetensors",
         "warm_up": 0,
+        "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
     }
     if args.role == "DECODE":
         options["decode_capture_config"] = "1,2,3,4,7,8,9,16"
@@ -108,15 +132,41 @@ def launch_config(args):
     return environment, command
 
 
+def filesystem_type(path):
+    output = subprocess.check_output(
+        ["findmnt", "-T", str(path), "-n", "-o", "FSTYPE"], text=True
+    )
+    types = {line.strip() for line in output.splitlines() if line.strip()}
+    if len(types) != 1:
+        raise ValueError(f"Ambiguous filesystem types for {path}: {sorted(types)}")
+    return types.pop()
+
+
 def require_local(path):
     resolved = Path(path).resolve(strict=True)
     if not re.match(r"^/(?:ssd|data[0-9]*)/", str(resolved)):
         raise ValueError(f"Not a local data destination: {resolved}")
-    fs = subprocess.check_output(
-        ["findmnt", "-T", str(resolved), "-n", "-o", "FSTYPE"], text=True
-    ).strip()
+    fs = filesystem_type(resolved)
     if fs not in {"ext4", "xfs", "btrfs"}:
         raise ValueError(f"Unsupported local filesystem: {resolved}: {fs}")
+
+
+def require_checkpoint_source(path, allowed_hf3fs_root=None):
+    resolved = Path(path).resolve(strict=True)
+    if re.match(r"^/(?:ssd|data[0-9]*)/", str(resolved)):
+        require_local(resolved)
+        return
+    if allowed_hf3fs_root is None:
+        raise ValueError(f"Checkpoint is not on a local data disk: {resolved}")
+    root = Path(allowed_hf3fs_root).resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Checkpoint is outside allowed 3FS root: {resolved}") from exc
+    for candidate in (root, resolved):
+        fs = filesystem_type(candidate)
+        if fs != "fuse.hf3fs":
+            raise ValueError(f"Expected fuse.hf3fs for {candidate}, got {fs}")
 
 
 def cpu_tp_socket_environment(run):
@@ -232,11 +282,17 @@ def main():
     parser.add_argument("--peer-port", required=True, type=int)
     parser.add_argument("--server", required=True)
     parser.add_argument("--guard", required=True, help="weight_loader_guard.py")
+    parser.add_argument("--allow-hf3fs-root",
+                        help="Explicit 3FS checkpoint root; checked by the loader guard")
     parser.add_argument("--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist")
+    parser.add_argument("--reserve-runtime-mem-mb", type=int, default=14336,
+                        help="Per-rank runtime reserve; validated PD427 used 14336 MiB")
     parser.add_argument(
         "--run-dir", required=True, help="New directory on a local data disk"
     )
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
+    parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
     parser.add_argument("--allow-shared-accuracy", action="store_true",
                         help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
     parser.add_argument("--min-free-gib", type=float, default=250,
@@ -260,9 +316,15 @@ def main():
     forbidden = ("CP_ROTATE_METHOD", "QUANTIZATION", "SP_QUANTIZATION")
     for name in forbidden:
         if os.environ.get(name):
-            raise ValueError(f"Unset inherited {name} before BF16 validation")
+            raise ValueError(f"Unset inherited {name} before precision validation")
     inherited = os.environ.copy()
     inherited.update(environment)
+    jit_cache_root = os.environ.get("RTP_LLM_JIT_CACHE_ROOT")
+    if jit_cache_root:
+        jit_cache_root = Path(jit_cache_root).resolve()
+        require_local(jit_cache_root.parent)
+        jit_cache_root.mkdir(exist_ok=True)
+        require_local(jit_cache_root)
     for key, subdir in {
         "TMPDIR": "tmp",
         "LOG_PATH": "logs",
@@ -270,26 +332,24 @@ def main():
         "DG_JIT_CACHE_DIR": "deep-gemm",
         "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     }.items():
-        directory = run / subdir
-        directory.mkdir()
+        cache_root = jit_cache_root if key in {"TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR"} and jit_cache_root else run
+        directory = cache_root / subdir
+        directory.mkdir(exist_ok=bool(jit_cache_root))
         inherited[key] = str(directory)
         environment[key] = str(directory)
     for label, checkpoint in (
         ("target", args.checkpoint),
         ("draft", args.draft_checkpoint),
     ):
-        require_local(checkpoint)
+        require_checkpoint_source(checkpoint, args.allow_hf3fs_root)
+        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint]
+        if args.allow_hf3fs_root:
+            guard_command.extend(["--allow-hf3fs-root", args.allow_hf3fs_root])
+        else:
+            guard_command.extend(["--local-data-root", str(Path(checkpoint).resolve().parent)])
         with (run / f"{label}-preflight.txt").open("w") as output:
             subprocess.run(
-                [
-                    sys.executable,
-                    args.guard,
-                    "preflight",
-                    "--checkpoint",
-                    checkpoint,
-                    "--local-data-root",
-                    str(Path(checkpoint).resolve().parents[0]),
-                ],
+                guard_command,
                 env=inherited,
                 stdout=output,
                 stderr=subprocess.STDOUT,
@@ -309,13 +369,16 @@ def main():
     (run / "launch.json").write_text(
         json.dumps(
             {
-                "profile": ("bf16-debug4-tp8-ep8-sp-mtp3-rdma" if args.debug_four_layer
-                            else "bf16-full93-tp8-ep8-sp-mtp3-rdma"),
+                "profile": (
+                    f"{'fp8' if args.fp8_kv_cache or args.fp8_gemm else 'bf16'}-"
+                    f"{'debug4' if args.debug_four_layer else 'full93'}-tp8-ep8-sp-mtp3-rdma"
+                ),
                 "full_model_acceptance_eligible": not args.debug_four_layer,
                 "environment": environment,
                 "command": command,
                 "pid": os.getpid(),
                 "allow_shared_accuracy": args.allow_shared_accuracy,
+                "allowed_hf3fs_root": args.allow_hf3fs_root,
                 "performance_validated": False,
             },
             indent=2,

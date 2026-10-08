@@ -839,7 +839,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # all_gather_into_tensor writes every element before returning. Avoid
+    # initializing the output only to overwrite it during the collective.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,

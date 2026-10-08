@@ -169,6 +169,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
+                kv_scale=attn_configs.mla_fp8_kv_scale,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
@@ -280,6 +282,23 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         if self.rope_impl is not None:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
+        # An expanded MLA implementation may produce its FP8 operands and
+        # insert the compressed cache row in one launch. The cache-store
+        # handoff still follows the write on the same stream.
+        fused_forward = getattr(self.fmha_impl, "forward_with_cache_insert", None)
+        if fused_forward is not None:
+            fused_result = fused_forward(
+                q, compressed_kv, k_pe, kv_cache, layer_id,
+                self.rope_params.slot_mapping,
+                self.kv_cache_write_op.scale,
+                self.kv_cache_write_op.scale_value,
+                lambda: common.apply_write_cache_store(
+                    self.write_cache_store_impl, self.attn_inputs, kv_cache
+                ),
+            )
+            if fused_result is not None:
+                return fused_result
+
         # Write compressed KV and position-encoded K to cache
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
@@ -331,6 +350,8 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
+                kv_scale=attn_configs.mla_fp8_kv_scale,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,

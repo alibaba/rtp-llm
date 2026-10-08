@@ -34,10 +34,15 @@ class KimiK3RouterProjection(nn.Module):
                 )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        if self._native_router is not None and hidden.dtype == torch.bfloat16 and 0 < hidden.shape[0] <= 16:
+        if (
+            self._native_router is not None
+            and hidden.dtype == torch.bfloat16
+            and hidden.is_contiguous()
+            and 0 < hidden.shape[0] <= 16
+        ):
             return self._native_router(hidden, self.weight.t())
         if hidden.is_cuda and hidden.dtype == torch.bfloat16 and self._bf16_exact:
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-            return rtp_llm_ops.cublas_gemm_bf16_bf16_fp32(hidden, self.weight.t())
+            # Keep the row-major router storage needed by small-batch CuTeDSL.
+            # torch.mm folds the FP32 epilogue into the large-batch GEMM.
+            return torch.mm(hidden, self.weight, out_dtype=torch.float32)
         return hidden.float() @ self.weight.float()

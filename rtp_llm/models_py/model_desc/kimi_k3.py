@@ -11,6 +11,7 @@ from torch import nn
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
+    _get_group,
     all_gather,
 )
 from rtp_llm.models_py.model_desc.block_map import (
@@ -23,11 +24,15 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.modules import Embedding, RMSNorm
-from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear
+from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear, profile_scope
+from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE, situ
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
+)
+from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill import (
+    prepare_paged_short_conv_metadata,
 )
 from rtp_llm.ops import HybridAttentionType, RoleType
 from rtp_llm.ops.compute_ops import PyModelOutputs
@@ -39,19 +44,45 @@ class KimiK3DenseMLP(nn.Module):
 
     def __init__(self, config, parallelism, weights, hardware):
         super().__init__()
-        self.gate = linear(weights, W.ffn_w1, hardware)
-        self.up = linear(weights, W.ffn_w3, hardware)
+        self.gate_up = None
+        if weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16:
+            gate_weight, up_weight = weights[W.ffn_w1], weights[W.ffn_w3]
+            if gate_weight.shape != up_weight.shape:
+                raise ValueError("Dense gate and up projections must have the same shape")
+            width = gate_weight.shape[1]
+            merged = torch.cat((gate_weight.T, up_weight.T), dim=0)
+            self.gate_up = KimiK3Bf16Linear(merged.T)
+            # ModelWeights retains these logical keys. Keep them as views into
+            # the merged GEMM weight so the original storages can be released.
+            weights[W.ffn_w1] = merged.narrow(0, 0, width).T
+            weights[W.ffn_w3] = merged.narrow(0, width, width).T
+        else:
+            self.gate = linear(weights, W.ffn_w1, hardware)
+            self.up = linear(weights, W.ffn_w3, hardware)
         self.down = linear(weights, W.ffn_w2, hardware)
         self.beta = config.k3_runtime_config.activation_situ_beta
         self.linear_beta = config.k3_runtime_config.activation_situ_linear_beta
 
     def forward(self, hidden, valid_mask=None):
-        return self.down(
-            situ(
-                self.gate(hidden), self.up(hidden), self.beta, self.linear_beta,
-                inplace=True,
+        if self.gate_up is not None:
+            with profile_scope("RTP::mlp.dense.gate_up_proj"):
+                gate, up = self.gate_up(hidden).chunk(2, dim=-1)
+        else:
+            with profile_scope("RTP::mlp.dense.gate_proj"):
+                gate = self.gate(hidden)
+            with profile_scope("RTP::mlp.dense.up_proj"):
+                up = self.up(hidden)
+        with profile_scope("RTP::mlp.dense.activation"):
+            activated = situ(
+                gate,
+                up,
+                self.beta,
+                self.linear_beta,
+                inplace=self.gate_up is None,
             )
-        )
+        del gate, up
+        with profile_scope("RTP::mlp.dense.down_proj"):
+            return self.down(activated)
 
 
 class KimiK3DecoderLayer(nn.Module):
@@ -94,28 +125,49 @@ class KimiK3DecoderLayer(nn.Module):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
             writes = self.index % self.block_size == 0
-            attn_input = self.attention_residual(
-                hidden, anchors, num_blocks=previous,
-                output_norm_weight=self.attention_norm.weight,
-                output_norm_eps=self.attention_norm.variance_epsilon,
+            fp8_ag = getattr(self.attention, "_fp8_collective", None)
+            produce_fp8 = (
+                fp8_ag is not None
+                and fp8_ag.enable_ag
+                and hidden.is_cuda
+                and hidden.shape[0] >= 4096
+                and fp8_ag.can_run_ag(hidden.shape[0])
+                and attention_inputs is not None
+                and attention_inputs.is_prefill
+                and not getattr(metadata, "is_target_verify", False)
+                and not getattr(attention_inputs, "is_mtp_draft_update", False)
+                and not torch.cuda.is_current_stream_capturing()
             )
-            if writes:
-                anchors[:, previous].copy_(hidden)
-            attended = self.attention(
-                attn_input, fmha, cache, attention_inputs, metadata
-            )
+            with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
+                residual = (
+                    self.attention_residual.forward_fp8
+                    if produce_fp8 else self.attention_residual
+                )
+                attn_input = residual(
+                    hidden, anchors, num_blocks=previous,
+                    block_write_idx=previous if writes else -1,
+                    output_norm_weight=self.attention_norm.weight,
+                    output_norm_eps=self.attention_norm.variance_epsilon,
+                )
+            with profile_scope(f"RTP::layers.{self.index}.attention"):
+                attended = self.attention(
+                    attn_input, fmha, cache, attention_inputs, metadata
+                )
             hidden = attended if writes else hidden + attended
-            mlp_input = self.mlp_residual(
-                hidden, anchors, num_blocks=previous + int(writes),
-                output_norm_weight=self.mlp_norm.weight,
-                output_norm_eps=self.mlp_norm.variance_epsilon,
-            )
+            with profile_scope(f"RTP::layers.{self.index}.mlp_residual"):
+                mlp_input = self.mlp_residual(
+                    hidden, anchors, num_blocks=previous + int(writes),
+                    output_norm_weight=self.mlp_norm.weight,
+                    output_norm_eps=self.mlp_norm.variance_epsilon,
+                )
         else:
-            hidden = hidden + self.attention(
-                self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
-            )
+            with profile_scope(f"RTP::layers.{self.index}.attention"):
+                hidden = hidden + self.attention(
+                    self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
+                )
             mlp_input = self.mlp_norm(hidden)
-        return hidden + self.mlp(mlp_input, valid_mask)
+        with profile_scope(f"RTP::layers.{self.index}.mlp"):
+            return hidden + self.mlp(mlp_input, valid_mask)
 
 
 class KimiK3Model(GptModelBase):
@@ -160,6 +212,12 @@ class KimiK3Model(GptModelBase):
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
         )
+        self.fp8_collective_max_tokens = int(
+            os.environ.get("RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS", "65536")
+        )
+        if (self.fp8_collective_max_tokens <= 0
+                or self.fp8_collective_max_tokens % self.tp_size):
+            raise ValueError("FP8 collective capacity must be positive and divisible by TP")
         # The scheduler bound is global; SP routes only the local token shard.
         global_prefill = model_config.moe_prefill_max_tokens_per_rank
         if global_prefill is None:
@@ -196,6 +254,13 @@ class KimiK3Model(GptModelBase):
             )
             for i in range(self.layer_num)
         )
+        self._fp8_collective = None
+        self.use_paged_conv_prefill = any(
+            layer.layer_type == HybridAttentionType.LINEAR
+            and getattr(layer.attention.prefill, "use_paged_conv", False)
+            for layer in self.layers
+        )
+        logging.info("K3 paged convolution Prefill enabled: %s", self.use_paged_conv_prefill)
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), model_config.layernorm_eps
         )
@@ -209,6 +274,47 @@ class KimiK3Model(GptModelBase):
                 weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ),
                 model_config.layernorm_eps,
             )
+
+    def initialize(self, init_resource) -> bool:
+        ready = super().initialize(init_resource)
+        if self._fp8_collective is not None:
+            return ready
+        # Native MTP subclasses this model but keeps its projections in BF16.
+        if (
+            type(self) is not KimiK3Model
+            or self.parallelism_config.role_type != RoleType.PREFILL
+            or self.tp_size == 1
+        ):
+            return ready
+        enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
+        enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
+        if not (enable_ag or enable_rs):
+            return ready
+        for layer in self.layers:
+            attention = layer.attention
+            if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
+                enable_rs and not getattr(attention.output, "scale_ue8m0", False)
+            ):
+                raise ValueError("FP8 collective fusion requires grouped E4M3 projections")
+        from rtp_llm.models_py.distributed.fp8_collective_projection import (
+            Fp8CollectiveProjection,
+        )
+
+        device = self.layers[0].attention.input.weight.device
+        self._fp8_collective = Fp8CollectiveProjection(
+            _get_group(Group.TP), device,
+            max_m=self.fp8_collective_max_tokens,
+            hidden_size=self.config.hidden_size,
+            enable_ag=enable_ag,
+            enable_rs=enable_rs,
+        )
+        for layer in self.layers:
+            layer.attention._fp8_collective = self._fp8_collective
+        logging.info(
+            "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
+            enable_ag, enable_rs, self.fp8_collective_max_tokens,
+        )
+        return ready
 
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
@@ -257,11 +363,36 @@ class KimiK3Model(GptModelBase):
             )
         )
 
-    def _forward_layers(self, hidden, inputs, fmha_impl):
-        if hidden.shape[0] % self.tp_size:
+    def _paged_conv_can_skip_classic_metadata(self, inputs):
+        if not self.use_paged_conv_prefill or self.kv_cache is None:
+            return False
+        for index, layer in enumerate(self.layers):
+            if layer.layer_type != HybridAttentionType.LINEAR:
+                continue
+            if not getattr(layer.attention.prefill, "use_paged_conv", False):
+                return False
+            if self.kv_cache.get_layer_cache(index) is None:
+                return False
+            layer_inputs = select_attention_inputs_for_layer(inputs, self.kv_cache, index)
+            prefixes = layer_inputs.prefix_lengths
+            if prefixes.device.type != "cpu" or any(
+                int(prefix) % 64 for prefix in prefixes.tolist()
+            ):
+                return False
+        return True
+
+    def _forward_layers(self, hidden, inputs, fmha_impl, sequence_parallel_input=False):
+        physical_rows = inputs.input_ids.shape[0]
+        if physical_rows % self.tp_size:
             raise ValueError("K3 requires physical token padding before SP execution")
-        local_rows = hidden.shape[0] // self.tp_size
-        hidden = hidden.narrow(0, self.tp_rank * local_rows, local_rows).contiguous()
+        local_rows = physical_rows // self.tp_size
+        if sequence_parallel_input:
+            if hidden.shape[0] != local_rows:
+                raise ValueError("K3 local SP input row count does not match physical tokens")
+        else:
+            if hidden.shape[0] != physical_rows:
+                raise ValueError("K3 full SP input row count does not match physical tokens")
+            hidden = hidden.narrow(0, self.tp_rank * local_rows, local_rows).contiguous()
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.
@@ -269,6 +400,7 @@ class KimiK3Model(GptModelBase):
         if valid_mask is not None:
             valid_mask = valid_mask.narrow(0, self.tp_rank * local_rows, local_rows)
         conv_meta = None
+        paged_conv_meta = None
         # Native MTP is MLA-only. Conv metadata performs host-side sequence
         # inspection and must not run in its prefill CUDA graph.
         if (
@@ -278,10 +410,26 @@ class KimiK3Model(GptModelBase):
                 layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers
             )
         ):
-            conv_meta = prepare_causal_conv1d_metadata(
-                query_start_loc=primary.cu_seqlens_device, device=hidden.device
-            )
-        metadata = KimiLinearMetadata(conv_meta, primary.is_target_verify)
+            if not self._paged_conv_can_skip_classic_metadata(inputs):
+                cu_seqlens_host = primary.cu_seqlens
+                conv_meta = prepare_causal_conv1d_metadata(
+                    query_start_loc=(
+                        cu_seqlens_host
+                        if cu_seqlens_host is not None and cu_seqlens_host.numel()
+                        else primary.cu_seqlens_device
+                    ),
+                    device=hidden.device,
+                )
+            if self.use_paged_conv_prefill:
+                cu_seqlens_host = primary.cu_seqlens
+                if cu_seqlens_host is None or cu_seqlens_host.device.type != "cpu":
+                    raise ValueError("paged convolution requires host cu_seqlens")
+                paged_conv_meta = prepare_paged_short_conv_metadata(
+                    cu_seqlens_host, hidden.device
+                )
+        metadata = KimiLinearMetadata(
+            conv_meta, primary.is_target_verify, paged_conv_meta
+        )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         anchors = hidden.new_empty((local_rows, self.num_blocks, hidden.shape[-1]))

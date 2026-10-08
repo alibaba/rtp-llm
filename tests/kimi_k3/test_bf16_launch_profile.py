@@ -38,12 +38,16 @@ def test_fixed_full_profile(tmp_path, role):
     environment, command = launcher.launch_config(arguments(tmp_path, role))
     options = dict(zip(command[1::2], command[2::2]))
     assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
+    assert environment["FT_DISABLE_CUSTOM_AR"] == "1"
     assert environment["LOAD_METHOD"] == "fastsafetensors"
     assert "CUBLAS_WORKSPACE_CONFIG" not in environment
     assert "CUBLASLT_WORKSPACE_SIZE" not in environment
     assert environment["GEN_NUM_PER_CIRCLE"] == "3"
-    for key in ("FP8_GEMM", "FP8_MLA", "FP8_KV_CACHE"):
-        assert environment[key] == "0"
+    assert environment["QUANTIZATION"] == ""
+    assert environment["SP_QUANTIZATION"] == ""
+    assert environment["FP8_KV_CACHE"] == "0"
+    assert "FP8_GEMM" not in environment
+    assert "FP8_MLA" not in environment
     for key in ("tp_size", "ep_size", "ffn_sp_size"):
         assert options["--" + key] == "8"
     assert options["--dp_size"] == options["--prefill_cp_size"] == "1"
@@ -54,11 +58,37 @@ def test_fixed_full_profile(tmp_path, role):
     assert options["--enable_cuda_graph"] == str(int(role == "DECODE"))
     assert options["--concurrency_limit"] == "16"
     assert int(options["--max_seq_len"]) > 2 * 65536
+    assert options["--reserver_runtime_mem_mb"] == "14336"
 
 
 def test_reject_four_layer_as_formal_profile(tmp_path):
     with pytest.raises(ValueError, match="93"):
         launcher.launch_config(arguments(tmp_path, layers=4))
+
+
+def test_existing_generic_fp8_settings_control_both_roles_without_changing_compute_dtype(tmp_path):
+    args = arguments(tmp_path)
+    args.fp8_gemm = True
+    args.fp8_kv_cache = True
+    environment, command = launcher.launch_config(args)
+    options = dict(zip(command[1::2], command[2::2]))
+    assert environment["QUANTIZATION"] == "FP8_PER_BLOCK"
+    assert environment["SP_QUANTIZATION"] == ""
+    assert environment["FP8_KV_CACHE"] == "1"
+    assert "FP8_GEMM" not in environment
+    assert "FP8_MLA" not in environment
+    assert options["--fp8_kv_cache"] == "1"
+    assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
+
+
+def test_projection_quantization_can_keep_bf16_mla_cache(tmp_path):
+    args = arguments(tmp_path)
+    args.fp8_gemm = True
+    environment, command = launcher.launch_config(args)
+    options = dict(zip(command[1::2], command[2::2]))
+    assert environment["QUANTIZATION"] == "FP8_PER_BLOCK"
+    assert environment["FP8_KV_CACHE"] == "0"
+    assert options["--kernel_seq_size_per_block"] == "64"
 
 
 @pytest.mark.parametrize("field", ["start_port", "peer_port"])
