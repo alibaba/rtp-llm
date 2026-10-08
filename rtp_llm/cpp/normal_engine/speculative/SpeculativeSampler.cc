@@ -4,6 +4,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_greedy_sampling.h"
+#endif
 
 namespace rtp_llm {
 namespace speculative {
@@ -12,6 +16,16 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     FastTopKSamplerOutput output;
 
     if (top_k == 1) {
+#if USING_CUDA
+        if (logits.is_cuda()) {
+            invokeMtpGreedySampling(logits,
+                                    d2t_map_,
+                                    output.token_ids,
+                                    output.all_probs,
+                                    at::cuda::getCurrentCUDAStream(logits.get_device()).stream());
+            return output;
+        }
+#endif
         output.token_ids = torch::argmax(logits, -1, true);
         output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
     } else {

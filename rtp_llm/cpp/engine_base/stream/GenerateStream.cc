@@ -1245,9 +1245,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {
-        const auto& topology = stream_cache_resource_->resourceContext().cache_manager->cacheConfig().topology();
+        const auto& config   = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
+        const auto& topology = config.topology();
         for (const auto& group : topology.groups()) {
-            if (group.policy.group_type != CacheGroupType::LINEAR) {
+            const int group_id = static_cast<int>(topology.groupIdForTag(group.tag));
+            // Replay commits accepted state through its log, without proposal-slot swaps.
+            if (!config.isLegacyLinearGroup(group_id)) {
                 continue;
             }
             // Calculate the two swaps in this LINEAR group's block-table coordinates.
@@ -1305,6 +1308,52 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+}
+
+absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearReplayRound() {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    const auto& lease = stream_cache_resource_->linearReplayLease();
+    // Cancellation after batch admission does not invalidate this round's resources.
+    // Keep its row and ownership until GPU use completes; output publication drops
+    // errored streams, and the scheduler releases them after bookkeeping drains.
+    if (!lease || stream_cache_resource_->isResourceReleased()) {
+        return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
+    }
+    LinearReplayRound round;
+    round.verify_epoch = ++linear_replay_epoch_counter_;
+    round.lease = lease;
+    if (linear_replay_window_ && linear_replay_window_->lease == lease) {
+        round.previous_window = linear_replay_window_;
+    }
+    round.state_block_hold = stream_cache_resource_->holdLinearReplayBlocks();
+    round.initial_block_ids = stream_cache_resource_->linearReplayInitialBlockIds();
+    round.initial_state_hold = stream_cache_resource_->linearReplayInitialBlockHold();
+    return round;
+}
+
+void GenerateStream::publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window) {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    if (stream_cache_resource_->isResourceReleased() || isFinished() || hasErrorWithoutLock()) {
+        return;
+    }
+    if (window && window->lease == stream_cache_resource_->linearReplayLease()
+        && window->verify_epoch == linear_replay_epoch_counter_
+        && (!linear_replay_window_ || window->verify_epoch > linear_replay_window_->verify_epoch)) {
+        linear_replay_window_ = std::move(window);
+        stream_cache_resource_->clearLinearReplayInitialState();
+    }
+}
+
+std::shared_ptr<LinearReplayBlockHold> GenerateStream::linearReplayStateBlockHold() const {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    return linear_replay_window_ ? linear_replay_window_->state_block_hold : nullptr;
+}
+
+void GenerateStream::clearLinearReplayWindow() {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    linear_replay_window_.reset();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {

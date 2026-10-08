@@ -532,7 +532,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TopologyRejectsMissingLayerTagMapp
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesFirstSeenTagsWithFullAfterLinear) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesCanonicalTagOrder) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -554,9 +554,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesFirstSeenTag
     parallelism_cfg.tp_size = 1;
     auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
-    std::vector<std::string>    expected_tags{"linear0", "linear1", "full", "linear2"};
+    std::vector<std::string>    expected_tags{"full", "linear0", "linear1", "linear2"};
     std::vector<CacheGroupType> expected_types{
-        CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR};
+        CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::LINEAR};
     std::vector<int> expected_full{3, 7};
     std::vector<int> expected_linear0{0, 1};
     std::vector<int> expected_linear1{2, 4};
@@ -592,7 +592,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsExplicitPhy
 
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(publishedGroupTags(config.topology()),
-              (std::vector<std::string>{"recurrent_state", "convolution_state", "full"}));
+              (std::vector<std::string>{"convolution_state", "full", "recurrent_state"}));
     EXPECT_TRUE(config.group("recurrent_state").policy.enable_prefix_reuse);
     EXPECT_TRUE(config.group("convolution_state").policy.enable_prefix_reuse);
     EXPECT_EQ(config.group("recurrent_state").spec->memoryLayoutDType(), DataType::TYPE_FP16);
@@ -672,7 +672,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridWithMt
         const auto& sub = config.mtp_sub_configs[mtp_id];
         ASSERT_NE(sub, nullptr);
         ASSERT_EQ(sub->groupNums(), 2);
-        std::vector<std::string> expected_tags{"linear", "full"};
+        std::vector<std::string> expected_tags{"full", "linear"};
         EXPECT_EQ(publishedGroupTags(sub->topology()), expected_tags);
         ASSERT_EQ(sub->layerIdsForGroup("full").size(), 1u);
         EXPECT_EQ(sub->layerIdsForGroup("full")[0], 0);
@@ -770,7 +770,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
         config = rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
     });
 
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_EQ(config.layerIdsForGroup("full").size(), 3u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(config.layer_all_num(), 9u);
@@ -780,7 +780,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
 
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"linear", "full"}));
+        EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"full", "linear"}));
         EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("full").tag), std::vector<int>({0}));
         EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("linear").tag).empty());
     }
@@ -945,7 +945,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpPrefersExactDefaultGroupMa
 
     const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
     ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"default", "aux"}));
+    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"aux", "default"}));
     EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("default").tag), std::vector<int>({0}));
     EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("aux").tag).empty());
     EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().group("default").tag), std::vector<int>({0, 2}));
