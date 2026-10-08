@@ -263,7 +263,8 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
                             batch_size,
                             previous_seq_lengths.numel(),
                             accept_lengths.numel());
-    if (batch_size == 0 || block_count == 0) {
+    if (batch_size == 0 || block_count == 0
+        || std::find(group_types.begin(), group_types.end(), CacheGroupType::LINEAR) == group_types.end()) {
         return current_table.clone();
     }
 
@@ -775,6 +776,110 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
+absl::Status MtpBatchStreamProcessor::gatherLinearReplayInputs(
+    const StreamGroups& stream_groups,
+    const CacheConfig& cache_config,
+    GptModelInputs& model_input,
+    TensorHolder& host_holder,
+    std::vector<GenerateStream::LinearReplayRound>& rounds) const {
+    const auto streams = stream_groups.allStreams();
+    if (cache_config.linear_replay_group_ids.empty() || streams.empty()) {
+        return absl::OkStatus();
+    }
+    const int64_t batch = static_cast<int64_t>(streams.size());
+    const int64_t groups = cache_config.groupNums();
+    auto host = LinearReplayInputs::allocate(batch, groups, torch::kCPU);
+    for (auto* tensor : host.tensors()) {
+        *tensor = tensor->pin_memory();
+        tensor->zero_();
+    }
+    host.slot_ids.fill_(-1);
+    host.active_block_ids.fill_(-1);
+    host.state_read_block_ids.fill_(-1);
+    std::vector<int64_t> history_rows;
+    std::vector<torch::Tensor> accepts;
+    std::vector<torch::Tensor> anchors;
+    std::vector<torch::Tensor> processed_lengths;
+    rounds.clear();
+    rounds.reserve(static_cast<size_t>(batch));
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        if (stream->isFakeStream()) {
+            rounds.emplace_back();
+            ++row;
+            continue;
+        }
+        if (stream->nextBatchSize() != 1) {
+            return absl::InvalidArgumentError("MTP LINEAR replay requires one sequence per stream");
+        }
+        auto round_status = stream->prepareLinearReplayRound();
+        if (!round_status.ok()) {
+            return round_status.status();
+        }
+        auto round = std::move(round_status.value());
+        host.slot_ids.data_ptr<int32_t>()[row] = round.lease->slot_id;
+        host.slot_generations.data_ptr<int64_t>()[row] = round.lease->generation;
+        host.verify_epochs.data_ptr<int64_t>()[row] = round.verify_epoch;
+        if (round.previous_window) {
+            const auto& previous = *round.previous_window;
+            if (previous.device_ready) {
+                previous.device_ready->block(cuda_graph::graphGetCurrentStream());
+            }
+            host.history_valid_lengths.data_ptr<int32_t>()[row] = previous.produced_steps;
+            host.history_epochs.data_ptr<int64_t>()[row] = previous.verify_epoch;
+            history_rows.push_back(row);
+            accepts.push_back(previous.accept_len_gpu.reshape({1}));
+            anchors.push_back(previous.anchor_block_ids_gpu);
+            processed_lengths.push_back(previous.anchor_processed_len_gpu.reshape({1}));
+        } else {
+            const int32_t processed = std::max(0, stream->seqLength() - 1);
+            host.anchor_processed_lengths.data_ptr<int32_t>()[row] = processed;
+            host.init_kinds.data_ptr<int32_t>()[row] = processed == 0 ? 2 : 1;
+            if (processed > 0) {
+                for (const int group_id : cache_config.linear_replay_group_ids) {
+                    host.state_read_block_ids.data_ptr<int32_t>()[group_id * batch + row] =
+                        round.initial_block_ids.at(static_cast<size_t>(group_id));
+                }
+            }
+        }
+        rounds.push_back(std::move(round));
+        ++row;
+    }
+    auto replay = host;
+    for (auto* tensor : replay.tensors()) {
+        host_holder.hold_host(*tensor);
+        *tensor = tensor->to(torch::kCUDA, /*non_blocking=*/true);
+    }
+    if (!history_rows.empty()) {
+        auto rows_host = torch::tensor(history_rows, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
+        host_holder.hold_host(rows_host);
+        auto rows = rows_host.to(torch::kCUDA, /*non_blocking=*/true);
+        auto accepted = torch::cat(accepts).to(torch::kInt32);
+        replay.prev_accept_lengths.index_copy_(0, rows, accepted);
+        replay.anchor_processed_lengths.index_copy_(0, rows, torch::cat(processed_lengths) + accepted);
+        replay.state_read_block_ids.index_copy_(1, rows, torch::cat(anchors, 1));
+    }
+    auto block_ids = toCudaInt32(model_input.kv_cache_kernel_block_id, host_holder);
+    if (block_ids.dim() == 2) {
+        block_ids = block_ids.unsqueeze(0);
+    }
+    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 3 && block_ids.size(0) == groups && block_ids.size(1) == batch,
+                            "LINEAR replay requires a grouped [group,batch,block] table");
+    const auto active_rows = replay.slot_ids >= 0;
+    for (const int group_id : cache_config.linear_replay_group_ids) {
+        const auto& group = cache_config.groups().at(static_cast<size_t>(group_id));
+        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::LINEAR && group.seqSizePerBlock() > 0,
+                                "LINEAR replay tag=%s has invalid geometry", group.tag.c_str());
+        const auto tail = torch::floor_divide(replay.anchor_processed_lengths,
+                                             static_cast<int64_t>(group.seqSizePerBlock())).to(torch::kInt64);
+        const auto destination = block_ids.select(0, group_id).gather(1, tail.reshape({batch, 1})).squeeze(1);
+        replay.active_block_ids.select(0, group_id).copy_(
+            torch::where(active_rows, destination, torch::full_like(destination, -1)));
+    }
+    model_input.linear_replay = std::move(replay);
+    return absl::OkStatus();
+}
+
 void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
                                                        GptModelInputs&     model_input,
                                                        TensorHolder&       host_holder) const {
@@ -844,7 +949,13 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
             const int64_t copy_width  = source.size(2);
             auto          row_indices = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64))
                                    .to(destination.device(), /*non_blocking=*/true);
-            destination.narrow(2, 0, copy_width).index_copy_(1, row_indices, source);
+            for (int64_t group_id = 0; group_id < source.size(0); ++group_id) {
+                // Generic gathering leaves every steady row empty. Replay
+                // groups also need their canonical pages from this snapshot;
+                // dispatch excludes them from the legacy LINEAR permutation.
+                destination.select(0, group_id).narrow(1, 0, copy_width).index_copy_(
+                    0, row_indices, source.select(0, group_id));
+            }
         };
 
     for (auto& [widths, bucket] : buckets) {
@@ -860,9 +971,14 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
                                                 const torch::Tensor&                        draft_token_ids) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
+    return finalizeSpecSamplerInput(
+        stream_groups, prepareSpecSamplerInputHost(stream_groups), model_output, spec_logits_result, draft_token_ids);
+}
+
+SamplerInputs MtpBatchStreamProcessor::prepareSpecSamplerInputHost(const StreamGroups& stream_groups) const {
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.prepare_spec_sampler_input_host");
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto               all_streams      = stream_groups.allStreams();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
+    auto all_streams = stream_groups.allStreams();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
@@ -870,32 +986,49 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     size_t score_len        = propose_step_ + 1;
     size_t total_batch_size = stream_groups.size() * score_len;
+    const bool requires_token_history = NormalSamplerInputGatherer::requiresTokenHistory(all_streams);
 
-    SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+    SamplerInputs sampler_inputs = allocateSamplerInputs(
+        stream_groups, total_batch_size, total_batch_size, propose_step_, !requires_token_history);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
     sampler_inputs.capture_original_probs = std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
         return stream->generateConfig()->return_all_probs == ReturnAllProbsMode::ORIGINAL;
     });
 
-    int64_t batch_idx = 0;
-    for (auto& stream : all_streams) {
-        auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = static_cast<int64_t>(stream->seqLength());
+    if (requires_token_history) {
+        int64_t batch_idx = 0;
+        for (auto& stream : all_streams) {
+            auto complete_token_ids = stream->completeTokenIds();
+            auto seq_len            = static_cast<int64_t>(stream->seqLength());
 
-        copyScoreSamplerTokenIds(
-            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
-        RTP_LLM_CHECK_WITH_INFO(
-            seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
-            "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
-            seq_len,
-            propose_step_,
-            sampler_inputs.step);
-        batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+            copyScoreSamplerTokenIds(
+                sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+            RTP_LLM_CHECK_WITH_INFO(
+                seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
+                "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
+                seq_len,
+                propose_step_,
+                sampler_inputs.step);
+            batch_idx += static_cast<int64_t>(score_len);
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
     }
+
+    return sampler_inputs;
+}
+
+SamplerInputs
+MtpBatchStreamProcessor::finalizeSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                  SamplerInputs                               sampler_inputs,
+                                                  const GptModelOutputs&                      model_output,
+                                                  const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                  const torch::Tensor&                        draft_token_ids) const {
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.finalize_spec_sampler_input");
+    const size_t score_len        = propose_step_ + 1;
+    const size_t total_batch_size = stream_groups.size() * score_len;
+    const auto   return_all_probs = stream_groups.needReturnAllProbs();
 
     RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
                                 && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
@@ -919,25 +1052,27 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                 && draft_token_ids.size(1) == gamma,
                             "MTP verify draft tokens must be int32 [B,gamma]");
 
-    // The sampler already needs token history on device. Fill every proposal
-    // slot once for all score rows, then let each row's sequence length expose
-    // exactly proposals [0, score_position).
-    auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-    auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-    auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
-                         .contiguous()
-                         .view({batch_size, 1, gamma})
-                         .expand({batch_size, rows, gamma});
-    auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
-                            .select(1, 0)
-                            .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
-                            .view({batch_size, 1, 1});
-    auto proposal_offsets =
-        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
-            .view({1, 1, gamma});
-    auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
-    histories.scatter_(2, proposal_columns, proposals);
-    sampler_inputs.token_ids = std::move(token_ids_gpu);
+    if (sampler_inputs.token_ids_include_history) {
+        // History-dependent sampling needs token history on device. Fill every proposal
+        // slot once for all score rows, then let each row's sequence length expose
+        // exactly proposals [0, score_position).
+        auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+        auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+        auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                             .contiguous()
+                             .view({batch_size, 1, gamma})
+                             .expand({batch_size, rows, gamma});
+        auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                .select(1, 0)
+                                .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                                .view({batch_size, 1, 1});
+        auto proposal_offsets =
+            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+                .view({1, 1, gamma});
+        auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+        histories.scatter_(2, proposal_columns, proposals);
+        sampler_inputs.token_ids = std::move(token_ids_gpu);
+    }
 
     // lm_head shards may contain TP-alignment padding. Synthetic columns must
     // not participate in target sampling or the rejection distribution.

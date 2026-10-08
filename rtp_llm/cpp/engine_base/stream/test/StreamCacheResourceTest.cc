@@ -381,6 +381,110 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequestFlags) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay_group_ids = {0};
+    config.linear_replay_slot_count = 2;
+    config.linear_replay_max_steps = 4;
+    config.linear_replay_key_heads = 1;
+    config.linear_replay_value_heads = 1;
+    config.linear_replay_key_dim = 1;
+    config.linear_replay_value_dim = 1;
+    config.linear_replay_conv_width = 2;
+    config.linear_replay_conv_dtype = DataType::TYPE_FP16;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    stream_->generate_input_->generate_config->force_disable_sp_run = true;
+
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_NE(resource.linearReplayLease(), nullptr);
+    EXPECT_TRUE(stream_->prepareLinearReplayRound().ok());
+}
+
+TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeepingFinishes) {
+    auto config                      = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay_group_ids   = {0};
+    config.linear_replay_slot_count  = 1;
+    config.linear_replay_max_steps   = 4;
+    config.linear_replay_key_heads   = 1;
+    config.linear_replay_value_heads = 1;
+    config.linear_replay_key_dim     = 1;
+    config.linear_replay_value_dim   = 1;
+    config.linear_replay_conv_width  = 2;
+    config.linear_replay_conv_dtype  = DataType::TYPE_FP16;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(stream_->prepareLinearReplayRound().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    stream_->incPendingAsyncBookkeeping();
+    auto pending_guard = std::shared_ptr<void>(
+        nullptr, [stream = stream_](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    // Reproduce an RPC cancellation after scheduling but before replay gather.
+    std::thread cancel([stream = stream_] { stream->reportError(ErrorCode::CANCELLED, "cancel after admission"); });
+    cancel.join();
+    ASSERT_FALSE(stream_->isActive());
+    auto round = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok()) << round.status();
+    ASSERT_NE(round->state_block_hold, nullptr);
+    const auto generation = round->lease->generation;
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_FALSE(resource.isResourceReleased());
+    EXPECT_TRUE(stream_->isDeferredReleasePending());
+    pending_guard.reset();
+    EXPECT_TRUE(resource.isResourceReleased());
+    EXPECT_FALSE(stream_->prepareLinearReplayRound().ok());
+    EXPECT_EQ(cache_manager_->acquireLinearReplaySlot(), nullptr);
+
+    round            = absl::FailedPreconditionError("round ownership released");
+    auto replacement = cache_manager_->acquireLinearReplaySlot();
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_GT(replacement->generation, generation);
+}
+
+TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {
+    auto config                      = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay_group_ids   = {0};
+    config.linear_replay_slot_count  = 2;
+    config.linear_replay_max_steps   = 4;
+    config.linear_replay_key_heads   = 1;
+    config.linear_replay_value_heads = 1;
+    config.linear_replay_key_dim     = 1;
+    config.linear_replay_value_dim   = 1;
+    config.linear_replay_conv_width  = 2;
+    config.linear_replay_conv_dtype  = DataType::TYPE_FP16;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/9).ok());
+    const auto&  group            = cache_manager_->cacheConfig().groups().at(0);
+    const auto&  blocks           = resource.kvCache().blocks(0, group.tag);
+    const size_t host_destination = 6 / group.seqSizePerBlock();
+    ASSERT_GT(blocks.size(), host_destination + 1);
+    const auto& pool = cache_manager_->coordinator_manager_->groupBlockPools().at(0);
+
+    auto exact = resource.holdLinearReplayBlocks();
+    EXPECT_TRUE(exact->contains(pool.get(), blocks[host_destination]));
+    EXPECT_FALSE(exact->contains(pool.get(), blocks[host_destination + 1]));
+    stream_->incPendingAsyncBookkeeping();
+    auto pending = resource.holdLinearReplayBlocks();
+    stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(pending->contains(pool.get(), blocks[host_destination]));
+    EXPECT_TRUE(pending->contains(pool.get(), blocks[host_destination + 1]));
+}
+
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
         auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
@@ -437,6 +541,38 @@ TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapUsesGroupCheckpointSpan) {
                   group.policy.group_type == CacheGroupType::LINEAR ?
                       (BlockIndicesType{0, 1, 3, 2, 4, 5}) :
                       (BlockIndicesType{0, 1, 2, 3, 4, 5}));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapSkipsReplayGroupsAcrossCheckpointBoundary) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    auto groups = config.topology().groups();
+    const auto layers = config.topology().layers();
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        auto& group = groups[group_id];
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            auto spec = group.spec->clone();
+            spec->seq_size_per_block = 32768;
+            group.spec = std::move(spec);
+            config.linear_replay_group_ids.push_back(static_cast<int>(group_id));
+        }
+    }
+    ASSERT_EQ(config.linear_replay_group_ids.size(), 1);
+    config.setTopology(std::move(groups), layers);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(config);
+    StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+    resource.init(1);
+    auto& batch = resource.kvCacheMutable();
+    for (const auto& group : config.topology().groups()) {
+        batch.mutableBlockIds(0, group.tag).assign({0, 1, 2, 3, 4});
+    }
+
+    // At 65538 -> 65542 the legacy swap would access slot 5, but replay
+    // groups publish the accepted state separately and retain this table.
+    resource.updateLinearBlocks(0, 65538, 65542);
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(batch.blocks(0, group.tag), (BlockIndicesType{0, 1, 2, 3, 4}));
     }
 }
 

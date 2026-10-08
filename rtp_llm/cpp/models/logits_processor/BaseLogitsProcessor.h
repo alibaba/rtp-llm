@@ -65,6 +65,11 @@ public:
     virtual bool supportsNormalAsyncDeviceState() const {
         return false;
     }
+    // Override when sampling consumes SamplerInputs::token_ids as history.
+    // This capability must be immutable while a decode round is preparing.
+    virtual bool requiresTokenHistory() const {
+        return false;
+    }
     virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
         (void)new_tokens;
         (void)num_new_tokens;

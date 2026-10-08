@@ -51,6 +51,20 @@ public:
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
+    // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
+    // Group IDs follow the merged physical topology; the draft groups are excluded.
+    std::vector<int> linear_replay_group_ids;
+    int              linear_replay_slot_count = 0;
+    int              linear_replay_max_steps  = 0;
+    int              linear_replay_key_heads  = 0;
+    int              linear_replay_value_heads = 0;
+    int              linear_replay_key_dim    = 0;
+    int              linear_replay_value_dim  = 0;
+    int              linear_replay_conv_width = 0;
+    DataType         linear_replay_conv_dtype = DataType::TYPE_INVALID;
+    bool             linear_replay_vector_gate = false;
+    size_t           linear_replay_reserve_bytes = 0;
+
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 

@@ -13,6 +13,7 @@ from math import gcd
 from typing import Any
 
 MARKER = "[K3_SMOKE_EVENT] "
+REPLAY_MARKER = "[RTP_SMOKE_EVENT] "
 PAGED_MARKER = "[K3_MLA_PAGED_INPUT] "
 
 
@@ -112,10 +113,13 @@ def read_events(
                 if PAGED_MARKER in line:
                     events.append(read_paged_contract(line))
                     continue
-                if MARKER not in line:
+                marker = next(
+                    (value for value in (MARKER, REPLAY_MARKER) if value in line), None
+                )
+                if marker is None:
                     continue
                 try:
-                    item = json.loads(line.split(MARKER, 1)[1])
+                    item = json.loads(line.split(marker, 1)[1])
                 except json.JSONDecodeError as exc:
                     raise ValueError(
                         f"malformed smoke event in {path}: {line[:300]}"
@@ -136,15 +140,18 @@ def read_events(
             raise ValueError(f"missing C++ engine log: {engine_log}")
         with engine_log.open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
-                if MARKER not in line:
+                marker = next(
+                    (value for value in (MARKER, REPLAY_MARKER) if value in line), None
+                )
+                if marker is None:
                     continue
-                match = re.search(r"\[RANK (\d+)\]", line.split(MARKER, 1)[0])
+                match = re.search(r"\[RANK (\d+)\]", line.split(marker, 1)[0])
                 if match is None or int(match.group(1)) not in result:
                     raise ValueError(
                         f"smoke event lacks valid rank in {engine_log}: {line[:300]}"
                     )
                 try:
-                    item = json.loads(line.split(MARKER, 1)[1])
+                    item = json.loads(line.split(marker, 1)[1])
                 except json.JSONDecodeError as exc:
                     raise ValueError(
                         f"malformed smoke event in {engine_log}: {line[:300]}"
@@ -558,15 +565,26 @@ def audit(
                     "589824-token historic FP8 MLA did not execute multiple chunks on every rank"
                 )
 
+        long_output_graph = name == "orthogonal_decode_graph_long_output_batch_64"
         match = re.fullmatch(r"orthogonal_decode_\d+_batch_(\d+)", name)
-        if match:
-            size = int(match.group(1))
+        if match or long_output_graph:
+            # The original 56-record case remains an answer regression. Its
+            # requests can finish before all 32 PD handoffs arrive. The separate
+            # long-output stage owns the exact batch-32 Graph requirement.
+            exact_batch = not (
+                name == "orthogonal_decode_04_batch_64"
+                and result.get("suite") == "main-text-64k-capped"
+            )
             valid = True
+            if long_output_graph:
+                valid &= len(stage["case_names"]) == 64
             for owner in range(decode_dp):
                 local = sum(
                     rows[case]["decode_owner_rank"] == owner
                     for case in stage["case_names"]
                 )
+                if long_output_graph:
+                    valid &= local == 64 // decode_dp
                 if local == 0:
                     continue
                 for rank in range(owner * decode_tp, (owner + 1) * decode_tp):
@@ -582,8 +600,11 @@ def audit(
                             if event.get("event") == forward_name
                         ]
                         for index, forward in enumerate(forwards):
-                            if forward.get("input_rows") != local or (
-                                root and forward.get("stream_count") != local
+                            actual = forward.get("input_rows", 0)
+                            if (
+                                not 0 < actual <= local
+                                or (exact_batch and actual != local)
+                                or (root and forward.get("stream_count") != actual)
                             ):
                                 continue
                             next_time = (
@@ -612,18 +633,26 @@ def audit(
                                 # Draft may capture its exact MTP token count.
                                 needs_padding = (
                                     role == 2
-                                    and local > 1
-                                    and bool(local & (local - 1))
+                                    and actual > 1
+                                    and bool(actual & (actual - 1))
                                 )
                                 if (
-                                    physical_batch >= local
+                                    physical_batch >= actual
                                     and rows_used > 0
                                     and event.get("bucket", 0) >= rows_used
+                                    and (
+                                        not long_output_graph
+                                        or role != 2
+                                        or (
+                                            event["bucket"] == local
+                                            and physical_batch == local
+                                        )
+                                    )
                                     and event.get("padding_rows")
                                     == event["bucket"] - rows_used
                                     and (
                                         not needs_padding
-                                        or physical_batch > local
+                                        or physical_batch > actual
                                         or event["padding_rows"] > 0
                                     )
                                 ):
@@ -743,6 +772,8 @@ def audit(
                 f"orthogonal_decode_{index:02d}_batch_{size}"
                 for index, size in enumerate(decode_sizes)
             }
+            if result.get("suite") == "main-text-64k-capped":
+                required.add("orthogonal_decode_graph_long_output_batch_64")
         if decode_dp == 2 and result.get("suite") == "main-text-64k-capped":
             required.add("decode_dp_cross_owner_handoff")
     for name in sorted(required - path_results.keys()):
@@ -800,9 +831,16 @@ def main() -> int:
         request_dir=args.result.parent / "requests",
     )
     if result.get("protocol_requests"):
-        from moe_smoke import audit_situ
+        from runtime_smoke import audit_request_runtime
 
         try:
+            verdict["migration_features"] = audit_request_runtime(
+                result,
+                read_events(args.decode_log_dir, engine_log=args.decode_engine_log),
+                args.decode_engine_log,
+            )
+            from moe_smoke import audit_situ
+
             verdict["situ_configuration"] = audit_situ(
                 args.prefill_log_dir, args.decode_log_dir
             )

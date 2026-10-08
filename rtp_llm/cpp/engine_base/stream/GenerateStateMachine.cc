@@ -86,6 +86,10 @@ void GenerateStateMachine::handleWaiting() {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
+            RTP_LLM_LOG_WARNING("KV init failed stream=%ld role=%d status=%s",
+                                stream ? stream->streamId() : -1,
+                                static_cast<int>(role_type),
+                                result.ToString().c_str());
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
@@ -131,6 +135,8 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
+        RTP_LLM_LOG_WARNING("KV wait increment failed stream=%ld status=%s",
+                            stream_cache_resource_->stream()->streamId(), result.ToString().c_str());
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
@@ -227,6 +233,8 @@ void GenerateStateMachine::handleRunning() {
     }
     auto result = stream_cache_resource_->incrKVBlock(seq_len_override);
     if (!result.ok()) {
+        RTP_LLM_LOG_WARNING("KV running increment failed stream=%ld status=%s",
+                            stream ? stream->streamId() : -1, result.ToString().c_str());
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);

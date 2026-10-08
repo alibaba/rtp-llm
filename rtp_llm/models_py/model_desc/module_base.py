@@ -53,6 +53,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
+        self._linear_replay_cache = None
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
@@ -70,6 +71,15 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
+            self._linear_replay_cache = next(
+                (
+                    cache.linear_replay
+                    for layer_id in range(self.kv_cache.layer_count)
+                    for cache in self.kv_cache.get_layer_cache_groups(layer_id)
+                    if cache.linear_replay is not None
+                ),
+                None,
+            )
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
                 self.kv_cache.get_layer_cache_groups(0) if num_layers > 0 else []
@@ -86,6 +96,13 @@ class GptModelBase(nn.Module):
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
         return True
+
+    def finalize_linear_replay(self, replay_inputs, steps: int) -> None:
+        from rtp_llm.models_py.triton_kernels.linear_replay import finalize_linear_replay
+
+        if self._linear_replay_cache is None:
+            raise RuntimeError("target LINEAR replay has no initialized log pool")
+        finalize_linear_replay(self._linear_replay_cache, replay_inputs, steps)
 
     def prepare_fmha_impl(
         self,

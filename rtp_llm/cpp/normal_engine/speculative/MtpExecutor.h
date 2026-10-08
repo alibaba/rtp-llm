@@ -170,6 +170,8 @@ protected:
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
+                                      const std::optional<LinearReplayInputs>&      linear_replay,
+                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event);
 
@@ -203,6 +205,11 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+    void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
+    void publishLinearReplayWindows(const StreamGroups& stream_groups,
+                                    const LinearReplayInputs& replay,
+                                    const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                    const torch::Tensor& accept_lengths);
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
@@ -212,14 +219,16 @@ protected:
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
-    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
-                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                     const torch::Tensor&                         verify_position_ids,
-                                     const torch::Tensor&                         kv_cache_block_id,
-                                     const torch::Tensor&                         kv_cache_kernel_block_id,
-                                     MergedOutput                                 draft_prefill_output,
-                                     std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event);
+    absl::Status dispatchDecodeAsync(const StreamGroups&                                   stream_groups,
+                                     const speculative::SpeculativeSamplerOutput&          spec_decode_output,
+                                     const torch::Tensor&                                  verify_position_ids,
+                                     const torch::Tensor&                                  kv_cache_block_id,
+                                     const torch::Tensor&                                  kv_cache_kernel_block_id,
+                                     MergedOutput                                          draft_prefill_output,
+                                     const std::optional<LinearReplayInputs>&              linear_replay,
+                                     const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
+                                     std::shared_ptr<torch::Event>                         rejection_event,
+                                     std::shared_ptr<torch::Event>                         draft_event);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -306,6 +315,7 @@ private:
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner                             spec_sampler_prepare_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

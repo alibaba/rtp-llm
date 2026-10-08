@@ -197,7 +197,8 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_num_value_heads: " << linear_num_value_heads << "\n"
         << "linear_value_head_dim: " << linear_value_head_dim << "\n"
         << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
-        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
+        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype) << "\n"
+        << "replay_vector_gate: " << replay_vector_gate;
     return oss.str();
 }
 // HybridAttentionConfig
