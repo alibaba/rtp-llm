@@ -25,6 +25,7 @@ SUITES = (
     "mxfp8",
     "expert",
     "feed_forward",
+    "block",
     "routed",
     "engram",
     "dispatch",
