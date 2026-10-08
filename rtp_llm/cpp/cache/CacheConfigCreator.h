@@ -43,6 +43,18 @@ public:
                                     bool                                             is_mtp             = false,
                                     bool                                             is_eagle           = false);
 
+    // Bound Decode LINEAR pools by the scheduler concurrency before computing
+    // the remaining paged-cache budget. Explicit group capacities take priority.
+    static void configureDecodeLinearPool(CacheConfig&             config,
+                                          const ParallelismConfig& parallelism_config,
+                                          const RuntimeConfig&     runtime_config);
+    static void configureLinearReplay(CacheConfig&                                      config,
+                                      const ModelConfig&                                model_config,
+                                      const ParallelismConfig&                          parallelism_config,
+                                      const RuntimeConfig&                              runtime_config,
+                                      const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                      bool                                              is_mtp);
+
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
                                          const RuntimeConfig&                             runtime_config,
