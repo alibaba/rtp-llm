@@ -7,6 +7,12 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_trace_compare",
+    srcs = ["dsv41_trace_compare.py"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_library(
     name = "dsv41_reference_probe",
     srcs = ["dsv41_reference_probe.py"],
     deps = [":dsv41_trace", "//rtp_llm:safetensors_header", "//rtp_llm:safetensors", "//rtp_llm:torch"],

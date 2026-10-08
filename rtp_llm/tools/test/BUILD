@@ -9,6 +9,12 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_trace_compare_test",
+    srcs = ["dsv41_trace_compare_test.py"],
+    deps = ["//rtp_llm/tools:dsv41_trace_compare"],
+)
+
+py_test(
     name = "checkpoint_inventory_test",
     srcs = ["checkpoint_inventory_test.py"],
     data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
