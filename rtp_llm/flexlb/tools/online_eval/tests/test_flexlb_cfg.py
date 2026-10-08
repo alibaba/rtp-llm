@@ -37,9 +37,9 @@ class GoldenProfileTest(unittest.TestCase):
 
     GOLDEN = {
         "batch-window": "b5313755f180838cbe6cd3e39b83909fb934ad9ee61c74517fb3f5fa2077691b",
-        "single-nonbatch": "0e4154649598be46bbc7ca4d3c332a5921db1b553c905db0ebef12255942ea3b",
+        "single-nonbatch": "e34effdb0eb2a490c6ebb25827dc3a1ff053b196d82d4ad492e69f29b18a66c6",
         "single-batch": "17008ef16c95cefcbd32ff931a3a49e886a6b32bd9df88d1c9d1d73ced6ce30e",
-        "window-nonbatch": "46a24d13d8f495c98f905767d2509ffea514b9bcb55a68c6566db0b4f57c86a4",
+        "window-nonbatch": "251e96437f9fcb31a70ea932b70e0907c1f54350ca355d9eda61fa290dd04e73",
         # the former data/config/master_fixed_window.json FLEXLB_CONFIG
         "stress-na130": "d3b763a3ca18e3df2d3a533ad51de1f0177134f7194789be540e7b8796979a81",
     }

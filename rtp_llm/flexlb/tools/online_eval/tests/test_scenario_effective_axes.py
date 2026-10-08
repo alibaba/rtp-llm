@@ -27,9 +27,10 @@ class EffectiveAxesTests(unittest.TestCase):
                 max_inflight_per_prefill_worker=1,
             )
         )
+        source["profiles"] = ["single-nonbatch"]
         source["requires"] = ["priority", "single", "generate_stream"]
         plans = compile_scenarios([("axes.yaml", source)])
-        self.assertEqual(len(plans), 4)
+        self.assertEqual(len(plans), 1)
         for plan in plans:
             self.assertEqual(
                 plan["effective_axes"],
@@ -51,7 +52,7 @@ class EffectiveAxesTests(unittest.TestCase):
         source = self.source(dict(dispatcher="non_batch"))
         source["profiles"] = ["batch-window"]
         source["requires"] = ["enqueue_batch"]
-        with self.assertRaisesRegex(ValueError, "effective environment lacks"):
+        with self.assertRaisesRegex(ValueError, "profile identity field"):
             compile_scenarios([("axes.yaml", source)])
 
     def test_preemption_is_preserved_through_backend_ssot_rendering(self):

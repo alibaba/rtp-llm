@@ -1,5 +1,7 @@
 # Python case execution core
 
+配置层次、默认变体、维度及身份规则见 [新增 case](../../docs/development/adding-cases.md#配置层次与-profile-身份)。
+
 中文文档：[框架结构](../../docs/architecture/framework.md) · [如何添加新 case](../../docs/development/adding-cases.md)。
 
 A schema-version-2 configuration selects a registered Python case program. YAML supplies data only; Python builds the ordered steps and assertions. A configuration defines one public scenario ID. Explicit variants and profiles compile into separate

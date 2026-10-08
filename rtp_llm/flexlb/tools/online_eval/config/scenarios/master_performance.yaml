@@ -20,9 +20,7 @@ metadata:
     frontend capture from 16/20 pods, output mean from real Decode monitoring.
     Absolute provisional contract, not production capacity.
   category: master
-variants:
-- id: flash_frozen_mock
-  program: steady
+program: steady
 parameters:
   criteria:
     benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10

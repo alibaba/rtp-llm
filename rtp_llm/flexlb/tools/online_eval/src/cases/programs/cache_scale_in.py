@@ -21,8 +21,8 @@ def step(case):
     budget = (
         gate["warmup_timeout_s"] + gate["topology_timeout_s"] + gate["observe_s"] + 10
     )
-    if "intermediate_p" in gate:
-        budget += gate["intermediate_hold_s"] + gate["topology_timeout_s"]
+    if {"intermediate_p", "intermediate_hold_s"} & gate.keys() or gate.get("removal_mode") != "graceful":
+        raise ValueError("step requires one graceful scale-in; different fault sequences require a separate case")
     if (
         int(client["DURATION_S"]) < budget
         or flow["source"]["parameters"]["count"] < budget * gate["qps"]

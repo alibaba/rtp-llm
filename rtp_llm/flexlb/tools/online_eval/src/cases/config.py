@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import math
+import re
 from pathlib import Path
 
 from scenario.loader import ScenarioError
@@ -27,9 +28,11 @@ class CaseBuilder:
         self.parameters = copy.deepcopy(parameters)
         self.parameter_schema = copy.deepcopy(parameter_schema or {})
         self.steps = []
+        self.read_parameters = set()
 
     def value(self, path):
         """Read required YAML data; programs provide no hidden fallback values."""
+        self.read_parameters.add(path)
         value = self.parameters
         for part in path.split("."):
             if not isinstance(value, dict) or part not in value:
@@ -120,6 +123,15 @@ def _data_only(value, path):
             _data_only(child, f"{path}[{index}]")
 
 
+def _leaf_paths(value, prefix=""):
+    for key, child in value.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(child, dict) and child:
+            yield from _leaf_paths(child, path)
+        else:
+            yield path
+
+
 def _merge_environment(base, patch):
     if not isinstance(base, dict) or not isinstance(patch, dict):
         raise ScenarioError("environment must be a mapping")
@@ -167,6 +179,8 @@ def configure_program(config, source):
         {
             "schema_version",
             "case",
+            "program",
+            "variant_axis",
             "id",
             "profiles",
             "environment",
@@ -193,9 +207,34 @@ def configure_program(config, source):
     parameters = config.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ScenarioError(f"{source}.parameters: expected mapping")
-    variants = config.get("variants")
+    variants = config.get("variants", [{"id": "default"}])
     if not isinstance(variants, list) or not variants:
         raise ScenarioError(f"{source}.variants: expected a nonempty list")
+    axis = config.get("variant_axis")
+    if "variants" in config:
+        _mapping(axis, {"kind", "fields"}, source + ".variant_axis")
+        if axis.get("kind") not in {"data", "scale", "flow"}:
+            raise ScenarioError(f"{source}: variant_axis.kind must be data, scale or flow")
+        axis_fields = axis.get("fields", [])
+        if (not isinstance(axis_fields, list) or not axis_fields
+                or any(not isinstance(f, str) for f in axis_fields)
+                or len(set(axis_fields)) != len(axis_fields)):
+            raise ScenarioError(f"{source}: variant_axis.fields must be unique nonempty paths")
+        for field in axis_fields:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*", field):
+                raise ScenarioError(f"{source}: invalid variant field path {field!r}")
+            if any(other != field and field.startswith(other + ".") for other in axis_fields):
+                raise ScenarioError(f"{source}: overlapping variant field paths")
+            valid = (field == "program" if axis["kind"] == "flow" else
+                     field.startswith("parameters.") if axis["kind"] == "data" else
+                     field in {"environment.n_prefill", "environment.n_decode",
+                               "environment.prefill_cache_blocks", "environment.decode_cache_blocks"})
+            if not valid:
+                raise ScenarioError(f"{source}: field {field!r} does not belong to declared variant dimension")
+    elif axis is not None:
+        raise ScenarioError(f"{source}: variant_axis requires variants")
+    if getattr(module, "FLOW_PROGRAMS", ()) and (axis is None or axis["kind"] != "flow" or "program" in config):
+        raise ScenarioError(f"{source}: flow programs require explicit flow variants")
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
@@ -208,6 +247,13 @@ def configure_program(config, source):
         if key in config:
             document[key] = copy.deepcopy(config[key])
     selected_profiles = document.get("profiles")
+    from scenario.compiler import identifier, environment as validate_environment, names
+    from flexlb_cfg import PROFILES
+    identifier(document["id"], source + ".id")
+    if isinstance(selected_profiles, list):
+        names(selected_profiles, source + ".profiles", PROFILES)
+        for profile in selected_profiles:
+            validate_environment(environment, source + ".environment", profile)
     seen = set()
     for row in variants:
         _mapping(
@@ -226,13 +272,20 @@ def configure_program(config, source):
             },
             source + ".variants",
         )
+        if axis is not None:
+            for field in _leaf_paths({k: v for k, v in row.items() if k != "id"}):
+                if not any(field == f or field.startswith(f + ".") for f in axis_fields):
+                    raise ScenarioError(f"{source}: variant field {field!r} outside declared dimension")
         identity = row.get("id")
-        if not isinstance(identity, str) or identity in seen:
+        if not isinstance(identity, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", identity) or identity in seen:
             raise ScenarioError(
                 f"{source}: missing or duplicate configuration id {identity!r}"
             )
         seen.add(identity)
-        program = row.get("program", identity)
+        program = row.get("program", config.get("program"))
+        if axis is not None and axis["kind"] == "flow":
+            if program != identity or program not in getattr(module, "FLOW_PROGRAMS", ()):
+                raise ScenarioError(f"{source}: flow identity must equal a registered flow program")
         build = vars(module).get(program) if isinstance(program, str) else None
         if (
             not isinstance(program, str)
@@ -241,7 +294,7 @@ def configure_program(config, source):
             or getattr(build, "__module__", None) != module.__name__
         ):
             raise ScenarioError(f"{source}: unknown Python case program {program!r}")
-        profiles = row.get("profiles", selected_profiles)
+        profiles = selected_profiles
         if (
             not isinstance(profiles, list)
             or not profiles
@@ -257,20 +310,21 @@ def configure_program(config, source):
         builder = CaseBuilder(
             _merge_environment(environment, patch),
             _merge_data(parameters, variant_parameters),
-            _merge_data(
-                config.get("parameter_schema", {}), row.get("parameter_schema", {})
-            ),
+            config.get("parameter_schema", {}),
         )
         build(builder)
-        variant = copy.deepcopy(row.get("metadata", {}))
+        for field in _leaf_paths(variant_parameters):
+            if not any(field == used or field.startswith(used + ".") for used in builder.read_parameters):
+                raise ScenarioError(f"{source}: unused variant parameter {field!r}")
+        variant = {}
         from scenario.suites import normalize_test
 
-        if not isinstance(config.get("test", {}), dict) or not isinstance(row.get("test", {}), dict):
+        if not isinstance(config.get("test", {}), dict):
             raise ScenarioError(f"{source}.test: expected mapping")
-        variant["test"] = normalize_test(_merge_data(config.get("test", {}), row.get("test", {})))
+        variant["test"] = normalize_test(copy.deepcopy(config.get("test", {})))
         from reporting.view_config import declaration
 
-        reports = row.get("reports", config.get("reports") if variant["test"]["kind"] == "workload" else None)
+        reports = config.get("reports") if variant["test"]["kind"] == "workload" else None
         if reports is not None:
             variant["test"]["reports"] = declaration(
                 reports, kind=variant["test"]["kind"], path=source + ".reports"
@@ -280,8 +334,6 @@ def configure_program(config, source):
         )
         if patch:
             variant["environment_overrides"] = copy.deepcopy(patch)
-        if "execution" in row:
-            variant["execution"] = copy.deepcopy(row["execution"])
         document["variants"].append(variant)
     program_path = Path(module.__file__).resolve()
     document.implementation = {

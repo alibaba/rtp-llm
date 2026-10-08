@@ -4,11 +4,21 @@ from cases.config import output
 from scenario.loader import ScenarioError
 
 
-def dual_master_cycle(case):
+FLOW_PROGRAMS = ("rolling", "non_rolling")
+
+
+def rolling(case):
+    _cycle(case, "rolling")
+
+
+def non_rolling(case):
+    _cycle(case, "non_rolling")
+
+
+def _cycle(case, restart_mode):
     root = "dual_master_cycle"
-    restart_mode = case.value(f"{root}.restart_mode")
-    if restart_mode not in ("rolling", "non_rolling"):
-        raise ScenarioError("dual_master_cycle.restart_mode must be rolling or non_rolling")
+    if "restart_mode" in case.value(root):
+        raise ScenarioError("restart_mode is owned by flow identity, not parameters")
     case.step("setup", "setup", timeout_s=case.value(f"{root}.setup_timeout_s"))
     case.step("flow", "master_client_start", params=case.value(f"{root}.flow"))
 

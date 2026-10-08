@@ -584,11 +584,11 @@ class MasterActionsTest(unittest.TestCase):
                     h.name: h for h in master.HANDLERS + observations + controls + faults
                 },
             )
-        self.assertEqual(5, len(plans))
+        self.assertEqual(6, len(plans))
         self.assertEqual(2, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
-            if plan["variant_id"] == "kill_single":
+            if plan["scenario_id"] == "master_lifecycle":
                 ids = [s["id"] for s in plan["stages"]]
                 ready, clean = ("restored_topology", "restored_inflight")
                 index = ids.index(ready)
@@ -605,6 +605,10 @@ class MasterActionsTest(unittest.TestCase):
                 ids = [stage["id"] for stage in plan["stages"]]
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("a_ready"))
+                if plan["variant_id"] == "non_rolling":
+                    self.assertLess(ids.index("kill_b"), ids.index("restart_a"))
+                    self.assertIn("outage_failures", ids)
+                    continue
                 self.assertLess(ids.index("a_ready"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
                 self.assertNotIn("outage_failures", ids)
@@ -632,9 +636,8 @@ class MasterActionsTest(unittest.TestCase):
 
         path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         config = load_document(path)
-        config["parameters"]["dual_master_cycle"]["restart_mode"] = "non_rolling"
         document = configure_program(config, str(path))
-        ids = [stage["id"] for stage in document["variants"][0]["stages"]]
+        ids = [stage["id"] for stage in document["variants"][1]["stages"]]
         self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
         self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
         self.assertIn("outage_failures", ids)

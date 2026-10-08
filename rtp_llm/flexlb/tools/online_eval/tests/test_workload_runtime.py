@@ -92,21 +92,21 @@ class WorkloadRuntimeTests(unittest.TestCase):
         w = {p["id"] for p in classify(plans, "workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
-        self.assertIn("master_ha_failover::dual_master_cycle::batch-window", w)
+        self.assertIn("master_ha_failover::rolling::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]
                 for plan in classify(plans, "functional")
             },
             {
-                "request_completion::immediate",
-                "cache_churn::lru_affinity",
-                "engine_fault_recovery::generation_bump",
-                "master_lifecycle::kill_single",
+                "request_completion::default",
+                "cache_churn::default",
+                "engine_fault_recovery::default",
+                "master_lifecycle::default",
             },
         )
-        self.assertEqual(len(plans), 21)
-        self.assertIn("cache_scale_in::step::single-nonbatch", w)
+        self.assertEqual(len(plans), 22)
+        self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_core_suite_is_two_stable_contracts_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
@@ -114,8 +114,8 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
         expected = {
-            "request_completion::immediate",
-            "cache_churn::lru_affinity",
+            "request_completion::default",
+            "cache_churn::default",
         }
         for profile in (
             "batch-window",

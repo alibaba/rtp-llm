@@ -2,5 +2,5 @@ schema_version: 2
 default_suite: core
 ci_suites:
   core:
-  - request_completion::immediate
-  - cache_churn::lru_affinity
+  - request_completion::default
+  - cache_churn::default

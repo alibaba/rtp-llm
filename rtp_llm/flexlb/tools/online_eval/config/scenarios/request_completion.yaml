@@ -1,5 +1,10 @@
 schema_version: 2
 case: request_completion
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
 environment:
   backend: java_mock
   n_prefill: 2
@@ -8,14 +13,7 @@ execution:
   timeout_s: 300
   stage_timeout_s: 60
   cleanup_timeout_s: 120
-variants:
-- id: immediate
-  program: immediate
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
+program: immediate
 metadata:
   description: Submitted requests reach a business terminal without stream errors.
   category: status

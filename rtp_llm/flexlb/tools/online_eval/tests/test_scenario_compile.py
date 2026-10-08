@@ -224,7 +224,6 @@ class LoaderTest(unittest.TestCase):
         config = load_document(TOOLS / "config/scenarios/request_completion.yaml")
         config["environment"].update(n_prefill=1, n_decode=1)
         config["profiles"] = ["batch-window", "single-batch"]
-        config["variants"] = [{"id": "immediate", "program": "immediate"}]
         return config
 
     def test_json_yaml_same_compile_plan(self):

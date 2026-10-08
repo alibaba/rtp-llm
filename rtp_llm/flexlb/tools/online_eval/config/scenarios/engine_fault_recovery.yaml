@@ -20,9 +20,7 @@ execution:
   timeout_s: 900
   stage_timeout_s: 120
   cleanup_timeout_s: 120
-variants:
-- id: generation_bump
-  program: generation_bump
+program: generation_bump
 metadata:
   description: Engine generation bump, retirement and request recovery.
   category: engine_fault

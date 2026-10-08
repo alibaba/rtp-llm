@@ -18,7 +18,7 @@ class SuiteOwnershipTest(unittest.TestCase):
         original = copy.deepcopy(docs)
         functional = preselect_documents(docs, 'functional')
         workload = preselect_documents(docs, 'workload')
-        self.assertEqual(['kill_single'], [v['id'] for v in functional[0][1]['variants']])
+        self.assertEqual(['default'], [v['id'] for v in functional[0][1]['variants']])
         self.assertEqual([], workload)
         self.assertEqual(docs, original)
         self.assertEqual(functional[0][1].implementation, docs[0][1].implementation)

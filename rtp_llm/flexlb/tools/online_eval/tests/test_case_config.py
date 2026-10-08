@@ -44,6 +44,8 @@ class CaseConfigTest(unittest.TestCase):
 
     def config(self):
         config = load_document(ROOT / "config/scenarios/request_completion.yaml")
+        config["variant_axis"] = {"kind": "data", "fields": ["parameters.count", "parameters.input_len", "parameters.output_len", "parameters.completion"]}
+        config["variants"] = [{"id": "immediate"}]
         return config
 
     def compile(self, config):
@@ -63,13 +65,13 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_extra_configuration_reuses_python_case_without_new_code(self):
         config = self.config()
+        config["variant_axis"] = {"kind": "scale", "fields": ["environment.n_prefill", "environment.n_decode"]}
+        config["profiles"] = ["single-nonbatch"]
+        config["parameters"].update(input_len=8192, output_len=16, count=3)
         config["variants"] = [
             {
                 "id": "large_pd",
-                "program": "immediate",
-                "profiles": ["single-nonbatch"],
                 "environment": {"n_prefill": 4, "n_decode": 8},
-                "parameters": {"input_len": 8192, "output_len": 16, "count": 3},
             }
         ]
         (plan,) = self.compile(config)
@@ -86,8 +88,6 @@ class CaseConfigTest(unittest.TestCase):
         config["variants"].append(
             {
                 "id": "default_count",
-                "program": "immediate",
-                "profiles": ["single-nonbatch"],
             }
         )
         original = copy.deepcopy(config)
@@ -173,7 +173,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_rejects_unknown_and_duplicate_programs(self):
         variants = (
-            [{"id": "unknown"}],
+            [{"id": "unknown", "program": "unknown"}],
             [{"id": "immediate"}, {"id": "immediate"}],
         )
         for value in variants:
@@ -208,7 +208,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_numeric_constraints_and_profiles_are_yaml_owned(self):
         config = self.config()
-        config["variants"] = [{"id": "custom", "program": "immediate"}]
+        config["variants"] = [{"id": "custom"}]
         config["profiles"] = ["single-nonbatch"]
         config["parameters"]["count"] = 10001
         config["parameter_schema"]["count"]["maximum"] = 10001

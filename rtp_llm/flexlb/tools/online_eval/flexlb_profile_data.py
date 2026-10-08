@@ -109,16 +109,8 @@ FUNCTIONAL_PROFILE_QUEUE_TIMEOUT_MS = 60_000
 
 # Functional-test workload defaults, not Java schema defaults.
 FUNCTIONAL_DEFAULTS = {
-    "ordering": "fifo",
-    "decision": "fixed_window",
-    "dispatcher": "batch",
     "default_priority": None,
     "preemption": None,
-    "max_requests": 32,
-    "max_collection_wait_ms": 10,
-    "max_predicted_execution_ms": 550,
-    "queue_timeout_ms": None,
-    "max_inflight_per_prefill_worker": 2,
     "prefill_expression": DSV4_PREFILL_EXPRESSION,
     "request_timeout_ms": 60_000,
     "decision_lifetime": 2.0,
@@ -138,8 +130,23 @@ FUNCTIONAL_PROFILE_KWARGS = {
         "decision": spec["decision"],
         "dispatcher": spec["dispatcher"],
         "queue_timeout_ms": FUNCTIONAL_PROFILE_QUEUE_TIMEOUT_MS,
+        # Admission counts batches for BATCH, individual requests for NON_BATCH.
+        # Fixed-window defaults admit two batches of at most 32 requests;
+        # NON_BATCH admits 64 requests. SINGLE+BATCH still counts batches.
+        "max_inflight_per_prefill_worker": 2 if spec["dispatcher"] == "batch" else 64,
+        "max_requests": 32,
+        "max_collection_wait_ms": 10,
+        "max_predicted_execution_ms": 550,
     }
     for profile, spec in PROFILE_SPECS.items()
+}
+
+
+# Defaults for direct low-level schema construction, not a profile merge layer.
+GENERATOR_DEFAULTS = {
+    **FUNCTIONAL_DEFAULTS,
+    **FUNCTIONAL_PROFILE_KWARGS["batch-window"],
+    "queue_timeout_ms": None,
 }
 
 

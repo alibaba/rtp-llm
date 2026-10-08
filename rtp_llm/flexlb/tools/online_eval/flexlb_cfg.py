@@ -30,10 +30,9 @@ Override semantics (``ConfigOverride``):
   * an override may only change fields the profile's document already
     has (unknown-for-profile fields raise ValueError — e.g.
     unknown legacy capacity knobs);
-  * axis fields (ordering / decision / dispatcher) re-type their block
-    and drop the other axis' exclusive keys, mirroring the strict
-    schema (SINGLE carries no window knobs; FIFO carries no
-    defaultPriority/preemption; NON_BATCH carries no BATCH lease keys).
+  * functional profile identity (decision / dispatcher) cannot be overridden;
+    ordering remains a configurable policy. The render-only stress profile
+    allows schema retyping and drops keys exclusive to the previous type.
 
 The Java side of the contract: ConfigService (STRICT_MAPPER,
 FAIL_ON_UNKNOWN_PROPERTIES) + FlexlbConfigValidator.validateQueue — the
@@ -50,6 +49,7 @@ from typing import Optional, Union
 from flexlb_profile_data import (
     DSV4_PREFILL_EXPRESSION,
     FUNCTIONAL_DEFAULTS,
+    GENERATOR_DEFAULTS,
     STRESS_BASE,
     PROFILES,
     PROFILE_SPECS,
@@ -223,27 +223,27 @@ def _build_ordering_cfg(
 
 def build_flexlb_config(
     *,
-    ordering: str = FUNCTIONAL_DEFAULTS["ordering"],
-    decision: str = FUNCTIONAL_DEFAULTS["decision"],
-    dispatcher: str = FUNCTIONAL_DEFAULTS["dispatcher"],
-    default_priority: Optional[int] = FUNCTIONAL_DEFAULTS["default_priority"],
-    preemption: Optional[dict] = FUNCTIONAL_DEFAULTS["preemption"],
-    max_requests: int = FUNCTIONAL_DEFAULTS["max_requests"],
-    max_collection_wait_ms: int = FUNCTIONAL_DEFAULTS["max_collection_wait_ms"],
-    max_predicted_execution_ms: int = FUNCTIONAL_DEFAULTS["max_predicted_execution_ms"],
-    queue_timeout_ms: Optional[int] = FUNCTIONAL_DEFAULTS["queue_timeout_ms"],
+    ordering: str = GENERATOR_DEFAULTS["ordering"],
+    decision: str = GENERATOR_DEFAULTS["decision"],
+    dispatcher: str = GENERATOR_DEFAULTS["dispatcher"],
+    default_priority: Optional[int] = GENERATOR_DEFAULTS["default_priority"],
+    preemption: Optional[dict] = GENERATOR_DEFAULTS["preemption"],
+    max_requests: int = GENERATOR_DEFAULTS["max_requests"],
+    max_collection_wait_ms: int = GENERATOR_DEFAULTS["max_collection_wait_ms"],
+    max_predicted_execution_ms: int = GENERATOR_DEFAULTS["max_predicted_execution_ms"],
+    queue_timeout_ms: Optional[int] = GENERATOR_DEFAULTS["queue_timeout_ms"],
     # Functional-test workload values come from flexlb_profile_data.
-    max_inflight_per_prefill_worker: int = FUNCTIONAL_DEFAULTS["max_inflight_per_prefill_worker"],
-    prefill_expression: str = FUNCTIONAL_DEFAULTS["prefill_expression"],
+    max_inflight_per_prefill_worker: int = GENERATOR_DEFAULTS["max_inflight_per_prefill_worker"],
+    prefill_expression: str = GENERATOR_DEFAULTS["prefill_expression"],
     cache_affinity_max_extra_ttft_ms: int = 20,
     cache_affinity_min_prefix_hit_percent: float = 20,
-    request_timeout_ms: int = FUNCTIONAL_DEFAULTS["request_timeout_ms"],
-    decision_lifetime: float = FUNCTIONAL_DEFAULTS["decision_lifetime"],
-    status_rpc_ms: int = FUNCTIONAL_DEFAULTS["status_rpc_ms"],
-    status_stale_after_ms: Optional[int] = FUNCTIONAL_DEFAULTS["status_stale_after_ms"],
-    cleanup_interval_ms: int = FUNCTIONAL_DEFAULTS["cleanup_interval_ms"],
-    decode_max_engine_requests: int = FUNCTIONAL_DEFAULTS["decode_max_engine_requests"],
-    decode_max_kv_usage_percent: int = FUNCTIONAL_DEFAULTS["decode_max_kv_usage_percent"],
+    request_timeout_ms: int = GENERATOR_DEFAULTS["request_timeout_ms"],
+    decision_lifetime: float = GENERATOR_DEFAULTS["decision_lifetime"],
+    status_rpc_ms: int = GENERATOR_DEFAULTS["status_rpc_ms"],
+    status_stale_after_ms: Optional[int] = GENERATOR_DEFAULTS["status_stale_after_ms"],
+    cleanup_interval_ms: int = GENERATOR_DEFAULTS["cleanup_interval_ms"],
+    decode_max_engine_requests: int = GENERATOR_DEFAULTS["decode_max_engine_requests"],
+    decode_max_kv_usage_percent: int = GENERATOR_DEFAULTS["decode_max_kv_usage_percent"],
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
@@ -494,8 +494,12 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         )
     if profile == STRESS_PROFILE:
         return _render_stress(overrides)
-    kwargs = dict(FUNCTIONAL_PROFILE_KWARGS[profile])
+    kwargs = {**FUNCTIONAL_DEFAULTS, **FUNCTIONAL_PROFILE_KWARGS[profile]}
     if overrides is not None:
+        for axis, expected in PROFILE_SPECS[profile].items():
+            value = getattr(overrides, axis)
+            if value is not None and value != expected:
+                raise ValueError(f"{axis} is a profile identity field for {profile}")
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)
             if value is None:

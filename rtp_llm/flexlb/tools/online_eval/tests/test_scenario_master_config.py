@@ -19,7 +19,7 @@ class MasterConfigTests(unittest.TestCase):
         self.assertEqual(4, len(plans))
         for plan in plans:
             with self.subTest(variant=plan["variant_id"], profile=plan["profile"]):
-                if plan["variant_id"] == "kill_single":
+                if plan["variant_id"] == "default":
                     override = ConfigOverride(
                         ordering="priority", queue_timeout_ms=OMIT
                     )

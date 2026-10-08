@@ -11,24 +11,16 @@ environment:
   n_decode: 4
   discovery: discovery_file
   perf_preset: fault_env
-  config_overrides: {}
+  # 故障恢复检查使用优先级队列，省略测试队列期限以使用 Java 默认值，隔离短期限对恢复检查的干扰。
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
 execution:
   timeout_s: 420
   stage_timeout_s: 60
   cleanup_timeout_s: 120
-variants:
-- id: kill_single
-  profiles:
-  - batch-window
-  - single-nonbatch
-  - single-batch
-  - window-nonbatch
-  environment:
-    config_overrides:
-      ordering: priority
-      queue_timeout_ms:
-        omit: true
-  program: kill_single
+program: kill_single
 metadata:
   description: Cold restart of the owned master, clean scheduler state, topology and request recovery.
   category: master

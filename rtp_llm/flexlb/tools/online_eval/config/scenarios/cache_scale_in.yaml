@@ -21,9 +21,7 @@ execution:
 metadata:
   description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P control point.
   category: kv
-variants:
-- id: step
-  program: step
+program: step
 parameters:
   gate:
     target_p: 64

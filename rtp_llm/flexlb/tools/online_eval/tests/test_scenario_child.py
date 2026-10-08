@@ -22,7 +22,7 @@ from scripts.commands.list_cases import instance_directory, select, summarize
 class ChildTest(unittest.TestCase):
     def test_storage_key_cannot_be_parsed_as_jvm_log_options(self):
         ids = [
-            "request_completion::immediate::batch-window",
+            "request_completion::default::batch-window",
             "request_completion::deferred_fetch::batch-window",
             "../odd:id",
         ]
@@ -66,7 +66,7 @@ class ChildTest(unittest.TestCase):
         rows = json.loads(proc.stdout)["instances"]
         self.assertEqual(
             {r["variant_id"] for r in rows},
-            {"immediate"},
+            {"default"},
         )
         self.assertTrue(all(row["grade"] == "loose" for row in rows))
         self.assertNotIn("stages", rows[0])

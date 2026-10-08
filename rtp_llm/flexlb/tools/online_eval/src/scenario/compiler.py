@@ -8,6 +8,7 @@ import re
 from flexlb_cfg import (
     OMIT,
     PROFILE_CAPS,
+    PROFILE_SPECS,
     PROFILES,
     VICTIM_STAGES,
     ConfigOverride,
@@ -149,6 +150,7 @@ def environment(value, path, profile):
             "prefill_cache_blocks",
             "decode_cache_blocks",
             "config_overrides",
+            "profile_overrides",
             "discovery",
             "perf_preset",
             "model_override",
@@ -264,8 +266,26 @@ def environment(value, path, profile):
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
     _, preset_runtime = load_preset(result["perf_preset"])
     paired_master = preset_runtime.get("master_config_overrides", {})
+    profile_overrides = mapping(value.get("profile_overrides", {}),
+                                path + ".profile_overrides", PROFILES)
+    # Validate every keyed entry, including profiles excluded by CLI selection.
+    for target, patch in profile_overrides.items():
+        mapping(patch, path + ".profile_overrides." + target, INTEGER_OVERRIDES | {
+            "ordering", "decision", "dispatcher", "preemption", "decision_lifetime",
+            "prefill_expression", "cache_affinity_max_extra_ttft_ms",
+            "cache_affinity_min_prefix_hit_percent",
+        })
+        if target != profile:
+            environment({**value, "profile_overrides": {target: patch}}, path, target)
+    common = value.get("config_overrides", {})
+    if not isinstance(common, dict):
+        fail(path + ".config_overrides", "expected mapping")
+    for target, patch in [(profile, common), (profile, paired_master), *profile_overrides.items()]:
+        for axis, expected in PROFILE_SPECS[target].items():
+            if patch.get(axis) is not None and patch[axis] != expected:
+                fail(path, f"{axis} is a profile identity field for {target}")
     overrides = mapping(
-        value.get("config_overrides", {}),
+        {**common, **{k: v for k, v in profile_overrides.get(profile, {}).items() if v is not None}},
         path + ".config_overrides",
         INTEGER_OVERRIDES
         | {
@@ -280,10 +300,12 @@ def environment(value, path, profile):
         },
     )
     declared_overrides = dict(overrides)
-    overrides = {**paired_master, **declared_overrides}
+    overrides = {**paired_master, **{k: v for k, v in declared_overrides.items() if v is not None}}
     kwargs = {}
     for key, val in overrides.items():
         field = path + ".config_overrides." + key
+        if val is None:
+            continue
         if key in {"ordering", "decision", "dispatcher"}:
             choices = {
                 "ordering": ("fifo", "priority"),
@@ -671,6 +693,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "prefill_cache_blocks",
                     "decode_cache_blocks",
                     "config_overrides",
+                    "profile_overrides",
                     "discovery",
                     "perf_preset",
                     "model_override",

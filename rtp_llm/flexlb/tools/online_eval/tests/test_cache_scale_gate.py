@@ -276,16 +276,14 @@ class CacheGateTest(unittest.TestCase):
         import yaml
         from cases.config import configure_program
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
-        for mode in ("graceful", "abrupt"):
+        for mode in ("graceful",):
             changed = copy.deepcopy(case)
             changed["parameters"]["gate"].update(topology_timeout_s=31, removal_mode=mode)
-            if mode == "abrupt":
-                changed["parameters"]["gate"]["drain_timeout_ms"] = 0
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
             self.assertEqual(len(plans), 2)
         changed["parameters"]["gate"]["removal_mode"] = "silent"
-        with self.assertRaisesRegex(Exception, "removal_mode"):
+        with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
 
     def test_drain_outcome_does_not_change_survivor_windows(self):
@@ -361,7 +359,7 @@ class CacheGateTest(unittest.TestCase):
             with mock.patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
                 main()
 
-    def test_staircase_validates_order_hold_and_traffic_budget(self):
+    def test_staircase_requires_a_separate_case_identity(self):
         import yaml
 
         case = yaml.safe_load(
@@ -382,20 +380,9 @@ class CacheGateTest(unittest.TestCase):
                         load_scenarios(path), handlers=handlers()
                     )
 
-            self.assertEqual(len(compile_case(case)), 2)
-            for key, value in (
-                ("intermediate_p", 64),
-                ("intermediate_p", 125),
-                ("intermediate_hold_s", 59),
-            ):
-                invalid = copy.deepcopy(case)
-                invalid["parameters"]["gate"][key] = value
-                with self.assertRaises(Exception):
-                    compile_case(invalid)
-            insufficient = copy.deepcopy(case)
-            insufficient["parameters"]["flow"]["client"]["DURATION_S"] = "310"
-            with self.assertRaisesRegex(Exception, "traffic plan must cover"):
-                compile_case(insufficient)
+            with self.assertRaisesRegex(ValueError, "separate case"):
+                compile_case(case)
+
 
 
 class WorkloadTest(unittest.TestCase):
