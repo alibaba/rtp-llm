@@ -69,7 +69,7 @@ class ContractTest(unittest.TestCase):
             _, _, _, errors = archived_series(tmp, 0)
             self.assertEqual(errors, [{
                 "source": "1", "query": "master/completions_qps",
-                "error": "monitor series absent",
+                "error": "monitor series absent", "severity": "diagnostic",
             }])
 
     def test_missing_binary_has_no_private_fallback(self):

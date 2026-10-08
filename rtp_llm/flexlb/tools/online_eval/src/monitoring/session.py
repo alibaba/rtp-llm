@@ -521,7 +521,8 @@ def archived_series(directory, anchor):
         epoch = path.parent.name
         errors.extend(dict(source=epoch, **error) for error in data.get("errors", []))
         errors.extend(
-            dict(source=epoch, query=query, error="monitor series absent")
+            dict(source=epoch, query=query, error="monitor series absent",
+                 severity="diagnostic")
             for query in data.get("missing_queries", [])
         )
         for query_id, query in data["queries"].items():

@@ -260,11 +260,19 @@ def analyze_report(directory, result, evidence):
     checks = [
         dict(stage=s["id"], **check) for s in result["stages"] for check in s["checks"]
     ]
-    journal_issues = monitor_errors
+    # Query archives retain absent optional curves for diagnosis. Only a
+    # failed query or a series explicitly required by the collector invalidates
+    # workload evidence; source coverage is checked separately below.
+    diagnostics = [error for error in monitor_errors
+                   if error.get("severity") == "diagnostic"]
+    journal_issues = [error for error in monitor_errors
+                      if error.get("severity") != "diagnostic"]
+    result["workload"]["telemetry_diagnostics"] = diagnostics
     result["workload"]["telemetry_integrity_errors"] = journal_issues
+    if journal_issues or diagnostics:
+        result["workload"]["telemetry_completeness"] = "PARTIAL"
     if journal_issues:
         result["workload"]["runtime_validity"] = "INVALID"
-        result["workload"]["telemetry_completeness"] = "PARTIAL"
     missing = []
     if result.get("workload", {}).get("capture_metrics"):
         present = {"/".join(key.split("/")[:2]) for key in series}

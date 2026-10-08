@@ -9,6 +9,37 @@ from workload.evidence_analysis import analyze_report
 
 
 class EvidenceIntegrityTest(unittest.TestCase):
+    def test_optional_missing_curve_is_diagnostic_but_required_curve_invalidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            telemetry = Path(d) / "telemetry" / "1"
+            telemetry.mkdir(parents=True)
+            queries = dict(start=1, end=2, step=1, targets={}, queries={
+                "mock/running_avg": dict(promql="running", result=[dict(
+                    metric={"role": "prefill"}, values=[[1, "1"]]
+                )])
+            }, missing_queries=["master-single/optional"], errors=[])
+            path = telemetry / "queries.json"
+            path.write_text(json.dumps(queries))
+            def result():
+                return dict(id="test", status="PASS", error=None, stages=[],
+                            workload=dict(capture_metrics=True,
+                                          runtime_validity="VALID"))
+            evidence = dict(clock_anchor={"epoch_s": 0}, phases=[],
+                            expected_telemetry=["1/mock"])
+            report = result()
+            analyze_report(d, report, evidence)
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(report["workload"]["runtime_validity"], "VALID")
+            self.assertEqual(report["workload"]["telemetry_completeness"], "PARTIAL")
+            self.assertEqual(len(report["workload"]["telemetry_diagnostics"]), 1)
+            queries["errors"] = [dict(query="mock/running_avg",
+                                     error="required monitor series absent")]
+            path.write_text(json.dumps(queries))
+            report = result()
+            analyze_report(d, report, evidence)
+            self.assertEqual(report["status"], "ERROR")
+            self.assertEqual(report["workload"]["runtime_validity"], "INVALID")
+
     def test_failed_scrape_is_attributed_at_observed_completion(self):
         from workload.evidence_analysis import (
             classify_gaps,
