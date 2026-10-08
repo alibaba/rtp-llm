@@ -90,6 +90,34 @@ class FrontendServerTest(TestCase):
             )
             self.assertEqual(response.status_code, 500)
 
+    def test_invalid_grammar_is_client_error_and_verify_failures_stay_internal(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        request = {request_id_field_name: 1}
+        invalid = FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            "Failed to compile regex grammar: unclosed '['",
+        )
+        invalid.aux_info = {"input_len": 25, "output_len": 0}
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(request, invalid)
+            self.assertEqual(response.status_code, 400)
+            body = json.loads(response.body)
+            self.assertEqual(body["error_code"], 605)
+            self.assertEqual(body["error_code_str"], "605_INVALID_PARAMS")
+            self.assertEqual(body["message"], invalid.message)
+            self.assertEqual(body["aux_info"], invalid.aux_info)
+            for error_type in (
+                ExceptionType.GRAMMAR_VERIFY_EXCEPTION,
+                ExceptionType.EXECUTION_EXCEPTION,
+                ExceptionType.GENERATE_TIMEOUT,
+            ):
+                with self.subTest(error_type=error_type):
+                    response = self.frontend_server._handle_exception(
+                        request, FtRuntimeException(error_type, "backend failed")
+                    )
+                    self.assertEqual(response.status_code, 500)
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         # Create PyEnvConfigs with default values for testing
