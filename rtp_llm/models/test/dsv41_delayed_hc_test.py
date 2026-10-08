@@ -16,7 +16,7 @@ with patch.dict(sys.modules):
     load_codec_source(
         "rtp_llm.models_py.modules.dsv4.hc.fallback_impl", "hc/fallback_impl.py"
     )
-    hc = load_codec_source("_dsv41_delayed_hc_test_source", "hc/delayed.py")
+    hc = load_codec_source("_dsv41_delayed_hc_test_source", "hc/delayed_reference.py")
 
 
 def reference_mixes(x, unit):

@@ -193,6 +193,27 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_delayed_hc",
+    srcs = ["test_v41_delayed_hc.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_delayed_hc_cuda_graph",
+    srcs = ["test_v41_delayed_hc_cuda_graph.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [

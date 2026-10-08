@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test import (
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     test_v41_routed_hardware as routed_fixture,
 )
-from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
+from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv4.v41_attention import V41SparseAttention
 from rtp_llm.models_py.modules.dsv4.v41_block import V41Block, V41ResidualState
 from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache
