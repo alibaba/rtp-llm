@@ -656,6 +656,15 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         }
     }
     auto model_input = allocateModelInputBuffers(stream_groups);
+    std::optional<V41CacheDispatch> next_dispatch;
+    if (config_.enable_v41_cache_dispatch) {
+        next_dispatch = v41_cache_dispatch_;
+        try {
+            next_dispatch->prepare(stream_groups, model_input);
+        } catch (const std::exception& error) {
+            return absl::FailedPreconditionError(error.what());
+        }
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
@@ -690,6 +699,9 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
                                                            torch::TensorOptions(torch::kInt64).pinned_memory(true));
         std::copy(
             blocks_to_zero.begin(), blocks_to_zero.end(), model_input.kv_cache_blocks_to_zero.data_ptr<int64_t>());
+    }
+    if (next_dispatch) {
+        v41_cache_dispatch_ = std::move(*next_dispatch);
     }
     return model_input;
 }

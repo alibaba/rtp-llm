@@ -19,6 +19,8 @@
 
 namespace rtp_llm {
 
+class KVCacheAllocationLease;
+
 enum class ParallelMode {
     TP = 0,
     DP = 1,
@@ -117,6 +119,11 @@ struct GptModelInputs {
     // Optional CPU int32 [tokens, 4], current-first committed Engram history.
     // Appended to preserve positional aggregate initialization.
     torch::Tensor engram_token_windows;
+
+    // CPU int64 [batch, 6]: request, generation, incarnation, chunk, start, count.
+    // Fake rows are all -1. Local physical leases are never serialized/broadcast.
+    torch::Tensor                                              v41_cache_spans;
+    std::vector<std::shared_ptr<const KVCacheAllocationLease>> v41_cache_leases;
 
 public:
     std::string debugString(bool force = false) const;

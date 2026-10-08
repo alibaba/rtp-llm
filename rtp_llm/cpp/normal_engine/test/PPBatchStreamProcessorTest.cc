@@ -2952,6 +2952,25 @@ TEST_F(PPBatchStreamProcessorTest, PlanSerializationPreservesEngramHistoryAndAbs
     }
 }
 
+TEST_F(PPBatchStreamProcessorTest, PlanSerializationPreservesV41SpansButNeverCopiesLocalLeases) {
+    for (const auto& spans :
+         {torch::Tensor(),
+          torch::empty({0, 6}, torch::kInt64),
+          torch::tensor(std::vector<int64_t>{41, 9, 3, 2, 128, 32, -1, -1, -1, -1, -1, -1}, torch::kInt64)
+              .reshape({2, 6})}) {
+        PPExecutionPlan plan;
+        plan.model_input.v41_cache_spans = spans;
+        plan.model_input.v41_cache_leases.resize(2);
+        const auto result = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
+        EXPECT_EQ(result.model_input.v41_cache_spans.defined(), spans.defined());
+        EXPECT_TRUE(result.model_input.v41_cache_leases.empty());
+        if (spans.defined()) {
+            EXPECT_TRUE(torch::equal(result.model_input.v41_cache_spans, spans));
+            EXPECT_EQ(result.model_input.v41_cache_spans.sizes(), spans.sizes());
+        }
+    }
+}
+
 TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
     struct Case {
         int                  input_len;

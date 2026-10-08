@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 
 using namespace std;
@@ -163,6 +164,189 @@ TEST_F(NormalBatchStreamProcessorTest, EngramGatherUsesRequestHistoryAndMasksFak
                                                                 std::vector<int32_t>{15, 14, 13, 12, 16, 15, 14, 13});
         EXPECT_EQ(toVec<int32_t>(input->engram_token_windows), fake ? std::vector<int32_t>(rows * 4, -1) : expected);
     }
+}
+
+class V41CacheDispatchTest: public NormalBatchStreamProcessorTest {
+protected:
+    void SetUp() override {
+        NormalBatchStreamProcessorTest::SetUp();
+        config_                             = test::makeSimpleHybridMhaCacheConfig(4, 33, 2, DataType::TYPE_FP16, 2);
+        config_.use_independent_block_pools = true;
+        manager_                            = std::make_shared<KVCacheManager>(config_);
+        ASSERT_TRUE(manager_->init());
+        model_config_.model_type  = "deepseek_v41";
+        model_config_.max_seq_len = 32;
+        model_config_.vocab_size = model_config_.input_vocab_size = 128;
+        model_config_.num_layers                                  = 4;
+        model_config_.attn_config.tokens_per_block                = 2;
+        processor_                                                = std::make_unique<NormalBatchStreamProcessor>(
+            model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config_, false);
+    }
+
+    GenerateStreamPtr makeStream(int64_t id) {
+        ResourceContext context;
+        context.cache_manager  = manager_;
+        context.reuse_cache    = false;
+        auto query             = std::make_shared<GenerateInput>();
+        query->request_id      = id;
+        query->input_ids       = hostIntBuffer({11, 12, 13, 14, 15, 16});
+        query->generate_config = std::make_shared<GenerateConfig>();
+        auto stream = std::make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        EXPECT_TRUE(stream->streamCacheResource().initKVBlock().ok());
+        return stream;
+    }
+
+    void chunk(const GenerateStreamPtr& stream, int start, int end) {
+        stream->setIsContextStream(true);
+        stream->enable_fast_gen_   = true;
+        stream->last_chunk_len_    = start;
+        stream->current_chunk_len_ = end;
+        stream->max_chunk_len_     = 6;
+    }
+
+    absl::StatusOr<GptModelInputs> gather(std::list<GenerateStreamPtr> streams) {
+        return processor_->gatherModelInput(StreamGroups(streams), holder_);
+    }
+
+    CacheConfig                                 config_;
+    ModelConfig                                 model_config_;
+    std::shared_ptr<KVCacheManager>             manager_;
+    std::unique_ptr<NormalBatchStreamProcessor> processor_;
+    TensorHolder                                holder_;
+};
+
+TEST_F(V41CacheDispatchTest, ChunkDecodeAndFakeRowsKeepIdentityAndPhysicalLeases) {
+    const auto initially_free = manager_->freeBlocksNum();
+    auto       stream         = makeStream(41);
+    chunk(stream, 0, 2);
+    auto first = gather({stream});
+    ASSERT_TRUE(first.ok()) << first.status();
+    const auto incarnation = stream->streamCacheResource().cacheIncarnation();
+    EXPECT_EQ(toVec<int64_t>(first->v41_cache_spans), (std::vector<int64_t>{41, 1, incarnation, 0, 0, 2}));
+    ASSERT_EQ(first->v41_cache_leases.size(), 1u);
+    ASSERT_TRUE(first->v41_cache_leases[0]);
+    EXPECT_FALSE(gather({stream}).ok());
+
+    chunk(stream, 2, 5);
+    auto second = gather({stream});
+    ASSERT_TRUE(second.ok()) << second.status();
+    EXPECT_EQ(toVec<int64_t>(second->v41_cache_spans), (std::vector<int64_t>{41, 1, incarnation, 1, 2, 3}));
+    stream->setIsContextStream(false);
+    auto fake = makeStream(99);
+    fake->setIsFakeStream(true);
+    auto decode = gather({fake, stream});
+    ASSERT_TRUE(decode.ok()) << decode.status();
+    EXPECT_EQ(toVec<int64_t>(decode->v41_cache_spans),
+              (std::vector<int64_t>{41, 1, incarnation, 2, 5, 1, -1, -1, -1, -1, -1, -1}));
+    ASSERT_EQ(decode->v41_cache_leases.size(), 2u);
+    EXPECT_FALSE(decode->v41_cache_leases[1]);
+    GptModelInputs micro;
+    sliceV41CacheInputs(*decode, micro, 0, 1);
+    ASSERT_EQ(micro.v41_cache_leases.size(), 1u);
+    EXPECT_EQ(micro.v41_cache_leases[0], decode->v41_cache_leases[0]);
+    fake->setIsFakeStream(false);
+    fake->releaseResource();
+    stream->releaseResource();
+    EXPECT_LT(manager_->freeBlocksNum(), initially_free);
+    first  = absl::CancelledError("drop first input");
+    second = absl::CancelledError("drop second input");
+    EXPECT_LT(manager_->freeBlocksNum(), initially_free);
+    decode = absl::CancelledError("drop last consumer");
+    EXPECT_LT(manager_->freeBlocksNum(), initially_free);
+    micro.v41_cache_leases.clear();
+    EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
+}
+
+TEST_F(V41CacheDispatchTest, FailedGatherDoesNotConsumeGenerationsOrLeakLeases) {
+    const auto initially_free                                   = manager_->freeBlocksNum();
+    auto       first                                            = makeStream(41);
+    auto       second                                           = makeStream(42);
+    processor_->model_input_gatherer_->config_.input_vocab_size = 12;
+    EXPECT_FALSE(gather({first, second}).ok());
+    processor_->model_input_gatherer_->config_.input_vocab_size = 128;
+    auto retry                                                  = gather({first, second});
+    ASSERT_TRUE(retry.ok()) << retry.status();
+    EXPECT_EQ(toVec<int64_t>(retry->v41_cache_spans), (std::vector<int64_t>{41, 1, 1, 0, 0, 6, 42, 2, 1, 0, 0, 6}));
+    first->releaseResource();
+    second->releaseResource();
+    retry = absl::CancelledError("drop consumers");
+    EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
+}
+
+TEST_F(V41CacheDispatchTest, ReusedRequestIdAndResetCacheRequireNewGeneration) {
+    auto stream = makeStream(41);
+    auto old    = gather({stream});
+    ASSERT_TRUE(old.ok()) << old.status();
+    auto duplicate = makeStream(41);
+    EXPECT_FALSE(gather({duplicate}).ok());
+    stream->releaseResource();
+    auto fresh = gather({duplicate});
+    ASSERT_TRUE(fresh.ok()) << fresh.status();
+    EXPECT_EQ(fresh->v41_cache_spans[0][1].item<int64_t>(), 2);
+    EXPECT_NE(old->v41_cache_leases[0]->blockTables(), fresh->v41_cache_leases[0]->blockTables());
+    duplicate->streamCacheResource().tryReleaseKVBlock(duplicate->curBlocksNum());
+    ASSERT_TRUE(duplicate->streamCacheResource().initKVBlock().ok());
+    auto reset = gather({duplicate});
+    ASSERT_TRUE(reset.ok()) << reset.status();
+    EXPECT_EQ(reset->v41_cache_spans[0][1].item<int64_t>(), 3);
+    EXPECT_GT(reset->v41_cache_spans[0][2].item<int64_t>(), fresh->v41_cache_spans[0][2].item<int64_t>());
+}
+
+TEST_F(V41CacheDispatchTest, RejectsGapsPrefixBootstrapAndDuplicateIdsBeforeGather) {
+    auto stream = makeStream(41);
+    chunk(stream, 2, 3);
+    EXPECT_FALSE(gather({stream}).ok());
+    chunk(stream, 0, 2);
+    EXPECT_FALSE(gather({stream, stream}).ok());
+    auto first = gather({stream});
+    ASSERT_TRUE(first.ok()) << first.status();
+    chunk(stream, 3, 4);
+    EXPECT_FALSE(gather({stream}).ok());
+    chunk(stream, 2, 4);
+    auto next = gather({stream});
+    ASSERT_TRUE(next.ok()) << next.status();
+    EXPECT_EQ(next->v41_cache_spans[0][3].item<int64_t>(), 1);
+}
+
+TEST_F(V41CacheDispatchTest, AppendOnlyGrowthPreservesGenerationAndEarlierSnapshot) {
+    config_.fromGroupedSpecs({test::makeMhaSpec("full0", 2, DataType::TYPE_FP16, 1, 1),
+                              test::makeMhaSpec("full1", 2, DataType::TYPE_FP16, 1, 1)},
+                             {{0, 1}, {2, 3}},
+                             {CacheGroupType::FULL, CacheGroupType::FULL},
+                             {"full0", "full1"});
+    manager_ = std::make_shared<KVCacheManager>(config_);
+    ASSERT_TRUE(manager_->init());
+    processor_ = std::make_unique<NormalBatchStreamProcessor>(
+        model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config_, false);
+    auto stream = makeStream(41);
+    chunk(stream, 0, 2);
+    auto first = gather({stream});
+    ASSERT_TRUE(first.ok()) << first.status();
+    const auto tables      = first->v41_cache_leases[0]->blockTables();
+    const auto incarnation = stream->streamCacheResource().cacheIncarnation();
+    ASSERT_TRUE(stream->streamCacheResource().incrKVBlock(12).ok());
+    EXPECT_EQ(stream->streamCacheResource().cacheIncarnation(), incarnation);
+    chunk(stream, 2, 4);
+    auto next = gather({stream});
+    ASSERT_TRUE(next.ok()) << next.status();
+    EXPECT_EQ(first->v41_cache_leases[0]->blockTables(), tables);
+    EXPECT_EQ(next->v41_cache_spans[0][1].item<int64_t>(), 1);
+    EXPECT_GT(next->v41_cache_leases[0]->blockTables().at("full1").size(), tables.at("full1").size());
+}
+
+TEST_F(V41CacheDispatchTest, LegacyLinearRotationIsRejectedWithoutChangingEarlierSnapshot) {
+    auto stream = makeStream(41);
+    chunk(stream, 0, 2);
+    auto first = gather({stream});
+    ASSERT_TRUE(first.ok()) << first.status();
+    const auto tables = first->v41_cache_leases[0]->blockTables();
+    ASSERT_TRUE(stream->streamCacheResource().incrKVBlock(12).ok());
+    chunk(stream, 2, 4);
+    auto next = gather({stream});
+    ASSERT_FALSE(next.ok());
+    EXPECT_NE(std::string(next.status().message()).find("append-only"), std::string::npos);
+    EXPECT_EQ(first->v41_cache_leases[0]->blockTables(), tables);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {

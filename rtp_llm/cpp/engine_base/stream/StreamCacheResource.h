@@ -56,6 +56,10 @@ public:
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     // Call under scheduler ownership before cancellation/free can race admission.
     KVCacheAllocationLeasePtr retainAllocation(int batch_id = 0) const;
+    // Scheduler-thread lifecycle marker. Append-only allocation does not change it.
+    int64_t cacheIncarnation() const {
+        return cache_incarnation_;
+    }
 
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
@@ -126,6 +130,7 @@ public:
     }
 
 private:
+    void advanceCacheIncarnation();
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
@@ -140,6 +145,7 @@ private:
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
+    int64_t                        cache_incarnation_ = 0;
 
     bool                          need_release_resource_ = true;
     bool                          last_block_aligned_    = false;

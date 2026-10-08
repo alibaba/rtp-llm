@@ -344,6 +344,7 @@ class PyModelInitResources:
 
 class PyModelInputs:
     engram_token_windows: torch.Tensor | None
+    v41_cache_spans: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -358,6 +359,7 @@ class PyModelInputs:
         bert_embedding_inputs: BertEmbeddingInputs = ...,
         dspark_call_phase: DSparkCallPhase = ...,
         engram_token_windows: torch.Tensor | None = ...,
+        v41_cache_spans: torch.Tensor | None = ...,
     ) -> None: ...
     @property
     def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:

@@ -20,6 +20,10 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+namespace rtp_llm {
+class KVCacheAllocationLease;
+}
+
 namespace torch_ext {
 
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
@@ -370,6 +374,9 @@ struct PyModelInputs {
     // PP: boundary tensors from the upstream stage; empty under pp_size=1.
     PPIntermediates pp_intermediates;
     torch::Tensor   engram_token_windows;  // optional device int32 [tokens, 4]
+    torch::Tensor   v41_cache_spans;       // optional CPU int64 [batch, 6]
+    // Opaque process-local ownership; retaining this input retains its native pages.
+    std::vector<std::shared_ptr<const rtp_llm::KVCacheAllocationLease>> v41_cache_leases;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

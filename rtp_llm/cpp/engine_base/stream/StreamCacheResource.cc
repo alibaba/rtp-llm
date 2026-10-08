@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
+#include <limits>
 #include <torch/extension.h>
 
 using namespace std;
@@ -268,7 +269,13 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
 // ----------------------------- StreamCacheResource -----------------------------
 
+void StreamCacheResource::advanceCacheIncarnation() {
+    RTP_LLM_CHECK_WITH_INFO(cache_incarnation_ < std::numeric_limits<int64_t>::max(), "cache incarnation exhausted");
+    ++cache_incarnation_;
+}
+
 void StreamCacheResource::init(int batch_size) {
+    advanceCacheIncarnation();
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
     const auto topology = resource_context_.cache_manager ?
@@ -322,6 +329,7 @@ void StreamCacheResource::releaseResource() {
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
+    advanceCacheIncarnation();
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -594,6 +602,7 @@ BatchKVCacheResource& StreamCacheResource::kvCacheMutable() {
 }
 
 void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
+    advanceCacheIncarnation();
     *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
@@ -605,6 +614,7 @@ KVCacheAllocationLeasePtr StreamCacheResource::retainAllocation(int batch_id) co
 }
 
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
+    advanceCacheIncarnation();
     return resource_context_.cache_manager->updateKVBlock(
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
@@ -618,6 +628,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 }
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
+    advanceCacheIncarnation();
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     const auto topology = resource_context_.cache_manager ?
@@ -802,6 +813,7 @@ void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
 }
 
 void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {
+    advanceCacheIncarnation();
     if (rhs == lhs) {
         return;
     }

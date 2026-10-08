@@ -568,6 +568,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               py_attn_inputs,
                                               attention_inputs_by_tag,
                                               bert_embedding_inputs});
+        input_list.back().v41_cache_spans  = micro_inputs.v41_cache_spans;
+        input_list.back().v41_cache_leases = micro_inputs.v41_cache_leases;
         if (micro_inputs.engram_token_windows.defined()) {
             auto windows                           = is_real_micro_input ? micro_inputs.engram_token_windows :
                                                                            torch::full(micro_inputs.engram_token_windows.sizes(),
@@ -865,6 +867,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         // PP: stage-boundary tensors populated by forwardPP.
         py_model_inputs.pp_intermediates = inputs.pp_intermediates;
+        py_model_inputs.v41_cache_spans  = inputs.v41_cache_spans;
+        py_model_inputs.v41_cache_leases = inputs.v41_cache_leases;
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, true);
@@ -1326,6 +1330,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
         fake_inputs.input_lengths     = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        if (inputs.v41_cache_spans.defined()) {
+            fake_inputs.v41_cache_spans  = torch::full({1, 6}, -1, torch::kInt64);
+            fake_inputs.v41_cache_leases = {nullptr};
+        }
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
@@ -1336,6 +1344,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
 
             if (d_micro_batch_size && p_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
+                sliceV41CacheInputs(
+                    inputs, micro_model_inputs, sliced_batch_idx, d_micro_batch_size + p_micro_batch_size);
                 size_t         total_batch_size   = d_micro_batch_size + p_micro_batch_size;
                 RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld",
                                   sliced_token_idx,
@@ -1397,6 +1407,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             } else if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
+                sliceV41CacheInputs(inputs, micro_model_inputs, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
                 if (inputs.engram_token_windows.defined()) {
                     micro_model_inputs.engram_token_windows =
@@ -1433,6 +1444,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             } else {
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
+                sliceV41CacheInputs(inputs, micro_model_inputs, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, p_micro_batch_size);
