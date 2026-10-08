@@ -10,12 +10,12 @@ import csv
 import json
 import math
 import os
-from pathlib import Path
 import pwd
 import re
 import socket
 import subprocess
 import sys
+from pathlib import Path
 
 
 def launch_config(args):
@@ -36,19 +36,29 @@ def launch_config(args):
         raise ValueError("PD topology requires positive TP/DP and EP=TP×DP")
     if orthogonal_smoke and args.role == "PREFILL" and dp_size != 1:
         raise ValueError("Orthogonal Prefill profile requires DP1")
-    if orthogonal_smoke and args.role == "DECODE" and (
-        source_tp_size % tp_size and tp_size % source_tp_size
+    if (
+        orthogonal_smoke
+        and args.role == "DECODE"
+        and (source_tp_size % tp_size and tp_size % source_tp_size)
     ):
         raise ValueError("PageRR PD attention TP sizes must divide one another")
     expected_layers = 4 if debug_four_layer else 93
     if text.get("num_hidden_layers") != expected_layers:
-        raise ValueError(f"Selected BF16 profile requires {expected_layers} target layers")
+        raise ValueError(
+            f"Selected BF16 profile requires {expected_layers} target layers"
+        )
     if debug_four_layer:
         linear = text.get("linear_attn_config", {})
-        if linear.get("kda_layers") != [1, 2, 3] or linear.get("full_attn_layers") != [4]:
-            raise ValueError("Four-layer debug profile requires the original first three KDA layers and fourth MLA layer")
+        if linear.get("kda_layers") != [1, 2, 3] or linear.get("full_attn_layers") != [
+            4
+        ]:
+            raise ValueError(
+                "Four-layer debug profile requires the original first three KDA layers and fourth MLA layer"
+            )
         if text.get("attn_res_block_size") != 12:
-            raise ValueError("Four-layer debug profile must preserve the original AttnRes block size")
+            raise ValueError(
+                "Four-layer debug profile must preserve the original AttnRes block size"
+            )
     for port in (args.start_port, args.peer_port):
         if port < 1024 or port + world_size * 9 > 65535:
             raise ValueError("Invalid service port range")
@@ -77,9 +87,13 @@ def launch_config(args):
     no_proxy = f"localhost,127.0.0.1,{local_ip},{args.peer_ip}"
     # K3's post-norm BF16 MoE inputs are finite in the validated serving path.
     # Keep the generic packer choice explicit in the emitted launch config.
-    packer_impl = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "fast_finite").strip().lower()
+    packer_impl = (
+        os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "fast_finite").strip().lower()
+    )
     if packer_impl not in ("legacy", "optimized", "fast_finite"):
-        raise ValueError("MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite")
+        raise ValueError(
+            "MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite"
+        )
     environment = {
         "MODEL_TYPE": "kimi_k3",
         "CHECKPOINT_PATH": str(checkpoint),
@@ -123,8 +137,9 @@ def launch_config(args):
         # target and draft checkpoints; nogds failed during MoE scale conversion.
         environment["FASTSAFETENSORS_NOGDS"] = "0"
     decode_capture_batches = (
-        [1, 2, 4, 8, 16, 32] if orthogonal_smoke and dp_size > 1 else
-        [1, 2, 4, 8, 16, 32, 64] if orthogonal_smoke else [1, 2, 3, 4, 7, 8, 9, 16]
+        [1, 2, 4, 8, 16, 32]
+        if orthogonal_smoke and dp_size > 1
+        else [1, 2, 4, 8, 16, 32, 64] if orthogonal_smoke else [1, 2, 3, 4, 7, 8, 9, 16]
     )
     options = {
         "role_type": args.role,
@@ -136,14 +151,19 @@ def launch_config(args):
         "local_world_size": world_size,
         "world_rank": 0,
         "prefill_cp_kv_cache_sharded": int(orthogonal_smoke),
-        "prefill_cp_size": source_tp_size if orthogonal_smoke and args.role == "DECODE" else 1,
+        "prefill_cp_size": (
+            source_tp_size if orthogonal_smoke and args.role == "DECODE" else 1
+        ),
         "remote_server_port": args.peer_port,
         "use_local": 1,
         "max_seq_len": 2097152 if orthogonal_smoke else 262144,
         # MTP update capture uses this request capacity independently of the
         # Decode runner. It must cover every configured proposal/Verify bucket.
-        "max_context_batch_size": (64 if orthogonal_smoke and args.role == "PREFILL"
-                                   else max(decode_capture_batches)),
+        "max_context_batch_size": (
+            64
+            if orthogonal_smoke and args.role == "PREFILL"
+            else max(decode_capture_batches)
+        ),
         "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
         **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
         "concurrency_limit": 64 if orthogonal_smoke else 16,
@@ -238,21 +258,30 @@ def require_rdma_device(run):
     evidence = Path(run) / "rdma-preflight.txt"
     try:
         result = subprocess.run(
-            ["ibv_devinfo"], text=True, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, timeout=30,
+            ["ibv_devinfo"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         evidence.write_text(f"RDMA device probe failed: {exc}\n")
-        raise RuntimeError("Cannot verify RDMA devices in this runtime container") from exc
+        raise RuntimeError(
+            "Cannot verify RDMA devices in this runtime container"
+        ) from exc
     evidence.write_text(result.stdout)
-    if result.returncode or not re.search(r"\bstate:\s+PORT_ACTIVE\s*\(4\)", result.stdout):
+    if result.returncode or not re.search(
+        r"\bstate:\s+PORT_ACTIVE\s*\(4\)", result.stdout
+    ):
         raise RuntimeError("No active RDMA port in this runtime container")
 
 
 def validate_rdma_hcas(value, devices, links):
     names = value.split(",")
-    if not names or len(set(names)) != len(names) or any(
-        not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names
+    if (
+        not names
+        or len(set(names)) != len(names)
+        or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names)
     ):
         raise ValueError("RDMA HCAs must be unique, non-empty device names")
     available = {line.split()[0] for line in devices.splitlines() if line.split()}
@@ -276,14 +305,23 @@ def rdma_hca_environment(run, value):
     devices = subprocess.check_output(["ibv_devices"], text=True, timeout=30)
     links = subprocess.check_output(["rdma", "link", "show"], text=True, timeout=30)
     selected = validate_rdma_hcas(value, devices, links)
-    (Path(run) / "rdma-hcas.json").write_text(json.dumps({
-        "devices": devices, "links": links, "ACCL_USE_NICS": selected,
-        "note": "Local HCA validation only; real RDMA transfer must still pass."
-    }, indent=2))
+    (Path(run) / "rdma-hcas.json").write_text(
+        json.dumps(
+            {
+                "devices": devices,
+                "links": links,
+                "ACCL_USE_NICS": selected,
+                "note": "Local HCA validation only; real RDMA transfer must still pass.",
+            },
+            indent=2,
+        )
+    )
     return {"ACCL_USE_NICS": selected}
 
 
-def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250, gpu_count=8):
+def require_gpu_capacity(
+    run, allow_shared_accuracy=False, min_free_gib=250, gpu_count=8
+):
     """Record a final selected-GPU capacity snapshot; shared runs prove correctness only.
 
     Host-side fleet selection must also record owners: container PID namespaces
@@ -291,13 +329,18 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250, gpu
     """
     if not math.isfinite(min_free_gib) or min_free_gib <= 0:
         raise ValueError("GPU free-memory requirement must be finite and positive")
+
     def query(fields):
         return subprocess.check_output(
             ["nvidia-smi", fields, "--format=csv,noheader,nounits"],
-            text=True, timeout=30,
+            text=True,
+            timeout=30,
         )
+
     gpu_text = query("--query-gpu=index,uuid,memory.free")
-    process_text = query("--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory")
+    process_text = query(
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory"
+    )
     evidence = {
         "allow_shared_accuracy": allow_shared_accuracy,
         "performance_validated": False,
@@ -309,15 +352,27 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250, gpu
     (Path(run) / "gpu-preflight.json").write_text(json.dumps(evidence, indent=2) + "\n")
     rows = list(csv.reader(gpu_text.splitlines(), skipinitialspace=True))
     selected = {int(row[0]): float(row[2]) for row in rows if len(row) == 3}
-    if any(i not in selected or not math.isfinite(selected[i]) or
-           selected[i] < min_free_gib * 1024 for i in range(gpu_count)):
-        raise RuntimeError("Insufficient free GPU memory for the selected profile; reselect hosts")
+    if any(
+        i not in selected
+        or not math.isfinite(selected[i])
+        or selected[i] < min_free_gib * 1024
+        for i in range(gpu_count)
+    ):
+        raise RuntimeError(
+            "Insufficient free GPU memory for the selected profile; reselect hosts"
+        )
     selected_uuids = {row[1].strip() for row in rows if int(row[0]) in range(gpu_count)}
-    occupied = [row for row in csv.reader(process_text.splitlines(), skipinitialspace=True)
-                if len(row) >= 2 and row[0].strip() in selected_uuids
-                and row[1].strip().isdigit()]
+    occupied = [
+        row
+        for row in csv.reader(process_text.splitlines(), skipinitialspace=True)
+        if len(row) >= 2
+        and row[0].strip() in selected_uuids
+        and row[1].strip().isdigit()
+    ]
     if occupied and not allow_shared_accuracy:
-        raise RuntimeError("GPUs occupied; reselect hosts or explicitly allow shared accuracy validation")
+        raise RuntimeError(
+            "GPUs occupied; reselect hosts or explicitly allow shared accuracy validation"
+        )
 
 
 def main():
@@ -325,12 +380,18 @@ def main():
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
     parser.add_argument("--tp-size", type=int, default=8)
     parser.add_argument("--dp-size", type=int, default=1)
-    parser.add_argument("--ep-size", type=int,
-                        help="Defaults to TP×DP")
-    parser.add_argument("--prefill-source-tp-size", type=int, default=8,
-                        help="Physical Prefill attention TP / PageRR shard count for Decode")
-    parser.add_argument("--debug-four-layer", action="store_true",
-                        help="Use a four-layer diagnostic checkpoint; never counts as full-model acceptance")
+    parser.add_argument("--ep-size", type=int, help="Defaults to TP×DP")
+    parser.add_argument(
+        "--prefill-source-tp-size",
+        type=int,
+        default=8,
+        help="Physical Prefill attention TP / PageRR shard count for Decode",
+    )
+    parser.add_argument(
+        "--debug-four-layer",
+        action="store_true",
+        help="Use a four-layer diagnostic checkpoint; never counts as full-model acceptance",
+    )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--draft-checkpoint", required=True)
     parser.add_argument("--peer-ip", required=True)
@@ -338,29 +399,64 @@ def main():
     parser.add_argument("--peer-port", required=True, type=int)
     parser.add_argument("--server", required=True)
     parser.add_argument("--guard", required=True, help="weight_loader_guard.py")
-    parser.add_argument("--allow-hf3fs-root",
-                        help="Explicit 3FS checkpoint root; checked by the loader guard")
-    parser.add_argument("--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist")
-    parser.add_argument("--reserve-runtime-mem-mb", type=int, default=14336,
-                        help="Per-rank runtime reserve; validated PD427 used 14336 MiB")
+    parser.add_argument(
+        "--allow-hf3fs-root",
+        help="Explicit 3FS checkpoint root; checked by the loader guard",
+    )
+    parser.add_argument(
+        "--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist"
+    )
+    parser.add_argument(
+        "--reserve-runtime-mem-mb",
+        type=int,
+        default=14336,
+        help="Per-rank runtime reserve; validated PD427 used 14336 MiB",
+    )
     parser.add_argument(
         "--run-dir", required=True, help="New directory on a local data disk"
     )
     parser.add_argument("--print-config", action="store_true")
-    parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
-    parser.add_argument("--fp8-kv-cache", action="store_true", help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting")
-    parser.add_argument("--moe-strategy", choices=["mega_moe", "mega_moe_se"],
-                        default="mega_moe", help="Select the routed/shared MoE executor")
-    parser.add_argument("--orthogonal-smoke", action="store_true",
-                        help="Enable the complete 64K PageRR, Host cache, DCP and Graph smoke profile")
-    parser.add_argument("--memory-cache-size-mb", type=int, default=32768,
-                        help="Per-rank Prefill Host cache capacity in the orthogonal profile")
-    parser.add_argument("--kv-cache-mem-mb", type=int,
-                        help="Explicit per-rank Device KV cache capacity for bounded smoke profiles")
-    parser.add_argument("--allow-shared-accuracy", action="store_true",
-                        help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
-    parser.add_argument("--min-free-gib", type=float, default=250,
-                        help="Required free memory on each selected GPU (default: 250 GiB)")
+    parser.add_argument(
+        "--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM"
+    )
+    parser.add_argument(
+        "--fp8-kv-cache",
+        action="store_true",
+        help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting",
+    )
+    parser.add_argument(
+        "--moe-strategy",
+        choices=["mega_moe", "mega_moe_se"],
+        default="mega_moe",
+        help="Select the routed/shared MoE executor",
+    )
+    parser.add_argument(
+        "--orthogonal-smoke",
+        action="store_true",
+        help="Enable the complete 64K PageRR, Host cache, DCP and Graph smoke profile",
+    )
+    parser.add_argument(
+        "--memory-cache-size-mb",
+        type=int,
+        default=32768,
+        help="Per-rank Prefill Host cache capacity in the orthogonal profile",
+    )
+    parser.add_argument(
+        "--kv-cache-mem-mb",
+        type=int,
+        help="Explicit per-rank Device KV cache capacity for bounded smoke profiles",
+    )
+    parser.add_argument(
+        "--allow-shared-accuracy",
+        action="store_true",
+        help="Allow correctness-only coexistence after host-side isolation checks; never for performance",
+    )
+    parser.add_argument(
+        "--min-free-gib",
+        type=float,
+        default=250,
+        help="Required free memory on each selected GPU (default: 250 GiB)",
+    )
     args = parser.parse_args()
     if args.ep_size is None:
         args.ep_size = args.tp_size * args.dp_size
@@ -369,7 +465,9 @@ def main():
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return
     if pwd.getpwuid(os.getuid()).pw_name != "luohaocheng.lhc":
-        raise ValueError("Must run as luohaocheng.lhc inside the verified runtime container")
+        raise ValueError(
+            "Must run as luohaocheng.lhc inside the verified runtime container"
+        )
     run = Path(args.run_dir).resolve()
     require_local(run.parent)
     environment.update(cpu_tp_socket_environment(run))
@@ -398,7 +496,11 @@ def main():
         "DG_JIT_CACHE_DIR": "deep-gemm",
         "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     }.items():
-        cache_root = jit_cache_root if key in {"TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR"} and jit_cache_root else run
+        cache_root = (
+            jit_cache_root
+            if key in {"TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR"} and jit_cache_root
+            else run
+        )
         directory = cache_root / subdir
         directory.mkdir(exist_ok=bool(jit_cache_root))
         inherited[key] = str(directory)
@@ -408,12 +510,21 @@ def main():
         ("draft", args.draft_checkpoint),
     ):
         require_checkpoint_source(checkpoint, args.allow_hf3fs_root)
-        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint,
-                         "--load-method", "fastsafetensors"]
+        guard_command = [
+            sys.executable,
+            args.guard,
+            "preflight",
+            "--checkpoint",
+            checkpoint,
+            "--load-method",
+            "fastsafetensors",
+        ]
         if args.allow_hf3fs_root:
             guard_command.extend(["--allow-hf3fs-root", args.allow_hf3fs_root])
         else:
-            guard_command.extend(["--local-data-root", str(Path(checkpoint).resolve().parent)])
+            guard_command.extend(
+                ["--local-data-root", str(Path(checkpoint).resolve().parent)]
+            )
         with (run / f"{label}-preflight.txt").open("w") as output:
             subprocess.run(
                 guard_command,
@@ -423,11 +534,14 @@ def main():
                 check=True,
             )
     # This is an additional final check, not a replacement for fleet selection.
-    require_gpu_capacity(run, args.allow_shared_accuracy, args.min_free_gib,
-                         args.tp_size * args.dp_size)
+    require_gpu_capacity(
+        run, args.allow_shared_accuracy, args.min_free_gib, args.tp_size * args.dp_size
+    )
     ports = []
     try:
-        for port in range(args.start_port, args.start_port + args.tp_size * args.dp_size * 9):
+        for port in range(
+            args.start_port, args.start_port + args.tp_size * args.dp_size * 9
+        ):
             sock = socket.socket()
             ports.append(sock)
             sock.bind(("0.0.0.0", port))

@@ -2,12 +2,11 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-
 
 LAUNCHER = Path(__file__).with_name("launch_bf16.py")
 spec = importlib.util.spec_from_file_location("k3_launch_bf16", LAUNCHER)
@@ -24,9 +23,15 @@ class CheckpointSourceTest(unittest.TestCase):
             draft.mkdir()
             (target / "config.json").write_text('{"num_hidden_layers":93}')
             args = SimpleNamespace(
-                checkpoint=str(target), draft_checkpoint=str(draft),
-                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="DECODE", server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=False,
+                checkpoint=str(target),
+                draft_checkpoint=str(draft),
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="127.0.0.1",
+                role="DECODE",
+                server="/bin/true",
+                moe_strategy="mega_moe",
+                orthogonal_smoke=False,
             )
             _, command = launch.launch_config(args)
             options = dict(zip(command[1::2], command[2::2]))
@@ -49,10 +54,18 @@ class CheckpointSourceTest(unittest.TestCase):
                 ("DECODE", 4, 4, 8, "1,2,4,8,16,32"),
             ):
                 args = SimpleNamespace(
-                    checkpoint=str(target), draft_checkpoint=str(draft),
-                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
-                    tp_size=tp, dp_size=dp, ep_size=tp * dp,
+                    checkpoint=str(target),
+                    draft_checkpoint=str(draft),
+                    start_port=28000,
+                    peer_port=29000,
+                    peer_ip="127.0.0.1",
+                    role=role,
+                    server="/bin/true",
+                    moe_strategy="mega_moe",
+                    orthogonal_smoke=True,
+                    tp_size=tp,
+                    dp_size=dp,
+                    ep_size=tp * dp,
                     prefill_source_tp_size=source_tp,
                 )
                 env, command = launch.launch_config(args)
@@ -64,15 +77,22 @@ class CheckpointSourceTest(unittest.TestCase):
                 if role == "DECODE":
                     self.assertEqual(options["--prefill_cp_size"], str(source_tp))
                     self.assertEqual(options["--decode_capture_config"], capture)
-                    self.assertEqual(int(options["--max_context_batch_size"]),
-                                     max(map(int, capture.split(","))))
+                    self.assertEqual(
+                        int(options["--max_context_batch_size"]),
+                        max(map(int, capture.split(","))),
+                    )
 
     def test_gpu_process_placeholder_is_not_an_occupier(self):
         gpu_rows = "".join(f"{index}, GPU-{index}, 274114\n" for index in range(8))
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(launch.subprocess, "check_output", side_effect=[
-                gpu_rows, "GPU-0, [N/A], [N/A]\n",
-            ]):
+            with patch.object(
+                launch.subprocess,
+                "check_output",
+                side_effect=[
+                    gpu_rows,
+                    "GPU-0, [N/A], [N/A]\n",
+                ],
+            ):
                 launch.require_gpu_capacity(Path(tmp), min_free_gib=250)
             self.assertTrue((Path(tmp) / "gpu-preflight.json").is_file())
 
@@ -86,11 +106,19 @@ class CheckpointSourceTest(unittest.TestCase):
             (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
             for role in ("PREFILL", "DECODE"):
                 args = SimpleNamespace(
-                    checkpoint=str(target), draft_checkpoint=str(draft),
-                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
-                    fp8_gemm=True, fp8_kv_cache=True,
-                    memory_cache_size_mb=8192, kv_cache_mem_mb=4096,
+                    checkpoint=str(target),
+                    draft_checkpoint=str(draft),
+                    start_port=28000,
+                    peer_port=29000,
+                    peer_ip="127.0.0.1",
+                    role=role,
+                    server="/bin/true",
+                    moe_strategy="mega_moe",
+                    orthogonal_smoke=True,
+                    fp8_gemm=True,
+                    fp8_kv_cache=True,
+                    memory_cache_size_mb=8192,
+                    kv_cache_mem_mb=4096,
                 )
                 env, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
@@ -106,12 +134,15 @@ class CheckpointSourceTest(unittest.TestCase):
                 self.assertEqual(options["--max_batch_tokens_without_cache"], "65536")
                 self.assertEqual(options["--concurrency_limit"], "64")
                 self.assertEqual(options["--kv_cache_mem_mb"], "4096")
-                self.assertEqual(options["--enable_memory_cache"],
-                                 "1" if role == "PREFILL" else "0")
-                self.assertEqual(options["--reuse_cache"],
-                                 "1" if role == "PREFILL" else "0")
-                self.assertEqual(options["--enable_cuda_graph"],
-                                 "0" if role == "PREFILL" else "1")
+                self.assertEqual(
+                    options["--enable_memory_cache"], "1" if role == "PREFILL" else "0"
+                )
+                self.assertEqual(
+                    options["--reuse_cache"], "1" if role == "PREFILL" else "0"
+                )
+                self.assertEqual(
+                    options["--enable_cuda_graph"], "0" if role == "PREFILL" else "1"
+                )
                 self.assertEqual(options["--fp8_kv_cache"], "1")
                 if role == "PREFILL":
                     self.assertEqual(options["--max_context_batch_size"], "64")
@@ -122,8 +153,9 @@ class CheckpointSourceTest(unittest.TestCase):
                     self.assertEqual(env["NCCL_MAX_CTAS"], "8")
                     self.assertEqual(options["--prefill_cp_kv_cache_sharded"], "1")
                     self.assertEqual(options["--prefill_cp_size"], "8")
-                    self.assertEqual(options["--decode_capture_config"],
-                                     "1,2,4,8,16,32,64")
+                    self.assertEqual(
+                        options["--decode_capture_config"], "1,2,4,8,16,32,64"
+                    )
 
     def test_complete_prefill_smoke_bounds_device_cache_for_host_demotion(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
@@ -134,9 +166,15 @@ class CheckpointSourceTest(unittest.TestCase):
             (target / "config.json").write_text('{"num_hidden_layers":93}')
             for role in ("PREFILL", "DECODE"):
                 args = SimpleNamespace(
-                    checkpoint=str(target), draft_checkpoint=str(draft),
-                    start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                    role=role, server="/bin/true", moe_strategy="mega_moe", orthogonal_smoke=True,
+                    checkpoint=str(target),
+                    draft_checkpoint=str(draft),
+                    start_port=28000,
+                    peer_port=29000,
+                    peer_ip="127.0.0.1",
+                    role=role,
+                    server="/bin/true",
+                    moe_strategy="mega_moe",
+                    orthogonal_smoke=True,
                 )
                 _, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
@@ -144,16 +182,24 @@ class CheckpointSourceTest(unittest.TestCase):
                     self.assertEqual(options["--kv_cache_mem_mb"], "4096")
                 else:
                     self.assertEqual(options["--kv_cache_mem_mb"], "34000")
-            (target / "config.json").write_text(json.dumps({
-                "num_hidden_layers": 4, "attn_res_block_size": 12,
-                "linear_attn_config": {"kda_layers": [1, 2, 3],
-                                       "full_attn_layers": [4]},
-            }))
+            (target / "config.json").write_text(
+                json.dumps(
+                    {
+                        "num_hidden_layers": 4,
+                        "attn_res_block_size": 12,
+                        "linear_attn_config": {
+                            "kda_layers": [1, 2, 3],
+                            "full_attn_layers": [4],
+                        },
+                    }
+                )
+            )
             args.role = "PREFILL"
             args.debug_four_layer = True
             _, command = launch.launch_config(args)
-            self.assertEqual(dict(zip(command[1::2], command[2::2]))["--kv_cache_mem_mb"],
-                             "256")
+            self.assertEqual(
+                dict(zip(command[1::2], command[2::2]))["--kv_cache_mem_mb"], "256"
+            )
 
     def test_rpc_self_address_bypasses_proxy(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
@@ -164,12 +210,21 @@ class CheckpointSourceTest(unittest.TestCase):
             draft.mkdir()
             (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
             args = SimpleNamespace(
-                checkpoint=str(target), draft_checkpoint=str(draft),
-                start_port=28000, peer_port=29000, peer_ip="11.163.39.115",
-                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
+                checkpoint=str(target),
+                draft_checkpoint=str(draft),
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="11.163.39.115",
+                role="PREFILL",
+                server="/bin/true",
+                moe_strategy="mega_moe",
+                allow_hf3fs_root=str(root),
             )
             with patch.object(launch.socket, "socket") as route_socket:
-                route_socket.return_value.getsockname.return_value = ("11.163.39.114", 54321)
+                route_socket.return_value.getsockname.return_value = (
+                    "11.163.39.114",
+                    54321,
+                )
                 environment, _ = launch.launch_config(args)
             for key in ("NO_PROXY", "no_proxy"):
                 self.assertIn("11.163.39.114", environment[key].split(","))
@@ -184,9 +239,15 @@ class CheckpointSourceTest(unittest.TestCase):
             draft.mkdir()
             (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
             args = SimpleNamespace(
-                checkpoint=str(target), draft_checkpoint=str(draft),
-                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
+                checkpoint=str(target),
+                draft_checkpoint=str(draft),
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="127.0.0.1",
+                role="PREFILL",
+                server="/bin/true",
+                moe_strategy="mega_moe",
+                allow_hf3fs_root=str(root),
             )
             environment, _ = launch.launch_config(args)
             self.assertEqual(environment["FASTSAFETENSORS_NOGDS"], "0")
@@ -201,11 +262,19 @@ class CheckpointSourceTest(unittest.TestCase):
             draft.mkdir()
             (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
             args = SimpleNamespace(
-                checkpoint=str(target), draft_checkpoint=str(draft),
-                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
-                role="PREFILL", server="/bin/true", moe_strategy="mega_moe", allow_hf3fs_root=str(root),
+                checkpoint=str(target),
+                draft_checkpoint=str(draft),
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="127.0.0.1",
+                role="PREFILL",
+                server="/bin/true",
+                moe_strategy="mega_moe",
+                allow_hf3fs_root=str(root),
             )
-            with patch.dict(launch.os.environ, {"MEGA_MOE_INPUT_PACKER_IMPL": "optimized"}):
+            with patch.dict(
+                launch.os.environ, {"MEGA_MOE_INPUT_PACKER_IMPL": "optimized"}
+            ):
                 environment, _ = launch.launch_config(args)
             self.assertEqual(environment["MEGA_MOE_INPUT_PACKER_IMPL"], "optimized")
 
@@ -216,7 +285,11 @@ class CheckpointSourceTest(unittest.TestCase):
             other = Path(tmp) / "other"
             model.mkdir(parents=True)
             other.mkdir()
-            with patch.object(launch.subprocess, "check_output", return_value="fuse.hf3fs\nfuse.hf3fs\n"):
+            with patch.object(
+                launch.subprocess,
+                "check_output",
+                return_value="fuse.hf3fs\nfuse.hf3fs\n",
+            ):
                 launch.require_checkpoint_source(model, root)
                 with self.assertRaises(ValueError):
                     launch.require_checkpoint_source(other, root)

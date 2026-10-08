@@ -44,11 +44,9 @@ class CudaGraphRunner: public GraphBase {
 public:
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               max_seq_len,
-                                                size_t               max_reserved_step);
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               fake_physical_block_count);
+    static int64_t
+    captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
@@ -101,7 +99,7 @@ public:
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
         if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
             const int unit = sequence_parallel_size_ / std::gcd(sequence_parallel_size_, num_tokens_per_bs_);
-            max_bs_ = (max_bs_ + unit - 1) / unit * unit;
+            max_bs_        = (max_bs_ + unit - 1) / unit * unit;
         }
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
@@ -208,8 +206,7 @@ private:
         // DSpARK propose/commit run as decode graphs. HC-shaped drafts and
         // model-declared rectangular draft attention retain the full physical
         // capacity across every MTP draft-prefill capture bucket.
-        return isMtpDraftPrefillCudaGraph()
-               && (hc_mult_ > 1 || fixed_capacity_mtp_draft_prefill_);
+        return isMtpDraftPrefillCudaGraph() && (hc_mult_ > 1 || fixed_capacity_mtp_draft_prefill_);
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);

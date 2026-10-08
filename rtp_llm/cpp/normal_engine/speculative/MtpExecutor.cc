@@ -909,8 +909,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // Draft prefill uses one block; draft decode uses 1 + gamma.
             RTP_LLM_CHECK_WITH_INFO(params.sp_config.gen_num_per_cycle >= 0,
                                     "draft CUDA graph speculative cycle count must be non-negative");
-            const size_t fake_count = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
-            const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+            const size_t fake_count               = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
+            const size_t fake_width               = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
             model_params.kernel_block_table_width = std::max(real_width, fake_width);
         }
 #endif
@@ -2015,7 +2015,7 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (batch_stream_processor_->usesFixedMtpUpdateLayout()) {
         // Prepare the same paged MTP phase that will replay after rejection,
         // rather than inheriting the target-verify flag from this snapshot.
-        model_input_copy.is_target_verify = false;
+        model_input_copy.is_target_verify    = false;
         model_input_copy.is_mtp_draft_update = true;
     }
     applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
@@ -2034,19 +2034,20 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
-    model_input.is_target_verify = true;
+    model_input.is_target_verify     = true;
     static const bool smoke_evidence = [] {
         const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
         return value != nullptr && std::strcmp(value, "1") == 0;
     }();
     if (smoke_evidence) {
-        RTP_LLM_LOG_INFO(
-            "[K3_SMOKE_EVENT] {\"event\":\"mtp_target_verify_forward\","
-            "\"input_rows\":%ld,\"stream_count\":%zu,\"token_rows\":%ld,\"time_ns\":%ld}",
-            model_input.input_lengths.size(0), stream_groups.allStreams().size(),
-            model_input.combo_tokens.numel(),
-            static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count()));
+        RTP_LLM_LOG_INFO("[K3_SMOKE_EVENT] {\"event\":\"mtp_target_verify_forward\","
+                         "\"input_rows\":%ld,\"stream_count\":%zu,\"token_rows\":%ld,\"time_ns\":%ld}",
+                         model_input.input_lengths.size(0),
+                         stream_groups.allStreams().size(),
+                         model_input.combo_tokens.numel(),
+                         static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count()));
     }
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
@@ -2556,18 +2557,20 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     torch::Tensor              spec_prefix_lengths;
 
     // update TP > 0 batch_size
-    size_t     batch_size       = model_input.combo_tokens.size(0);
+    size_t            batch_size     = model_input.combo_tokens.size(0);
     static const bool smoke_evidence = [] {
         const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
         return value != nullptr && std::strcmp(value, "1") == 0;
     }();
     if (smoke_evidence) {
-        RTP_LLM_LOG_INFO(
-            "[K3_SMOKE_EVENT] {\"event\":\"mtp_draft_decode_forward\","
-            "\"input_rows\":%zu,\"stream_count\":%zu,\"propose_step\":%d,\"time_ns\":%ld}",
-            batch_size, stream_groups.allStreams().size(), propose_step_,
-            static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count()));
+        RTP_LLM_LOG_INFO("[K3_SMOKE_EVENT] {\"event\":\"mtp_draft_decode_forward\","
+                         "\"input_rows\":%zu,\"stream_count\":%zu,\"propose_step\":%d,\"time_ns\":%ld}",
+                         batch_size,
+                         stream_groups.allStreams().size(),
+                         propose_step_,
+                         static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count()));
     }
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {

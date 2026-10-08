@@ -304,9 +304,9 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+                                              {static_cast<int64_t>(group_tags.size()),
+                                               static_cast<int64_t>(batch_size),
+                                               static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -548,8 +548,8 @@ Scenario makeScenario(const std::string& name) {
     if (name == "sp_padded_multi_tag" || name == "sp_padded_single_tag") {
         auto scenario = makeMultiTagScenario();
         if (name == "sp_padded_single_tag") {
-            scenario = makeMtpScenario();
-            scenario.inputs.kv_cache_block_id = scenario.inputs.kv_cache_block_id[0];
+            scenario                                 = makeMtpScenario();
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id[0];
             scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id[0];
         }
         scenario.parallelism.tp_size = 8;
@@ -615,7 +615,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     MlaOpsType::AUTO);
     });
 
-    const bool inspect_padding = scenario_name.rfind("request_padding ", 0) == 0;
+    const bool inspect_padding  = scenario_name.rfind("request_padding ", 0) == 0;
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
     const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
                                || scenario_name == "micro_batch_split_single_group"
@@ -627,29 +627,33 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     auto       scenario       = makeScenario(inspect_padding ? "multi_tag" : input_scenario);
     if (inspect_padding) {
         std::istringstream parameters(scenario_name);
-        std::string name;
-        int tp = 0, batch = 0, width = 0, prefill = 0, grouped = 0, update = 0;
+        std::string        name;
+        int                tp = 0, batch = 0, width = 0, prefill = 0, grouped = 0, update = 0;
         parameters >> name >> tp >> batch >> width >> prefill >> grouped >> update;
         RTP_LLM_CHECK_WITH_INFO(parameters && batch > 0 && width > 0, "invalid request padding test geometry");
-        scenario.parallelism.tp_size = tp;
-        const int tokens = batch * width + prefill;
-        const auto host = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+        scenario.parallelism.tp_size  = tp;
+        const int  tokens             = batch * width + prefill;
+        const auto host               = torch::TensorOptions(torch::kInt32).pinned_memory(true);
         scenario.inputs.input_lengths = torch::full({batch}, width, host);
-        if (prefill) scenario.inputs.input_lengths[0] += 1;
-        scenario.inputs.prefix_lengths = (prefill || width > 1) ? torch::full({batch}, 65535, host) : torch::empty({0}, host);
-        scenario.inputs.sequence_lengths = (!prefill && width == 1) ? torch::full({batch}, 65535, host) : torch::empty({0}, host);
+        if (prefill)
+            scenario.inputs.input_lengths[0] += 1;
+        scenario.inputs.prefix_lengths =
+            (prefill || width > 1) ? torch::full({batch}, 65535, host) : torch::empty({0}, host);
+        scenario.inputs.sequence_lengths =
+            (!prefill && width == 1) ? torch::full({batch}, 65535, host) : torch::empty({0}, host);
         scenario.inputs.sequence_lengths_plus_1 = torch::full({batch}, 65536, host);
-        scenario.inputs.combo_tokens = torch::arange(tokens, host);
-        scenario.inputs.combo_position_ids = torch::arange(tokens, host);
-        scenario.inputs.text_tokens_mask = torch::ones({tokens}, host);
-        scenario.inputs.last_hidden_states = torch::arange(tokens * 2, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({tokens, 2});
-        scenario.inputs.lm_output_indexes = torch::arange(batch, host) * width + width - 1 + prefill;
-        scenario.inputs.is_target_verify = !prefill && width > 1 && !update;
-        scenario.inputs.is_mtp_draft_update = !prefill && update;
-        scenario.inputs.kv_cache_block_id = torch::arange(2 * batch * 3, host).reshape({2, batch, 3}) + 1;
+        scenario.inputs.combo_tokens            = torch::arange(tokens, host);
+        scenario.inputs.combo_position_ids      = torch::arange(tokens, host);
+        scenario.inputs.text_tokens_mask        = torch::ones({tokens}, host);
+        scenario.inputs.last_hidden_states =
+            torch::arange(tokens * 2, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({tokens, 2});
+        scenario.inputs.lm_output_indexes        = torch::arange(batch, host) * width + width - 1 + prefill;
+        scenario.inputs.is_target_verify         = !prefill && width > 1 && !update;
+        scenario.inputs.is_mtp_draft_update      = !prefill && update;
+        scenario.inputs.kv_cache_block_id        = torch::arange(2 * batch * 3, host).reshape({2, batch, 3}) + 1;
         scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_block_id + 100;
         if (!grouped) {
-            scenario.inputs.kv_cache_block_id = scenario.inputs.kv_cache_block_id[0];
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id[0];
             scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id[0];
         }
     }
@@ -709,20 +713,20 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
         PyWrappedModel model(params, std::move(py_model));
         if (inspect_padding) {
             const auto padded = PyWrappedModelTestPeer::padInputs(model, scenario.inputs);
-            py::dict result;
-            result["tokens"] = padded.combo_tokens;
-            result["positions"] = padded.combo_position_ids;
-            result["hidden"] = padded.last_hidden_states;
-            result["mask"] = padded.text_tokens_mask;
-            result["input_lengths"] = padded.input_lengths;
-            result["prefix_lengths"] = padded.prefix_lengths;
-            result["sequence_lengths"] = padded.sequence_lengths;
+            py::dict   result;
+            result["tokens"]                  = padded.combo_tokens;
+            result["positions"]               = padded.combo_position_ids;
+            result["hidden"]                  = padded.last_hidden_states;
+            result["mask"]                    = padded.text_tokens_mask;
+            result["input_lengths"]           = padded.input_lengths;
+            result["prefix_lengths"]          = padded.prefix_lengths;
+            result["sequence_lengths"]        = padded.sequence_lengths;
             result["sequence_lengths_plus_1"] = padded.sequence_lengths_plus_1;
-            result["physical_table"] = padded.kv_cache_block_id;
-            result["kernel_table"] = padded.kv_cache_kernel_block_id;
-            result["logical_requests"] = padded.sp_logical_requests;
-            result["logical_tokens"] = padded.sp_logical_tokens;
-            result["output_indexes"] = padded.lm_output_indexes;
+            result["physical_table"]          = padded.kv_cache_block_id;
+            result["kernel_table"]            = padded.kv_cache_kernel_block_id;
+            result["logical_requests"]        = padded.sp_logical_requests;
+            result["logical_tokens"]          = padded.sp_logical_tokens;
+            result["output_indexes"]          = padded.lm_output_indexes;
             return result;
         }
         if (inspect_split) {

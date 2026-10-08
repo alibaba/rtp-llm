@@ -36,8 +36,9 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 
 }  // namespace
 
-GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
-    const GptModelOutputs& target_output, const torch::Tensor& accept_lengths, int64_t verify_width) {
+GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(const GptModelOutputs& target_output,
+                                                                         const torch::Tensor&   accept_lengths,
+                                                                         int64_t                verify_width) {
     GptModelOutputs result;
     if (!target_output.logits.defined() && !target_output.hidden_states.defined()) {
         return result;
@@ -48,8 +49,7 @@ GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
                 "Target diagnostic accepted lengths must be integers");
     // Diagnostic requests already return device tensors to the host. Keep this
     // validation off the default path, and reject invalid rows rather than clamp.
-    TORCH_CHECK(accept_lengths.min().item<int64_t>() >= 1
-                    && accept_lengths.max().item<int64_t>() <= verify_width,
+    TORCH_CHECK(accept_lengths.min().item<int64_t>() >= 1 && accept_lengths.max().item<int64_t>() <= verify_width,
                 "Target diagnostic accepted length is outside the verify window");
     auto gather = [&](const torch::Tensor& values) {
         if (!values.defined()) {
@@ -63,7 +63,7 @@ GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
         // index_select allocates: these outputs cannot alias graph buffers.
         return values.index_select(0, rows);
     };
-    result.logits = gather(target_output.logits);
+    result.logits        = gather(target_output.logits);
     result.hidden_states = gather(target_output.hidden_states);
     return result;
 }
@@ -336,7 +336,7 @@ dsparkRoundHeadState(const StreamGroups& stream_groups, const GptModelInputs& mo
 }
 
 torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
-    const auto state          = stream->getMtpAsyncDeviceState();
+    const auto  state         = stream->getMtpAsyncDeviceState();
     const auto& accept_tokens = state.accept_tokens_gpu;
     const auto& accept_len    = state.accept_len_gpu;
     if (useMtpDeviceState() && accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined()
@@ -438,8 +438,8 @@ void logMtpStateFallback(const GenerateStreamPtr& stream, const char* reason) {
     if (!shouldLogFallback(count)) {
         return;
     }
-    const auto  mtp_state        = stream->getMtpAsyncDeviceState();
-    auto        sp_output_buffer = stream->getSPOutputBuffer();
+    const auto mtp_state        = stream->getMtpAsyncDeviceState();
+    auto       sp_output_buffer = stream->getSPOutputBuffer();
     RTP_LLM_LOG_INFO("[mtp-async-fallback] reason=%s stream=%ld epoch=%lu fallback_count=%lu success_count=%lu "
                      "tensors_holder_size=%zu seq_len=%d",
                      reason,
@@ -620,7 +620,7 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
     };
 
     std::map<std::pair<int64_t, int64_t>, SnapshotBucket> buckets;
-    int64_t                                                row = 0;
+    int64_t                                               row = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state        = stream->getMtpAsyncDeviceState();
         const bool use_snapshot = GenerateStream::hasMtpCacheSnapshot(state);
@@ -630,13 +630,12 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
                                     stream->streamId());
             const auto& physical = state.next_kv_cache_block_id_gpu;
             const auto& kernel   = state.next_kv_cache_kernel_block_id_gpu;
-            RTP_LLM_CHECK_WITH_INFO(
-                physical.defined() && physical.is_cuda() && physical.scalar_type() == torch::kInt32
-                    && physical.dim() == 3 && physical.size(1) == 1 && kernel.defined() && kernel.is_cuda()
-                    && kernel.scalar_type() == torch::kInt32 && kernel.dim() == 3
-                    && kernel.size(1) == 1,
-                "MTP cache snapshots require CUDA int32 [group,1,blocks] physical/kernel tensors");
-            auto&       bucket   = buckets[{physical.size(2), kernel.size(2)}];
+            RTP_LLM_CHECK_WITH_INFO(physical.defined() && physical.is_cuda() && physical.scalar_type() == torch::kInt32
+                                        && physical.dim() == 3 && physical.size(1) == 1 && kernel.defined()
+                                        && kernel.is_cuda() && kernel.scalar_type() == torch::kInt32
+                                        && kernel.dim() == 3 && kernel.size(1) == 1,
+                                    "MTP cache snapshots require CUDA int32 [group,1,blocks] physical/kernel tensors");
+            auto& bucket = buckets[{physical.size(2), kernel.size(2)}];
             // Keep the immutable device snapshots alive through the asynchronous
             // overlay copies below, without reading their mutable host rows.
             host_holder.hold(physical);
@@ -657,33 +656,31 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
     // sources alive until the non-blocking copies complete.
     model_input.kv_cache_block_id        = toCudaInt32(model_input.kv_cache_block_id, host_holder);
     model_input.kv_cache_kernel_block_id = toCudaInt32(model_input.kv_cache_kernel_block_id, host_holder);
-    RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.defined() && model_input.kv_cache_block_id.is_cuda()
-                                && model_input.kv_cache_block_id.scalar_type() == torch::kInt32
-                                && model_input.kv_cache_block_id.dim() == 3
-                                && model_input.kv_cache_kernel_block_id.defined()
-                                && model_input.kv_cache_kernel_block_id.is_cuda()
-                                && model_input.kv_cache_kernel_block_id.scalar_type() == torch::kInt32
-                                && model_input.kv_cache_kernel_block_id.dim() == 3,
-                            "MTP cache snapshot overlay requires physical and kernel CUDA int32 destinations "
-                            "[group,batch,blocks]");
+    RTP_LLM_CHECK_WITH_INFO(
+        model_input.kv_cache_block_id.defined() && model_input.kv_cache_block_id.is_cuda()
+            && model_input.kv_cache_block_id.scalar_type() == torch::kInt32 && model_input.kv_cache_block_id.dim() == 3
+            && model_input.kv_cache_kernel_block_id.defined() && model_input.kv_cache_kernel_block_id.is_cuda()
+            && model_input.kv_cache_kernel_block_id.scalar_type() == torch::kInt32
+            && model_input.kv_cache_kernel_block_id.dim() == 3,
+        "MTP cache snapshot overlay requires physical and kernel CUDA int32 destinations "
+        "[group,batch,blocks]");
 
-    auto overlay = [](torch::Tensor& destination,
-                      const std::vector<torch::Tensor>& sources,
-                      const std::vector<int64_t>&       rows) {
-        auto source = torch::cat(sources, 1);
-        RTP_LLM_CHECK_WITH_INFO(source.size(0) == destination.size(0),
-                                "MTP cache snapshot group mismatch: source=%ld destination=%ld",
-                                source.size(0),
-                                destination.size(0));
-        RTP_LLM_CHECK_WITH_INFO(source.size(2) <= destination.size(2),
-                                "MTP cache snapshot exceeds destination width: source=%ld destination=%ld",
-                                source.size(2),
-                                destination.size(2));
-        const int64_t copy_width = source.size(2);
-        auto row_indices = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64))
-                               .to(destination.device(), /*non_blocking=*/true);
-        destination.narrow(2, 0, copy_width).index_copy_(1, row_indices, source);
-    };
+    auto overlay =
+        [](torch::Tensor& destination, const std::vector<torch::Tensor>& sources, const std::vector<int64_t>& rows) {
+            auto source = torch::cat(sources, 1);
+            RTP_LLM_CHECK_WITH_INFO(source.size(0) == destination.size(0),
+                                    "MTP cache snapshot group mismatch: source=%ld destination=%ld",
+                                    source.size(0),
+                                    destination.size(0));
+            RTP_LLM_CHECK_WITH_INFO(source.size(2) <= destination.size(2),
+                                    "MTP cache snapshot exceeds destination width: source=%ld destination=%ld",
+                                    source.size(2),
+                                    destination.size(2));
+            const int64_t copy_width  = source.size(2);
+            auto          row_indices = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64))
+                                   .to(destination.device(), /*non_blocking=*/true);
+            destination.narrow(2, 0, copy_width).index_copy_(1, row_indices, source);
+        };
 
     for (auto& [widths, bucket] : buckets) {
         (void)widths;
@@ -953,7 +950,7 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
     if (batch_size == 0) {
         return false;
     }
-    const auto all_streams = stream_groups.allStreams();
+    const auto                                       all_streams = stream_groups.allStreams();
     std::vector<GenerateStream::MtpAsyncDeviceState> states;
     states.reserve(batch_size);
     for (const auto& stream : all_streams) {
@@ -1082,34 +1079,45 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
     // The default one-dimensional position policy reuses the final input
     // position for the sampled token. Other styles keep the stream policy below.
-    const bool shift_default_positions = model_input.combo_position_ids.defined()
+    const bool shift_default_positions =
+        model_input.combo_position_ids.defined()
         && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
         && model_input_gatherer_config_.position_id_len_factor == 1;
     if (!model_input.combo_position_ids.defined() || shift_default_positions) {
         const int64_t token_stride = new_all_token_ids.size(1);
         RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
-                                "invalid MTP Prefill sample stride: %ld", token_stride);
+                                "invalid MTP Prefill sample stride: %ld",
+                                token_stride);
         auto input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder).contiguous();
         auto combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder).contiguous();
         auto sampled_d = new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
         if (sampled_d.scalar_type() != torch::kInt32) {
             sampled_d = sampled_d.to(torch::kInt32);
         }
-        sampled_d = sampled_d.contiguous();
+        sampled_d      = sampled_d.contiguous();
         auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
         auto shifted_d = torch::empty_like(combo_tokens_d);
 #if USING_CUDA
         if (shift_default_positions) {
-            auto positions_d = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
+            auto positions_d         = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
             auto shifted_positions_d = torch::empty_like(positions_d);
-            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
-                                        sampled_d, shifted_d, positions_d, shifted_positions_d,
+            invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                        input_lengths_d,
+                                        offsets_d,
+                                        sampled_d,
+                                        shifted_d,
+                                        positions_d,
+                                        shifted_positions_d,
                                         static_cast<int32_t>(token_stride),
                                         cuda_graph::graphGetCurrentStream().stream());
             model_input.combo_position_ids = shifted_positions_d;
         } else {
-            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
-                                        sampled_d, shifted_d, static_cast<int32_t>(token_stride),
+            invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                        input_lengths_d,
+                                        offsets_d,
+                                        sampled_d,
+                                        shifted_d,
+                                        static_cast<int32_t>(token_stride),
                                         cuda_graph::graphGetCurrentStream().stream());
         }
 #else
@@ -1215,12 +1223,11 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
     const int64_t token_count = batch_size * propose_step_;
     if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
         if (!dspark_sample_from_anchor_) {
-            dspark_lm_indexes_cache_ =
-                torch::arange(batch_size * dsparkQueryWidth(), cudaInt32Options())
-                    .view({batch_size, dsparkQueryWidth()})
-                    .narrow(1, 1, propose_step_)
-                    .contiguous()
-                    .view({-1});
+            dspark_lm_indexes_cache_ = torch::arange(batch_size * dsparkQueryWidth(), cudaInt32Options())
+                                           .view({batch_size, dsparkQueryWidth()})
+                                           .narrow(1, 1, propose_step_)
+                                           .contiguous()
+                                           .view({-1});
         } else {
             dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
         }
@@ -1355,7 +1362,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
-    model_input.is_target_verify = false;
+    model_input.is_target_verify    = false;
     model_input.is_mtp_draft_update = false;
     if (!usesFixedMtpUpdateLayout() && !useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
@@ -1429,22 +1436,22 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // Keep the target's B x Q geometry for paged MTP update in both sync and
     // device-state scheduling. Candidate rows beyond accept_len are overwritten
     // next round; only accepted positions advance the stream's logical cache.
-    model_input.is_target_verify = false;
+    model_input.is_target_verify    = false;
     model_input.is_mtp_draft_update = true;
-    const int64_t width = propose_step_ + 1;
-    const int64_t total_tokens = width * static_cast<int64_t>(batch_size);
+    const int64_t width             = propose_step_ + 1;
+    const int64_t total_tokens      = width * static_cast<int64_t>(batch_size);
     RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_tokens.numel() == total_tokens
-                               && speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
-                           "MTP update requires B x Q accepted-token slots");
+                                && speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
+                            "MTP update requires B x Q accepted-token slots");
     RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined()
-                               && model_output.all_hidden_states.size(0) == total_tokens,
-                           "MTP update requires one target hidden row per physical token");
+                                && model_output.all_hidden_states.size(0) == total_tokens,
+                            "MTP update requires one target hidden row per physical token");
     // Metadata remains Q-wide even for accept_len=1. Position IDs and cache
     // tables already describe this target-verify layout and are kept verbatim.
     if (usesFixedMtpUpdateLayout()) {
         RTP_LLM_CHECK_WITH_INFO(model_input.input_lengths.defined()
-                                   && model_input.input_lengths.numel() == static_cast<int64_t>(batch_size),
-                               "MTP update input_lengths must match the logical batch");
+                                    && model_input.input_lengths.numel() == static_cast<int64_t>(batch_size),
+                                "MTP update input_lengths must match the logical batch");
         auto options = model_input.input_lengths.options();
         if (model_input.input_lengths.device().is_cpu()) {
             options = options.pinned_memory(true);
