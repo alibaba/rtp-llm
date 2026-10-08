@@ -18,6 +18,32 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_upstream_linear_sm120",
+    srcs = ["test_v41_upstream_linear_sm120.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_engram",
+    srcs = ["test_engram.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_engram_cuda_sm120",
+    srcs = ["test_engram_cuda.py"],
+    main = "test_engram_cuda.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

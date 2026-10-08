@@ -13,6 +13,139 @@ from rtp_llm.models_py.utils.arch import is_sm120
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 
+class V41MXFP8Linear(torch.nn.Module):
+    """Upstream group32/packed-int32 interface with an SM120 GEMM adapter.
+
+    Ported from e4a9162f6f. Activation quantization remains upstream's native
+    recipe; the SM120 provider is called only with already quantized values.
+    Its standalone forward uses a different activation floor.
+    """
+
+    def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
+        super().__init__()
+        self.weight = weight
+        self.N, self.K = weight.shape
+        self._sm120_linear = None
+        if weight.is_cuda and is_sm120(weight.device):
+            from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import (
+                V41MXFP8Linear as SM120MXFP8Linear,
+            )
+
+            self._sm120_linear = SM120MXFP8Linear(weight, scales)
+            self.weight_scales = self._sm120_linear._packed_scales
+        else:
+            self.weight_scales = self.pack_scales(scales)
+
+    def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
+        if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
+            raise ValueError(
+                f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
+            )
+        if self._sm120_linear is not None:
+            return self._sm120_linear._interleave(
+                scales.view(torch.uint8).repeat_interleave(32, dim=0)
+            )
+        rows = torch.arange(self.N, device=scales.device) // 32
+        return get_mn_major_tma_aligned_packed_ue8m0_tensor(
+            scales.float().index_select(0, rows)
+        )
+
+    def _quantize_input(self, x: torch.Tensor):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+
+        flat = x.reshape(-1, self.K).contiguous()
+        quantized, scales = sgl_per_token_group_quant_fp8(
+            flat,
+            group_size=32,
+            eps=torch.finfo(torch.float32).tiny,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        return quantized.view(x.shape), scales
+
+    def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
+        """Consume group32 E4M3/packed UE8M0 without another quantization.
+
+        Deliberately no quantize_input method: the V4 input-reuse gate must
+        remain closed for this linear. The caller owns the BF16 norm tensor.
+        """
+        if (
+            x_q.ndim < 1
+            or x_q.shape[-1] != self.K
+            or x_q.dtype != torch.float8_e4m3fn
+            or not x_q.is_cuda
+            or x_q.device != self.weight.device
+            or not x_q.is_contiguous()
+        ):
+            raise ValueError("expected contiguous CUDA E4M3 [...,K] input")
+        m = x_q.numel() // self.K
+        if (
+            x_s.dtype != torch.int32
+            or x_s.device != x_q.device
+            or x_s.shape != (m, (self.K + 127) // 128)
+            or x_s.stride() != (1, max(1, (m + 3) // 4 * 4))
+        ):
+            raise ValueError("expected group32 column-major TMA packed UE8M0 scales")
+        shape = (*x_q.shape[:-1], self.N)
+        if out is not None and any(
+            torch._C._overlaps(out, source)
+            for source in (x_q, x_s, self.weight, self.weight_scales)
+        ):
+            raise ValueError(
+                "out must not share storage with quantized inputs or weights"
+            )
+        if out is not None and (
+            out.shape != shape
+            or out.dtype != torch.bfloat16
+            or out.device != x_q.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError("out must be contiguous BF16 [...,N] on the input device")
+        output = (
+            out
+            if out is not None
+            else torch.empty(shape, device=x_q.device, dtype=torch.bfloat16)
+        )
+        if m:
+            if self._sm120_linear is not None:
+                # Each int32 contains four consecutive group32 exponents.
+                # Force dense strides even for a singleton packed column:
+                # contiguous() may retain its padded last stride.
+                linear_scales = (
+                    x_s.clone(memory_format=torch.contiguous_format)
+                    .view(torch.uint8)[:, : self.K // 32]
+                    .contiguous()
+                )
+                self._sm120_linear.forward_quantized(
+                    x_q.reshape(m, self.K),
+                    linear_scales,
+                    out=output.reshape(m, self.N),
+                )
+                return output
+            import deep_gemm
+
+            deep_gemm.fp8_fp4_gemm_nt(
+                (x_q.reshape(m, self.K), x_s),
+                (self.weight, self.weight_scales),
+                output.reshape(m, self.N),
+                recipe=(1, 1, 32),
+            )
+        return output
+
+    def forward(self, x: torch.Tensor, out=None):
+        return self.forward_quantized(*self._quantize_input(x), out=out)
+
+
+def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:
+    return s.dtype == torch.float8_e8m0fnu and s.shape == (
+        (w.shape[0] + 31) // 32,
+        (w.shape[1] + 31) // 32,
+    )
+
+
 def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
     if scale.dtype != torch.int32:
         return scale.float().contiguous()
@@ -98,6 +231,8 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
+    if _is_v41_fp8_scale(w, s):
+        return V41MXFP8Linear(w, s)
     # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
     # Blackwell.  Keep the compact checkpoint scale for the SM120 CUTLASS
     # blockwise backend; only data-center architectures use the DeepGEMM
@@ -120,6 +255,8 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for flat dict callers."""
     w = weights[weight_key]
     s = weights[scale_key]
+    if _is_v41_fp8_scale(w, s):
+        return _v4_fp8_linear(w, s)
     from rtp_llm.models_py.utils.arch import is_sm120
 
     if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
