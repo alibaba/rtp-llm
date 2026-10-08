@@ -208,6 +208,8 @@ filegroup(
         "modules/dsv4/v41_collective.py",
         "modules/dsv4/v41_feed_forward.py",
         "modules/dsv4/v41_block.py",
+        "modules/dsv4/v41_stage_attention.py",
+        "modules/dsv4/v41_stage.py",
         "modules/dsv4/v41_attention.py",
         "modules/dsv4/v41_indexer.py",
         "modules/dsv4/v41_compressor.py",

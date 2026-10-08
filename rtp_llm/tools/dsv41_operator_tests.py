@@ -26,6 +26,7 @@ SUITES = (
     "expert",
     "feed_forward",
     "block",
+    "stage",
     "routed",
     "engram",
     "dispatch",

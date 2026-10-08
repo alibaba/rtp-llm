@@ -118,6 +118,24 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_stage_test",
+    srcs = ["dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_stage_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_stage_attention_test",
+    srcs = ["dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_stage_attention_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "dsv41_block_test",
     srcs = ["dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_block_test.py",

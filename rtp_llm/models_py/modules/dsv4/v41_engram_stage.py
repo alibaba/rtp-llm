@@ -232,6 +232,46 @@ class V41EngramStage:
                 out=out,
             )
 
+    def validate_forward(self, frame, valid_rows, *, dim):
+        """Preflight a model forward before any earlier layer can publish caches."""
+        with self._mutex:
+            self._check_ready()
+            self._check_capture()
+            if not self._sources:
+                if frame is not None:
+                    raise ValueError("A stage without Engram cannot receive hashes")
+                return
+            if (
+                not isinstance(frame, V41EngramForward)
+                or frame.owner is not self._owner
+            ):
+                raise ValueError(
+                    "Engram forward hashes belong to a different stage owner"
+                )
+            hashes = frame.hashes
+            if (
+                valid_rows.ndim != 1
+                or valid_rows.dtype != torch.bool
+                or valid_rows.device != self.device
+                or hashes.ids.shape
+                != (
+                    valid_rows.numel(),
+                    len(self._hasher.layout.layer_ids),
+                    self._hasher.layout.n_hash_cols,
+                )
+                or hashes.ids.dtype != torch.int64
+                or hashes.ids.device != self.device
+                or hashes.valid_rows.device != self.device
+                or not torch.equal(hashes.valid_rows, valid_rows)
+                or any(
+                    module.dim != dim or module.lanes != 4 or module.eps != 1e-20
+                    for module in self._modules.values()
+                )
+            ):
+                raise ValueError(
+                    "Engram forward mask or module geometry disagrees with the stage"
+                )
+
     def close(self):
         with self._mutex:
             self._check_worker()
