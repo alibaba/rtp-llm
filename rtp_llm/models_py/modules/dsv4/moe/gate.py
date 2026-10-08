@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.utils.arch import is_sm120
+
 # P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
@@ -187,6 +189,11 @@ class Gate(nn.Module):
                 torch.zeros((0, self.topk), dtype=torch.float32, device=x.device),
                 torch.zeros((0, self.topk), dtype=torch.long, device=x.device),
             )
+        rows = x.size(0)
+        # Use the same GEMM shape for single-token and gamma-3 verification
+        # batches. SM120's small-M algorithms otherwise round differently.
+        if rows < 8 and is_sm120(x.device):
+            x = F.pad(x, (0, 0, 0, 8 - rows))
         # P1 (plan_0427.md): BF16 GEMM with FP32 epilogue replaces the
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
@@ -196,6 +203,7 @@ class Gate(nn.Module):
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = F.linear(x_bf16, self._weight_bf16()).float()
+        scores = scores[:rows]
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 
@@ -204,7 +212,7 @@ class Gate(nn.Module):
         if (
             not self.hash
             and self.bias is not None
-            and _use_fused_gate(self.score_func, x.size(0))
+            and _use_fused_gate(self.score_func, rows)
         ):
             return fused_sqrtsoftplus_gate(
                 scores.contiguous(),

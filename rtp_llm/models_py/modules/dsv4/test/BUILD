@@ -281,6 +281,18 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_small_batch_projections",
+    srcs = ["test_sm120_small_batch_projections.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_mega_moe_input_packer",
     srcs = ["test_mega_moe_input_packer.py"],
     deps = [

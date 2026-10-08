@@ -39,9 +39,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
@@ -58,8 +60,13 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
+    rows = x_2d.shape[0]
+    # Decode and speculative verification must project identical token rows
+    # identically before FP8 KV quantization amplifies small rounding changes.
+    if x.ndim == 3 and 0 < rows < 8 and is_sm120(x.device):
+        x_2d = F.pad(x_2d, (0, 0, 0, 8 - rows))
     out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
-    return out_2d.reshape(*leading_shape, weight.shape[0])
+    return out_2d[:rows].reshape(*leading_shape, weight.shape[0])
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
