@@ -27,8 +27,6 @@ from rtp_llm.config.server_config_setup import (
 from rtp_llm.model_loader.weight_memory_saver import (
     limit_init_segment_splitting,
     prepare_expandable_coexistence,
-)
-from rtp_llm.model_loader.weight_memory_saver import (
     start_configured_process as start_memory_saver_configured_process,
 )
 from rtp_llm.utils.concurrency_controller import (
@@ -148,6 +146,8 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
             f"multi rank starts with resolved local world size: {local_world_size}, "
             f"world size = {py_env_configs.parallelism_config.world_size}"
         )
+    if local_world_size < 1:
+        raise ValueError(f"LOCAL_WORLD_SIZE must be positive, got {local_world_size}")
     visible_cuda_devices = torch.cuda.device_count()
     if local_world_size > visible_cuda_devices:
         raise ValueError(
