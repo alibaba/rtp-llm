@@ -289,12 +289,17 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
                          [1, 4, 8, 63, 64])
         self.assertEqual([sum(case.decode_owner_rank == rank for case in groups[4][1])
                           for rank in (0, 1)], [32, 32])
-        self.assertEqual(groups[4][2]["admission_wave_size"], 8)
-        self.assertEqual(groups[4][1][0].max_tokens, 64)  # four-layer diagnostic
+        self.assertIsNone(groups[4][2].get("admission_wave_size"))
+        self.assertEqual(groups[4][2].get("admission_gap_s", 0), 0)
+        self.assertEqual(groups[4][1][0].max_tokens, 512)
+        self.assertTrue(all(group[2]["grouped_pd"] for group in groups[1:]))
         smoke.args.suite = "main-text-64k-capped"
         groups.clear()
         smoke._orthogonal_decode_batches()
-        self.assertEqual(groups[4][1][0].max_tokens, 256)
+        self.assertTrue(groups[4][2]["grouped_pd"])
+        self.assertEqual(groups[3][1][0].max_tokens, 2560)
+        self.assertEqual(groups[4][1][0].max_tokens, 1280)
+        self.assertFalse(groups[2][2]["grouped_pd"])
 
     def test_cached_64k_crosses_decode_dp_owner_without_extra_requests(self):
         smoke = runner()

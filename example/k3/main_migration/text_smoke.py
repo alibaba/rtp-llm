@@ -2078,6 +2078,7 @@ class Runner:
 
     def _orthogonal_decode_batches(self) -> None:
         owner_count = max(1, len(self.decode_role_addrs))
+        diagnostic = self.args.suite == "orthogonal-flow"
         sizes = (1, 4, 8, 63, 64)
         for stage_index, size in enumerate(sizes):
             name = f"orthogonal_decode_{stage_index:02d}_batch_{size}"
@@ -2085,17 +2086,24 @@ class Runner:
             for index in range(size):
                 case = self.record_case(f"{name}_{index:02d}",
                                         index % owner_count,
-                                        words=12)
-                if self.args.suite == "orthogonal-flow":
+                                        words=(112 if size == 63 and not diagnostic else
+                                               56 if size >= 64 and not diagnostic else 12))
+                if diagnostic:
                     case = replace(case, expected_json=None, expected_regex=r".",
-                                   max_tokens=64)
+                                   max_tokens=512)
                 else:
-                    case = replace(case, max_tokens=256,
+                    # Keep all 32 rows of the larger DP owner alive while
+                    # the other owner's 31 rows join the same Verify step.
+                    case = replace(case,
+                                   max_tokens=(2560 if size == 63 else
+                                               1280 if size >= 64 else 256),
                                    require_mtp_draft=True, thinking_disabled=True)
                 cases.append(case)
+            # A PD group admits the large boundary batch in one Prefill
+            # forward. The longer exact answer keeps all Decode rows alive
+            # until both owners reach their intended Graph buckets.
             self._required_stage(name, cases, concurrent=size > 1,
-                                 admission_wave_size=8 if size > 8 else None,
-                                 admission_gap_s=1.0 if size > 8 else 0)
+                                 grouped_pd=(size > 1 if diagnostic else size >= 63))
 
     def _orthogonal_page_boundaries(self) -> None:
         owners = max(1, len(self.decode_role_addrs))
