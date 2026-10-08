@@ -24,6 +24,7 @@ SUITES = (
     "engram_inject",
     "mxfp8",
     "expert",
+    "feed_forward",
     "routed",
     "engram",
     "dispatch",

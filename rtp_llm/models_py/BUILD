@@ -206,6 +206,7 @@ filegroup(
         "modules/dsv4/v41_moe.py",
         "modules/dsv4/v41_dispatch.py",
         "modules/dsv4/v41_collective.py",
+        "modules/dsv4/v41_feed_forward.py",
         "modules/dsv4/v41_attention.py",
         "modules/dsv4/v41_indexer.py",
         "modules/dsv4/v41_compressor.py",

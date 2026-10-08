@@ -14,10 +14,16 @@ import types
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--without-engine-bindings", action="store_true")
+    parser.add_argument("--with-feed-forward", action="store_true")
+    parser.add_argument("--flashinfer-source-jit", action="store_true")
+    parser.add_argument("--extra-package-path", action="append", default=[])
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
+    sys.path.extend(args.extra_package_path)
+    if args.flashinfer_source_jit:
+        sys.modules["flashinfer_jit_cache"] = None
     if args.without_engine_bindings:
         package = types.ModuleType("rtp_llm.models_py.modules")
         package.__path__ = [str(root / "rtp_llm/models_py/modules")]
@@ -36,9 +42,18 @@ def main():
     from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout
     from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
     from rtp_llm.models_py.modules.dsv4.v41_routed import V41RoutedExperts
+    from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_expert_hardware import (
+        V41ExpertHardwareTest,
+    )
+    from rtp_llm.models_py.modules.dsv4.v41_expert import V41SharedExpert
+    from rtp_llm.models_py.modules.dsv4.v41_feed_forward import (
+        V41FeedForward,
+        V41Router,
+    )
 
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
+    torch.backends.cuda.matmul.allow_tf32 = False
     if torch.cuda.get_device_capability() != (12, 0):
         raise RuntimeError("Collective qualification requires exact SM120 devices")
     dist.init_process_group(
@@ -119,7 +134,7 @@ def main():
             valid = torch.arange(count, device="cuda") % 3 != 1
             x[~valid] = float("nan")
 
-            def check(actual):
+            def check(actual, shared=None):
                 all_x = torch.zeros(
                     (world * 4, 5120), device="cuda", dtype=torch.bfloat16
                 )
@@ -153,8 +168,11 @@ def main():
                 for source in range(world):
                     begin = source * world * 4 + peer * 4
                     expected.add_(all_partial[begin : begin + 4])
-                assert actual.dtype == torch.float32
-                torch.testing.assert_close(actual, expected[:count], rtol=0, atol=0)
+                expected = expected[:count]
+                if shared is not None:
+                    expected = (expected + shared(x, valid).float()).bfloat16()
+                assert actual.dtype == expected.dtype
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
             check(op(x, weights, ids, valid_rows=valid))
             graph_checked = False
@@ -179,6 +197,42 @@ def main():
                     check(actual)
                 graph_checked = True
                 del graph, actual
+            if args.with_feed_forward:
+                router_rng = torch.Generator(device="cuda").manual_seed(4145)
+                router = V41Router(
+                    (
+                        torch.randn(384, 5120, device="cuda", generator=router_rng)
+                        / 5120**0.5
+                    ).bfloat16(),
+                    torch.randn(384, device="cuda", generator=router_rng) * 0.1,
+                    max_rows=4,
+                )
+                shared = V41SharedExpert(V41ExpertHardwareTest.weights())
+                ffn = V41FeedForward(plan.layer_id, router, shared, op)
+                weights, ids = router(x, valid)
+                check(ffn(x, valid), shared)
+                if role == "decode":
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            ffn(x, valid)
+                    torch.cuda.current_stream().wait_stream(stream)
+                    torch.cuda.synchronize()
+                    dist.barrier(group=group)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = ffn(x, valid)
+                    for live in (False, True):
+                        x.normal_()
+                        valid.fill_(live)
+                        if not live:
+                            x.fill_(float("nan"))
+                        graph.replay()
+                        weights, ids = router(x, valid)
+                        check(actual, shared)
+                    del graph, actual
+                del ffn, router, shared
             records.append(
                 {
                     "role": role,
@@ -189,6 +243,7 @@ def main():
                     "decode_graph": graph_checked,
                     "peer_rejection": True,
                     "exact_fp32_return": True,
+                    "complete_feed_forward": args.with_feed_forward,
                 }
             )
             print(f"rank {rank}: {role} passed", flush=True)
@@ -209,6 +264,7 @@ def main():
                 "torch": torch.__version__,
                 "nccl": torch.cuda.nccl.version(),
                 "engine_bindings_bypassed": args.without_engine_bindings,
+                "flashinfer_source_jit": args.flashinfer_source_jit,
                 "reports": reports,
                 "source_sha256": {
                     str(path.relative_to(root)): hashlib.sha256(
