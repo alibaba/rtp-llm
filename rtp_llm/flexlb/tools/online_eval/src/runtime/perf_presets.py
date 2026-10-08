@@ -1,10 +1,60 @@
 """Declared mock performance presets; no name-specific Python branches."""
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
+
+from flexlb_profile_data import PROFILES, REGISTERED_PROFILE_SPECS
 
 ROOT = Path(__file__).resolve().parents[2]
 INDEX = ROOT / "config/performance_presets.json"
+PROFILE_SCOPED_MASTER_FIELDS = frozenset({"max_inflight_per_prefill_worker"})
+
+
+@dataclass(frozen=True)
+class PairedMasterSettings:
+    """Observed Master values, with explicit applicability for profile-bound fields."""
+
+    overrides: dict
+    profile_scope: dict
+
+    @classmethod
+    def from_record(cls, master):
+        from flexlb_cfg import ConfigOverride
+
+        if not isinstance(master, dict) or set(master) - {
+            "config_overrides", "profile_scope", "provenance"
+        }:
+            raise ValueError("invalid paired master settings")
+        if not master:
+            return cls({}, {})
+        overrides = master.get("config_overrides")
+        provenance = master.get("provenance")
+        scopes = master.get("profile_scope", {})
+        if not isinstance(overrides, dict) or not isinstance(provenance, dict):
+            raise ValueError("paired master requires config_overrides and provenance")
+        if provenance.get("status") not in {"verified", "legacy_unverified"} or not provenance.get("source"):
+            raise ValueError("paired master requires provenance status and source")
+        if (not isinstance(scopes, dict) or set(scopes) - set(overrides)
+                or set(scopes) - PROFILE_SCOPED_MASTER_FIELDS):
+            raise ValueError("paired master profile_scope must name supported configured fields")
+        missing_scopes = PROFILE_SCOPED_MASTER_FIELDS.intersection(overrides) - scopes.keys()
+        if missing_scopes:
+            raise ValueError(f"paired master profile_scope required for {sorted(missing_scopes)}")
+        for field, profiles in scopes.items():
+            if (not isinstance(profiles, list) or not profiles
+                    or any(not isinstance(profile, str) or profile not in PROFILES
+                           for profile in profiles)
+                    or len(profiles) != len(set(profiles))):
+                raise ValueError(f"invalid paired master profile_scope for {field}")
+        ConfigOverride(**overrides)
+        return cls(overrides, {field: tuple(profiles) for field, profiles in scopes.items()})
+
+    def for_profile(self, profile):
+        if profile not in REGISTERED_PROFILE_SPECS:
+            raise ValueError(f"invalid paired master profile {profile!r}")
+        return {field: value for field, value in self.overrides.items()
+                if field not in self.profile_scope or profile in self.profile_scope[field]}
 
 
 def _registry():
@@ -74,17 +124,7 @@ def load_performance_bundle(path):
         ):
             raise ValueError("verified capture requires deployment and window")
     master = document.pop("master", {})
-    if not isinstance(master, dict) or set(master) - {"config_overrides", "provenance"}:
-        raise ValueError("invalid paired master settings")
-    if master:
-        from flexlb_cfg import ConfigOverride
-        overrides = master.get("config_overrides")
-        provenance = master.get("provenance")
-        if not isinstance(overrides, dict) or not isinstance(provenance, dict):
-            raise ValueError("paired master requires config_overrides and provenance")
-        if provenance.get("status") not in {"verified", "legacy_unverified"} or not provenance.get("source"):
-            raise ValueError("paired master requires provenance status and source")
-        ConfigOverride(**overrides)
+    PairedMasterSettings.from_record(master)
     resolve_performance_calibration(document, path)
     return document, capture, master
 
@@ -137,6 +177,6 @@ def load_preset(name):
             raise ValueError(f"perf_preset {name!r} duplicates capture mock settings")
         runtime["mock_extra_args"] = capture["mock_extra_args"]
     if master:
-        runtime["master_config_overrides"] = master["config_overrides"]
+        runtime["paired_master"] = PairedMasterSettings.from_record(master)
         runtime["master_provenance"] = master["provenance"]
     return performance, runtime

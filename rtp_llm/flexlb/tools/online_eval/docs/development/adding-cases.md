@@ -82,7 +82,7 @@ environment:
       max_inflight_per_prefill_worker: 2
 ```
 
-合并次序是模型 preset 的配对覆盖 → 公共覆盖 → 所选 profile 覆盖，再作为 L3 传给渲染器。null 不覆盖已有值；`{omit: true}` 只适用于可省略字段。不同 profile 的映射互不继承。所有键控条目在加载时校验，即使 CLI 未选择该 profile；未知 profile、未知字段、非法值、身份轴修改均失败。模型基线偏离继续使用 `model_override` 给出原因。最终 `resolved_config` 和原始配置都进入计划，可审计实际生效值。
+合并次序是所选 profile 的 L2 模板 → 对该 profile 适用的模型 preset 配对值 → 公共覆盖 → 所选 profile 覆盖。配对 Master 记录中的 `profile_scope` 为模式相关字段声明适用的完整 profile；例如 GLM 记录保留 `max_inflight_per_prefill_worker: 1024`，但只将它用于 `single-nonbatch`，其他 profile 使用各自的 L2 cap。这是来源模式尚未独立核验时的保守适用策略，不表示已经证实 `1024` 的现场归属。场景与 stress 使用同一解析规则。null 不覆盖已有值；`{omit: true}` 只适用于可省略字段。不同 profile 的映射互不继承。所有键控条目在加载时校验，即使 CLI 未选择该 profile；未知 profile、未知字段、非法值、身份轴修改均失败。模型基线偏离继续使用 `model_override` 给出原因。最终 `resolved_config` 和原始配置都进入计划，可审计实际生效值。
 
 ## 变体维度、参数与命名
 

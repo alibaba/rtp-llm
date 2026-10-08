@@ -265,7 +265,8 @@ def environment(value, path, profile):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
     _, preset_runtime = load_preset(result["perf_preset"])
-    paired_master = preset_runtime.get("master_config_overrides", {})
+    paired_settings = preset_runtime.get("paired_master")
+    paired_master = paired_settings.for_profile(profile) if paired_settings else {}
     profile_overrides = mapping(value.get("profile_overrides", {}),
                                 path + ".profile_overrides", PROFILES)
     # Validate every keyed entry, including profiles excluded by CLI selection.

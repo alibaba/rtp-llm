@@ -56,10 +56,20 @@ class StartupOptionsTest(unittest.TestCase):
     def test_paired_master_baseline_is_rendered_and_explicit_deviations_are_audited(self):
         from flexlb_cfg import render_env, render_process_config, ConfigOverride
         from runtime import stress
-        for profile in ("single-nonbatch", "batch-window"):
+        expected_caps = {
+            "single-nonbatch": 1024,
+            "batch-window": 2,
+            "single-batch": 2,
+            "window-nonbatch": 64,
+        }
+        for profile, cap in expected_caps.items():
             plan = environment({"perf_preset": "glm_5_3_l20d"}, "test", profile)
             override = ConfigOverride(**plan["config_overrides"])
             config = json.loads(render_env(profile, override))
+            self.assertEqual(config["dispatcher"]["maxInflightPerPrefillWorker"], cap)
+            self.assertEqual(plan["resolved_config"], config)
+            self.assertEqual(plan["config_overrides"].get("max_inflight_per_prefill_worker"),
+                             1024 if profile == "single-nonbatch" else None)
             affinity = config["router"]["roles"]["prefill"]["cacheAffinity"]
             self.assertEqual(affinity, {"maxExtraTtftMs": 1000000000, "minPrefixHitPercent": 5})
             envelope = json.loads(render_process_config(profile, override))
@@ -71,6 +81,18 @@ class StartupOptionsTest(unittest.TestCase):
         self.assertEqual(environment(raw, "test", "single-nonbatch")["config_overrides"]["cache_affinity_max_extra_ttft_ms"], 20)
         args = stress.parse_args(["--performance", str(ROOT / "data/performance/glm_5_3_l20d.json"), "--dry-run"])
         self.assertEqual(json.loads(stress._config(args))["router"]["roles"]["prefill"]["cacheAffinity"], affinity)
+        for mode, cap in (("sn", 1024), ("wb", 2), ("sb", 2), ("wn", 64)):
+            args = stress.parse_args(["--performance", str(ROOT / "data/performance/glm_5_3_l20d.json"),
+                                      "--master-mode", mode, "--dry-run"])
+            self.assertEqual(json.loads(stress._config(args))["dispatcher"]["maxInflightPerPrefillWorker"], cap)
+        batch_override = environment({"perf_preset": "glm_5_3_l20d",
+                                      "config_overrides": {"max_inflight_per_prefill_worker": 3}},
+                                     "test", "batch-window")
+        self.assertEqual(batch_override["resolved_config"]["dispatcher"]["maxInflightPerPrefillWorker"], 3)
+        with self.assertRaisesRegex(Exception, "model_override"):
+            environment({"perf_preset": "glm_5_3_l20d",
+                         "config_overrides": {"max_inflight_per_prefill_worker": 3}},
+                        "test", "single-nonbatch")
         self.assertNotIn("master", load_preset("glm_5_3_l20d")[0])
         for bad in (-1, True, 2**63):
             with self.assertRaises(ValueError):
@@ -85,6 +107,19 @@ class StartupOptionsTest(unittest.TestCase):
             path.write_text(json.dumps(document))
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 load_performance_file(path)
+
+    def test_paired_master_cap_requires_valid_profile_scope(self):
+        from runtime.perf_presets import PairedMasterSettings
+
+        document = json.loads((ROOT / "data/performance/glm_5_3_l20d.json").read_text())
+        master = document["master"]
+        self.assertEqual(master["config_overrides"]["max_inflight_per_prefill_worker"], 1024)
+        for scope in ({}, {"max_inflight_per_prefill_worker": ["unknown"]},
+                      {"max_inflight_per_prefill_worker": []},
+                      {"other": ["single-nonbatch"]},
+                      {"prefill_expression": ["single-nonbatch"]}):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "profile_scope"):
+                PairedMasterSettings.from_record({**master, "profile_scope": scope})
 
     def test_preset_registry_is_total_and_rejects_typos_before_launch(self):
         self.assertEqual(("default", "glm_5_3_l20d", "deepseek_v4_flash_l20c"), preset_names())

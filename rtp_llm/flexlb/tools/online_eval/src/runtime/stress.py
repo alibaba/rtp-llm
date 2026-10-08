@@ -20,7 +20,8 @@ from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
                              http_get_json, http_post_json, port_in_use,
                              resolve_java21, wait_for)
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
-from runtime.perf_presets import load_performance_file, load_performance_bundle
+from runtime.perf_presets import (PairedMasterSettings, load_performance_file,
+                                  load_performance_bundle)
 from traffic.datasets import DEFAULT_TRACE, model_path, read_manifest, trace_models
 from traffic.traffic_source import materialize
 
@@ -215,7 +216,7 @@ def required_ports(a) -> list[int]:
 def _config(a):
     overrides = parse_overrides(a.config_override) if a.config_override.strip() else None
     _, _, master = load_performance_bundle(a.performance)
-    paired = dict(master.get("config_overrides", {}))
+    paired = PairedMasterSettings.from_record(master).for_profile(a.profile)
     if overrides is not None:
         paired.update({f.name: getattr(overrides, f.name) for f in fields(ConfigOverride)
                        if getattr(overrides, f.name) is not None and f.name != "strip_preemption"})
