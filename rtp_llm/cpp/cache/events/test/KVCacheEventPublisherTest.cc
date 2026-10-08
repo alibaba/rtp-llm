@@ -147,7 +147,13 @@ public:
             cv_.notify_all();
             cv_.wait(lock, [this] { return release_snapshot_; });
         }
-        response = R"({"header":{"status":{"code":"OK"}}})";
+        if (request.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos) {
+            snapshot_committed_ = true;
+        }
+        // The Manager repeats this advisory on successful heartbeats before
+        // the first snapshot commits.
+        response = snapshot_committed_ ? R"({"header":{"status":{"code":"OK"}}})" :
+                                         R"({"header":{"status":{"code":"OK"}},"snapshot_required":true})";
         return true;
     }
 
@@ -209,6 +215,7 @@ private:
     bool                     block_next_snapshot_ = false;
     bool                     snapshot_blocked_    = false;
     bool                     release_snapshot_    = false;
+    bool                     snapshot_committed_  = false;
 };
 
 size_t countOccurrences(const std::string& text, const std::string& pattern) {
@@ -664,10 +671,17 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadIsSlow
         publisher.stop();
         FAIL() << "initial snapshot request did not reach the blocking reporter";
     }
-    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 2, kAsyncTestTimeout));
+    EXPECT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 2, kAsyncTestTimeout));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 30, 0}));
     reporter->releaseSnapshot();
     EXPECT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+    EXPECT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_ADD", 1, kAsyncTestTimeout));
     publisher.stop();
+    size_t snapshot_count = 0;
+    for (const auto& request : reporter->requests()) {
+        snapshot_count += request.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos;
+    }
+    EXPECT_EQ(snapshot_count, 1u);
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnapshotIsInFlight) {

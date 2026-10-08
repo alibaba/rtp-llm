@@ -613,8 +613,9 @@ private:
         if (respect_retry_after && !waitForReportRetry(require_registration)) {
             return ReportResult::INTERRUPTED;
         }
+        const auto snapshot_epoch = snapshot_epoch_.load(std::memory_order_relaxed);
         const bool success = reporter->post("/api/reportEvent", request, response);
-        return observeReportResponse(response, success, respect_retry_after) ?
+        return observeReportResponse(response, success, snapshot_epoch, respect_retry_after) ?
                    ReportResult::SUCCESS : ReportResult::FAILED;
     }
 
@@ -639,7 +640,8 @@ private:
         return false;
     }
 
-    bool observeReportResponse(const std::string& response, bool success, bool apply_retry_after = true) {
+    bool observeReportResponse(const std::string& response, bool success, uint64_t snapshot_epoch,
+                               bool apply_retry_after = true) {
         const auto feedback = detail::parseKVCMReportFeedback(response);
         if (!feedback.valid || feedback.registration_required || (!success && feedback.ok)) {
             registered_.store(false, std::memory_order_relaxed);
@@ -647,7 +649,19 @@ private:
             queue_.wake();
         }
         if (feedback.snapshot_required) {
-            dirty_generation_.fetch_add(1, std::memory_order_relaxed);
+            if (success && feedback.ok) {
+                // Successful heartbeats repeat this advisory until a snapshot
+                // commits. A snapshot completed after this request started
+                // satisfies the hint, even if the response arrives later.
+                const auto requested_epoch = snapshot_epoch + 1;
+                auto previous = requested_snapshot_epoch_.load(std::memory_order_relaxed);
+                while (previous < requested_epoch && !requested_snapshot_epoch_.compare_exchange_weak(
+                           previous, requested_epoch, std::memory_order_relaxed)) {}
+            } else {
+                // Errors must not be coalesced with advisory hints: a rejected
+                // mutation or snapshot still needs reconciliation.
+                dirty_generation_.fetch_add(1, std::memory_order_relaxed);
+            }
             queue_.wake();
         }
         if (apply_retry_after && feedback.retry_after_ms != 0) {
@@ -711,6 +725,7 @@ private:
         const auto committed_snapshot = std::move(*pending_snapshot_report_);
         pending_snapshot_report_.reset();
         reconciled_generation_ = committed_snapshot.generation;
+        snapshot_epoch_.fetch_add(1, std::memory_order_relaxed);
         RTP_LLM_LOG_INFO("KVCMPublisher snapshot committed, instance_id=%s host=%s dp_rank=%d version=%lld keys=%zu "
                          "generation=%llu",
                          context_.instance_id.c_str(),
@@ -776,6 +791,12 @@ private:
                         + std::chrono::milliseconds(1));
     }
 
+    bool needsReconciliation(uint64_t generation) const {
+        return reconciled_generation_ != generation
+               || requested_snapshot_epoch_.load(std::memory_order_relaxed)
+                      > snapshot_epoch_.load(std::memory_order_relaxed);
+    }
+
     void workerLoop() noexcept {
         const auto    base_retry_interval   = std::chrono::milliseconds(std::max(config_.retry_interval_ms, 1));
         const int64_t max_retry_interval_ms = base_retry_interval.count() >= 30000 ?
@@ -819,7 +840,7 @@ private:
                 }
 
                 const uint64_t dirty_generation = dirty_generation_.load(std::memory_order_relaxed);
-                if (reconciled_generation_ != dirty_generation) {
+                if (needsReconciliation(dirty_generation)) {
                     const auto reconcile_now = std::chrono::steady_clock::now();
                     if (reconcile_now < next_reconcile) {
                         waitUntil(next_reconcile);
@@ -839,7 +860,7 @@ private:
                     retry_interval = base_retry_interval;
 
                     const uint64_t current_generation = dirty_generation_.load(std::memory_order_relaxed);
-                    if (reconciled_generation_ != current_generation) {
+                    if (needsReconciliation(current_generation)) {
                         ++consecutive_dirty_snapshots;
                         state_.store(PublisherState::RESYNCING, std::memory_order_relaxed);
                         next_reconcile = std::chrono::steady_clock::now() + base_retry_interval;
@@ -911,6 +932,8 @@ private:
     std::atomic<uint64_t>                 dropped_count_{0};
     std::atomic<uint64_t>                 dirty_generation_{1};
     uint64_t                              reconciled_generation_ = 0;
+    std::atomic<uint64_t>                 snapshot_epoch_{0};
+    std::atomic<uint64_t>                 requested_snapshot_epoch_{0};
     std::atomic<uint64_t>                 next_request_id_{1};
     std::atomic<int64_t>                  report_retry_deadline_ms_{0};
     std::optional<PendingSnapshotReport>  pending_snapshot_report_;

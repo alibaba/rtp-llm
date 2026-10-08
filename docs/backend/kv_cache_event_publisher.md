@@ -31,9 +31,11 @@ before sending best-effort `EVENT_HOST_DOWN` during engine shutdown. Snapshots r
 identity; failed snapshot payloads are retained for retry. The endpoint must support snapshot fencing and crash-safe
 commit semantics.
 
-`snapshot_required` triggers reconciliation on both successful and failed responses. `retry_after_ms` delays subsequent
-data-event requests, capped at five minutes by default, while heartbeats continue independently. Snapshot throttling
-preserves registration; missing instances/nodes and leader errors trigger re-registration.
+`snapshot_required` triggers reconciliation on both successful and failed responses. Successful hints from requests
+already in flight when a snapshot completes are satisfied by that snapshot, including replies arriving afterward.
+Local event loss and failed responses still require reconciliation. `retry_after_ms` delays subsequent data-event
+requests, capped at five minutes by default, while heartbeats continue independently. Snapshot throttling preserves
+registration; missing instances/nodes and leader errors trigger re-registration.
 
 Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and an `event_report://host/hbm?size=...` URI containing the aggregate
 byte size. Configure the corresponding L1P5 event storage on the server and add it to the Instance Group's

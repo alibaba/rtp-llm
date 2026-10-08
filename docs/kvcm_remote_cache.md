@@ -68,7 +68,7 @@ export MC_TENT_CONF='{"transports":{"tcp":{"enable":true},"aft":{"enable":false}
 
 TENT uses an RDMA device slot, so `--no_rdma` disables it. Updating the SDK dependency alone does not change the transport.
 
-Batch/SWA misses preserve their original key positions. Reuse requires a complete FULL prefix, final LINEAR state, and complete SWA window across every TP rank; missing URIs do not count as hits. Mixed LINEAR+SWA writes may store the FULL+LINEAR portion first, but reads still require the complete SWA window. Existing IOV, pool/group, FULL+LINEAR, and same-layout TP support is retained.
+Batch/SWA misses preserve their original key positions. For layouts containing SWA groups, internal payload matching translates SWA queries to batch queries so FULL locations outside the window remain available; explicit metadata queries retain the requested mode. Reuse requires a complete FULL prefix, final LINEAR state, and complete SWA window across every TP rank; missing URIs do not count as hits. Mixed LINEAR+SWA writes may store the FULL+LINEAR portion first, but reads still require the complete SWA window. Existing IOV, pool/group, FULL+LINEAR, and same-layout TP support is retained.
 
 Generated Instance identities include the default query mode and registered group configuration, so an upgrade may select a new cache namespace. Custom IDs must match the existing server configuration. `KVCacheConfig` uses pickle version 8 with 74 items and reads versions 1-7; communicating processes must use the same build.
 

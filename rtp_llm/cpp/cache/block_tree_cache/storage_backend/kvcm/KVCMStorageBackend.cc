@@ -181,8 +181,14 @@ public:
             return {request.local_matched_blocks_num, nullptr};
         }
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
-        const auto query_type = static_cast<kv_cache_manager::QueryType>(
+        auto query_type = static_cast<kv_cache_manager::QueryType>(
             resolveQueryType(kv_cache_config_.kvcm_query_type));
+        if (has_swa_ && query_type == kv_cache_manager::QueryType::QT_REVERSE_ROLL_SW_MATCH) {
+            // A SWA query omits locations outside its window, including FULL
+            // blocks needed for reuse. Fetch all keys and apply each group's
+            // reuse policy locally; explicit metadata queries keep their mode.
+            query_type = kv_cache_manager::QueryType::QT_BATCH_GET;
+        }
         bool success = false;
         kv_cache_manager::Locations locations;
         bool positional = query_type == kv_cache_manager::QueryType::QT_BATCH_GET

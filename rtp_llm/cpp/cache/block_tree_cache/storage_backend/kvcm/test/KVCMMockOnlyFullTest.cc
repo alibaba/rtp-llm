@@ -230,7 +230,7 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     EXPECT_TRUE(backend->execute(request, response));
 }
 
-TEST(KVCMMockOnlyFullTest, SwaQueryForwardsConfiguredWindowToTheClient) {
+TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {
     BackendEnvironment environment;
     environment.cache_config.dtype = DataType::TYPE_FP16;
     environment.cache_config.layer_num = 2;
@@ -259,18 +259,15 @@ TEST(KVCMMockOnlyFullTest, SwaQueryForwardsConfiguredWindowToTheClient) {
         [&](int layer, const std::string& tag, int block) {
             return environmentBuffers(environment, layer, tag, block);
         }));
-    // FULL is a complete prefix; the SWA group supplies only its final two blocks.
+    // Batch mode returns the FULL prefix, including blocks outside the SWA
+    // window. A reverse-window query would leave the first location empty.
     const kv_cache_manager::Locations locations{
         {{"tp0_Ffull0", "full_101"}},
         {{"tp0_Ffull0", "full_102"}, {"tp0_Lwindow0", "window_102"}},
         {{"tp0_Ffull0", "full_103"}, {"tp0_Lwindow0", "window_103"}}};
-    EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_REVERSE_ROLL_SW_MATCH,
+    EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET,
                               std::vector<int64_t>({101, 102, 103}), _, _))
-        .WillOnce(Invoke([&](const auto&, const auto&, auto, const auto&, const auto&,
-                            const kv_cache_manager::ForwardContext& forward) {
-            EXPECT_EQ(forward.sw_size, 2);
-            return std::make_pair(true, locations);
-        }));
+        .WillOnce(Return(std::make_pair(true, locations)));
     const auto result = match(*backend.backend, makeStorageRequest(environment, {101, 102, 103}));
     EXPECT_TRUE(result.success);
     EXPECT_EQ(result.matched_blocks_num, 3u);

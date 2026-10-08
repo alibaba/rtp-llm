@@ -73,7 +73,12 @@ class PaceFixture:
                 if response.status != 200:
                     raise RuntimeError(f"PACE Provider unavailable: {url}")
                 # A byte round trip, rather than this readiness check, proves I/O.
-                json.load(response)
+                try:
+                    json.load(response)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise RuntimeError(
+                        f"PACE Provider status response is not valid JSON: {url}"
+                    ) from exc
 
     def client_env(self):
         env = dict(self.config.get("client_env", {}))
