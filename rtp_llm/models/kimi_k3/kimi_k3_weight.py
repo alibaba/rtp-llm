@@ -12,6 +12,7 @@ represented explicitly below.
 from __future__ import annotations
 
 import functools
+import os
 
 from rtp_llm.models.kimi_k3.weight_layout import split_kda_input
 from typing import Iterator, List, Optional
@@ -34,7 +35,7 @@ from rtp_llm.model_loader.weight_module import (
     CustomAtomicWeight,
     WeightModule,
 )
-from rtp_llm.ops import HybridAttentionType, KvCacheDataType, MlaOpsType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -89,6 +90,19 @@ def _merge_mla_input_projections(
 _SHARED_EXPERT_WEIGHT_SHARD_ENV = "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"
 
 
+def shared_expert_weight_shard_enabled(role_type: RoleType) -> bool:
+    """Keep shared expert shards resident only on the Prefill TP ranks."""
+
+    if role_type != RoleType.PREFILL:
+        return False
+    raw = os.environ.get(_SHARED_EXPERT_WEIGHT_SHARD_ENV, "0").strip()
+    if raw not in ("0", "1"):
+        raise ValueError(
+            f"{_SHARED_EXPERT_WEIGHT_SHARD_ENV} must be 0 or 1, got {raw!r}"
+        )
+    return raw == "1"
+
+
 def _pack_shared_gate_up_full(ts: List[torch.Tensor]) -> torch.Tensor:
     """Pack replicated checkpoint gate/up weights as ``[gate; up]``."""
 
@@ -101,6 +115,26 @@ def _pack_shared_gate_up_full(ts: List[torch.Tensor]) -> torch.Tensor:
             f"got gate={tuple(gate.shape)} up={tuple(up.shape)}"
         )
     return torch.cat((gate, up), dim=0).contiguous()
+
+
+def _slice_shared_gate_up_tp_rank(
+    ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """Place one native gate or up projection shard on each TP rank."""
+
+    if len(ts) != 1 or ts[0].ndim != 2:
+        raise ValueError("sharded K3 shared gate/up requires one matrix")
+    if tp_size <= 0 or tp_size % 2 or not 0 <= tp_rank < tp_size:
+        raise ValueError(f"invalid shared expert FFN TP size={tp_size} rank={tp_rank}")
+    projection = ts[0]
+    shards_per_projection = tp_size // 2
+    if projection.shape[0] % shards_per_projection:
+        raise ValueError(
+            "shared expert intermediate size must divide FFN TP/2, got "
+            f"width={projection.shape[0]} ffn_tp={tp_size}"
+        )
+    width = projection.shape[0] // shards_per_projection
+    return projection.narrow(0, (tp_rank % shards_per_projection) * width, width)
 
 
 def _unpad_kda_alog(ts: List[torch.Tensor], *, num_heads: int) -> torch.Tensor:
@@ -665,18 +699,38 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
     def _moe_weights(self) -> List[WeightModule]:
         n = KimiK3WeightNames
-        shared_gate_up_ckpts = [
-            CkptWeightInfo(
-                self._layer_ckpt("block_sparse_moe.shared_experts.gate_proj.weight"),
-                identity,
-            ),
-            CkptWeightInfo(
-                self._layer_ckpt("block_sparse_moe.shared_experts.up_proj.weight"),
-                identity,
-            ),
-        ]
-        shared_gate_up_process = _pack_shared_gate_up_full
-        shared_down_split = sp_id
+        gate_suffix = "block_sparse_moe.shared_experts.gate_proj.weight"
+        up_suffix = "block_sparse_moe.shared_experts.up_proj.weight"
+        if shared_expert_weight_shard_enabled(self.role_type):
+            # Main names the token-owner axis FFN SP; the all-gather still
+            # uses the attention TP group. Feat called this same axis FFN TP.
+            if self.tp_size <= 0 or self.tp_size % 2:
+                raise ValueError(
+                    f"shared expert sharding requires even TP, got {self.tp_size}"
+                )
+            if not 0 <= self.tp_rank < self.tp_size:
+                raise ValueError(
+                    f"invalid shared expert TP rank {self.tp_rank}"
+                )
+            projection_suffix = (
+                gate_suffix if self.tp_rank < self.tp_size // 2 else up_suffix
+            )
+            shared_gate_up_ckpts = [
+                CkptWeightInfo(self._layer_ckpt(projection_suffix), identity)
+            ]
+            shared_gate_up_process = functools.partial(
+                _slice_shared_gate_up_tp_rank,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
+            shared_down_split = sp_0
+        else:
+            shared_gate_up_ckpts = [
+                CkptWeightInfo(self._layer_ckpt(gate_suffix), identity),
+                CkptWeightInfo(self._layer_ckpt(up_suffix), identity),
+            ]
+            shared_gate_up_process = _pack_shared_gate_up_full
+            shared_down_split = sp_id
 
         weights: List[WeightModule] = [
             self._linear(n.MOE_GATE, "block_sparse_moe.gate.weight"),

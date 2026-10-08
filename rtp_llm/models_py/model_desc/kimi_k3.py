@@ -173,6 +173,7 @@ class KimiK3DecoderLayer(nn.Module):
 class KimiK3Model(GptModelBase):
     requires_sequence_parallel_padding = True
     requires_token_position_ids = True
+    requires_fixed_capacity_mtp_draft_prefill = True
 
     def __init__(
         self,
@@ -382,6 +383,12 @@ class KimiK3Model(GptModelBase):
         return True
 
     def _forward_layers(self, hidden, inputs, fmha_impl, sequence_parallel_input=False):
+        if hidden is None:
+            # Construct the target embedding in this frame. Passing the
+            # full-token tensor from the caller keeps its storage alive until
+            # all layers return, even after SP narrows it to local rows.
+            # feat/k3_dev releases that storage during the layer loop.
+            hidden = self.embed_tokens(inputs.input_ids)
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
             raise ValueError("K3 requires physical token padding before SP execution")
@@ -454,7 +461,5 @@ class KimiK3Model(GptModelBase):
         return self._forward_single(inputs, fmha_impl)
 
     def _forward_single(self, inputs, fmha_impl=None):
-        hidden = self._forward_layers(
-            self.embed_tokens(inputs.input_ids), inputs, fmha_impl
-        )
+        hidden = self._forward_layers(None, inputs, fmha_impl)
         return PyModelOutputs(self.norm(hidden), hidden)
