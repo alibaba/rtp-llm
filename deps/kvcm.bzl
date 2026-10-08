@@ -38,6 +38,23 @@ KVCM_SERVER_ARTIFACT = {
     "source_id": KVCM_SOURCE_ID,
 }
 
+def _kvcm_manifest_impl(ctx):
+    ctx.file("WORKSPACE", "")
+    ctx.file("BUILD.bazel", 'exports_files(["manifest.json"])\n')
+    manifest_path = ctx.os.environ.get("KVCM_ARTIFACT_MANIFEST", "")
+    if manifest_path:
+        ctx.symlink(manifest_path, "manifest.json")
+    else:
+        ctx.file("manifest.json", "", executable = False)
+
+# Bazel 6 tracks file content through labels, not reads of absolute paths.
+# Only this small local repository is refreshed; binary artifacts stay cached.
+_kvcm_manifest = repository_rule(
+    implementation = _kvcm_manifest_impl,
+    local = True,
+    environ = ["KVCM_ARTIFACT_MANIFEST"],
+)
+
 def _client_variant(ctx):
     if ctx.attr.client_variant:
         return ctx.attr.client_variant
@@ -52,7 +69,7 @@ def _artifact_from_manifest(ctx):
         if ctx.attr.kind == "client" and _client_variant(ctx) == "cpu":
             fail("No CPU-only SDK is published in the source lock. Supply a paired cpu artifact via KVCM_ARTIFACT_MANIFEST.")
         return {"urls": ctx.attr.urls, "sha256": ctx.attr.sha256, "source_id": ctx.attr.source_id}
-    manifest = json.decode(ctx.read(ctx.path(manifest_path)))
+    manifest = json.decode(ctx.read(ctx.attr.manifest))
     if manifest.get("source_id") != ctx.attr.expected_source_id:
         fail("KVCM_ARTIFACT_MANIFEST does not match KVCM_SOURCE_LOCK")
     # A client validates its server pair; platform-specific variants come from BUILD selects.
@@ -105,6 +122,7 @@ _kvcm_artifact = repository_rule(
     implementation = _kvcm_artifact_impl,
     environ = ["KVCM_ARTIFACT_MANIFEST", "KVCM_CLIENT_VARIANT"],
     attrs = {
+        "manifest": attr.label(default = "@kvcm_artifact_manifest//:manifest.json", allow_single_file = True),
         "kind": attr.string(mandatory = True),
         "client_variant": attr.string(),
         "server_variant": attr.string(default = "server"),
@@ -116,6 +134,7 @@ _kvcm_artifact = repository_rule(
 )
 
 def kvcm_deps():
+    _kvcm_manifest(name = "kvcm_artifact_manifest")
     for name, kind, client_variant, server_variant, artifact in [
         ("remote_kv_cache_manager_client_rpm", "client", "", "server", KVCM_CLIENT_ARTIFACT),
         ("remote_kv_cache_manager_client_rpm_cuda129_x86", "client", "cuda129_x86", "server", KVCM_CLIENT_CUDA129_X86_ARTIFACT),

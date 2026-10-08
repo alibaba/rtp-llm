@@ -58,10 +58,22 @@ class RemoteKVCMServer:
             os.makedirs(self._kvcm_src_logs_path)
 
     def copy_logs(self):
-        if not os.path.exists(self._kvcm_src_logs_path):
-            logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
+        if self.pace_fixture is not None and self._work_dir is None:
             return
-        shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True)
+        try:
+            if not os.path.exists(self._kvcm_src_logs_path):
+                logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
+                return
+            shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True)
+            # Keep diagnostics until the manager has stopped and logs are saved.
+            if self._work_dir is not None and self._server_process is None:
+                shutil.rmtree(self._work_dir)
+                self._work_dir = None
+        except Exception:
+            logging.exception(
+                "Failed to collect KVCM logs or remove its working directory: %s",
+                self._kvcm_src_logs_path,
+            )
 
     @property
     def rpc_port(self) -> int:

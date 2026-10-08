@@ -317,7 +317,14 @@ class CaseRunner(object):
         remote_kvcm_server = RemoteKVCMServer(
             server_path, self.kvcm_config, kvcm_src_logs_path, kvcm_dst_logs_path
         )
-        if remote_kvcm_server.start_server():
+        started = False
+        try:
+            started = remote_kvcm_server.start_server()
+        finally:
+            if not started:
+                remote_kvcm_server.stop_server()
+                remote_kvcm_server.copy_logs()
+        if started:
             return remote_kvcm_server
         logging.error("start remote_kvcm_server")
         return None

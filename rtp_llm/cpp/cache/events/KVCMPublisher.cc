@@ -738,7 +738,8 @@ private:
                 }
                 dirty_generation_.fetch_add(1, std::memory_order_relaxed);
                 state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                RTP_LLM_LOG_WARNING("KVCMPublisher heartbeat failed; the worker will re-register");
+                RTP_LLM_LOG_WARNING(
+                    "KVCMPublisher heartbeat failed; the worker will re-register or resync as needed");
                 queue_.wake();
             }
         }
