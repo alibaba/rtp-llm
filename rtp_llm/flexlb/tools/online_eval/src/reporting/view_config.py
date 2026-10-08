@@ -73,34 +73,51 @@ def view(name):
             } or type(panel["id"]) is not str or not panel["id"] or type(panel["title"]) is not str or not panel["title"] or type(panel["caption"]) is not str or not panel["caption"] or not isinstance(panel["fields"], list) or not panel["fields"] or len(set(panel["fields"])) != len(panel["fields"]) or set(panel["fields"]) - allowed:
                 _fail(path, "invalid HA panel")
     else:
-        required = {"kind", "report", "producer", "title", "subtitle", "panel", "sections"}
-        if not required <= set(data) or set(data) - required - {"time_origin", "kpis", "meta", "audit_columns", "criteria_columns"} or data["kind"] != "produced":
+        required = {"kind", "report", "producer", "title", "subtitle", "sections"}
+        if not required <= set(data) or set(data) - required - {"panel", "panels", "time_origin", "kpis", "meta", "audit_columns", "criteria_columns"} or data["kind"] != "produced":
             _fail(path, "invalid produced report view")
         for field in ("report", "producer"):
             if type(data[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", data[field]):
                 _fail(path, "invalid " + field)
-        panel = data["panel"]
-        if not isinstance(panel, dict) or "title" not in panel or set(panel) - {"title", "caption", "empty_caption", "presets", "axes"}:
-            _fail(path, "invalid panel presentation")
-        for field in ("title", "caption", "empty_caption"):
-            if field in panel and (type(panel[field]) is not str or not panel[field]):
-                _fail(path, "invalid panel " + field)
-        presets = panel.get("presets", {})
-        if not isinstance(presets, dict) or any(
-            type(name) is not str or not name or not isinstance(selector, dict)
-            or len(selector) != 1 or not set(selector) <= {"names", "contains", "groups", "visible"}
-            or any((type(values) is not bool or values is not True) if key == "visible"
-                   else (not isinstance(values, list) or not values or any(type(item) is not str or not item for item in values))
-                   for key, values in selector.items())
-            for name, selector in presets.items()
-        ):
-            _fail(path, "invalid panel presets")
-        if "axes" in panel and (not isinstance(panel["axes"], dict) or any(
-            not isinstance(axis, dict) or set(axis) != {"title", "position"}
-            or type(axis["title"]) is not str or axis["position"] not in {"left", "right"}
-            for axis in panel["axes"].values()
-        )):
-            _fail(path, "invalid panel axes")
+        if ("panel" in data) == ("panels" in data):
+            _fail(path, "declare exactly one of panel or panels")
+        panels = data.get("panels", [data.get("panel")])
+        if not isinstance(panels, list) or not panels:
+            _fail(path, "invalid panels")
+        if "panels" in data:
+            ids = []
+            for panel in panels:
+                if not isinstance(panel, dict) or not {"id", "names"} <= set(panel):
+                    _fail(path, "panels require id and names")
+                if type(panel["id"]) is not str or not panel["id"] or panel["id"] in ids:
+                    _fail(path, "invalid panel id")
+                ids.append(panel["id"])
+                if not isinstance(panel["names"], list) or not panel["names"] or any(
+                    type(name) is not str or not name for name in panel["names"]
+                ):
+                    _fail(path, "invalid panel names")
+        for panel in panels:
+            if not isinstance(panel, dict) or "title" not in panel or set(panel) - {"title", "caption", "empty_caption", "presets", "axes", "id", "names"}:
+                _fail(path, "invalid panel presentation")
+            for field in ("title", "caption", "empty_caption"):
+                if field in panel and (type(panel[field]) is not str or not panel[field]):
+                    _fail(path, "invalid panel " + field)
+            presets = panel.get("presets", {})
+            if not isinstance(presets, dict) or any(
+                type(name) is not str or not name or not isinstance(selector, dict)
+                or len(selector) != 1 or not set(selector) <= {"names", "contains", "groups", "visible"}
+                or any((type(values) is not bool or values is not True) if key == "visible"
+                       else (not isinstance(values, list) or not values or any(type(item) is not str or not item for item in values))
+                       for key, values in selector.items())
+                for name, selector in presets.items()
+            ):
+                _fail(path, "invalid panel presets")
+            if "axes" in panel and (not isinstance(panel["axes"], dict) or any(
+                not isinstance(axis, dict) or set(axis) != {"title", "position"}
+                or type(axis["title"]) is not str or axis["position"] not in {"left", "right"}
+                for axis in panel["axes"].values()
+            )):
+                _fail(path, "invalid panel axes")
         sections = data["sections"]
         if not isinstance(sections, dict) or not sections or any(
             type(key) is not str or type(value) is not str or not value

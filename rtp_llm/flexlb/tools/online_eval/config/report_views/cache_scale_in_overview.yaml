@@ -11,31 +11,23 @@ meta:
 kpis:
   verdict: Gate verdict
   monitoring: Monitoring / load validity
-panel:
-  title: 监控聚合曲线
+panels:
+- id: cache-hit
+  title: Prefill 缓存命中率 · P 数量
+  names: [P cache hit ratio, P engine count]
   axes:
-    queue: {title: 每引擎 streams, position: left}
-    count: {title: 数量, position: right}
-    p: {title: 引擎数, position: right}
-    qps: {title: 请求 / 秒, position: right}
-    tokens: {title: tokens / 秒, position: right}
-    ms: {title: 毫秒, position: right}
-    blocks: {title: KV blocks, position: right}
-    seconds: {title: 秒, position: right}
-    ratio: {title: 命中率, position: right}
-  caption: 全部曲线来自 Prometheus；默认展示关键指标。单击勾选、双击隔离、悬停高亮。waiting/running 使用每引擎平均值。
+    ratio: {title: 命中率（0–1）, position: left}
+    count: {title: P 数量, position: right}
+  caption: 命中率使用左轴，P 数量使用右轴；竖线标出缩容事件。缺采保留断线，不补零。
   empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
-  presets:
-    核心:
-      names: [P cache hit ratio, P Waiting / engine, P Running / engine, P engine count, Client sent QPS, Client success QPS, Client error QPS, Master inflight requests]
-    队列:
-      contains: [Waiting, Running, queue, inflight]
-    流量:
-      groups: [流量]
-    性能:
-      groups: [性能, 延迟]
-    KV:
-      groups: [KV]
+- id: client-qps
+  title: 请求发出 / 成功 / 失败 QPS · P 数量
+  names: [Client sent QPS, Client success QPS, Client error QPS, P engine count]
+  axes:
+    qps: {title: 请求 / 秒, position: left}
+    count: {title: P 数量, position: right}
+  caption: 客户端发出、成功和失败 QPS 使用左轴，P 数量使用右轴；竖线标出缩容事件。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
 sections:
   audit: 监控曲线审计
   monitoring: 实验与监控有效性

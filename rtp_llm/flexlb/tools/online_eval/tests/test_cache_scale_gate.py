@@ -24,8 +24,8 @@ class CacheGateTest(unittest.TestCase):
     def test_report_layout_follows_yaml_view(self):
         template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
         template["title"] = "YAML title"
-        template["panel"]["title"] = "YAML panel"
-        template["panel"]["presets"]["核心"] = {"names": ["P engine count"]}
+        template["panels"][0]["title"] = "YAML panel"
+        template["panels"][0]["names"] = ["P engine count"]
         prepared = dict(
             curves=[dict(name="P engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
@@ -39,7 +39,26 @@ class CacheGateTest(unittest.TestCase):
             spec = build_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["title"], "YAML title")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
-        self.assertEqual(spec["panels"][0]["presets"]["核心"], ["P engine count"])
+        self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["P engine count"])
+        self.assertEqual(len(spec["panels"]), 2)
+        self.assertTrue(all("presets" not in p for p in spec["panels"]))
+
+    def test_split_panels_keep_metric_values_and_missing_annotations(self):
+        from workload.cache_gate import report_panels
+        names = ["P cache hit ratio", "P engine count", "Client sent QPS",
+                 "Client success QPS", "Client error QPS", "P Waiting / engine"]
+        curves = [dict(name=name, points=[dict(x=5, y=None), dict(x=6, y=2)])
+                  for name in names]
+        panels = report_panels(curves, view("cache_scale_in_overview.yaml"))
+        self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
+        self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
+        self.assertEqual(panels[0]["series"][1]["points"], panels[1]["series"][-1]["points"])
+        self.assertIsNone(panels[0]["series"][0]["points"][0]["y"])
+        for panel, axis in zip(panels, ("ratio", "qps")):
+            self.assertEqual("left", panel["axes"][axis]["position"])
+            self.assertEqual("right", panel["axes"]["count"]["position"])
+        sparse = report_panels(curves[:2], view("cache_scale_in_overview.yaml"))
+        self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def evidence(self, hit=0.8):
         rows = []
@@ -172,7 +191,7 @@ class CacheGateTest(unittest.TestCase):
                 "FAIL",
             )
             self.assertIn(
-                "监控聚合曲线",
+                "Prefill 缓存命中率 · P 数量",
                 (Path(d) / "reports/run/cache-scale-in/report.html").read_text(),
             )
 
@@ -206,7 +225,8 @@ class CacheGateTest(unittest.TestCase):
                 }},
             }))
             spec = write_report(root, e, analyze(e))
-            self.assertEqual(spec["panels"][0]["series"][0]["name"], "P Waiting / engine")
+            self.assertEqual(spec["panels"][0]["series"], [])
+            self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "INVALID")
             audit = spec["sections"][0]["rows"]

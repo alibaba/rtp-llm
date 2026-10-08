@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 
 from reporting.catalog import CACHE_METRICS
-from reporting.view_config import select_presets, view
+from reporting.view_config import view
 from reporting import (
     details,
     table,
@@ -307,6 +307,25 @@ def prepare_report(directory, evidence):
                 monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
 
 
+def report_panels(curves, presentation):
+    """Project archived monitoring curves into independent presentation panels."""
+    panels = []
+    for descriptor in presentation["panels"]:
+        selected = [dict(curve, hidden=False) for name in descriptor["names"]
+                    for curve in curves
+                    if curve["name"] == name or curve["name"].startswith(name + " · ")]
+        missing = [name for name in descriptor["names"] if not any(
+            curve["name"] == name or curve["name"].startswith(name + " · ")
+            for curve in selected)]
+        caption = descriptor["caption"] if selected else descriptor["empty_caption"]
+        if selected and missing:
+            caption += " 缺少监控序列：" + "、".join(missing) + "。"
+        panels.append(dict(id=descriptor["id"], title=descriptor["title"],
+                           overlay=True, timeX=True, axes=descriptor["axes"],
+                           series=selected, caption=caption))
+    return panels
+
+
 def build_spec(directory, evidence, result, prepared):
     presentation = view("cache_scale_in_overview.yaml")
     rows = evidence["samples"]
@@ -315,8 +334,6 @@ def build_spec(directory, evidence, result, prepared):
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
     monitor_warnings = prepared["monitor_warnings"]
-    panel = presentation["panel"]
-    presets = select_presets(curves, panel["presets"])
     return dict(
         run_id="cache-scale-in",
         title=presentation["title"],
@@ -338,17 +355,7 @@ def build_spec(directory, evidence, result, prepared):
             dict(label=presentation["kpis"]["monitoring"], value=monitoring_status,
                  tone="danger" if monitor_warnings else "success"),
         ],
-        panels=[
-            dict(
-                id="cache-overlay",
-                title=panel["title"],
-                overlay=True,
-                axes=panel["axes"],
-                series=curves,
-                presets=presets,
-                caption=panel["caption"] if curves else panel["empty_caption"],
-            )
-        ],
+        panels=report_panels(curves, presentation),
         sections=[
             table(presentation["sections"]["audit"], presentation["audit_columns"], audit),
             details(presentation["sections"]["monitoring"], dict(status=monitoring_status, warnings=monitor_warnings)),
