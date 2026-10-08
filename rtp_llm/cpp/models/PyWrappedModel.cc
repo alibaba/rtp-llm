@@ -687,7 +687,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
         attention_inputs = buildPyAttentionInputs(inputs);
     }
-    if (!inputs.warmup && inputs.pd_separation) {
+    if (!inputs.warmup && inputs.pd_separation && inputs.combo_tokens.numel() > 0) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         if (attention_inputs.cache_store_inputs.has_value()) {
             attention_inputs.cache_store_writer = cache_store_async_writer_;
@@ -919,6 +919,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return attach_model_side_outputs(GptModelOutputs{});
         }
         auto hidden_states = py_model_outputs.hidden_states.clone();
+        if (inputs.is_fake_stream && inputs.combo_tokens.numel() == 0) {
+            // The zero-token DP participant has completed its model collectives.
+            // There are no rows for the LM head or the sampler.
+            GptModelOutputs outputs;
+            outputs.hidden_states = hidden_states;
+            outputs.all_hidden_states = hidden_states;
+            return attach_model_side_outputs(std::move(outputs));
+        }
         if (is_dspark_draft_) {
             // DSpARK already applies its full-vocabulary lm_head and Markov
             // head in Python. Running the generic C++ post-layers path would

@@ -289,7 +289,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0
+        || (model_input.is_fake_stream && model_input.combo_tokens.numel() == 0)) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
         if (profile_step_finish_) {
