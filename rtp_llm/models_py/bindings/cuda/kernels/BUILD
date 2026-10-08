@@ -214,6 +214,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "topk_v3_jit_headers",
+    srcs = [
+        "topk_v3.cuh",
+        "topk_v3_compat.cuh",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],

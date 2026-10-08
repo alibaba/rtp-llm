@@ -55,6 +55,10 @@ py_library(
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
         "modules/dsv4/fp8/_v41_cache_triton.LICENSE",
+        "modules/dsv4/fp8/_v41_candidate_topk.cu",
+        "modules/dsv4/fp8/_v41_candidate_topk_sb.cuh",
+        "modules/dsv4/fp8/_v41_candidate_topk.LICENSE",
+        "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_jit_headers",
     ],
     deps = [
         ":utils",

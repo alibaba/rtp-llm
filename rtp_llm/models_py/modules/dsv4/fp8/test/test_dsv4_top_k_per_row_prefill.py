@@ -296,7 +296,11 @@ if __name__ == "__main__":
     test_long_T_radix_inside_block()
     test_radix_branch_above_threshold()
     test_force_radix_sort()
-    test_fast_topk_v2_short_inputs_topk_512_1024()
+    test_radix_negative_infinity_threshold_has_no_padding_indices()
+    try:
+        test_fast_topk_v2_short_inputs_topk_512_1024()
+    except unittest.SkipTest as error:
+        print(f"SKIP: {error}")
     test_zero_length_row()
     print("\n== Benchmark ==")
     bench_prefill_sweep()
