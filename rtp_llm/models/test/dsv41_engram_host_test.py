@@ -1,5 +1,6 @@
 """Small real-file/multiprocess tests for Engram table ownership and lookup."""
 
+import errno
 import json
 import multiprocessing
 import os
@@ -256,7 +257,7 @@ class V41EngramHostTest(unittest.TestCase):
         table = self.open()
         self.assertEqual(table._path.read_bytes(), self.weights + self.scales)
 
-    def test_capacity_checks_and_fallocate_failure_leave_no_ready_table(self):
+    def test_capacity_and_sync_failure_leave_no_ready_or_mapped_table(self):
         with self.assertRaisesRegex(ValueError, "budget"):
             self.open(max_bytes=1)
         with patch.object(
@@ -264,11 +265,37 @@ class V41EngramHostTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "insufficient"):
                 self.open()
-        with patch.object(host.os, "posix_fallocate", side_effect=OSError("no space")):
+        with patch.object(
+            host.os, "fsync", side_effect=OSError(errno.ENOSPC, "no space")
+        ), patch.object(host.mmap, "mmap") as mapping:
             with self.assertRaisesRegex(OSError, "no space"):
                 self.open()
+            mapping.assert_not_called()
         self.assertEqual(list(self.shared.glob("*.partial")), [])
         self.assertEqual(list(self.shared.glob("*.json")), [])
+
+    def test_partial_write_and_short_copy_never_publish_or_map(self):
+        def write_failure(span, destination):
+            destination.write(b"partial")
+            raise OSError(errno.ENOSPC, "injected write exhaustion")
+
+        for copy, error in ((write_failure, OSError), (lambda *args: None, ValueError)):
+            with patch.object(host, "_copy_span", side_effect=copy), patch.object(
+                host.mmap, "mmap"
+            ) as mapping:
+                with self.assertRaises(error):
+                    self.open()
+                mapping.assert_not_called()
+            self.assertEqual(
+                [p for p in self.shared.iterdir() if p.suffix != ".lock"], []
+            )
+        with patch.object(
+            host.os,
+            "posix_fallocate",
+            side_effect=AssertionError("emulated preallocation"),
+        ):
+            table = self.open()
+        self.assertEqual(table._path.read_bytes(), self.weights + self.scales)
 
     def test_bad_live_metadata_cannot_replace_a_readers_storage(self):
         table = self.open()

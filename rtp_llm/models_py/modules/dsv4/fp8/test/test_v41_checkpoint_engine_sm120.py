@@ -399,9 +399,10 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             directory_context = tempfile.TemporaryDirectory(
                 prefix="v41-full-engine-", dir=storage
             )
-        self.assertGreater(
-            shutil.disk_usage(storage).free, (0 if reuse else total) + 64 * 2**30
-        )
+        reserve_gib = int(os.environ.get("DSV41_TEST_STORAGE_RESERVE_GIB", "64"))
+        self.assertGreaterEqual(reserve_gib, 32)
+        free_storage = shutil.disk_usage(storage).free
+        self.assertGreater(free_storage, (0 if reuse else total) + reserve_gib * 2**30)
         memory = {
             key: int(value.split()[0]) * 1024
             for key, value in (
@@ -427,6 +428,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         self.assertTrue(all(0 < len(prompt) <= 32 for prompt in prompts))
         print(
             f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} "
+            f"free_storage={free_storage} reserve_gib={reserve_gib} "
             f"reuse_tables={bool(reuse)} prompts={prompts}",
             flush=True,
         )
