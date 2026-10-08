@@ -293,6 +293,7 @@ class KimiK3(BaseModel):
         config.linear_attention_config.linear_value_head_dim = linear_head_dim
         config.linear_attention_config.linear_num_key_heads = linear_heads
         config.linear_attention_config.linear_num_value_heads = linear_heads
+        config.linear_attention_config.replay_vector_gate = True
         config.linear_attention_config.linear_conv_kernel_dim = int(
             linear_config.get("short_conv_kernel_size", 4)
         )

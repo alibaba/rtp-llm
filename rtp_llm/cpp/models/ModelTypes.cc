@@ -159,6 +159,10 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::linearReplayBatch] =
+        inputs.linear_replay ? inputs.linear_replay->slot_ids.numel() : 0;
+    shape_hints[GptModelInputIndex::linearReplayGroups] =
+        inputs.linear_replay ? inputs.linear_replay->active_block_ids.size(0) : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -337,6 +341,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.kernel_seq_size_per_block =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
     if (inputs.skip_run) {
+        inputs.linear_replay.reset();
         inputs.kv_cache_group_tags.clear();
         inputs.kv_cache_block_id        = torch::Tensor();
         inputs.kv_cache_kernel_block_id = torch::Tensor();
@@ -430,6 +435,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (!mm_extra_input_num) {
             inputs.mm_extra_input.reset();
+        }
+        const auto replay_batch = checkedHint(GptModelInputIndex::linearReplayBatch, "linearReplayBatch");
+        const auto replay_groups = checkedHint(GptModelInputIndex::linearReplayGroups, "linearReplayGroups");
+        if (replay_batch > 0) {
+            inputs.linear_replay = LinearReplayInputs::allocate(replay_batch, replay_groups);
+        } else {
+            inputs.linear_replay.reset();
         }
         const auto context_batch_size = checkedHint(GptModelInputIndex::prefixLengths, "prefixLengths");
 
@@ -585,6 +597,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.combo_tokens);
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
+    if (inputs.linear_replay) {
+        for (auto* tensor : inputs.linear_replay->tensors()) {
+            collect(*tensor);
+        }
+    }
     collect(inputs.prefix_lengths);
     collect(inputs.cache_store_publish_start_tokens);
     if (max_kernel_blocks || max_blocks) {

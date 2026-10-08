@@ -454,6 +454,78 @@ static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, 
     return group;
 }
 
+TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinearGroup) {
+    auto linear = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear_a", 16, 16, 1),
+                                CacheGroupType::LINEAR,
+                                {0});
+    auto other = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear_b", 16, 16, 1),
+                               CacheGroupType::LINEAR,
+                               {1});
+    other.policy.explicit_block_num = 19;
+    auto full = makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"),
+                              CacheGroupType::FULL,
+                              {0});
+    CacheConfig config;
+    config.layer_num = 2;
+    config.setTopology({linear, other, full}, {{0, {"linear_a", "full"}}, {1, {"linear_b"}}});
+
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 7;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);  // 2 * (7 + 4)
+    EXPECT_TRUE(config.group("linear_a").policy.charge_to_paged_budget);
+    EXPECT_EQ(config.group("linear_b").policy.explicit_block_num, 19u);
+    EXPECT_EQ(config.group("full").policy.explicit_block_num, 0u);
+
+    parallelism.role_type = RoleType::PREFILL;
+    runtime.max_generate_batch_size = 15;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);
+}
+
+TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory) {
+    auto target = makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear", 16, 16, 1),
+                                CacheGroupType::LINEAR,
+                                {0});
+    auto draft = makeTestGroup(std::make_shared<LinearKVCacheSpec>("draft_linear", 16, 16, 1),
+                               CacheGroupType::LINEAR,
+                               {2});
+    auto full = makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"),
+                              CacheGroupType::FULL,
+                              {1});
+    CacheConfig config;
+    config.layer_num = 2;
+    config.setTopology({target, draft, full},
+                       {{0, {"target_linear"}}, {1, {"full"}}, {2, {"draft_linear"}}});
+    ModelConfig model;
+    auto& linear = model.linear_attention_config;
+    linear.linear_num_key_heads = 2;
+    linear.linear_num_value_heads = 4;
+    linear.linear_key_head_dim = 64;
+    linear.linear_value_head_dim = 64;
+    linear.linear_conv_kernel_dim = 4;
+    linear.conv_state_dtype = DataType::TYPE_BF16;
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 5;
+    SpeculativeExecutionConfig speculative;
+    speculative.type = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 3;
+    CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
+    EXPECT_EQ(config.linear_replay_group_ids, (std::vector<int>{0}));
+    EXPECT_EQ(config.linear_replay_slot_count, 5);
+    EXPECT_EQ(config.linear_replay_max_steps, 4);
+    // Each slot has one target layer of 4-step logs and shared generation/epoch headers.
+    const size_t values_per_step = 2u * 64u + 4u * 64u + 4u;
+    const size_t channels = 2u * 2u * 64u + 4u * 64u;
+    EXPECT_EQ(config.linear_replay_reserve_bytes,
+              5u * (2u * sizeof(int64_t) + 2u * sizeof(int32_t)
+                    + 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
+}
+
 TEST(CacheConfigTest, GroupIdentityQueriesPreserveGeometryAcrossTopologyOrders) {
     auto                         full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 4, 16, "full");
     auto                         swa_spec  = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 8, "swa");

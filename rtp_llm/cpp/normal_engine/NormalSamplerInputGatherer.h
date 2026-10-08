@@ -17,6 +17,8 @@ class NormalSamplerInputGatherer {
 public:
     NormalSamplerInputGatherer() = default;
 
+    static bool requiresTokenHistory(const std::list<GenerateStreamPtr>& streams);
+
     absl::StatusOr<SamplerInputs> gather(const StreamGroups&    stream_groups,
                                          const GptModelInputs&  model_inputs,
                                          const GptModelOutputs& model_output) const;
@@ -24,7 +26,8 @@ public:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step      = 0,
+                                        bool                compact_token_ids = false) const;
 
     void fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,
                                  std::list<GenerateStreamPtr>& all_streams,

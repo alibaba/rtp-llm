@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <optional>
@@ -48,6 +49,7 @@ struct GptModelInputs {
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
     torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    std::optional<LinearReplayInputs> linear_replay;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]

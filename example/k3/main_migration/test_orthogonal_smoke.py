@@ -413,9 +413,32 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         smoke.args.suite = "main-text-64k-capped"
         groups.clear()
         smoke._orthogonal_decode_batches()
+        self.assertEqual(len(groups), 6)
+        self.assertEqual(groups[4][0], "orthogonal_decode_04_batch_64")
         self.assertTrue(groups[4][2]["grouped_pd"])
         self.assertEqual(groups[3][1][0].max_tokens, 2560)
         self.assertEqual(groups[4][1][0].max_tokens, 1280)
+        for index, case in enumerate(groups[4][1]):
+            original = smoke.record_case(case.name, index % 2, words=56)
+            self.assertEqual(case.prompt, original.prompt)
+            self.assertEqual(case.expected_json, original.expected_json)
+            self.assertEqual(len(case.expected_json["value"].split()), 56)
+        name, cases, options = groups[5]
+        self.assertEqual(name, "orthogonal_decode_graph_long_output_batch_64")
+        self.assertEqual(len(cases), 64)
+        self.assertEqual(
+            [
+                sum(case.decode_owner_rank == owner for case in cases)
+                for owner in (0, 1)
+            ],
+            [32, 32],
+        )
+        self.assertTrue(options["concurrent"] and options["grouped_pd"])
+        for case in cases:
+            self.assertTrue(case.name.startswith(name + "_"))
+            self.assertEqual(len(case.expected_json["value"].split()), 112)
+            self.assertEqual(case.max_tokens, 2560)
+            self.assertTrue(case.require_mtp_draft and case.thinking_disabled)
         self.assertFalse(groups[0][2]["grouped_pd"])
         self.assertTrue(all(group[2]["grouped_pd"] for group in groups[1:]))
         for index, local_batch in ((1, 2), (2, 4)):
