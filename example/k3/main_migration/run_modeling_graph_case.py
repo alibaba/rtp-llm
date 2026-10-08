@@ -127,7 +127,7 @@ def main():
     parser.add_argument("--warmup-batches", type=int, default=10)
     parser.add_argument("--profile-steps", type=int, default=40)
     parser.add_argument("--profile-start-step", type=int, default=8)
-    parser.add_argument("--output-tokens", type=int, default=512)
+    parser.add_argument("--output-tokens", type=int, default=4096)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     urls = [url.rstrip("/") for url in args.decode_urls]
@@ -272,7 +272,7 @@ def main():
         ack = None
         with ThreadPoolExecutor(max_workers=count) as pool:
             futures = [pool.submit(one, index) for index in range(count)]
-            if profile_name:
+            if per_owner == 32:
                 deadline = time.monotonic() + args.timeout
                 while time.monotonic() < deadline:
                     if any(
@@ -280,27 +280,30 @@ def main():
                         for future in futures
                     ):
                         raise RuntimeError(
-                            "Request failed before the full B32 profiling boundary"
+                            "Request failed before the full B32 warmup/profiling boundary"
                         )
                     if any(future.done() for future in futures):
                         raise RuntimeError(
-                            "A request finished before full B32 profiling could be armed"
+                            "A request finished before the full B32 boundary"
                         )
                     state = snapshot()
                     if full_batch_ready(state):
                         ready = state
-                        ack = arm_profile(
-                            urls,
-                            profile_name,
-                            args.profile_steps,
-                            start_step=args.profile_start_step,
-                        )
+                        if profile_name:
+                            ack = arm_profile(
+                                urls,
+                                profile_name,
+                                args.profile_steps,
+                                start_step=args.profile_start_step,
+                            )
                         break
                     time.sleep(0.05)
-                if ack is None:
+                if ready is None:
                     raise RuntimeError("Did not observe real B32 on every Decode owner")
             records = [future.result() for future in futures]
         group = {"label": label, "requests": records, "queues_after": drain()}
+        if ready is not None:
+            group["ready_snapshot"] = ready
         if ack is not None:
             group.update(
                 {

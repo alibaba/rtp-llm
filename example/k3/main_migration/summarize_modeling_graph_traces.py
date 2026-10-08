@@ -164,6 +164,17 @@ def load_window(window, root, sample_rounds):
             for r in requests
         ):
             raise ValueError("Warmup request failed or used another shape")
+        ready = groups[0].get("ready_snapshot", {})
+        if set(map(int, ready)) != set(range(client["dp"])) or any(
+            len(row.get("running_task_info", [])) != 32
+            or any(
+                task.get("is_waiting", False)
+                or int(task.get("input_length", -1)) != 65536
+                for task in row.get("running_task_info", [])
+            )
+            for row in ready.values()
+        ):
+            raise ValueError("Warmup did not observe actual B32 on every owner")
         queues = groups[0]["queues_after"]["decode"]
         if set(map(int, queues)) != set(range(client["dp"])) or any(
             row.get("running_task_info") for row in queues.values()

@@ -202,6 +202,15 @@ class EightRankSummaryTest(unittest.TestCase):
                             "1": {"running_task_info": []},
                         }
                     },
+                    "ready_snapshot": {
+                        str(owner): {
+                            "running_task_info": [
+                                {"input_length": "65536", "is_waiting": False}
+                                for _ in range(32)
+                            ]
+                        }
+                        for owner in range(2)
+                    },
                 }
                 for label in labels
             ]
@@ -225,6 +234,23 @@ class EightRankSummaryTest(unittest.TestCase):
                 "client_summary_sha256": file_sha256(client_path),
             }
             self.assertEqual(load_window(window, root, 1)["all_rank_matched_rounds"], 1)
+            original_ready = copy.deepcopy(client["groups"][0]["ready_snapshot"])
+            for mutation in ("missing", "partial", "waiting", "wrong_kv"):
+                client["groups"][0]["ready_snapshot"] = copy.deepcopy(original_ready)
+                ready = client["groups"][0]["ready_snapshot"]
+                if mutation == "missing":
+                    ready.pop("1")
+                elif mutation == "partial":
+                    ready["1"]["running_task_info"].pop()
+                elif mutation == "waiting":
+                    ready["1"]["running_task_info"][0]["is_waiting"] = True
+                else:
+                    ready["1"]["running_task_info"][0]["input_length"] = 69632
+                client_path.write_text(json.dumps(client))
+                window["client_summary_sha256"] = file_sha256(client_path)
+                with self.assertRaisesRegex(ValueError, "actual B32"):
+                    load_window(window, root, 1)
+            client["groups"][0]["ready_snapshot"] = original_ready
             client["groups"][0]["requests"].pop()
             client_path.write_text(json.dumps(client))
             window["client_summary_sha256"] = file_sha256(client_path)
