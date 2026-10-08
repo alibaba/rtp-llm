@@ -99,6 +99,22 @@ TEST_F(AsyncRunnerTest, CudaTensorWork) {
     EXPECT_TRUE(torch::equal(result, torch::ones({64}, torch::kFloat32)));
 }
 
+TEST_F(AsyncRunnerTest, DestructorDrainsCudaWorkAfterWorkerFailure) {
+    auto output = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto ready  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(currentStream());
+    {
+        AsyncRunner runner(makeStream());
+        runner.launch("failed CUDA task", [ready, output] {
+            ready->block(cuda_graph::graphGetCurrentStream());
+            output.fill_(19);
+            throw std::runtime_error("failed after CUDA submission");
+        });
+        EXPECT_THROW(runner.sync(currentStream()), std::runtime_error);
+    }
+    EXPECT_TRUE(torch::equal(output.cpu(), torch::full({8192}, 19, torch::kInt32)));
+}
+
 TEST_F(AsyncRunnerTest, DoesNotPropagateRecordFunctionCallbacksToWorker) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
@@ -164,7 +180,7 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
 
-    runner.launch([] { throw std::runtime_error("async failure"); });
+    runner.launch("sync failure", [] { throw std::runtime_error("async failure"); });
     EXPECT_THROW(runner.sync(currentStream()), std::runtime_error);
 
     std::atomic<int> counter{0};
@@ -177,13 +193,26 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
 
-    runner.launch([] { throw std::runtime_error("async failure"); });
+    runner.launch("previous task failure", [] { throw std::runtime_error("async failure"); });
     EXPECT_THROW(runner.launch([] {}), std::runtime_error);
 
     std::atomic<int> counter{0};
     runner.launch([&counter] { counter.fetch_add(1); });
     runner.sync(currentStream());
     EXPECT_EQ(counter.load(), 1);
+}
+
+TEST_F(AsyncRunnerTest, RethrowsNonStandardWorkerException) {
+    AsyncRunner runner(makeStream());
+    runner.launch("non-standard failure", [] { throw 42; });
+    EXPECT_THROW(runner.sync(currentStream()), int);
+}
+
+TEST_F(AsyncRunnerTest, DestructorDoesNotRethrowUnobservedFailure) {
+    EXPECT_NO_THROW({
+        AsyncRunner runner(makeStream());
+        runner.launch("unobserved failure", [] { throw 19; });
+    });
 }
 
 TEST_F(AsyncRunnerTest, LaunchSyncInterleavedStress) {

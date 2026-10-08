@@ -383,7 +383,16 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 }  // anonymous namespace
 
-NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
+NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {
+    RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_tags.size() == config_.kv_cache_group_nums
+                                && config_.kv_cache_group_types.size() == config_.kv_cache_group_nums,
+                            "cache group tag/type counts must match configured group count");
+    for (size_t row = 0; row < config_.kv_cache_group_tags.size(); ++row) {
+        const auto& tag = config_.kv_cache_group_tags[row];
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && (row == 0 || config_.kv_cache_group_tags[row - 1] < tag),
+                                "cache group tags must be non-empty, unique and sorted");
+    }
+}
 
 GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
@@ -467,15 +476,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
 }
 
 void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_input) const {
-    RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_tags.size() == config_.kv_cache_group_nums
-                                && config_.kv_cache_group_types.size() == config_.kv_cache_group_nums,
-                            "cache group tag/type counts must match configured group count");
-    std::unordered_set<std::string> seen;
-    for (const auto& tag : config_.kv_cache_group_tags) {
-        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
-                                "cache group tags must be non-empty and unique: tag=%s",
-                                tag.c_str());
-    }
     model_input.kv_cache_group_tags = config_.kv_cache_group_tags;
     if (config_.kv_cache_group_nums > 0) {
         RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_group_types.defined(),

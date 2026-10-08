@@ -15,6 +15,7 @@ TEST(FastTopKSamplerTest, TopKOneReturnsArgmaxIndex) {
     ASSERT_EQ(out.token_ids.dim(), 2);
     ASSERT_EQ(out.token_ids.size(0), 1);
     ASSERT_EQ(out.token_ids.size(1), 1);
+    EXPECT_EQ(out.token_ids.scalar_type(), torch::kInt32);
     EXPECT_EQ(out.token_ids[0][0].item<int64_t>(), 2);
     EXPECT_TRUE(torch::equal(out.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}})));
 }
@@ -27,9 +28,20 @@ TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
     ASSERT_EQ(out.token_ids.dim(), 2);
     ASSERT_EQ(out.token_ids.size(0), 1);
     ASSERT_EQ(out.token_ids.size(1), 2);
+    EXPECT_EQ(out.token_ids.scalar_type(), torch::kInt32);
     // softmax preserves ordering: indices 2 (5.0) then 3 (3.0).
     EXPECT_EQ(out.token_ids[0][0].item<int64_t>(), 2);
     EXPECT_EQ(out.token_ids[0][1].item<int64_t>(), 3);
+}
+
+TEST(FastTopKSamplerTest, ReturnsInt32MappedTokensWithoutChangingProbabilities) {
+    FastTopKSampler sampler(torch::tensor({163839, 163838, 163837, 163836}, torch::kInt64));
+    auto            logits = torch::tensor({{1.0f, 2.0f, 5.0f, 3.0f}});
+    auto            out    = sampler.forward(logits, 1);
+
+    EXPECT_EQ(out.token_ids.scalar_type(), torch::kInt32);
+    EXPECT_EQ(out.token_ids[0][0].item<int32_t>(), 163837);
+    EXPECT_TRUE(torch::equal(out.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}})));
 }
 
 TEST(SpeculativeSamplerTest, SelectsPerRequestProbabilityModeWithoutChangingRejectionInput) {

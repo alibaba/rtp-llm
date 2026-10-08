@@ -72,6 +72,18 @@ cc_library(
 )
 
 cc_library(
+    name = "mtp_greedy_sampling",
+    srcs = ["mtp_greedy_sampling.cu"],
+    hdrs = ["mtp_greedy_sampling.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_fused_qk_rmsnorm",
     srcs = ["fused_qk_rmsnorm.cu"],
     hdrs = ["fused_qk_rmsnorm.h"],
