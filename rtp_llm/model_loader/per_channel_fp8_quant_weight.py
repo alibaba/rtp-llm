@@ -64,6 +64,33 @@ def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
     return re.compile("^" + r"\d+".join(re.escape(p) for p in parts) + "$")
 
 
+# Layer indices the ``re:`` ignore patterns are probed with. A template stands
+# for *every* layer, so a pattern only covers it when it matches at every one of
+# these widths. A single fixed probe cannot tell "matches any layer" from
+# "matches a layer with this many digits": ``model\.layers\.[0-9]\.`` matches
+# layer 0 but not layer 12, so it does not stand for the whole template.
+_LAYER_INDEX_PROBES = (
+    "0",
+    "1",
+    "12",
+    "123",
+    "123456789",
+)
+
+
+def _regex_ignore_covers_template(pattern: str, base_name_template: str) -> bool:
+    """Return whether a ``re:`` ignore pattern covers the whole weight template.
+
+    The template is rendered with each of ``_LAYER_INDEX_PROBES`` and the
+    pattern has to match every rendering, which is the same whole-template
+    question ``_exclude_pattern_for`` answers for the compressed-tensors paths.
+    """
+    return all(
+        re.search(pattern, base_name_template.replace("{i}", probe))
+        for probe in _LAYER_INDEX_PROBES
+    )
+
+
 def _ckpt_base_matches_quant_exclude(
     base_name_template: str, exclude_modules: set
 ) -> bool:
@@ -99,8 +126,9 @@ def _ckpt_base_matches_quant_exclude(
     for exclude in exclude_modules:
         if exclude.startswith("re:"):
             try:
-                probe = base_name_template.replace("{i}", "123456789")
-                if re.search(exclude[3:], probe):
+                if _regex_ignore_covers_template(
+                    exclude[3:], base_name_template
+                ):
                     return True
             except re.error as error:
                 raise ValueError(
@@ -113,12 +141,11 @@ def _ckpt_base_matches_quant_exclude(
 
 def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: set) -> bool:
     """Return whether a regex ignore matches the whole weight template."""
-    probe = base_name_template.replace("{i}", "123456789")
     for exclude in exclude_modules:
         if not exclude.startswith("re:"):
             continue
         try:
-            if re.search(exclude[3:], probe):
+            if _regex_ignore_covers_template(exclude[3:], base_name_template):
                 return True
         except re.error as error:
             raise ValueError(

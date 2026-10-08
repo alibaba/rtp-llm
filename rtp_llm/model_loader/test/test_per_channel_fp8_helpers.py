@@ -126,10 +126,6 @@ class CkptBaseMatchesQuantExcludeTest(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
     """The ``re:`` ignore entries describe which weight *templates* are excluded.
 
@@ -165,6 +161,37 @@ class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
         self.assertTrue(
             _ckpt_base_matches_regex_exclude(self.TEMPLATE, excludes)
         )
+
+    def test_unbounded_digit_quantifiers_cover_the_template(self):
+        for pattern in (
+            r"re:^model\.layers\.\d+\.mlp$",
+            r"re:^model\.layers\.[0-9]+\.mlp$",
+            r"re:.*mlp$",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertTrue(
+                    _ckpt_base_matches_quant_exclude(self.TEMPLATE, {pattern})
+                )
+
+    def test_digit_count_pinned_patterns_do_not_cover_the_template(self):
+        r"""A pattern pinned to one digit does not stand for every layer.
+
+        `model\.layers\.[0-9]\.mlp` matches layer 0 but not layer 12, so it
+        must not be treated as covering the template - which is what the old
+        single "0" probe did.
+        """
+        for pattern in (
+            r"re:^model\.layers\.\d\.mlp$",
+            r"re:^model\.layers\.[0-9]\.mlp$",
+            r"re:^model\.layers\.\d{1,2}\.mlp$",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertFalse(
+                    _ckpt_base_matches_quant_exclude(self.TEMPLATE, {pattern})
+                )
+                self.assertFalse(
+                    _ckpt_base_matches_regex_exclude(self.TEMPLATE, {pattern})
+                )
 
     def test_pattern_without_a_trailing_anchor_still_matches(self):
         excludes = {r"re:^model\.layers\.\d+\.mlp"}
@@ -207,3 +234,7 @@ class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
         self.assertFalse(
             _ckpt_base_matches_quant_exclude(self.TEMPLATE, {"model.layers.5.moe"})
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
