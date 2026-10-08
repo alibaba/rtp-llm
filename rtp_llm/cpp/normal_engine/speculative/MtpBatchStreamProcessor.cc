@@ -1357,7 +1357,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     TensorHolder&                                host_holder) {
     model_input.is_target_verify = false;
     model_input.is_mtp_draft_update = false;
-    if (!useMtpDeviceState()) {
+    if (!usesFixedMtpUpdateLayout() && !useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
             speculative_sampler_output.transfer_done_event->synchronize();
@@ -1426,12 +1426,31 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
         return;
     }
 
-    // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
-    // only the last accepted position. All outputs stay on CUDA so the next
-    // stream-async step can prepare without waiting for worker D2H.
+    // Keep the target's B x Q geometry for paged MTP update in both sync and
+    // device-state scheduling. Candidate rows beyond accept_len are overwritten
+    // next round; only accepted positions advance the stream's logical cache.
     model_input.is_target_verify = false;
     model_input.is_mtp_draft_update = true;
-    int total_tokens             = (propose_step_ + 1) * batch_size;
+    const int64_t width = propose_step_ + 1;
+    const int64_t total_tokens = width * static_cast<int64_t>(batch_size);
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_tokens.numel() == total_tokens
+                               && speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
+                           "MTP update requires B x Q accepted-token slots");
+    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined()
+                               && model_output.all_hidden_states.size(0) == total_tokens,
+                           "MTP update requires one target hidden row per physical token");
+    // Metadata remains Q-wide even for accept_len=1. Position IDs and cache
+    // tables already describe this target-verify layout and are kept verbatim.
+    if (usesFixedMtpUpdateLayout()) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.input_lengths.defined()
+                                   && model_input.input_lengths.numel() == static_cast<int64_t>(batch_size),
+                               "MTP update input_lengths must match the logical batch");
+        auto options = model_input.input_lengths.options();
+        if (model_input.input_lengths.device().is_cpu()) {
+            options = options.pinned_memory(true);
+        }
+        model_input.input_lengths = torch::full({static_cast<int64_t>(batch_size)}, width, options);
+    }
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
@@ -1661,10 +1680,10 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         }
         spec_update_infos.push_back(std::move(spec_update_info));
 
-        // Draft hidden layout differs per mode: the device-state path keeps a
-        // dense (propose_step_+1) rows/stream layout, while the default sync
-        // path compacts draft inputs (and thus hidden rows) to accept_len.
-        token_offset += useMtpDeviceState() ? (propose_step_ + 1) : cur_accept_len;
+        // Recurrent hidden is request_index * Q + accept_len - 1 for Native
+        // K3, including sync scheduling. Other models retain their legacy
+        // compact layout unless device-state scheduling is enabled.
+        token_offset += (usesFixedMtpUpdateLayout() || useMtpDeviceState()) ? (propose_step_ + 1) : cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

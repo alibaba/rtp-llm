@@ -18,9 +18,14 @@ public:
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
+        fixed_mtp_update_layout_(model_config.model_type == "kimi_k3" && sp_config.type == SP_TYPE_MTP),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+
+    // Native K3 modeling uses request-major Q slots even with synchronous
+    // scheduling. Accept lengths select outputs, never the forward shape.
+    bool usesFixedMtpUpdateLayout() const { return fixed_mtp_update_layout_; }
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -190,6 +195,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                   = 0;
+    bool    fixed_mtp_update_layout_      = false;
     bool    is_dspark_                    = false;
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;

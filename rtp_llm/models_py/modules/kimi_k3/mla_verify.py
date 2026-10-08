@@ -30,17 +30,19 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         self.tokens = inputs.physical_token_count
         if self.batch <= 0 or self.tokens <= 0:
             raise ValueError("K3 MLA requires nonempty physical rows")
-        if inputs.is_target_verify and self.tokens % self.batch:
-            raise ValueError("K3 target verification requires rectangular physical rows")
+        if (inputs.is_target_verify or inputs.is_mtp_draft_update) and self.tokens % self.batch:
+            raise ValueError("K3 verify/MTP update requires rectangular physical rows")
         device = next(w[W.mla_vc].device for w in self.weights if W.mla_vc in w)
-        if device not in _workspaces:
-            _workspaces[device] = torch.empty(512 * 1024 * 1024, dtype=torch.uint8, device=device)
+        operand_dtype = torch.float8_e4m3fn if attention.mla_fp8_compute else torch.bfloat16
+        workspace_key = (device, operand_dtype)
+        if workspace_key not in _workspaces:
+            _workspaces[workspace_key] = torch.empty(512 * 1024 * 1024, dtype=torch.uint8, device=device)
         self.native = NativeMlaDecode(
             num_heads=attention.head_num, kv_lora_rank=attention.kv_lora_rank,
             nope_dim=attention.nope_head_dim, pe_dim=attention.rope_head_dim,
             page_size=attention.kernel_tokens_per_block,
             softmax_extra_scale=attention.softmax_extra_scale,
-            workspace=_workspaces[device], max_batch=self.batch, max_tokens=self.tokens,
+            workspace=_workspaces[workspace_key], max_batch=self.batch, max_tokens=self.tokens,
             fp8_compute=attention.mla_fp8_compute,
             q_scale=attention.mla_fp8_q_scale,
             kv_scale=attention.mla_fp8_kv_scale,
