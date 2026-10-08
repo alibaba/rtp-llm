@@ -27,6 +27,17 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_engram_full_tables_sm120",
+    srcs = ["test_v41_engram_full_tables_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
     name = "test_v41_native_engine_sm120",
     srcs = [
         "test_v41_native_engine_sm120.py",
