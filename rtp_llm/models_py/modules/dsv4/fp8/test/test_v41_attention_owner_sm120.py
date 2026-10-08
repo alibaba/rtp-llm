@@ -690,7 +690,7 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 prepare(layer, x, cache, [3], tables=bad_tables)
             with self.assertRaisesRegex(ValueError, "block table"):
                 layer(x, positions, cache, bad_tables)
-        with self.assertRaisesRegex(NotImplementedError, "decode"):
+        with self.assertRaisesRegex(ValueError, "decode"):
             layer.forward_decode(x.unsqueeze(1), None, cache)
         cache.groups[0, "indexer_kv"] = LayerKVCache(
             original[0, "indexer_kv"], 256, 99, 0, "indexer_kv"

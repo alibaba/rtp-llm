@@ -2395,7 +2395,102 @@ class AttentionV41FP8(AttentionFP8):
                     raise ValueError(f"Invalid V4.1 {region} block table page")
 
     def forward_decode(self, x, attn_metadata, kv_cache=None):
-        raise NotImplementedError("V4.1 attention owner decode is not integrated")
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+
+        if attn_metadata is None or kv_cache is None:
+            raise ValueError("V4.1 decode requires native metadata and cache")
+        with bind_attn_cache(self, kv_cache, attn_metadata.pool_block_tables):
+            self._require_qualified_decode(x, attn_metadata)
+            return self._forward_decode_body(x, attn_metadata)
+
+    def _require_qualified_decode(self, x, metadata):
+        if (
+            not x.is_cuda
+            or torch.cuda.get_device_capability(x.device) != (12, 0)
+            or x.dtype != torch.bfloat16
+            or x.ndim != 3
+            or x.shape[0] < 1
+            or x.shape[1:] != (1, self.dim)
+            or not x.is_contiguous()
+        ):
+            raise NotImplementedError(
+                "V4.1 decode requires SM120 BF16 single-token requests"
+            )
+        batch = x.shape[0]
+        if metadata.is_cuda_graph or torch.cuda.is_current_stream_capturing():
+            raise NotImplementedError("V4.1 attention owner graphs are not integrated")
+        if (
+            metadata.batch_size != batch
+            or metadata.q_len_per_req != 1
+            or metadata.total_tokens != batch
+            or metadata.window_size != self.window_size
+            or metadata.head_dim != self.head_dim
+        ):
+            raise ValueError("V4.1 decode metadata geometry mismatch")
+        for name in ("start_pos", "position_ids", "req_id_per_token"):
+            value = getattr(metadata, name)
+            if (
+                value is None
+                or value.shape != (batch,)
+                or value.dtype != torch.int32
+                or value.device != x.device
+                or not value.is_contiguous()
+            ):
+                raise ValueError(f"Invalid V4.1 decode {name}")
+        starts = metadata.start_pos
+        if (
+            not torch.equal(metadata.position_ids, starts)
+            or not torch.equal(
+                metadata.req_id_per_token,
+                torch.arange(batch, dtype=torch.int32, device=x.device),
+            )
+            or bool((starts < 1).any())
+            or bool((starts >= self._rope_max_seq_len).any())
+        ):
+            raise ValueError(
+                "V4.1 decode requires consistent nonempty prompt positions"
+            )
+        self._require_qualified_prefill(
+            torch.ones_like(starts),
+            starts,
+            cp_on=self._cp_ctx is not None and self._cp_ctx.cp_size > 1,
+        )
+        regions = [SWA_KV]
+        if self.compress_ratio:
+            regions += [self._global_region(), INDEXER_KV]
+            if self.compress_ratio == 2:
+                regions += [CSA_STATE]
+        for region in regions:
+            if metadata.paged_pool_tokens_per_block.get(region) != 256:
+                raise ValueError("V4.1 decode requires native 256-token coverage")
+            if bool((metadata.pool_block_tables[region][:, 0] <= 0).any()):
+                raise ValueError("V4.1 decode requires allocated prompt pages")
+
+        # Validate the base metadata's SWA mapping before either cache writer.
+        # GLOBAL/state slots are computed by the V4.1 owner, not V4 metadata.
+        entries = self._cache_layouts[SWA_KV].entries
+        pages = metadata.pool_block_tables[SWA_KV][:, 0].long()
+        write = pages * entries + starts.long().remainder(entries)
+        first = (starts.long() - self.window_size + 1).clamp_min(0)
+        positions = first[:, None] + torch.arange(self.window_size, device=x.device)
+        read = torch.where(
+            positions <= starts[:, None],
+            pages[:, None] * entries + positions.remainder(entries),
+            -1,
+        ).int()
+        for actual, expected in (
+            (metadata.pool_write_slot_mappings.get(SWA_KV), write),
+            (metadata.swa_global_slots, read),
+        ):
+            if (
+                actual is None
+                or actual.device != x.device
+                or actual.dtype != expected.dtype
+                or actual.shape != expected.shape
+                or not actual.is_contiguous()
+                or not torch.equal(actual, expected)
+            ):
+                raise ValueError("V4.1 decode SWA slots do not match native pages")
 
     def _forward_prefill(self, x, positions, shared_input_quant=None):
         prepared = self._prefill_produce(x, positions, shared_input_quant)
@@ -2979,59 +3074,34 @@ class AttentionV41FP8(AttentionFP8):
         return slots.int()
 
     def _forward_decode_body(self, x, metadata):
-        raise NotImplementedError(
-            "V4.1 attention decode is not integrated on this branch"
-        )
         from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
             decode_compute_qkv,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.rope_metadata import (
-            decode_rope_metadata,
         )
 
         self._begin_forward()
         B, S, _ = x.shape
         T = B * S
-        positions, freqs = decode_rope_metadata(
-            self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
-        )
-        swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
-        global_work = None
-        if self.compress_ratio and self.is_kv_source:
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.global_overlap import (
-                start_global_decode,
-            )
-
-            req = metadata.req_id_per_token[:T].long()
-            starts = metadata.start_pos[:B].long()
-            global_work = start_global_decode(self, x, positions, req, starts)
-        try:
-            qkv = decode_compute_qkv(
-                self,
-                x,
-                positions,
-                freqs_cis=freqs,
-                swa_pool=self._pool_view_3d_fp8(SWA_KV),
-                swa_slots=None if swa_slots is None else swa_slots[:T],
-            )
-            if not qkv.swa_written:
-                self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
-        finally:
-            if global_work is not None:
-                global_work.finish()
+        positions = metadata.position_ids.long()
+        qkv = decode_compute_qkv(self, x, positions)
+        self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
+        swa_slots = metadata.swa_global_slots.view(B, S, self.window_size)
         if not self.compress_ratio:
-            o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
-        else:
-            if self.is_kv_source and global_work is None:
-                self._produce_global_decode(x, positions, req, starts)
-            selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized
+            from ._v41_decode_attention_sm120 import sparse_decode_attention
+
+            o = sparse_decode_attention(
+                qkv.q, self._pool_view_3d_fp8(SWA_KV), swa_slots, self.attn_sink
             )
+        else:
+            if self.is_kv_source:
+                self._produce_global_decode(
+                    x,
+                    positions,
+                    metadata.req_id_per_token.long(),
+                    metadata.start_pos.long(),
+                )
+            selected = self._select_indices_decode(x, qkv.qr, positions)
             from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-                get_or_build_sched_meta,
             )
 
             slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
@@ -3040,20 +3110,11 @@ class AttentionV41FP8(AttentionFP8):
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
                 global_pool_3d=self._source_pool(self._global_region()),
                 attn_sink=self.attn_sink,
-                swa_topk_3d=metadata.swa_global_slots[:T]
-                .view(B, S, self.window_size)
-                .contiguous(),
+                swa_topk_3d=swa_slots,
                 global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
                 swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
-                sched_meta=get_or_build_sched_meta(
-                    metadata,
-                    batch_size=B,
-                    q_len=S,
-                    num_heads=self.n_heads,
-                    topk=self.window_size,
-                    extra_attn_type=self._global_region(),
-                ),
-                fp8_op=self._get_fp8_decode_op(),
+                sched_meta=None,
+                fp8_op=None,
             )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
