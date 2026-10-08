@@ -10,7 +10,7 @@ meta:
   engine_dist: not used
 kpis:
   verdict: Gate verdict
-  monitoring: Monitoring / load validity
+  monitoring: 监控与请求诊断
 panels:
 - id: cache-hit
   title: Prefill 缓存命中率 · P 数量
@@ -30,7 +30,7 @@ panels:
   empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
 sections:
   audit: 监控曲线审计
-  monitoring: 实验与监控有效性
+  monitoring: 监控与请求诊断（不参与门禁）
   verdict: 专用门禁判据（非监控曲线）
   sources: 监控来源与缺采
 audit_columns: [曲线, 覆盖率, 状态, PromQL / 说明]

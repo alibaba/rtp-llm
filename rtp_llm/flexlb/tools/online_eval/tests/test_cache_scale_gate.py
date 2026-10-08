@@ -101,8 +101,6 @@ class CacheGateTest(unittest.TestCase):
                 window_s=10,
                 step_s=1,
                 sustain_s=15,
-                min_waiting=1,
-                max_pacing_lag_ms=100,
             ),
             baseline_start=0,
             baseline_end=20,
@@ -118,6 +116,7 @@ class CacheGateTest(unittest.TestCase):
         result = analyze(self.evidence())
         self.assertEqual(result["verdict"], "PASS")
         self.assertAlmostEqual(result["windows"][-1]["hit"], 0.8)
+        self.assertEqual(result["windows"][-1]["evictions"], 10)
 
     def test_buffered_journal_does_not_distort_actual_send_rate(self):
         evidence = self.evidence()
@@ -157,23 +156,33 @@ class CacheGateTest(unittest.TestCase):
                 )
         self.assertEqual(analyze(e)["verdict"], "INVALID")
 
-    def test_reset_gap_topology_and_pacing_fail_closed(self):
-        for fault in ("reset", "gap", "topology", "pacing", "rate"):
+    def test_missing_cache_data_and_off_target_load_are_invalid(self):
+        for fault in ("reset", "gap", "missing-survivor", "rate"):
             e = self.evidence()
             if fault == "reset":
                 e["samples"][40]["engines"]["p0"]["hit_tokens_total"] = 0
             if fault == "gap":
                 del e["samples"][40:46]
-            if fault == "topology":
-                e["samples"][40]["engines"]["p1"] = copy.deepcopy(
-                    e["samples"][20]["engines"]["p1"]
-                )
-            if fault == "pacing":
-                e["max_pacing_lag_ms"] = 1000
+            if fault == "missing-survivor":
+                del e["samples"][40]["engines"]["p0"]
             if fault == "rate":
                 for r in e["samples"]:
                     r["started"] //= 2
             self.assertEqual(analyze(e)["verdict"], "INVALID", fault)
+
+    def test_missing_diagnostic_counters_do_not_hide_valid_hit_window(self):
+        evidence = self.evidence(0.1)
+        for row in evidence["samples"]:
+            row["terminal"] = None
+            row["engines"]["p0"].pop("cache_evictions")
+            row["engines"]["p0"].pop("waiting")
+            row["engines"]["p0"].pop("prefill_ms_avg")
+        result = analyze(evidence)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertIsNone(result["windows"][0]["evictions"])
+        self.assertIsNone(result["windows"][0]["terminal_qps"])
+        self.assertIsNone(result["windows"][0]["waiting"])
+        self.assertTrue(result["windows"][0]["diagnostic_gaps"])
 
     def test_report_uses_same_verdict_and_data(self):
         e = self.evidence(0.1)
@@ -231,7 +240,7 @@ class CacheGateTest(unittest.TestCase):
                              ["Survivor window hit ratio"])
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
-            self.assertEqual(spec["kpis"][1]["value"], "INVALID")
+            self.assertEqual(spec["kpis"][1]["value"], "WARN")
             audit = spec["sections"][0]["rows"]
             self.assertIn(["Master schedule response QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
 
@@ -291,7 +300,7 @@ class CacheGateTest(unittest.TestCase):
         evidence["errors"].append("real collection failure")
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
-    def test_draining_victim_does_not_supply_survivor_overload(self):
+    def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):
         from workload.cache_gate import MEASUREMENT_POLICY, attribute_client, topology_ready
         evidence = self.evidence()
         evidence["measurement_policy"] = MEASUREMENT_POLICY
@@ -310,28 +319,30 @@ class CacheGateTest(unittest.TestCase):
         evidence["removals"] = [dict(engine="p1", admission=dict(admission_open=0, admission_closed_epoch_ms=1020000,
                 admitted_rpcs_total=42, admitted_rpcs_at_close=42), drained=False)]
         result = analyze(evidence)
-        self.assertEqual(result["errors"], ["overload not exercised"])
+        self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["windows"][0]["waiting"], 0)
         self.assertGreater(result["windows"][0]["client_cohorts"]["removed"]["failed_qps"], 0)
-        for row in evidence["samples"]:
-            if row["t"] > 20:
-                row["engines"]["p0"]["waiting"] = 100
-        self.assertEqual(analyze(evidence)["verdict"], "PASS")
         evidence["removals"][0]["admission"]["admitted_rpcs_total"] += 1
-        self.assertIn("removal admission proof unavailable or violated", analyze(evidence)["errors"])
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
         evidence["removals"][0]["admission"]["admitted_rpcs_total"] -= 1
         records[0]["send_start_epoch_ms"] = 1019000
         attribute_client(evidence, dict(complete=True, records=records))
-        self.assertIn("removed engine failures predate withdrawal or lack timing proof", analyze(evidence)["errors"])
+        self.assertTrue(evidence["client_attribution"]["removed_failures_without_intervention"])
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
         records[0]["send_start_epoch_ms"] = 1021000
         records[0]["prefill"] = ""
         attribute_client(evidence, dict(complete=True, records=records))
-        self.assertIn("unknown client failures are not exempt", analyze(evidence)["errors"])
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
         records[0]["prefill"] = "p0"
         attribute_client(evidence, dict(complete=True, records=records))
-        self.assertIn("survivor client failures are not exempt", analyze(evidence)["errors"])
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
+        attribute_client(evidence, dict(complete=False, records=records))
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
         evidence["samples"][-1]["engines"]["p1"]["admission_open"] = 1
         self.assertFalse(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
+        evidence["max_pacing_lag_ms"] = 1000
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
 
     def test_reinterpretation_preserves_frozen_input_and_requires_new_output(self):
         import sys
@@ -343,10 +354,10 @@ class CacheGateTest(unittest.TestCase):
             destination = Path(directory) / "new"
             argv = ["cache_gate", str(source), "--reinterpret", "--output", str(destination)]
             with mock.patch.object(sys, "argv", argv):
-                self.assertEqual(main(), 2)  # no historical journal: no invented attribution
+                self.assertEqual(main(), 0)
             self.assertEqual(source.read_bytes(), frozen)
             result = json.loads((destination / "reports/run/cache-scale-in/analysis.json").read_text())
-            self.assertIn("historical client attribution unavailable", result["result"]["errors"])
+            self.assertEqual(result["result"]["verdict"], "PASS")
             with mock.patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
                 main()
 

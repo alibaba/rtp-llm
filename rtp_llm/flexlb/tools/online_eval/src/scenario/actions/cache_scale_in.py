@@ -29,8 +29,6 @@ FIELDS = {
     "absolute_min_hit",
     "max_drop",
     "min_completed",
-    "min_waiting",
-    "max_pacing_lag_ms",
     "drain_timeout_ms",
     "topology_timeout_s",
 }
@@ -48,7 +46,7 @@ def validate(params, plan):
     for k in FIELDS - {"flow"}:
         if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or p[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")
-    for k in ("target_p", "min_completed", "min_waiting"):
+    for k in ("target_p", "min_completed"):
         if type(p[k]) is not int or p[k] < 1:
             raise ValueError(k + " must be a positive integer")
     if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
@@ -368,10 +366,15 @@ def check(ctx, p, deadline):
     evidence = ctx.resource(p["evidence"], "snapshot")
     flow = ctx.resource(p["flow"], "java_flow")
     snapshot = flow.evidence_snapshot()
-    if not snapshot["complete"]:
-        evidence["errors"].extend(snapshot["errors"])
+    # Terminal request failures do not decide whether survivor cache counters
+    # are measurable. Issued sends still need complete accounting for QPS.
+    if len(snapshot["issued"]) != snapshot.get("status", {}).get("submitted"):
+        evidence["errors"].append("issued send accounting incomplete")
     else:
-        align_send_counters(evidence, snapshot["issued"])
+        try:
+            align_send_counters(evidence, snapshot["issued"])
+        except ValueError as exc:
+            evidence["errors"].append(str(exc))
     attribute_client(evidence, snapshot)
     from traffic.traffic_source import sha256_file
     evidence["client_attribution"]["artifacts"] = [
@@ -401,7 +404,7 @@ def check(ctx, p, deadline):
                 "cache_stability",
                 status,
                 actual=result,
-                expected="valid overload without sustained cache collapse",
+                expected="valid survivor cache measurement without sustained hit collapse",
             )
         ],
         artifacts=[

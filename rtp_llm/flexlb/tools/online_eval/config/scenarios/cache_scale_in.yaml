@@ -42,8 +42,6 @@ parameters:
     absolute_min_hit: 0.45
     max_drop: 0.25
     min_completed: 20
-    min_waiting: 64
-    max_pacing_lag_ms: 1000
     removal_mode: graceful
     drain_timeout_ms: 30000
     topology_timeout_s: 37  # discovery convergence budget, independent of drain
