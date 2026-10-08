@@ -366,6 +366,7 @@ def build_v41_model_stage(
             frequencies[bool(source.compress_ratio)],
             backend=backend,
             max_rows=rows_per_rank,
+            kv_max_rows=4 * rows_per_rank if role == "prefill" else rows_per_rank,
         )
         local = _local_experts(
             weights, text, expert_ids, len(world_ranks) * rows_per_rank, backend

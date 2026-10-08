@@ -186,6 +186,9 @@ class V41ModelTest(unittest.TestCase):
                     tensors = weights.weights[op.layer_id]
                     self.assertIs(op.attention.wq_a.weight, tensors[W.v4_attn_wq_a_w])
                     self.assertIs(op.attention.frequencies, op.kv.frequencies)
+                    self.assertEqual(op.attention.max_rows, 4)
+                    self.assertEqual(op.max_rows, 4)
+                    self.assertEqual(op.kv.max_rows, 16 if role == "prefill" else 4)
                     self.assertEqual(
                         op.attention.sources, self.config.layer_sources()[op.layer_id]
                     )
@@ -242,6 +245,27 @@ class V41ModelTest(unittest.TestCase):
         torch.testing.assert_close(
             compressed, torch.polar(torch.ones_like(angles), angles), rtol=0, atol=0
         )
+
+    def test_cp_kv_finish_accepts_full_rows_while_queries_remain_local(self):
+        op = self.build(pp_rank=0, ep_rank=0).stage.blocks[0]
+        projected = op.kv.project(
+            torch.zeros(1, 32, dtype=torch.bfloat16),
+            torch.tensor([0]),
+            torch.tensor([True]),
+        )
+        full = dataclasses.replace(
+            projected,
+            swa=projected.swa.repeat(16, 1),
+            positions=torch.arange(16),
+            valid_rows=torch.ones(16, dtype=torch.bool),
+        )
+        self.assertEqual(op.kv.finish(full).swa.shape, (16, 512))
+        with self.assertRaises(ValueError):
+            op.attention.prepare(
+                torch.zeros(16, 32, dtype=torch.bfloat16),
+                full.positions,
+                full.valid_rows,
+            )
 
     def test_embedding_masks_padding_and_stage_one_requires_pp(self):
         loaded = self.build(pp_rank=0, ep_rank=0)

@@ -180,7 +180,13 @@ class V41AttentionProjection:
 
 
 def build_v41_projections(
-    sources, weights, frequencies, *, backend="flashinfer", max_rows=128
+    sources,
+    weights,
+    frequencies,
+    *,
+    backend="flashinfer",
+    max_rows=128,
+    kv_max_rows=None,
 ):
     """Bind loader W names without consuming/mutating its dictionary on failure.
 
@@ -203,7 +209,7 @@ def build_v41_projections(
         gate_weight=weights.get(W.v4_compressor_wgate),
         index_weight=weights.get(W.v41_indexer_wk),
         index_norm=weights.get(W.v41_indexer_k_norm),
-        max_rows=max_rows,
+        max_rows=max_rows if kv_max_rows is None else kv_max_rows,
     )
     index_q = (
         dense(W.v4_indexer_wq_b_w, W.v4_indexer_wq_b_s) if sources.owns_index else None
