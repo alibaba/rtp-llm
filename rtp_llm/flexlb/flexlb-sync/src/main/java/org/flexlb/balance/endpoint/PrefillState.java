@@ -11,6 +11,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.util.PriorityNormalizer;
+import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,6 +38,9 @@ import java.util.function.ToLongFunction;
  * worker's queue lock, which is the sole Prefill ownership lock.
  */
 public final class PrefillState {
+
+    private static final boolean ROUTE_DIAGNOSTICS =
+            Boolean.getBoolean("flexlb.route.diagnostics");
 
     public enum CapacityStatus {
         ACQUIRED,
@@ -605,6 +609,8 @@ public final class PrefillState {
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
+    private String diagnosticLabel = "unlabeled";
+    private long lastDiagnosticAtMs = Long.MIN_VALUE;
     private int batchLeasesInUse;
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
@@ -633,6 +639,11 @@ public final class PrefillState {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.capacityAvailable = Objects.requireNonNull(
                 capacityAvailable, "capacityAvailable");
+    }
+
+    /** Set once, before this worker generation starts receiving status. */
+    public void setDiagnosticLabel(String label) {
+        this.diagnosticLabel = Objects.requireNonNull(label, "label");
     }
 
     private RequestEntry putRequestUnderLock(long requestId, RequestEntry entry) {
@@ -1427,6 +1438,8 @@ public final class PrefillState {
         requireLock();
         Set<Long> unknownDetailed = new HashSet<>();
         Set<Long> knownObserved = new HashSet<>();
+        int missingOwner = 0;
+        int batchMismatch = 0;
         for (WorkerStatus.TaskObservation task : activeTasks.values()) {
             if (terminals.containsKey(task.requestId())) {
                 continue;
@@ -1435,6 +1448,13 @@ public final class PrefillState {
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
                 if (!task.isPriorityCancelOverlayOnly()) {
                     unknownDetailed.add(task.requestId());
+                    if (ROUTE_DIAGNOSTICS) {
+                        if (entry == null) {
+                            missingOwner++;
+                        } else {
+                            batchMismatch++;
+                        }
+                    }
                 }
                 continue;
             }
@@ -1460,7 +1480,24 @@ public final class PrefillState {
         }
         long scalarUnknown = Math.max(
                 0L, reportedActive - knownObserved.size());
-        return Math.max(unknownDetailed.size(), scalarUnknown);
+        long nextUnknown = Math.max(unknownDetailed.size(), scalarUnknown);
+        if (ROUTE_DIAGNOSTICS
+                && (nextUnknown > 0L || unknownEngineRequestCount > 0L)) {
+            long nowMs = clock.getAsLong();
+            if (lastDiagnosticAtMs == Long.MIN_VALUE
+                    || nowMs - lastDiagnosticAtMs >= 5_000L) {
+                lastDiagnosticAtMs = nowMs;
+                Logger.info("ROUTE_DIAG_RECONCILE epoch_ms={} engine={} unknown={} "
+                                + "previous_unknown={} missing_owner={} batch_mismatch={} "
+                                + "scalar_unknown={} reported_active={} known_observed={} "
+                                + "detailed_active={} terminal_count={} owned_requests={}",
+                        nowMs, diagnosticLabel, nextUnknown,
+                        unknownEngineRequestCount, missingOwner, batchMismatch,
+                        scalarUnknown, reportedActive, knownObserved.size(),
+                        activeTasks.size(), terminals.size(), requests.size());
+            }
+        }
+        return nextUnknown;
     }
 
     private StatusReconciliation reconcileEngineStatus(

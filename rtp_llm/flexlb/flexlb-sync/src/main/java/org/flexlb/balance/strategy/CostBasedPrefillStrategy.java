@@ -109,6 +109,34 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
 
+        if (Boolean.getBoolean("flexlb.route.diagnostics")
+                && Math.floorMod(requestId, 64L) == 0L) {
+            int maxHitIndex = -1;
+            int unknownCandidates = 0;
+            for (int i = 0; i < survivors.size(); i++) {
+                if (survivors.projectedTtftMs(i) < 0L) {
+                    unknownCandidates++;
+                }
+                if (maxHitIndex < 0
+                        || survivors.cacheHit(i) > survivors.cacheHit(maxHitIndex)) {
+                    maxHitIndex = i;
+                }
+            }
+            Logger.info("ROUTE_DIAG_SELECT epoch_ms={} request_id={} mode={} "
+                            + "candidate_count={} unknown_candidates={} seq_len={} "
+                            + "selected_engine={} selected_hit={} selected_ttft={} "
+                            + "max_hit_engine={} max_hit={} max_hit_ttft={}",
+                    System.currentTimeMillis(), requestId,
+                    config.getDispatcher().typeName(), survivors.size(),
+                    unknownCandidates, seqLen,
+                    survivors.endpointAddress(selectedIndex),
+                    survivors.cacheHit(selectedIndex),
+                    survivors.projectedTtftMs(selectedIndex),
+                    survivors.endpointAddress(maxHitIndex),
+                    survivors.cacheHit(maxHitIndex),
+                    survivors.projectedTtftMs(maxHitIndex));
+        }
+
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);

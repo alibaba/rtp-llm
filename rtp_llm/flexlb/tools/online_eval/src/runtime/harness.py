@@ -1235,6 +1235,8 @@ class EnvManager:
         """Build master configuration documents and the existing HA deployment identity."""
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
+        if os.environ.get("FLEXLB_ROUTE_DIAGNOSTICS") == "1":
+            menv["JAVA_TOOL_OPTIONS"] = "-Dflexlb.route.diagnostics=true"
         if "FLEXLB_CONFIG" in spec.master_env:
             # Narrowed channel (SSOT migration): master_env is non-config
             # env only — a stray FLEXLB_CONFIG here would silently fork
