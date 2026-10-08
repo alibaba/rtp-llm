@@ -49,47 +49,41 @@ def assert_snapshot_matches(path, expected):
 
 
 class MockCalibrationTest(unittest.TestCase):
-    def test_default_and_fault_presets_materialize_named_file_values(self):
+    def test_default_preset_materializes_named_file_values(self):
         calibration = load_mock_calibration()
         expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
-        for preset in ("default", "fault_env"):
-            with self.subTest(preset=preset):
-                performance, runtime = load_preset(preset)
-                self.assertEqual(runtime, {})
-                for key in ("id", "model", "hardware", "status"):
-                    self.assertEqual(performance["calibration_" + key], calibration[key])
-                self.assertEqual(performance["calibration_sha256"], expected_sha)
-                self.assertEqual({key: performance["decode"][key]
-                                  for key in calibration["decode"]}, calibration["decode"])
+        performance, runtime = load_preset("default")
+        self.assertEqual(runtime, {})
+        for key in ("id", "model", "hardware", "status"):
+            self.assertEqual(performance["calibration_" + key], calibration[key])
+        self.assertEqual(performance["calibration_sha256"], expected_sha)
+        self.assertEqual({key: performance["decode"][key]
+                          for key in calibration["decode"]}, calibration["decode"])
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
         self.assertEqual(load_preset("default")[0]["block_size"], calibration["block_size"])
 
-    def test_run_files_expose_effective_default_and_fault_calibration(self):
+    def test_run_files_expose_effective_default_calibration(self):
         calibration = load_mock_calibration()
         expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
-        for preset in ("default", "fault_env"):
-            with self.subTest(preset=preset), tempfile.TemporaryDirectory() as directory:
-                plan = environment({"perf_preset": preset}, "test", "single-nonbatch")
-                spec = make_env_spec(plan, "single-nonbatch", {"master_base": 28000})
-                run_dir = Path(directory)
-                perf_path = run_dir / "perf.json"
-                perf_path.write_text(json.dumps(spec.perf))
-                master_path = _write_master_config(SimpleNamespace(run_dir=run_dir, spec=spec))
-                observed_perf = json.loads(perf_path.read_text())
-                envelope = json.loads(master_path.read_text())
-                envs = dict(envelope["zone_process_setting"]["process_info"]["envs"])
-                master = json.loads(envs["FLEXLB_CONFIG"])
-                estimator = master["router"]["roles"]["prefill"]["executionTimeEstimator"]
-                self.assertEqual(estimator["expression"], calibration["prefill_expression"])
-                self.assertEqual(observed_perf["calibration_id"], calibration["id"])
-                self.assertEqual(observed_perf["calibration_sha256"],
-                                 hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest())
-                for key, value in calibration["decode"].items():
-                    self.assertEqual(observed_perf["decode"][key], value)
-                if preset == "fault_env":
-                    self.assertEqual(observed_perf["prefill"]["fixed_ms"], 100.0)
+        with tempfile.TemporaryDirectory() as directory:
+            plan = environment({"perf_preset": "default"}, "test", "single-nonbatch")
+            spec = make_env_spec(plan, "single-nonbatch", {"master_base": 28000})
+            run_dir = Path(directory)
+            perf_path = run_dir / "perf.json"
+            perf_path.write_text(json.dumps(spec.perf))
+            master_path = _write_master_config(SimpleNamespace(run_dir=run_dir, spec=spec))
+            observed_perf = json.loads(perf_path.read_text())
+            envelope = json.loads(master_path.read_text())
+            envs = dict(envelope["zone_process_setting"]["process_info"]["envs"])
+            master = json.loads(envs["FLEXLB_CONFIG"])
+            estimator = master["router"]["roles"]["prefill"]["executionTimeEstimator"]
+            self.assertEqual(estimator["expression"], calibration["prefill_expression"])
+            self.assertEqual(observed_perf["calibration_id"], calibration["id"])
+            self.assertEqual(observed_perf["calibration_sha256"], expected_sha)
+            for key, value in calibration["decode"].items():
+                self.assertEqual(observed_perf["decode"][key], value)
 
     def test_missing_or_invalid_calibration_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:

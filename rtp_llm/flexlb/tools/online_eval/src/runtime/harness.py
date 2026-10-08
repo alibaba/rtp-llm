@@ -2678,22 +2678,6 @@ PREFILL_DOMAIN = "mock.prefill.hosts.address"
 DECODE_DOMAIN = "mock.decode.hosts.address"
 
 
-def fault_env_perf() -> dict:
-    """Fault/elastic perf: an EXPLICIT flat prefill (performance JSON
-    "prefill.fixed_ms" — the sanctioned explicit channel, cluster-wide so
-    dynamically added engines inherit it too).
-
-    The elastic cases measure discovery/removal/inflight semantics, not
-    ledger-driven routing. The formula-driven default (~220ms at 2048
-    tokens) doubles the in-flight window at removal time and amplifies a
-    pre-existing intermittent drain stall (requests orphaned by the removed
-    engine never complete decode) — the flat 100ms declaration restores the
-    historical timing envelope this family was calibrated on.
-    """
-    from runtime.perf_presets import load_preset
-    return load_preset("fault_env")[0]
-
-
 def _initial_engine_names(env) -> set:
     return {f"prefill-{i}" for i in range(env.spec.n_prefill)} | {
         f"decode-{i}" for i in range(env.spec.n_decode)
