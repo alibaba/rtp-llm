@@ -944,7 +944,8 @@ class FrontendServer(object):
 
         status_code = (
             400
-            if exception_json.get("error_code") == int(ExceptionType.LONG_PROMPT_ERROR)
+            if exception_json.get("error_code")
+            in (int(ExceptionType.LONG_PROMPT_ERROR), int(ExceptionType.INVALID_PARAMS))
             else 500
         )
         return ORJSONResponse(format_client_exception(e), status_code=status_code)
