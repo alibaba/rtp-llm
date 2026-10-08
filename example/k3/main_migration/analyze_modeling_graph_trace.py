@@ -59,6 +59,9 @@ def analyze(events, actual_batch=32, verify_width=4, require_contract=False):
             correlation = event.get("args", {}).get("correlation")
             if correlation is not None:
                 gpu[correlation].append(event)
+    # Chrome trace arrays are not necessarily ordered by timestamp.
+    # Proposal ordinals must follow submission time on the model thread.
+    launches.sort(key=lambda event: event["ts"])
     for mapping in (scopes, graph_scopes, modeling_scopes):
         for values in mapping.values():
             values.sort(key=lambda e: e["ts"])

@@ -64,6 +64,18 @@ class ModelingBoundaryTest(unittest.TestCase):
         self.assertEqual([p["gpu_span_us"] for p in record["proposal"]], [5, 7])
         self.assertEqual(record["update"][0]["gpu_span_us"], 11)
 
+    def test_unordered_trace_events_preserve_proposal_submission_order(self):
+        ordered = analyze(round_events())
+        reversed_events = analyze(reversed(round_events()))
+        self.assertEqual(reversed_events, ordered)
+        self.assertEqual(
+            [
+                p["gpu_span_us"]
+                for p in reversed_events["complete_rounds"][0]["proposal"]
+            ],
+            [5, 7],
+        )
+
     def test_missing_update_and_eager_cannot_pass(self):
         for data in (
             round_events()[:-4],
