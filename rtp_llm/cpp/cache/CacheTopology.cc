@@ -30,6 +30,15 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology read replica tag=%s must have at most one storage slot",
                                 group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheTopology tag=%s has null spec", group.tag.c_str());
+        if (group.policy.single_block_per_request) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group.spec->type == KVCacheSpecType::OpaqueState && group.policy.group_type == CacheGroupType::SWA
+                    && !group.policy.enable_prefix_reuse && group.policy.cp_mapping == CpBlockMappingMode::NONE
+                    && group.policy.cp_slice == CpBlockSliceMode::NONE,
+                "CacheTopology tag=%s persistent request state requires OpaqueState/SWA, "
+                "no prefix reuse and unsharded CP",
+                group.tag.c_str());
+        }
         RTP_LLM_CHECK_WITH_INFO(group.spec->tag == group.tag,
                                 "CacheTopology tag=%s does not match spec tag=%s",
                                 group.tag.c_str(),

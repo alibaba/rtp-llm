@@ -26,6 +26,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", evict=" << static_cast<int>(policy.evict_policy) << ", reservable=" << policy.reservable
        << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
+       << ", single_block_per_request=" << policy.single_block_per_request
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
@@ -129,6 +130,7 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
            && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.single_block_per_request == rhs.single_block_per_request
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;

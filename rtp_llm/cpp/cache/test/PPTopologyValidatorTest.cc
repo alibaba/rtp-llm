@@ -405,6 +405,10 @@ TEST(PPTopologyValidatorTest, PolicyFingerprintCoversSamePolicyFields) {
     changed                    = base;
     changed.active_tail_blocks = 3;
     EXPECT_NE(base_fp, cacheGroupPolicyFingerprint(changed));
+    changed                          = base;
+    changed.single_block_per_request = true;
+    EXPECT_NE(base_fp, cacheGroupPolicyFingerprint(changed));
+    EXPECT_FALSE(CacheConfig::samePolicy(base, changed));
 }
 
 TEST(PPTopologyValidatorTest, PolicyMismatchFails) {

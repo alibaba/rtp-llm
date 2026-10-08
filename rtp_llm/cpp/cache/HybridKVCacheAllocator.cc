@@ -87,6 +87,12 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+    // A paged-prefix hit cannot restore the mutable request state that accompanies it.
+    for (const auto& group : kv_cache_groups_) {
+        if (group->policy().single_block_per_request) {
+            return 0;
+        }
+    }
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -188,6 +194,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
+    for (const auto& group : kv_cache_groups_) {
+        RTP_LLM_CHECK_WITH_INFO(!group->policy().single_block_per_request || batch_size == 1,
+                                "persistent request state requires a single sequence");
+    }
 
     const int   seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
@@ -524,6 +534,10 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                                                                         bool                   is_connector) {
     if (cache_keys.empty() || kvcache_resource.groupNums() <= 0) {
         return nullptr;
+    }
+    for (const auto& group : kv_cache_groups_) {
+        RTP_LLM_CHECK_WITH_INFO(!group->policy().single_block_per_request,
+                                "persistent request state requires retainAllocation, not cache-key retention");
     }
 
     std::unordered_map<CacheKeyType, size_t> key_to_pos;

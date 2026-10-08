@@ -243,6 +243,13 @@ void validateDsv41CacheDescs(const ModelConfig&       model_config,
                                     layer,
                                     desc.tag.c_str());
             const bool     state = desc.tag == "csa_state" || desc.tag == "swa_kv";
+            const auto     policy = SpecBuilder::groupPolicy(desc);
+            RTP_LLM_CHECK_WITH_INFO(policy.single_block_per_request == state
+                                        && policy.group_type == (state ? CacheGroupType::SWA : CacheGroupType::FULL)
+                                        && (!state || !policy.enable_prefix_reuse),
+                                    "V4.1 layer=%zu tag=%s requires persistent state allocation without prefix reuse",
+                                    layer,
+                                    desc.tag.c_str());
             const auto     dtype = desc.tag == "csa_state" ? DataType::TYPE_FP32 : DataType::TYPE_UINT8;
             const uint32_t elems = desc.tag == "csa_state"  ? 1024 :
                                    desc.tag == "swa_kv"     ? 528 :

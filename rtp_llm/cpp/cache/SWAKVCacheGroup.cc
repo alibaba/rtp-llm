@@ -71,6 +71,9 @@ void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndices
 }
 
 int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+    if (policy().single_block_per_request) {
+        return std::max(static_cast<int>(seq_len > 0 || reserve_step > 0) - current_blocks, 0);
+    }
     const int block_size = seqSizePerBlock();
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
@@ -97,6 +100,9 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  target_batch_size) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
+    if (policy().single_block_per_request) {
+        return batch_size * needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
+    }
     const int common_blocks = needBlocksNum(common_seq_len, 0);
     const int peak_blocks   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
@@ -105,6 +111,9 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)common_seq_len;
+    if (policy().single_block_per_request) {
+        return {0, needBlocksNum(seq_len, 0, reserve_step)};
+    }
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
     const int  active_tail_blocks      = activeTailBlockCount();
@@ -128,7 +137,7 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
 
 MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     MatchResult result;
-    if (!shared_cache_) {
+    if (!shared_cache_ || policy().single_block_per_request) {
         return result;
     }
     auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
@@ -145,6 +154,11 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
                              std::vector<size_t>* backfilled_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
+    }
+    if (policy().single_block_per_request) {
+        RTP_LLM_CHECK_WITH_INFO(block_ids.blocksNum() <= 1
+                                    && (block_ids.blocks().empty() || block_ids.blocks().front() > 0),
+                                "persistent request state requires one nonzero physical block");
     }
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
@@ -210,6 +224,9 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
 }
 
 void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    if (policy().single_block_per_request) {
+        return;
+    }
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");

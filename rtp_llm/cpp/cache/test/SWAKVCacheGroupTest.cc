@@ -94,6 +94,59 @@ TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 }
 
+TEST_F(SWAKVCacheGroupTest, PersistentStateKeepsOneBlockAcrossGrowthAndReserve) {
+    auto policy                     = makePolicy(true);
+    policy.single_block_per_request = true;
+    policy.cp_mapping               = CpBlockMappingMode::NONE;
+    SWAKVCacheGroup group(
+        {}, makeDsv4StateSpec("csa_state", 256), block_pool_, 0, 3, shared_cache_.get(), nullptr, policy);
+    EXPECT_FALSE(group.hasSparseSlots());
+    EXPECT_FALSE(group.prefixReusable());
+    EXPECT_EQ(group.seqSizePerBlock(), 256);
+    EXPECT_EQ(group.needBlocksNum(0, 0), 0);
+    EXPECT_EQ(group.needBlocksNum(0, 0, 1), 1);
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(256, 256, 32768, 5, true, 4), 4);
+    EXPECT_EQ(group.estimatePeakNeedBlocks(0, {}, 32768, 5, true), 1);
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, 1));
+    const auto original = blocks.blocks();
+    ASSERT_EQ(original.size(), 1u);
+    for (int seq_len : {255, 256, 257, 511, 512, 513, 32768}) {
+        for (int reserve : {0, 1, 257}) {
+            SCOPED_TRACE(seq_len);
+            SCOPED_TRACE(reserve);
+            EXPECT_EQ(group.needBlocksNum(seq_len, 0, reserve), 1);
+            EXPECT_EQ(group.needBlocksNum(seq_len, 1, reserve), 0);
+            auto need = group.getNeedBlocks(256, seq_len, reserve, 128, true);
+            EXPECT_EQ(need.common_blocks, 0);
+            EXPECT_EQ(need.extra_blocks, 1);
+            EXPECT_EQ(group.estimatePeakNeedBlocks(seq_len, original, 32768, reserve, true), 0);
+            ASSERT_TRUE(group.malloc(blocks, seq_len, true, reserve));
+            group.removeSkippedBlocks(blocks, true, reserve);
+            EXPECT_EQ(blocks.blocks(), original);
+            EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+        }
+    }
+    shared_cache_->put(101, original, false);
+    EXPECT_TRUE(group.matchSingleKey(101).block_indices.empty());
+    EXPECT_THROW(buildCacheStorePlan(policy, 3, 0, true, 0, 1), std::invalid_argument);
+    EXPECT_THROW(buildCacheStorePlan(policy, 3, 0, false, 0, 4), std::invalid_argument);
+    group.free(original);
+}
+
+TEST_F(SWAKVCacheGroupTest, PersistentStateRejectsLegacyOrNullTables) {
+    auto policy                     = makePolicy(true);
+    policy.single_block_per_request = true;
+    SWAKVCacheGroup group(
+        {}, makeDsv4StateSpec("csa_state", 256), block_pool_, 0, 0, shared_cache_.get(), nullptr, policy);
+    for (const BlockIndicesType invalid : {BlockIndicesType{NULL_BLOCK_IDX}, {0}, {1, 2}}) {
+        BlockIds blocks;
+        blocks.assign(invalid);
+        EXPECT_THROW(group.malloc(blocks, 513), std::exception);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+    }
+}
+
 // ==================== needBlocksNum ====================
 
 TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_Basic) {

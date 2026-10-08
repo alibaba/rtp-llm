@@ -349,6 +349,78 @@ TEST_F(V41CacheDispatchTest, LegacyLinearRotationIsRejectedWithoutChangingEarlie
     EXPECT_EQ(first->v41_cache_leases[0]->blockTables(), tables);
 }
 
+TEST_F(V41CacheDispatchTest, PersistentStateSurvivesPagedGrowthAndStreamRelease) {
+    config_.seq_size_per_block = config_.kernel_seq_size_per_block = 256;
+    config_.fromGroupedSpecs(
+        {test::makeResolvedOpaqueSpec(true, "swa_kv", DataType::TYPE_UINT8, 69120, 256),
+         test::makeResolvedOpaqueSpec(true, "csa_state", DataType::TYPE_FP32, 16384, 256),
+         test::makeResolvedOpaqueSpec(false, "csa_kv", DataType::TYPE_UINT8, 36864, 256),
+         test::makeResolvedOpaqueSpec(false, "hca_kv", DataType::TYPE_UINT8, 73728, 256),
+         test::makeResolvedOpaqueSpec(false, "indexer_kv", DataType::TYPE_UINT8, 17408, 256)},
+        {{0, 1, 2, 3}, {1}, {1}, {2}, {1, 2}},
+        {CacheGroupType::SWA, CacheGroupType::SWA, CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL},
+        {"swa_kv", "csa_state", "csa_kv", "hca_kv", "indexer_kv"});
+    auto groups = config_.topology().groups();
+    for (auto& group : groups) {
+        group.policy.cp_mapping = CpBlockMappingMode::NONE;
+        if (group.policy.group_type == CacheGroupType::SWA) {
+            group.policy.single_block_per_request = true;
+            group.policy.enable_prefix_reuse      = false;
+        }
+    }
+    config_.setTopology(std::move(groups), config_.topology().layers());
+    manager_ = std::make_shared<KVCacheManager>(config_);
+    ASSERT_TRUE(manager_->init());
+    model_config_.max_seq_len                  = 1024;
+    model_config_.attn_config.tokens_per_block = 256;
+    processor_                                 = std::make_unique<NormalBatchStreamProcessor>(
+        model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config_, false);
+    const auto      initially_free = manager_->freeBlocksNum();
+    ResourceContext context;
+    context.cache_manager  = manager_;
+    context.reuse_cache    = false;
+    auto query             = std::make_shared<GenerateInput>();
+    query->request_id      = 41;
+    query->input_ids       = hostIntBuffer(std::vector<int32_t>(513, 11));
+    query->generate_config = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->completeTokenIdsPtr()->setSeqLength(128);
+    ASSERT_TRUE(stream->streamCacheResource().initKVBlock().ok());
+    std::vector<KVCacheAllocationLeasePtr> consumers;
+    int                                    start       = 0;
+    int64_t                                chunk_id    = 0;
+    const auto                             incarnation = stream->streamCacheResource().cacheIncarnation();
+    for (int end : {128, 256, 257, 385, 512, 513}) {
+        stream->completeTokenIdsPtr()->setSeqLength(end);
+        ASSERT_TRUE(stream->streamCacheResource().incrKVBlock(end).ok());
+        chunk(stream, start, end);
+        stream->max_chunk_len_ = 513;
+        auto input             = gather({stream});
+        ASSERT_TRUE(input.ok()) << input.status();
+        EXPECT_EQ(toVec<int64_t>(input->v41_cache_spans),
+                  (std::vector<int64_t>{41, 1, incarnation, chunk_id++, start, end - start}));
+        consumers.push_back(input->v41_cache_leases.at(0));
+        const auto& tables = consumers.back()->blockTables();
+        EXPECT_EQ(tables.at("swa_kv"), consumers.front()->blockTables().at("swa_kv"));
+        EXPECT_EQ(tables.at("csa_state"), consumers.front()->blockTables().at("csa_state"));
+        EXPECT_EQ(tables.at("swa_kv").size(), 1u);
+        EXPECT_EQ(tables.at("csa_state").size(), 1u);
+        for (const auto* tag : {"csa_kv", "hca_kv", "indexer_kv"}) {
+            EXPECT_EQ(tables.at(tag).size(), static_cast<size_t>((end + 255) / 256));
+            EXPECT_EQ(tables.at(tag).front(), consumers.front()->blockTables().at(tag).front());
+        }
+        start = end;
+    }
+    stream->releaseResource();
+    EXPECT_EQ(manager_->freeBlocksNum(), initially_free - 11);
+    auto final_consumer = consumers.back();
+    consumers.clear();
+    EXPECT_EQ(manager_->freeBlocksNum(), initially_free - 11);
+    final_consumer.reset();
+    EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
     ResourceContext resource_context;
     ModelConfig     model_config;

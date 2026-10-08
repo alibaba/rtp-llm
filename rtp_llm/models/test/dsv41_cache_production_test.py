@@ -65,6 +65,9 @@ class V41ProductionCacheTest(unittest.TestCase):
                 self.assertEqual(groups[tag]["seq_size_per_block"], 256)
                 self.assertEqual(groups[tag]["cp_mapping"], 0)
                 self.assertEqual(groups[tag]["cp_slice"], 0)
+                state = tag in ("swa_kv", "csa_state")
+                self.assertEqual(groups[tag]["single_block_per_request"], state)
+                self.assertEqual(groups[tag]["enable_prefix_reuse"], not state)
         self.assertEqual(self.probe()["groups"]["indexer_kv"]["layers"], [2, 8, 14, 20])
 
     def test_stage_storage_and_publication_match_global_bindings(self):
@@ -135,6 +138,31 @@ class V41ProductionCacheTest(unittest.TestCase):
         config.prefill_cp_config.kv_cache_sharded = True
         with self.assertRaisesRegex(RuntimeError, "unsharded"):
             cache_pool_topology(self.model, config, self.kv_config, 1)
+
+    def test_state_capacity_pickle_and_legacy_defaults(self):
+        desc = self.model.kv_cache_spec_descs[2][-1]
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertTrue(restored.capacity.single_block_per_request)
+        self.assertFalse(restored.reuse.enable_prefix_reuse)
+        legacy = type(desc.capacity).__new__(type(desc.capacity))
+        legacy.__setstate__(desc.capacity.__getstate__()[:3])
+        self.assertIsNone(legacy.single_block_per_request)
+
+    def test_rejects_rotating_state_or_prefix_reuse(self):
+        for tag in ("swa_kv", "csa_state"):
+            for invalid in ("allocation", "reuse"):
+                with self.subTest(tag=tag, invalid=invalid):
+                    descs = build_dsv41_kv_cache_spec_descs(self.text)
+                    desc = next(d for d in descs[2] if d.tag == tag)
+                    if invalid == "allocation":
+                        desc.capacity = None
+                    else:
+                        reuse = desc.reuse
+                        reuse.enable_prefix_reuse = True
+                        desc.reuse = reuse
+                    self.model.kv_cache_spec_descs = descs
+                    with self.assertRaisesRegex(RuntimeError, "persistent state"):
+                        self.probe()
 
     def test_rejects_page_overrides_and_wrong_index_capacity(self):
         self.kv_config.kernel_seq_size_per_block = 128

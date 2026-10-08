@@ -98,6 +98,8 @@ py::dict cachePoolTopology(const ModelConfig&       model_config,
         row["read_replica_source_layer_id"] = group.read_replica_source_layer_id;
         row["cp_mapping"]                   = static_cast<int>(group.policy.cp_mapping);
         row["cp_slice"]                     = static_cast<int>(group.policy.cp_slice);
+        row["single_block_per_request"]     = group.policy.single_block_per_request;
+        row["enable_prefix_reuse"]          = group.policy.enable_prefix_reuse;
         row["seq_size_per_block"]           = group.seq_size_per_block;
         groups[group.tag.c_str()]           = row;
     }

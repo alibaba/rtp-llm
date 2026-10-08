@@ -430,7 +430,7 @@ static CacheConfig makeV41LeaseConfig(bool stage_one) {
     };
     std::vector<int> all_layers(config.layer_num);
     std::iota(all_layers.begin(), all_layers.end(), 0);
-    add("swa_kv", 69120, false, all_layers);
+    add("swa_kv", 69120, true, all_layers);
     if (!stage_one) {
         add("csa_state", 16384, true, {2, 8, 14});
         add("csa_kv", 36864, false, {2, 8, 14});
@@ -439,16 +439,113 @@ static CacheConfig makeV41LeaseConfig(bool stage_one) {
     add("indexer_kv", 17408, false, stage_one ? std::vector<int>{0} : std::vector<int>{2, 8, 14, 20});
     config.fromGroupedSpecs(specs, layers, types, tags);
     config.setGroupBlockLayout(std::vector<uint32_t>(tags.size(), 5), strides, std::vector<size_t>(tags.size(), 0));
-    if (stage_one) {
-        auto groups = config.topology().groups();
-        for (auto& group : groups) {
-            if (group.tag != "swa_kv") {
-                group.read_replica_source_layer_id = 20;
+    auto groups = config.topology().groups();
+    for (auto& group : groups) {
+        group.policy.cp_mapping = CpBlockMappingMode::NONE;
+        if (group.tag == "swa_kv" || group.tag == "csa_state") {
+            group.policy.single_block_per_request = true;
+            group.policy.enable_prefix_reuse      = false;
+        } else if (stage_one) {
+            group.read_replica_source_layer_id = 20;
+        }
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
+    return config;
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, V41PersistentStateGrowthAndLeaseLifetime) {
+    for (bool stage_one : {false, true}) {
+        auto config  = makeV41LeaseConfig(stage_one);
+        auto budgets = groupBlockNumsSnapshot(config);
+        for (size_t gid = 0; gid < budgets.size(); ++gid) {
+            if (config.policyForGroup(gid).single_block_per_request) {
+                budgets[gid] = 2;  // Reserved zero plus one persistent request slot.
             }
         }
-        config.setTopology(std::move(groups), config.topology().layers());
+        setGroupBlockNums(config, budgets);
+        auto allocator = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+        const auto pools    = allocator->groupBlockPools();
+        auto       resource = makeBatchResource(1, config);
+        auto       tokens   = makeCompleteTokenIds(1, 513, 256);
+        tokens->setSeqLength(1);
+        MallocInfo info{resource, tokens};
+        info.reuse_cache                  = true;
+        info.enable_device_cache          = true;
+        info.enable_remove_skipped_blocks = true;
+        ASSERT_TRUE(allocator->hasAvailableBlocksForReserve(info, 0));
+        ASSERT_TRUE(allocator->malloc(info).success);
+        auto       first        = allocator->retainAllocation(resource->cacheResource(0));
+        const auto tables       = first->blockTables();
+        const int  full_groups  = stage_one ? 2 : 3;
+        const int  state_groups = stage_one ? 1 : 2;
+        EXPECT_EQ(allocator->estimateInitialBatchPeakNeedBlocks(1, 1, 512, 0, true, 1), state_groups + full_groups * 3);
+        for (int end : {255, 256, 257, 511, 512, 513}) {
+            tokens->setSeqLength(end);
+            ASSERT_TRUE(allocator->malloc(info).success);
+            auto current = allocator->retainAllocation(resource->cacheResource(0));
+            for (size_t gid = 0; gid < pools.size(); ++gid) {
+                const auto& tag    = config.tagForGroup(gid);
+                const auto& blocks = current->blockTables().at(tag);
+                if (config.policyForGroup(gid).single_block_per_request) {
+                    EXPECT_EQ(blocks, tables.at(tag));
+                    EXPECT_EQ(pools[gid]->freeBlocksNum(), 0u);
+                } else {
+                    EXPECT_EQ(blocks.size(), static_cast<size_t>((end + 255) / 256));
+                    EXPECT_EQ(blocks.front(), tables.at(tag).front());
+                }
+            }
+        }
+        auto last = allocator->retainAllocation(resource->cacheResource(0));
+        EXPECT_EQ(allocator->estimatePeakNeedBlocks(resource->cacheResource(0), 513, 255, 0, true), 0);
+        EXPECT_EQ(allocator->estimatePeakNeedBlocks(resource->cacheResource(0), 513, 255, 1, true), full_groups);
+        info.incr_seq_len_override = 1025;
+        EXPECT_FALSE(allocator->malloc(info).success);
+        EXPECT_EQ(allocator->retainAllocation(resource->cacheResource(0))->blockTables(), last->blockTables());
+        allocator->free(FreeInfo{resource, tokens});
+        first.reset();
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            EXPECT_EQ(pools[gid]->freeBlocksNum(),
+                      pools[gid]->totalBlocksNum() - last->blockTables().at(config.tagForGroup(gid)).size());
+        }
+        last.reset();
+        for (const auto& pool : pools) {
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
     }
-    return config;
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, V41PersistentStateDisablesPartialPrefixRestoration) {
+    const auto config    = makeV41LeaseConfig(false);
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(1, config);
+    resource->setBatchCacheKeys(0, {101, 102, 103});
+    auto       tokens = makeCompleteTokenIds(1, 513, 256);
+    MallocInfo info{resource, tokens};
+    info.reuse_cache         = true;
+    info.enable_device_cache = true;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    allocator->insertIntoCache(InsertInfo{resource, tokens, false});
+    EXPECT_GT(allocator->blockCacheRefBlocksNum(), 0u);
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        if (config.policyForGroup(gid).single_block_per_request) {
+            EXPECT_EQ(allocator->groupBlockPools()[gid]->blockCacheRefBlocksNum(), 0u);
+        }
+    }
+    EXPECT_THROW(allocator->incrKVCacheRef(resource->cacheResource(0), {101}, false), std::exception);
+    allocator->free(FreeInfo{resource, tokens});
+    auto fresh = makeBatchResource(1, config);
+    fresh->setBatchCacheKeys(0, {101, 102, 103});
+    info.batch_kv_cache_resource = fresh;
+    const auto result            = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(fresh->blocksNum(0, config.groupIdForTag("swa_kv")), 1u);
+    allocator->free(FreeInfo{fresh, tokens});
+    info.batch_kv_cache_resource = makeBatchResource(2, config);
+    EXPECT_THROW(allocator->malloc(info), std::exception);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, AllocationLeaseRetainsAllV41TagsWithoutCacheKeysAndSurvivesOwnerTeardown) {

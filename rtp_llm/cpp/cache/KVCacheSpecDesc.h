@@ -37,6 +37,7 @@ struct CacheCapacityPolicyDesc {
     std::optional<bool>     reservable;
     std::optional<uint32_t> explicit_block_num;
     std::optional<bool>     charge_to_paged_budget;
+    std::optional<bool>     single_block_per_request;
 };
 
 struct CacheMemoryPolicyDesc {

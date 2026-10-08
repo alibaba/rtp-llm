@@ -137,7 +137,9 @@ def build_dsv41_kv_cache_spec_descs(text: Mapping[str, Any]):
     """Global producer descriptors; native PP projection adds stage-one replicas."""
     bindings = dsv41_cache_bindings(text)
     from rtp_llm.ops import (
+        CacheCapacityPolicyDesc,
         CacheCpPolicyDesc,
+        CacheReusePolicyDesc,
         CpBlockMappingMode,
         CpBlockSliceMode,
         CpPrefillSliceLayout,
@@ -155,6 +157,13 @@ def build_dsv41_kv_cache_spec_descs(text: Mapping[str, Any]):
         desc = KVCacheSpecDesc()
         desc.tag = tag
         desc.is_state_cache = tag in ("swa_kv", "csa_state")
+        if desc.is_state_cache:
+            capacity = CacheCapacityPolicyDesc()
+            capacity.single_block_per_request = True
+            desc.capacity = capacity
+            reuse = CacheReusePolicyDesc()
+            reuse.enable_prefix_reuse = False
+            desc.reuse = reuse
         desc.cache_type = (
             KVCacheSpecType.OPAQUE_STATE
             if desc.is_state_cache

@@ -71,7 +71,7 @@ std::string cacheGroupPolicyFingerprint(const CacheGroupPolicy& policy) {
         << policy.explicit_block_num << ":c" << (policy.charge_to_paged_budget ? 1 : 0) << ":p"
         << static_cast<int>(policy.memory_placement) << ":a" << policy.active_tail_blocks << ":w"
         << (policy.validate_tail_blocks ? 1 : 0) << ":m" << static_cast<int>(policy.cp_mapping) << ":s"
-        << static_cast<int>(policy.cp_slice);
+        << static_cast<int>(policy.cp_slice) << ":q" << (policy.single_block_per_request ? 1 : 0);
     return oss.str();
 }
 
