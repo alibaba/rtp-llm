@@ -241,6 +241,10 @@ class TestCudaGraphDecodePaddingDiag(TestCudaGraphDecodePadding):
     capture slot. Prints only; never asserts.
     """
 
+    def test_batch_decode(self):
+        # The parent class already exercises the gate; skip the duplicate.
+        pass
+
     def _ratio(self, a_hidden, b_hidden, rows):
         b = b_hidden.type(a_hidden.dtype)
         close = torch.isclose(a_hidden[:rows], b[:rows], rtol=1e-2, atol=1e-2)
@@ -251,9 +255,13 @@ class TestCudaGraphDecodePaddingDiag(TestCudaGraphDecodePadding):
         prev_graph = {}
         for bs in sizes:
             try:
-                g = self.op.forward(
-                    self.build_inputs(bs, self.max_seq_len, self.kernel_tokens_per_block)
-                )
+                inputs = self.build_inputs(bs, self.max_seq_len, self.kernel_tokens_per_block)
+                # canRun performs graph selection (state.current_real_graph_bs);
+                # it must run before forward, exactly like the parent test.
+                if not self.op.canRun(inputs):
+                    print(f"DIAG bs={bs} canRun=False", flush=True)
+                    continue
+                g = self.op.forward(inputs)
                 torch.cuda.synchronize()
                 capture = self.op.getCurrentRealGraphSize()
                 e_real = self.normal_model.forward(
