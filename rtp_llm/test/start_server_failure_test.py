@@ -199,6 +199,25 @@ class StartServerFailureTest(unittest.TestCase):
             self.assertNotIn("LOCAL_WORLD_SIZE", os.environ)
         ctx.Process.assert_not_called()
 
+    def test_backend_rejects_nonpositive_local_world_size_before_spawn(self):
+        configs = PyEnvConfigs()
+        configs.parallelism_config.world_size = 4
+        configs.parallelism_config.local_world_size = 2
+        for value in ("0", "-1"):
+            with self.subTest(local_world_size=value):
+                ctx = MagicMock()
+                with (
+                    patch.dict("os.environ", {"LOCAL_WORLD_SIZE": value}, clear=True),
+                    patch("torch.cuda.device_count", return_value=4),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError, "LOCAL_WORLD_SIZE must be positive"
+                    ):
+                        start_backend_server._create_rank_processes(
+                            None, configs, ctx, [], []
+                        )
+                ctx.Process.assert_not_called()
+
     def test_health_check_failure_requests_failure_shutdown_and_exits_nonzero(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT
