@@ -2425,14 +2425,15 @@ class Runner:
                         thinking_disabled=True,
                     )
                 cases.append(case)
-            # A PD group admits the large boundary batch in one Prefill
-            # forward. The longer exact answer keeps all Decode rows alive
-            # until both owners reach their intended Graph buckets.
+            # Group every multi-request case into one Prefill forward. HTTP
+            # arrivals can serialize a small batch on the full model before
+            # the second DP owner reaches its intended Decode bucket.
+            # Large boundary cases also use longer exact answers.
             self._required_stage(
                 name,
                 cases,
                 concurrent=size > 1,
-                grouped_pd=(size > 1 if diagnostic else size >= 63),
+                grouped_pd=size > 1,
             )
 
     def _orthogonal_page_boundaries(self) -> None:

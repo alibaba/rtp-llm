@@ -401,7 +401,16 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         self.assertTrue(groups[4][2]["grouped_pd"])
         self.assertEqual(groups[3][1][0].max_tokens, 2560)
         self.assertEqual(groups[4][1][0].max_tokens, 1280)
-        self.assertFalse(groups[2][2]["grouped_pd"])
+        self.assertFalse(groups[0][2]["grouped_pd"])
+        self.assertTrue(all(group[2]["grouped_pd"] for group in groups[1:]))
+        for index, local_batch in ((1, 2), (2, 4)):
+            self.assertEqual(
+                [
+                    sum(case.decode_owner_rank == owner for case in groups[index][1])
+                    for owner in (0, 1)
+                ],
+                [local_batch, local_batch],
+            )
 
     def test_cached_64k_crosses_decode_dp_owner_without_extra_requests(self):
         smoke = runner()
