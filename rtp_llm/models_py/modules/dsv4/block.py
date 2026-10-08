@@ -86,6 +86,7 @@ class Block(nn.Module):
         cache_layer_id: Optional[int] = None,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        gen_num_per_cycle: int = 1,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -111,7 +112,11 @@ class Block(nn.Module):
             from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
 
             attn_cls = AttentionV41FP8
-            attn_extra = dict(v41_config=v41_config, shared_attention=shared_attention)
+            attn_extra = dict(
+                v41_config=v41_config,
+                shared_attention=shared_attention,
+                gen_num_per_cycle=gen_num_per_cycle,
+            )
             moe_extra = dict(expert_recipe=V41_EXPERT_RECIPE)
         self.attn = attn_cls(
             layer_id=layer_id,

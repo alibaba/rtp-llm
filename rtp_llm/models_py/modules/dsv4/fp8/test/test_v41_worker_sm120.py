@@ -64,7 +64,7 @@ def checkpoint(root):
     }
 
 
-def model_config(args, engram):
+def model_config(args, engram, gen_num_per_cycle=0):
     config = ModelConfig()
     fields = {
         "vocab_size": args.vocab_size,
@@ -82,7 +82,7 @@ def model_config(args, engram):
         "hc_eps": args.hc_eps,
         "layernorm_eps": args.norm_eps,
         "max_seq_len": args.max_seq_len,
-        "gen_num_per_cycle": 1,
+        "gen_num_per_cycle": gen_num_per_cycle,
         "ckpt_path": engram["checkpoint_path"],
         "deepseek_v41_config": {**args.v41_config, **engram},
     }
@@ -130,7 +130,9 @@ def resources(cache=None, **kwargs):
 
 
 def tagged_cache(model):
-    cache = NativeTaggedCache([layer.attn for layer in model.v4.layers])
+    cache = NativeTaggedCache(
+        [layer.attn for layer in model.v4.layers], gen=model._gen_num_per_cycle
+    )
     cache.group_tags = list(cache.layouts)
     cache.layer_count = len(model.v4.layers)
     cache.get_layer_cache_groups = lambda layer: [
@@ -191,6 +193,9 @@ class V41WorkerSM120Test(unittest.TestCase):
         self.addCleanup(model.close)
         if initialize:
             self.assertTrue(model.initialize(resources()))
+            for layer in model.v4.layers:
+                self.assertEqual(layer.attn._cache_layouts["csa_state"].entries, 2)
+                self.assertEqual(layer.attn._cache_layouts["swa_kv"].entries, 128)
             self.assertTrue(model.initialize(resources(tagged_cache(model))))
         return model
 
@@ -437,6 +442,10 @@ class V41WorkerSM120Test(unittest.TestCase):
         for field in ("is_decode_role", "is_speculative"):
             with self.assertRaises(NotImplementedError):
                 model.initialize(resources(**{field: True}))
+        for gen in (-1, 2, 3):
+            with patch.object(model, "_gen_num_per_cycle", gen):
+                with self.assertRaises(NotImplementedError):
+                    model.initialize(resources())
         self.assertIsNone(model.v4)
         self.assertTrue(hasattr(model, "weight"))
 

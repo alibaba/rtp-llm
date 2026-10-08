@@ -207,7 +207,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 or args.commit_only
                 or init_resource.is_speculative
                 or init_resource.is_decode_role
-                or self._gen_num_per_cycle != 1
+                or self._gen_num_per_cycle not in (0, 1)
             ):
                 raise NotImplementedError(
                     "V4.1 worker currently requires eager PP1/CP1/TP1 prefill"

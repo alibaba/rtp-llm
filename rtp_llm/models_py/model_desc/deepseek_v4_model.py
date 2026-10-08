@@ -240,6 +240,7 @@ def _args_from_model_config(
         dim=model_config.hidden_size,
         n_heads=attn_config.head_num,
         n_layers=model_config.num_layers,
+        gen_num_per_cycle=int(model_config.gen_num_per_cycle),
         n_mtp_layers=0,  # MTP wiring lands later; main-layer inference first.
         q_lora_rank=attn_config.q_lora_rank,
         head_dim=attn_config.size_per_head,

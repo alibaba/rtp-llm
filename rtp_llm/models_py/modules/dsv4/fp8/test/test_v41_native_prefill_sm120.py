@@ -5,6 +5,7 @@ import importlib.metadata
 import os
 import socket
 import tempfile
+import traceback
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -36,7 +37,7 @@ def cache_snapshot(cache):
     }
 
 
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, gen_num_per_cycle):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     expected_version = os.environ.get("DSV41_TEST_DEEPGEMM_VERSION")
@@ -75,16 +76,28 @@ def run_rank(rank, port, config):
     model = reference = native = None
     try:
         with torch.inference_mode():
-            model, reference = make_workers(rank, config)
+            model, reference = make_workers(rank, config, gen_num_per_cycle)
             torch.manual_seed(41950)
             head = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
             native = NativePrefill(
                 model,
-                model_config(model._v4_args, config),
+                model_config(model._v4_args, config, gen_num_per_cycle),
                 model.parallelism_config,
                 head,
             )
             assert type(model.kv_cache).__name__ == "KVCache"
+            expected_bytes = {
+                "swa_kv": 67584 if gen_num_per_cycle == 0 else 69120,
+                "csa_state": 8192 if gen_num_per_cycle == 0 else 16384,
+            }
+            for layer in range(model.kv_cache.layer_count):
+                for group in model.kv_cache.get_layer_cache_groups(layer):
+                    if group.tag in expected_bytes:
+                        pool = group.kv_cache_base
+                        assert (
+                            pool.stride(0) * pool.element_size()
+                            == expected_bytes[group.tag]
+                        )
             for phase, lengths in enumerate(
                 (
                     (),
@@ -182,9 +195,13 @@ def run_rank(rank, port, config):
                 dist.barrier()
             if rank == 0:
                 print(
-                    "V4.1 native DP8 prefill: allocator, gather, wrapper, MoE and sampler PASS",
+                    f"V4.1 native DP8 prefill gen={gen_num_per_cycle}: "
+                    "allocator, gather, wrapper, MoE and sampler PASS",
                     flush=True,
                 )
+    except BaseException:
+        traceback.print_exc()
+        raise
     finally:
         del native
         if reference is not None:
@@ -197,13 +214,15 @@ def run_rank(rank, port, config):
 class V41NativePrefillSM120Test(unittest.TestCase):
     def test_eight_rank_native_executor(self):
         self.assertEqual(torch.cuda.device_count(), 8)
-        with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
+        with tempfile.TemporaryDirectory() as root:
             torch.manual_seed(41900)
             config = checkpoint(Path(root))
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-            sock.close()
-            mp.spawn(run_rank, args=(port, config), nprocs=8, join=True)
+            for gen in (0, 1):
+                with self.subTest(gen_num_per_cycle=gen), socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                    sock.close()
+                    mp.spawn(run_rank, args=(port, config, gen), nprocs=8, join=True)
 
 
 if __name__ == "__main__":

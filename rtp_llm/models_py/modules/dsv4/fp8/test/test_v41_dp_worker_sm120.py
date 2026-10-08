@@ -3,6 +3,7 @@
 import os
 import socket
 import tempfile
+import traceback
 import unittest
 from contextlib import ExitStack
 from datetime import timedelta
@@ -57,7 +58,7 @@ def assert_released(model):
         assert layer.attn._prefill_meta_shared is None
 
 
-def make_workers(rank, config):
+def make_workers(rank, config, gen_num_per_cycle=0):
     torch.manual_seed(41901)
     args, full = fixture(experts=16)
     shard = SimpleNamespace(
@@ -80,7 +81,9 @@ def make_workers(rank, config):
         setattr(parallelism, field, 8)
     for field in ("world_rank", "dp_rank", "ep_rank", "local_rank"):
         setattr(parallelism, field, rank)
-    model = DeepSeekV41Model(model_config(args, config), parallelism, shard, None, 2)
+    model = DeepSeekV41Model(
+        model_config(args, config, gen_num_per_cycle), parallelism, shard, None, 2
+    )
     with patch.dict(
         os.environ, {"DSV41_ENGRAM_HOST_BYTES": "0" if rank == 0 else str(2**20)}
     ):
@@ -96,7 +99,9 @@ def make_workers(rank, config):
     model.initialize(resources(tagged_cache(model)))
     local = ParallelismConfig()
     local.role_type = RoleType.PREFILL
-    reference = DeepSeekV41Model(model_config(args, config), local, full, None, 2)
+    reference = DeepSeekV41Model(
+        model_config(args, config, gen_num_per_cycle), local, full, None, 2
+    )
     reference.initialize(resources())
     reference.initialize(resources(tagged_cache(reference)))
     return model, reference
@@ -280,6 +285,9 @@ def run_rank(rank, port, config):
                     flush=True,
                 )
             dist.barrier()
+    except BaseException:
+        traceback.print_exc()
+        raise
     finally:
         if reference is not None:
             reference.close()

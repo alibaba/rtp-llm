@@ -605,6 +605,31 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 layer._source_pool("csa_state")
 
     @torch.no_grad()
+    def test_no_speculative_slack_matches_odd_continuation_and_swa_wrap(self):
+        torch.manual_seed(41129)
+        zero = make_layer(2, 2, gen=0)
+        torch.manual_seed(41129)
+        one = make_layer(2, 2, gen=1)
+        caches = [NativeTaggedCache([zero], gen=0), NativeTaggedCache([one], gen=1)]
+        x = torch.randn(135, 512, device="cuda", dtype=torch.bfloat16)
+        prefix = 0
+        for length in (3, 124, 3, 5):
+            outputs = []
+            for layer, cache in zip((zero, one), caches):
+                chunk = x[prefix : prefix + length]
+                positions, tables, _ = prepare(layer, chunk, cache, [length], [prefix])
+                outputs.append(layer(chunk, positions, cache, tables).clone())
+            torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+            for tag in ("csa_kv", "indexer_kv"):
+                torch.testing.assert_close(
+                    caches[0].groups[0, tag].kv_cache_base,
+                    caches[1].groups[0, tag].kv_cache_base,
+                    rtol=0,
+                    atol=0,
+                )
+            prefix += length
+
+    @torch.no_grad()
     def test_native_fp32_state_matches_opaque_bytes(self):
         layer = make_layer(2, 2)
         byte_cache = NativeTaggedCache([layer])

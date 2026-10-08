@@ -121,6 +121,7 @@ class V4Args:
     fp8_kv_cache: bool = True
     # V4.1 uses delayed mHC and a distinct compressed attention/cache layout.
     v41_config: Optional[Dict] = None
+    gen_num_per_cycle: int = 1
 
 
 def _block_kwargs(
@@ -202,6 +203,7 @@ def _build_block(
         ),
         v41_config=args.v41_config,
         shared_attention=shared_attention,
+        gen_num_per_cycle=args.gen_num_per_cycle,
     )
 
 

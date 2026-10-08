@@ -14,9 +14,13 @@
 namespace rtp_llm::test {
 namespace {
 
-CacheConfig smallV41CacheConfig() {
+CacheConfig smallV41CacheConfig(int gen_num_per_cycle) {
     // Same six-layer source schedule as the Python worker fixture. Byte
-    // geometry is the qualified gen=1 layout; allocation/leases are native.
+    // geometry includes only the configured generation slack.
+    RTP_LLM_CHECK(gen_num_per_cycle == 0 || gen_num_per_cycle == 1);
+    const int swa_rows = (128 + gen_num_per_cycle + 1) & ~1;
+    const int state_rows = (2 + gen_num_per_cycle + 1) & ~1;
+    const int swa_bytes = ((swa_rows * 528 + 511) / 512) * 512;
     CacheConfig config;
     config.layer_num = config.layer_all_num = 6;
     config.block_num = 8;
@@ -24,8 +28,8 @@ CacheConfig smallV41CacheConfig() {
     config.use_independent_block_pools = true;
     config.use_opaque_kv_cache_store = true;
     config.fromGroupedSpecs(
-        {makeResolvedOpaqueSpec(true, "swa_kv", DataType::TYPE_UINT8, 69120, 256),
-         makeResolvedOpaqueSpec(true, "csa_state", DataType::TYPE_FP32, 16384, 256),
+        {makeResolvedOpaqueSpec(true, "swa_kv", DataType::TYPE_UINT8, swa_bytes, 256),
+         makeResolvedOpaqueSpec(true, "csa_state", DataType::TYPE_FP32, state_rows * 4096, 256),
          makeResolvedOpaqueSpec(false, "csa_kv", DataType::TYPE_UINT8, 36864, 256),
          makeResolvedOpaqueSpec(false, "hca_kv", DataType::TYPE_UINT8, 73728, 256),
          makeResolvedOpaqueSpec(false, "indexer_kv", DataType::TYPE_UINT8, 17408, 256)},
@@ -61,7 +65,7 @@ public:
         model_config_.data_type = DataType::TYPE_BF16;
         model_config_.attn_config.tokens_per_block = 256;
         model_config_.attn_config.kernel_tokens_per_block = 256;
-        auto config = smallV41CacheConfig();
+        auto config = smallV41CacheConfig(model_config_.gen_num_per_cycle);
         manager_ = std::make_shared<KVCacheManager>(config);
         if (!manager_->init()) {
             throw std::runtime_error("V4.1 test cache manager initialization failed");
