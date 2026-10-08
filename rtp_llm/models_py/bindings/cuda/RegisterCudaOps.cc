@@ -30,48 +30,84 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("custom_all_gather_staging",
+                  &custom_all_gather_staging,
+                  py::arg("input"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("counters"),
+                  py::arg("workspace_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
     rtp_ops_m.def("custom_all_gather_fp8_staging",
                   &custom_all_gather_fp8_staging,
-                  py::arg("values"), py::arg("scales"),
-                  py::arg("output_values"), py::arg("output_scales"),
-                  py::arg("workspace"), py::arg("counters"),
-                  py::arg("workspace_mc_ptr"), py::arg("rank"),
-                  py::arg("blocks"), py::arg("threads"));
+                  py::arg("values"),
+                  py::arg("scales"),
+                  py::arg("output_values"),
+                  py::arg("output_scales"),
+                  py::arg("workspace"),
+                  py::arg("counters"),
+                  py::arg("workspace_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
     rtp_ops_m.def("push_reduce_scatter",
                   &push_reduce_scatter,
-                  py::arg("input"), py::arg("output"),
-                  py::arg("peers"), py::arg("counters"),
-                  py::arg("rank"), py::arg("blocks"), py::arg("threads"));
+                  py::arg("input"),
+                  py::arg("output"),
+                  py::arg("peers"),
+                  py::arg("counters"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
 #ifdef RTP_K3_NATIVE_FUSED_A
-    rtp_ops_m.def("kimi_k3_fused_a_gemm", &kimi_k3_fused_a_gemm,
-                 py::arg("output"), py::arg("input"), py::arg("weight"), py::arg("enable_pdl") = true);
+    rtp_ops_m.def("kimi_k3_fused_a_gemm",
+                  &kimi_k3_fused_a_gemm,
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("enable_pdl") = true);
 #endif
 #ifdef RTP_K3_NATIVE_RMS_NORM
-    rtp_ops_m.def("kimi_k3_rms_norm", &kimi_k3_rms_norm,
-                 py::arg("input"), py::arg("weight"), py::arg("epsilon"));
+    rtp_ops_m.def("kimi_k3_rms_norm", &kimi_k3_rms_norm, py::arg("input"), py::arg("weight"), py::arg("epsilon"));
 #endif
 #ifdef RTP_K3_NATIVE_ROUTING
-    rtp_ops_m.def("kimi_k3_grouped_topk", &kimi_k3_grouped_topk,
-                 "Native K3 fused sigmoid, grouped top-k and routing normalization",
-                 py::arg("scores"), py::arg("bias"), py::arg("n_group"),
-                 py::arg("topk_group"), py::arg("topk"), py::arg("renormalize"),
-                 py::arg("scale"));
+    rtp_ops_m.def("kimi_k3_grouped_topk",
+                  &kimi_k3_grouped_topk,
+                  "Native K3 fused sigmoid, grouped top-k and routing normalization",
+                  py::arg("scores"),
+                  py::arg("bias"),
+                  py::arg("n_group"),
+                  py::arg("topk_group"),
+                  py::arg("topk"),
+                  py::arg("renormalize"),
+                  py::arg("scale"));
 #endif
 
 #ifdef RTP_K3_NATIVE_ATTNRES
-    rtp_ops_m.def("kimi_k3_attn_res", &kimi_k3_attn_res,
-                 "Native Blackwell K3 AttnRes with optional fused RMSNorm",
-                 py::arg("prefix"), py::arg("delta"), py::arg("blocks"),
-                 py::arg("norm_weight"), py::arg("qk_weight"),
-                 py::arg("output_norm_weight"), py::arg("output"),
-                 py::arg("num_blocks"), py::arg("block_write_idx"),
-                 py::arg("eps"), py::arg("output_norm_eps"));
+    rtp_ops_m.def("kimi_k3_attn_res",
+                  &kimi_k3_attn_res,
+                  "Native Blackwell K3 AttnRes with optional fused RMSNorm",
+                  py::arg("prefix"),
+                  py::arg("delta"),
+                  py::arg("blocks"),
+                  py::arg("norm_weight"),
+                  py::arg("qk_weight"),
+                  py::arg("output_norm_weight"),
+                  py::arg("output"),
+                  py::arg("num_blocks"),
+                  py::arg("block_write_idx"),
+                  py::arg("eps"),
+                  py::arg("output_norm_eps"));
 #endif
 
     rtp_ops_m.def("cublas_gemm_bf16_fp32_accum_add",
                   &torch_ext::cublas_gemm_bf16_fp32_accum_add,
                   "BF16 GEMM with FP32 reduction policy and native addmm residual semantics",
-                  py::arg("input"), py::arg("weight"), py::arg("residual"));
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("residual"));
 
     rtp_ops_m.def("cublas_gemm_bf16_fp32_accum",
                   &torch_ext::cublas_gemm_bf16_fp32_accum,

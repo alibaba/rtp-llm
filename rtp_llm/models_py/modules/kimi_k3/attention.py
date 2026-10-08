@@ -1,19 +1,14 @@
 """K3 projections over RTP's MLA and paged KDA implementations."""
 
-from functools import lru_cache
-from contextlib import nullcontext
 import os
+from contextlib import nullcontext
+from functools import lru_cache
 
 import torch
 from torch import nn
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.ops import RoleType
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    _get_group,
-    all_gather,
-)
+from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_gather
 from rtp_llm.models_py.distributed.fp8_collective_projection import Fp8Activation
 from rtp_llm.models_py.model_desc.kimi_linear import (
     KimiLinearKDADecode,
@@ -27,6 +22,7 @@ from rtp_llm.models_py.modules.kimi_k3.native_mla_ops import (
     fused_q_kv_rmsnorm,
     gate_sigmoid_mul,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
 
 _PROFILE_MODEL_MODULES = os.environ.get("RTP_LLM_PROFILE_MODEL_MODULES", "0") == "1"
@@ -54,8 +50,12 @@ def linear(weights, name, hardware=None):
         if scale_name is None or scale_name not in weights:
             raise ValueError(f"K3 FP8 projection {name} requires its block scales")
         return LinearFactory.create_linear_from_weights(
-            weights, name, scale_name, None,
-            quant_config=Fp8BlockWiseQuantConfig(), hw_kernel_config=hardware,
+            weights,
+            name,
+            scale_name,
+            None,
+            quant_config=Fp8BlockWiseQuantConfig(),
+            hw_kernel_config=hardware,
         )
     return LinearFactory.create_linear_from_weights(
         weights, name, None, None, quant_config=None, hw_kernel_config=hardware
@@ -87,7 +87,9 @@ class KimiK3KDA(nn.Module):
             )
 
             if not isinstance(self.input, CudaFp8GEMMLinear):
-                raise ValueError("BF16 NCCL/FP8 local overlap requires a grouped FP8 input projection")
+                raise ValueError(
+                    "BF16 NCCL/FP8 local overlap requires a grouped FP8 input projection"
+                )
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
         self._fp8_output_norm = False
@@ -96,8 +98,13 @@ class KimiK3KDA(nn.Module):
                 CudaFp8GEMMLinear,
             )
 
-            if not isinstance(self.output, CudaFp8GEMMLinear) or not self.output.scale_ue8m0:
-                raise ValueError("FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales")
+            if (
+                not isinstance(self.output, CudaFp8GEMMLinear)
+                or not self.output.scale_ue8m0
+            ):
+                raise ValueError(
+                    "FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales"
+                )
             self._fp8_output_norm = True
         forget_weight = weights[W.linear_attn_f_b_w]
         self.fa_width = forget_weight.shape[
@@ -122,8 +129,12 @@ class KimiK3KDA(nn.Module):
             )
 
             self.prefill = KimiK3NativeKDAPrefill(
-                cfg, parallelism, weights, backend,
-                use_paged_conv=self._fp8_output_norm and backend in {"flashkda", "cula"},
+                cfg,
+                parallelism,
+                weights,
+                backend,
+                use_paged_conv=self._fp8_output_norm
+                and backend in {"flashkda", "cula"},
             )
         elif backend == "rtp":
             self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
@@ -182,7 +193,9 @@ class KimiK3KDA(nn.Module):
                 )
         else:
             with profile_scope("RTP::attention.input_all_gather"):
-                full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+                full_hidden = (
+                    all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+                )
             with profile_scope("RTP::attention.kda.input_proj"):
                 fused = self.input(full_hidden)
         logical_width = 4 * self.width + self.fa_width + self.heads
@@ -205,7 +218,11 @@ class KimiK3KDA(nn.Module):
         with profile_scope("RTP::attention.kda.core"):
             output = kernel(
                 qkv if kernel is self.prefill else qkv.contiguous(),
-                forget, beta, attention_inputs, cache, metadata
+                forget,
+                beta,
+                attention_inputs,
+                cache,
+                metadata,
             )
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
@@ -227,9 +244,14 @@ class KimiK3KDA(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
                 )
-        use_fused_rs = self._fp8_collective is not None and self._fp8_collective.eligible_rs(
-            values.shape[0] if self._fp8_output_norm else 0,
-            attention_inputs, metadata, self._fp8_output_norm,
+        use_fused_rs = (
+            self._fp8_collective is not None
+            and self._fp8_collective.eligible_rs(
+                values.shape[0] if self._fp8_output_norm else 0,
+                attention_inputs,
+                metadata,
+                self._fp8_output_norm,
+            )
         )
         if use_fused_rs:
             with profile_scope("RTP::attention.fp8_gemm_rs"):
@@ -255,6 +277,7 @@ class KimiK3MLA(nn.Module):
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__()
         self._fp8_collective = None
+        self._mtp_bf16_collectives = None
         cfg = config.attn_config
         if (
             not config.k3_runtime_config.mla_use_nope
@@ -276,23 +299,30 @@ class KimiK3MLA(nn.Module):
         self.q_norm = RMSNorm(weights[W.mla_q_a_ln_gamma], config.layernorm_eps)
         self.kv_norm = RMSNorm(weights[W.mla_kv_a_ln_gamma], config.layernorm_eps)
         self._fp8_output_gate = False
-        if weights[W.attn_o_w].is_cuda and weights[W.attn_o_w].dtype == torch.float8_e4m3fn:
+        if (
+            weights[W.attn_o_w].is_cuda
+            and weights[W.attn_o_w].dtype == torch.float8_e4m3fn
+        ):
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
                 CudaFp8GEMMLinear,
             )
 
             self._fp8_output_gate = (
-                isinstance(self.output, CudaFp8GEMMLinear)
-                and self.output.scale_ue8m0
+                isinstance(self.output, CudaFp8GEMMLinear) and self.output.scale_ue8m0
             )
         self._gate_stream = None
         weight = weights[W.mla_fusedqkrope_w]
         if (
             isinstance(self.input, KimiK3Bf16Linear)
-            and weight.is_cuda and weight.dtype == torch.bfloat16
+            and weight.is_cuda
+            and weight.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(weight.device) in ((10, 3), (10, 7))
-            and (self.q_rank + self.kv_rank + self.suffix_dim,
-                 self.heads * self.v_dim, weight.shape[0]) == (2112, 1536, 7168)
+            and (
+                self.q_rank + self.kv_rank + self.suffix_dim,
+                self.heads * self.v_dim,
+                weight.shape[0],
+            )
+            == (2112, 1536, 7168)
         ):
             # One allocation supports fused prefill and contiguous split views.
             self.input.weight = self.input.weight.contiguous()
@@ -304,11 +334,8 @@ class KimiK3MLA(nn.Module):
             self._gate_start = torch.cuda.Event()
             self._gate_done = torch.cuda.Event()
 
-
     def _attend(self, qkv, fmha, cache):
-        q, kv = qkv.split(
-            [self.q_rank, self.kv_rank + self.suffix_dim], dim=-1
-        )
+        q, kv = qkv.split([self.q_rank, self.kv_rank + self.suffix_dim], dim=-1)
         latent, suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
         with profile_scope("RTP::attention.mla.qkv_norm"):
             if q.is_cuda:
@@ -344,9 +371,17 @@ class KimiK3MLA(nn.Module):
             full_hidden = None
         else:
             with profile_scope("RTP::attention.input_all_gather"):
-                full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+                full_hidden = (
+                    self._mtp_bf16_collectives.all_gather(hidden)
+                    if self._mtp_bf16_collectives is not None
+                    else all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+                )
         qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
-        if full_hidden is not None and self._gate_stream is not None and full_hidden.shape[0] < 512:
+        if (
+            full_hidden is not None
+            and self._gate_stream is not None
+            and full_hidden.shape[0] < 512
+        ):
             # Native event fork/join: attention on current stream, gate on aux.
             self._gate_start.record()
             with profile_scope("RTP::attention.mla.qkv_input_proj"):
@@ -360,9 +395,9 @@ class KimiK3MLA(nn.Module):
             self._gate_done.wait()
         else:
             with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
-                qkv, gate = (fused_input if use_fused_ag else self.input(full_hidden)).split(
-                    [qkv_rows, self.heads * self.v_dim], dim=-1
-                )
+                qkv, gate = (
+                    fused_input if use_fused_ag else self.input(full_hidden)
+                ).split([qkv_rows, self.heads * self.v_dim], dim=-1)
             # The projected tensors no longer depend on the gathered input.
             # Release it before MLA expands a historical KV chunk, as the
             # feat/k3_dev projection path does before entering attention.
@@ -386,9 +421,14 @@ class KimiK3MLA(nn.Module):
                     if output.is_cuda
                     else output * gate.sigmoid()
                 )
-        use_fused_rs = self._fp8_collective is not None and self._fp8_collective.eligible_rs(
-            values.shape[0] if self._fp8_output_gate else 0,
-            attention_inputs, metadata, self._fp8_output_gate,
+        use_fused_rs = (
+            self._fp8_collective is not None
+            and self._fp8_collective.eligible_rs(
+                values.shape[0] if self._fp8_output_gate else 0,
+                attention_inputs,
+                metadata,
+                self._fp8_output_gate,
+            )
         )
         if use_fused_rs:
             with profile_scope("RTP::attention.fp8_gemm_rs"):
@@ -398,7 +438,12 @@ class KimiK3MLA(nn.Module):
         with profile_scope("RTP::attention.mla.output_proj"):
             output = (
                 self.output.forward_quantized(values, scales)
-                if self._fp8_output_gate else self.output(output)
+                if self._fp8_output_gate
+                else self.output(output)
             )
         with profile_scope("RTP::attention.output_reduce_scatter"):
-            return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+            return (
+                self._mtp_bf16_collectives.reduce_scatter(output)
+                if self._mtp_bf16_collectives is not None
+                else reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+            )
