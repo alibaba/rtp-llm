@@ -158,6 +158,9 @@ py_test(
         "util_test.py",
     ],
     deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:ops",
+        "//rtp_llm:transformers",
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:fastapi",
         "//rtp_llm:psutil",

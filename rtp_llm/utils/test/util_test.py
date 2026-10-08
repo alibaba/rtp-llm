@@ -4,7 +4,22 @@ import unittest
 from unittest.mock import patch
 
 from rtp_llm.utils import flash_attn_utils
+from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import has_overlap_kmp
+
+
+class VitParametersTest(unittest.TestCase):
+    def test_mutable_state_is_instance_local(self):
+        first = VitParameters()
+        second = VitParameters()
+
+        first.config["model"] = "first"
+        first.special_token_ids["image"] = 1
+        first.special_tokens["image"] = "<image>"
+
+        self.assertEqual(second.config, {})
+        self.assertEqual(second.special_token_ids, {})
+        self.assertEqual(second.special_tokens, {})
 
 
 class TestUtil(unittest.TestCase):
