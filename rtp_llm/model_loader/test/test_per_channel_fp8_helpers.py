@@ -172,6 +172,22 @@ class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
             _ckpt_base_matches_quant_exclude(self.TEMPLATE, excludes)
         )
 
+    def test_unanchored_substring_pattern_still_matches(self):
+        """The probe change must not alter matching for existing configs.
+
+        A user pattern such as ``re:.*layernorm`` pins a substring and does not
+        consume the whole template; it has to keep matching, otherwise modules
+        that used to be excluded would silently start being quantized.
+        """
+        excludes = {r"re:.*layernorm"}
+        template = "model.layers.{i}.input_layernorm.weight"
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(template, excludes)
+        )
+        self.assertTrue(
+            _ckpt_base_matches_regex_exclude(template, excludes)
+        )
+
     def test_pattern_for_another_submodule_does_not_match(self):
         excludes = {r"re:^model\.layers\.\d+\.self_attn\.q_proj$"}
         self.assertFalse(

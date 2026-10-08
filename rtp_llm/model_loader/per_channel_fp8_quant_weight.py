@@ -100,7 +100,7 @@ def _ckpt_base_matches_quant_exclude(
         if exclude.startswith("re:"):
             try:
                 probe = base_name_template.replace("{i}", "123456789")
-                if re.fullmatch(exclude[3:], probe):
+                if re.search(exclude[3:], probe):
                     return True
             except re.error as error:
                 raise ValueError(
@@ -118,7 +118,7 @@ def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: s
         if not exclude.startswith("re:"):
             continue
         try:
-            if re.fullmatch(exclude[3:], probe):
+            if re.search(exclude[3:], probe):
                 return True
         except re.error as error:
             raise ValueError(
