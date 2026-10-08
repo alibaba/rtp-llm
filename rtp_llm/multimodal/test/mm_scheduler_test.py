@@ -385,6 +385,26 @@ class MMSchedulerTest(TestCase):
         finally:
             scheduler.close()
 
+    def test_idle_executor_releases_completed_batch(self):
+        part = _FakeMMPart()
+        scheduler = MMScheduler(part, batch_wait_ms=0, max_batch_size=1)
+        try:
+
+            def submit():
+                pixels = torch.zeros(1)
+                pixels_ref = weakref.ref(pixels)
+                scheduler.submit_and_wait([_FakeWorkItem(preprocess_result=pixels)])
+                return pixels_ref
+
+            pixels_ref = submit()
+            deadline = time.monotonic() + 2
+            while pixels_ref() is not None and time.monotonic() < deadline:
+                gc.collect()
+                time.sleep(0.01)
+            self.assertIsNone(pixels_ref())
+        finally:
+            scheduler.close()
+
     def test_failed_forward_does_not_retain_prepared_pixels(self):
         part = _FakeMMPart()
         references = []

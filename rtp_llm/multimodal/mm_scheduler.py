@@ -624,7 +624,9 @@ class MMScheduler:
 
         try:
             while not self._stopped.is_set():
-                batch = None
+                # Drop the completed batch before blocking for the next one.
+                # Its work items own prepared pixels and embedding tensors.
+                batch = claimed_batch = None
                 try:
                     batch = self._collect_batch()
                     if batch is None:
