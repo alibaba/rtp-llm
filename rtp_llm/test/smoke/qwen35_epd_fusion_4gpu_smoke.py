@@ -1995,6 +1995,8 @@ def run_quality_probe(manager, model, out, label):
 def run_worker(a):
     out = Path(a.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    if hasattr(a, "preset_metadata"):
+        save(out / "preset.json", a.preset_metadata)
     CLIENT_OPTIONS.update(
         mode=getattr(a, "client_mode", "legacy"),
         processes=getattr(a, "client_processes", 1),
@@ -2521,7 +2523,8 @@ def bazel_command(a):
         "--batch",
         "--output_user_root=" + str(Path(a.cache_root).resolve()),
         "test",
-        (
+        getattr(a, "bazel_target", None)
+        or (
             (
                 SINGLE_ENCODER_TARGET
                 if len(encoder_gpu_ids(encoder_gpus)) == 1
@@ -2550,6 +2553,7 @@ def bazel_command(a):
         "--test_env=RTP_GPU_PASSIVE_LOCK=1",
     ]
     command += a.bazel_option
+    command += ["--test_arg=" + value for value in getattr(a, "extra_test_args", ())]
     for name, value in (
         ("encoder-dp2", getattr(a, "encoder_dp2", 0)),
         ("encoder-profile", getattr(a, "encoder_profile", "candidate-a")),
@@ -2627,6 +2631,8 @@ def run_launcher(a):
     out = Path(a.output).resolve()
     out.mkdir(parents=True, exist_ok=False)
     save(out / "command.json", public)
+    if hasattr(a, "preset_metadata"):
+        save(out / "preset.json", a.preset_metadata)
     snapshot = out / "source-snapshot"
     snapshot.mkdir()
     fingerprints = {}
@@ -2654,7 +2660,7 @@ def run_launcher(a):
         "rtp_llm/cpp/models/PyWrappedModel.cc",
         "rtp_llm/cpp/models/PyWrappedModel.h",
         "rtp_llm/models_py/modules/factory/attention/cuda_impl/trtllm_gen.py",
-    ):
+    ) + tuple(getattr(a, "snapshot_files", ())):
         data = (repo / relative).read_bytes()
         target = snapshot / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2719,7 +2725,7 @@ def run_launcher(a):
     return rc
 
 
-def main():
+def main(argv=None, preset=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--startup-timeout", type=int, default=1600)
     p.add_argument(
@@ -2839,7 +2845,11 @@ def main():
     p.add_argument("--steady-windows", type=int, choices=(2, 3, 4), default=2)
     p.add_argument("--execute", action="store_true")
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    a = p.parse_args()
+    if preset is not None:
+        preset.add_arguments(p)
+    a = p.parse_args(argv)
+    if preset is not None:
+        preset.configure(a, p)
     if not 3600 <= a.test_timeout_seconds <= 21600:
         p.error("test timeout must be between 3600 and 21600 seconds")
     if a.client_processes > 1 and (
@@ -2950,6 +2960,8 @@ def main():
         p.error("Encoder proxy requires one or two encoder GPUs and video workload")
     if not 0 <= a.perf_repeats <= 4:
         p.error("--perf-repeats must be between 0 and 4 (7200-second test budget)")
+    if preset is not None and (a.execute or a.worker):
+        preset.validate_runtime(a)
     return run_worker(a) if a.worker else run_launcher(a)
 
 

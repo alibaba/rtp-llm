@@ -49,3 +49,9 @@ For steady video load, enable the Encoder proxy, set `--client-mode measured`, c
 The CPU harness target is `//rtp_llm/test/smoke:qwen35_epd_fusion_4gpu_harness_test`. Trace analysis has its own `pdfusion_schedule_trace_test` target. The live multi-GPU targets are manual and must use the repository GPU-lock workflow.
 
 Historical single-Encoder short runs used five GPUs and produced throughput close to the two-Encoder baseline, with greater tail latency and higher per-Encoder memory. These results do not establish strictly unchanged throughput or long-term stability. A later two-Encoder FP8 long run failed with grid sync timeout before a valid long comparison; reducing Encoder count has not been established as the cause. The separate video-decoder pixel-consistency issue is also unresolved. Preserve full run evidence and exclude failed windows from performance conclusions.
+
+## Frozen single-Encoder performance preset
+
+For the complete measured C512/N7 configuration (Encoder 1 GPU + PD Fusion 4 GPUs),
+use [qwen35_e1pd4_perf_smoke](qwen35_e1pd4_perf_smoke.md). It includes the
+required environment, the pinned DeepGEMM wheel and dependency checks.

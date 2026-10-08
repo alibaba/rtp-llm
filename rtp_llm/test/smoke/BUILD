@@ -1,3 +1,4 @@
+load(":qwen35_e1pd4_perf_smoke.bzl", "qwen35_e1pd4_perf_suite")
 load(":qwen35_epd_fusion_4gpu_smoke.bzl", "qwen35_epd_fusion_4gpu_suite")
 load(":qwen35_e2p4d2_repro.bzl", "qwen35_e2p4d2_repro_suite")
 package(default_visibility = ["//visibility:public"])
@@ -126,4 +127,21 @@ py_test(
     name = "pdfusion_schedule_trace_test",
     srcs = ["pdfusion_schedule_trace.py", "pdfusion_schedule_trace_test.py"],
     main = "pdfusion_schedule_trace_test.py",
+)
+
+qwen35_e1pd4_perf_suite()
+
+py_test(
+    name = "qwen35_e1pd4_perf_preset_test",
+    srcs = [
+        "qwen35_e1pd4_perf_smoke.py",
+        "qwen35_e1pd4_perf_smoke_test.py",
+        "qwen35_epd_fusion_4gpu_smoke.py",
+    ],
+    main = "qwen35_e1pd4_perf_smoke_test.py",
+    data = ["qwen35_e1pd4_perf_reference.json"],
+    deps = ["//rtp_llm:requests"],
+    legacy_create_init = 0,
+    tags = ["manual"],
+    timeout = "moderate",
 )
