@@ -80,6 +80,18 @@ def _inputs(x, positions, valid, projection, frequencies, max_rows):
 
 
 @dataclass(frozen=True)
+class V41KVInputs:
+    """Projected token rows before cross-rank pairing and cache publication."""
+
+    owner: object
+    swa: torch.Tensor
+    values: torch.Tensor | None
+    scores: torch.Tensor | None
+    positions: torch.Tensor
+    valid_rows: torch.Tensor
+
+
+@dataclass(frozen=True)
 class V41KVFrame:
     """Owned projected rows; preparing a frame does not modify any cache.
 
@@ -273,18 +285,61 @@ class V41KVProjection:
         )
         self.backend = "eager" if wkv.backend == "eager" else "triton"
 
-    def prepare(
+    def project(self, hidden, positions, valid_rows) -> V41KVInputs:
+        """Project local rows; an explicit CP exchange may gather these outputs."""
+        x, safe_positions = _inputs(
+            hidden, positions, valid_rows, self.wkv, self.frequencies, self.max_rows
+        )
+        values, scores = None, None
+        if self.sources.owns_kv:
+            if self.sources.compress_ratio == 2:
+                if hidden.is_cuda and torch.backends.cuda.matmul.allow_tf32:
+                    raise RuntimeError(
+                        "V4.1 FP32 compressor projections require TF32 disabled"
+                    )
+                values = F.linear(x.float(), self.compressor_weight)
+                scores = F.linear(x.float(), self.gate_weight)
+            else:
+                values = F.linear(x, self.compressor_weight)
+        swa = _rotate(
+            _rms_norm(self.wkv(x), self.kv_norm), self.frequencies[safe_positions]
+        )
+        return V41KVInputs(self, swa, values, scores, positions, valid_rows)
+
+    def finish(
         self,
-        hidden: torch.Tensor,
-        positions: torch.Tensor,
-        valid_rows: torch.Tensor,
+        projected: V41KVInputs,
         *,
         pair_state: V41PairState | None = None,
         pair_metadata: V41PairMetadata | None = None,
     ) -> V41KVFrame:
-        x, safe_positions = _inputs(
-            hidden, positions, valid_rows, self.wkv, self.frequencies, self.max_rows
-        )
+        """Pool complete visible rows and prepare writes, without mutating caches."""
+        if not isinstance(projected, V41KVInputs) or projected.owner is not self:
+            raise ValueError("V4.1 KV inputs belong to a different projection")
+        positions, valid_rows = projected.positions, projected.valid_rows
+        device = self.wkv.weight.device
+        rows = valid_rows.numel()
+        if rows > self.max_rows or positions.dtype not in (torch.int32, torch.int64):
+            raise ValueError("V4.1 projected KV rows exceed their admitted geometry")
+        _tensor(positions, (rows,), positions.dtype, device, "projected positions")
+        _tensor(valid_rows, (rows,), torch.bool, device, "projected row mask")
+        _tensor(projected.swa, (rows, 512), torch.bfloat16, device, "projected SWA")
+        if self.sources.owns_kv:
+            dtype = (
+                torch.float32 if self.sources.compress_ratio == 2 else torch.bfloat16
+            )
+            _tensor(
+                projected.values, (rows, 512), dtype, device, "projected compressor"
+            )
+        elif projected.values is not None:
+            raise ValueError("V4.1 non-owner cannot carry compressor projections")
+        if self.sources.owns_kv and self.sources.compress_ratio == 2:
+            _tensor(
+                projected.scores, (rows, 512), torch.float32, device, "projected gates"
+            )
+        elif projected.scores is not None:
+            raise ValueError("V4.1 compressor gates belong only to ratio-2 sources")
+        safe_positions = torch.where(valid_rows, positions, 0).long()
         pair = None
         latent = None
         needs_pair = self.sources.owns_kv and self.sources.compress_ratio == 2
@@ -301,14 +356,9 @@ class V41KVProjection:
                 raise ValueError(
                     "V4.1 pair positions/mask must be the projection metadata"
                 )
-            if hidden.is_cuda and torch.backends.cuda.matmul.allow_tf32:
-                raise RuntimeError(
-                    "V4.1 FP32 compressor projections require TF32 disabled"
-                )
-            x32 = x.float()
             pair = prepare_ratio2(
-                F.linear(x32, self.compressor_weight),
-                F.linear(x32, self.gate_weight),
+                projected.values,
+                projected.scores,
                 self.compressor_norm,
                 pair_state,
                 pair_metadata,
@@ -324,9 +374,7 @@ class V41KVProjection:
                 else torch.zeros_like(valid_rows)
             )
             if self.sources.owns_kv:
-                latent = _rms_norm(
-                    F.linear(x, self.compressor_weight), self.compressor_norm
-                )
+                latent = _rms_norm(projected.values, self.compressor_norm)
         global_kv, index_k, tag = None, None, None
         if latent is not None:
             group_positions = torch.where(
@@ -342,11 +390,8 @@ class V41KVProjection:
             index_k = torch.where(complete[:, None], index_k, 0)
             global_kv = torch.where(complete[:, None], global_kv, 0)
             tag = "csa_kv" if self.sources.compress_ratio == 2 else "hca_kv"
-        swa = _rotate(
-            _rms_norm(self.wkv(x), self.kv_norm), self.frequencies[safe_positions]
-        )
         return V41KVFrame(
-            swa,
+            projected.swa,
             global_kv,
             index_k,
             valid_rows.clone(),
@@ -355,8 +400,25 @@ class V41KVProjection:
             pair,
             self.backend,
             (
-                torch.cuda.current_stream(hidden.device).cuda_stream
-                if hidden.is_cuda
+                torch.cuda.current_stream(device).cuda_stream
+                if device.type == "cuda"
                 else None
             ),
+        )
+
+    def prepare(
+        self,
+        hidden: torch.Tensor,
+        positions: torch.Tensor,
+        valid_rows: torch.Tensor,
+        *,
+        pair_state: V41PairState | None = None,
+        pair_metadata: V41PairMetadata | None = None,
+        exchange=None,
+    ) -> V41KVFrame:
+        projected = self.project(hidden, positions, valid_rows)
+        if exchange is not None:
+            projected = exchange(projected)
+        return self.finish(
+            projected, pair_state=pair_state, pair_metadata=pair_metadata
         )

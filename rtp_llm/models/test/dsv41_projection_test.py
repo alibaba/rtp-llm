@@ -106,6 +106,39 @@ def swa_reference(op, x, positions):
 
 
 class V41ProjectionTest(unittest.TestCase):
+    def test_projected_exchange_pairs_remote_rows_before_any_state_write(self):
+        for ratio in (0, 1, 2):
+            op = fixture(ratio)
+            x = torch.randn(4, 128).bfloat16()
+            pool, _ = state()
+            meta = metadata([(0, 1), (0, 3), (0, 0), (0, 2)], pool.entries)
+            kwargs = dict(pair_state=pool, pair_metadata=meta) if ratio == 2 else {}
+            expected = op.prepare(x, meta.positions, meta.valid_rows, **kwargs)
+            projected = [
+                op.project(x[part], meta.positions[part], meta.valid_rows[part])
+                for part in (slice(0, 2), slice(2, 4))
+            ]
+            before = pool.raw.clone()
+            gathered = dataclasses.replace(
+                projected[0],
+                **{
+                    name: torch.cat([getattr(item, name) for item in projected])
+                    for name in ("swa", "values", "scores")
+                    if getattr(projected[0], name) is not None
+                },
+                positions=meta.positions,
+                valid_rows=meta.valid_rows,
+            )
+            actual = op.finish(gathered, **kwargs)
+            for name in ("swa", "global_kv", "index_k"):
+                if getattr(expected, name) is not None:
+                    torch.testing.assert_close(
+                        getattr(actual, name), getattr(expected, name), rtol=0, atol=0
+                    )
+            torch.testing.assert_close(pool.raw, before, rtol=0, atol=0)
+            with self.assertRaisesRegex(ValueError, "different projection"):
+                op.finish(dataclasses.replace(gathered, owner=object()), **kwargs)
+
     def test_ratio1_projects_index_from_unrotated_latent_and_publishes_exact_bytes(
         self,
     ):
