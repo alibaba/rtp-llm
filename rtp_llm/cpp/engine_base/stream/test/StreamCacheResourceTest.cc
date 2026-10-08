@@ -408,6 +408,38 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
     }
 }
 
+TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapUsesGroupCheckpointSpan) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    auto groups = config.topology().groups();
+    const auto layers = config.topology().layers();
+    for (auto& group : groups) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            auto spec = group.spec->clone();
+            spec->seq_size_per_block = 32768;
+            group.spec = std::move(spec);
+        }
+    }
+    config.setTopology(std::move(groups), layers);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(config);
+    StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+    resource.init(1);
+    auto& batch = resource.kvCacheMutable();
+    for (const auto& group : config.topology().groups()) {
+        batch.mutableBlockIds(0, group.tag).assign({0, 1, 2, 3, 4, 5});
+    }
+
+    // Three accepted tokens after 64K move the LINEAR final state from
+    // checkpoint slot 3 to slot 2. FULL pages keep their own layout.
+    resource.updateLinearBlocks(0, 65535, 65538);
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(batch.blocks(0, group.tag),
+                  group.policy.group_type == CacheGroupType::LINEAR ?
+                      (BlockIndicesType{0, 1, 3, 2, 4, 5}) :
+                      (BlockIndicesType{0, 1, 2, 3, 4, 5}));
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     for (const bool with_backend : {false, true}) {
         for (const bool ignore_request_switches : {false, true}) {

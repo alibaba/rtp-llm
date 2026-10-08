@@ -70,9 +70,11 @@ class KimiLinearMetadata(object):
         self,
         prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         is_target_verify: bool = False,
+        prefill_paged_conv_meta=None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
+        self.prefill_paged_conv_meta = prefill_paged_conv_meta
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -94,6 +96,7 @@ class KimiLinearKDABase(nn.Module):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__()
+        self.gate_lower_bound = None
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -195,6 +198,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            preserve_input_dtype=getattr(self, "preserve_conv_input_dtype", False),
+            reserved_cache_block_id=getattr(self, "conv_reserved_cache_block_id", -1),
         ).transpose(0, 1)
         return out
 
@@ -272,8 +277,10 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             return_intermediate_states=True,
+            intermediate_states_in_fp32=getattr(self, "intermediate_states_in_fp32", False),
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            lower_bound=self.gate_lower_bound,
         )
         h_from_chunk = h
 
@@ -410,9 +417,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         g = forget_gate_2d.view(
             batch, seq, self.local_num_v_heads, self.head_k_dim
         ).contiguous()
-        # beta: [batch*seq, H] -> sigmoid in float32 -> [batch, seq, H]
-        beta_out = beta.reshape(batch * seq, -1).float().sigmoid()
-        beta_out = beta_out.view(batch, seq, self.local_num_v_heads)
+        # Apply sigmoid in the recurrent kernel to avoid a separate producer.
+        beta_out = beta.reshape(batch, seq, self.local_num_v_heads)
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
 
@@ -426,9 +432,12 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             initial_state=ssm_states,
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            lower_bound=self.gate_lower_bound,
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            state_v_first=False,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
@@ -618,7 +627,8 @@ class KimiLinearKDA(nn.Module):
             attention_inputs.is_target_verify
             or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
-        ), "prefill_conv1d_meta is required for prefill"
+            or attn_meta.prefill_paged_conv_meta is not None
+        ), "convolution metadata is required for prefill"
 
         # 1. Projections
         projected_qkv = self.in_proj_qkv(hidden_states)

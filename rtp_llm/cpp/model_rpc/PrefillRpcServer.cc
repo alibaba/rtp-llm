@@ -6,6 +6,8 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -391,6 +393,43 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
+    }
+    // KV page sharding is independent of whether queries use Prefill CP.
+    // Decode needs the physical source shard count to pull every cache page.
+    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        const auto tp_size = maga_init_params_.parallelism_config.tp_size;
+        RTP_LLM_CHECK_WITH_INFO(tp_size > 1 && alloc_request.peer_addrs_size() == tp_size,
+                                "sharded Prefill KV requires one rank-ordered cache-store peer per TP rank, "
+                                "got peers=%d TP=%ld",
+                                alloc_request.peer_addrs_size(),
+                                tp_size);
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(tp_size));
+    }
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto& mla_config = maga_init_params_.model_config_.attn_config;
+    alloc_request.set_prefill_seq_size_per_block(static_cast<int32_t>(cache_config.seq_size_per_block));
+    for (const auto& group : cache_config.groups()) {
+        if (dynamic_cast<const MLAKVCacheSpec*>(group.spec.get()) != nullptr) {
+            alloc_request.set_prefill_kernel_seq_size_per_block(
+                static_cast<int32_t>(group.spec->kernel_seq_size_per_block));
+            break;
+        }
+    }
+    alloc_request.set_prefill_attention_tp_size(
+        static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
+    alloc_request.set_prefill_cache_dtype(static_cast<int32_t>(cache_config.dtype));
+    alloc_request.set_prefill_mla_fp8_format(mla_config.mla_fp8_compute ? 1 : 0);
+    if (mla_config.mla_fp8_compute) {
+        alloc_request.set_prefill_mla_fp8_q_scale(mla_config.mla_fp8_q_scale);
+        alloc_request.set_prefill_mla_fp8_kv_scale(mla_config.mla_fp8_kv_scale);
+    }
+    for (const auto& group : cache_config.topology().groups()) {
+        const auto* linear = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
+        if (linear != nullptr) {
+            alloc_request.set_prefill_ssm_state_dtype(static_cast<int32_t>(linear->ssmStateDType()));
+            alloc_request.set_prefill_conv_state_dtype(static_cast<int32_t>(linear->convStateDType()));
+            break;
+        }
     }
     return alloc_request;
 }
@@ -942,6 +981,14 @@ PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB
     switch (result) {
         case PriorityCancelResult::ACCEPTED:
             response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+            if (envValueIsTrue(std::getenv("KIMI_K3_SMOKE_EVIDENCE"))) {
+                const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"prefill_priority_cancel_accepted\","
+                    "\"request_id\":%ld,\"time_ns\":%ld}",
+                    static_cast<long>(request->request_id()), static_cast<long>(time_ns));
+            }
             RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel accepted", request->request_id());
             break;
         case PriorityCancelResult::TOMBSTONED:

@@ -5,6 +5,7 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -43,11 +44,9 @@ class CudaGraphRunner: public GraphBase {
 public:
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               max_seq_len,
-                                                size_t               max_reserved_step);
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               fake_physical_block_count);
+    static int64_t
+    captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
@@ -61,10 +60,12 @@ public:
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        sequence_parallel_size_(graph_params.sequence_parallel_size),
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        fixed_capacity_mtp_draft_prefill_(graph_params.fixed_capacity_mtp_draft_prefill),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -96,6 +97,10 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
+            const int unit = sequence_parallel_size_ / std::gcd(sequence_parallel_size_, num_tokens_per_bs_);
+            max_bs_        = (max_bs_ + unit - 1) / unit * unit;
+        }
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -198,12 +203,10 @@ private:
         return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK propose/commit now run as construction-time-role decode graphs
-        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // DSpARK propose/commit run as decode graphs. HC-shaped drafts and
+        // model-declared rectangular draft attention retain the full physical
+        // capacity across every MTP draft-prefill capture bucket.
+        return isMtpDraftPrefillCudaGraph() && (hc_mult_ > 1 || fixed_capacity_mtp_draft_prefill_);
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -242,12 +245,14 @@ private:
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
+    int                     sequence_parallel_size_{1};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
+    bool                    fixed_capacity_mtp_draft_prefill_{false};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
@@ -271,6 +276,7 @@ private:
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
     mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t>              cache_table_fallback_count_{0};
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =
         static_cast<size_t>(GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>

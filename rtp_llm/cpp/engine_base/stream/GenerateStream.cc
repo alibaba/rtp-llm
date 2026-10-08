@@ -2,6 +2,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
@@ -801,6 +803,18 @@ bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& 
     const bool successful_completion_pending =
         hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock();
     if (!successful_completion_pending) {
+        const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        if (smoke_evidence != nullptr && std::strcmp(smoke_evidence, "1") == 0
+            && getStatus() == StreamState::LOADING_CACHE
+            && streamCacheResource().pendingHostReuseTokens() > 0) {
+            const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            RTP_LLM_LOG_INFO(
+                "[K3_SMOKE_EVENT] {\"event\":\"host_cache_cancelled_during_load\","
+                "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                static_cast<long>(streamId()), streamCacheResource().pendingHostReuseTokens(),
+                static_cast<long>(time_ns));
+        }
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
     }
 
@@ -1147,26 +1161,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
-
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
+        stream_cache_resource_->updateLinearBlocks(0, cur_cached_len, nxt_cached_len);
     } else {
         RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
                           streamLogTag().c_str(),
@@ -1177,8 +1172,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.target_hidden_states,
+                  update_info.target_logits,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

@@ -78,6 +78,7 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+    bool                                   mla_fp8_e4m3 = false;
 };
 
 struct SpecBuildContext {

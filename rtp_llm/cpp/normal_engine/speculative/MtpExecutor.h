@@ -262,6 +262,7 @@ private:
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool is_dspark_ = false;
+    bool uses_recurrent_mtp_ = false;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;

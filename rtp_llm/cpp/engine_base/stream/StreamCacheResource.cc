@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -416,6 +417,11 @@ bool StreamCacheResource::asyncLoadCache() {
     return allocator_load_context_ != nullptr;
 }
 
+size_t StreamCacheResource::pendingHostReuseTokens() const {
+    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    return load_context == nullptr ? 0 : load_context->matchedBlocks(Tier::HOST) * reuseBlockTokens();
+}
+
 bool StreamCacheResource::loadCacheDone() {
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {
@@ -552,6 +558,41 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
         if (group.policy.group_type == CacheGroupType::LINEAR) {
             batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
+        }
+    }
+}
+
+void StreamCacheResource::updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len) {
+    const auto& topology = resource_context_.cache_manager->cacheConfig().topology();
+    for (const auto& group : topology.groups()) {
+        if (group.policy.group_type != CacheGroupType::LINEAR) {
+            continue;
+        }
+        // LINEAR checkpoints can span a complete PageRR stripe, while FULL
+        // cache pages retain their physical size. Use this group's span for
+        // the two speculative-acceptance swaps, as in the source branch.
+        const auto span = group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(span > 0 && span <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "invalid LINEAR group %s token span %zu", group.tag.c_str(), span);
+        const auto [cached_src, cached_dst] =
+            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+        const auto [final_src, final_dst] =
+            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+        const auto block_num = batch_kv_cache_resource_->blocks(batch_id, group.tag).size();
+        const auto valid_swap = [block_num](int src, int dst) {
+            return src == dst || (src >= 0 && dst >= 0 && static_cast<size_t>(src) < block_num
+                                  && static_cast<size_t>(dst) < block_num);
+        };
+        RTP_LLM_CHECK_WITH_INFO(valid_swap(cached_src, cached_dst) && valid_swap(final_src, final_dst),
+                                "LINEAR group %s span %zu table size %zu cannot commit %d -> %d: "
+                                "swaps (%d,%d), (%d,%d)",
+                                group.tag.c_str(), span, block_num, cur_cached_len, nxt_cached_len,
+                                cached_src, cached_dst, final_src, final_dst);
+        if (cached_src != cached_dst) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, cached_src, cached_dst);
+        }
+        if (final_src != final_dst) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, final_src, final_dst);
         }
     }
 }

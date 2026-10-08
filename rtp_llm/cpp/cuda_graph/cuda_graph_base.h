@@ -45,12 +45,17 @@ struct GraphParams {
     CudaGraphRole    role                               = CudaGraphRole::AUTO;
     int              max_seq_len                        = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int              sp_steps               = 0;
+    int              sequence_parallel_size = 1;
     size_t           max_context_batch_size = 128;
     std::size_t      hidden_size            = 0;
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult                                    = 1;
+    // Models whose draft attention requires rectangular physical query rows
+    // keep the full draft-prefill graph capacity in every token bucket.
+    bool             fixed_capacity_mtp_draft_prefill            = false;
     int              generation_prefill_cuda_graph_max_requests = 0;
     int              generation_prefill_cuda_graph_pad_token_id = 0;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
