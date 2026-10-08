@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 import unittest
+from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,7 +31,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     save_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
-from rtp_llm.models_py.modules.dsv4.v41_engram_host import plan_stage_engram_tables
+from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
+    _live_leases,
+    _locked,
+    _PinnedSharedTable,
+    plan_stage_engram_tables,
+)
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -97,8 +103,23 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
                 collective._register_process_groups_to_cpp()
             forward = model.forward
             initialize = model.initialize
+            register = _PinnedSharedTable.register_cuda
             calls = {"initialize": 0, "active": 0, "idle": 0}
             observations = {}
+
+            def checked_register(table, device):
+                began = time.monotonic()
+                print(
+                    f"rank={rank} Engram registration start key={table.source.key} "
+                    f"bytes={table.source.nbytes}",
+                    flush=True,
+                )
+                register(table, device)
+                print(
+                    f"rank={rank} Engram registration complete key={table.source.key} "
+                    f"seconds={time.monotonic() - began:.2f}",
+                    flush=True,
+                )
 
             def checked_initialize(resource):
                 assert isinstance(resource, PyModelInitResources)
@@ -138,7 +159,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
 
             with patch.object(model, "initialize", checked_initialize), patch.object(
                 model, "forward", checked_forward
-            ):
+            ), patch.object(_PinnedSharedTable, "register_cuda", checked_register):
                 engine = native_ops.NativeEngine(model, config, parallelism, head)
                 assert calls["initialize"] == 1 and model._materialized
                 assert not hasattr(model, "weight")
@@ -253,7 +274,31 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         total = sum(source.nbytes for source in sources.values())
         self.assertGreater(total, 180 * 2**30)
         self.assertLessEqual(total, 192 * 2**30)
-        self.assertGreater(shutil.disk_usage(storage).free, total + 64 * 2**30)
+        reuse = os.environ.get("DSV41_TEST_REUSE_ENGRAM_DIR")
+        if reuse:
+            reused_directory = Path(reuse).resolve(strict=True)
+            self.assertEqual(reused_directory.parent, storage)
+            self.assertTrue(reused_directory.name.startswith("v41-full-engine-"))
+            for source in sources.values():
+                source.check_sources()
+                path = reused_directory / f"rtp_llm_engram_{os.getuid()}_{source.key}"
+                with _locked(Path(str(path) + ".lock")):
+                    self.assertFalse(
+                        _live_leases(path), "reused tables have active owners"
+                    )
+                    self.assertFalse(path.is_symlink())
+                    self.assertEqual(path.stat().st_size, source.nbytes)
+                    self.assertEqual(
+                        Path(str(path) + ".json").read_bytes(), source.manifest
+                    )
+            directory_context = nullcontext(str(reused_directory))
+        else:
+            directory_context = tempfile.TemporaryDirectory(
+                prefix="v41-full-engine-", dir=storage
+            )
+        self.assertGreater(
+            shutil.disk_usage(storage).free, (0 if reuse else total) + 64 * 2**30
+        )
         memory = {
             key: int(value.split()[0]) * 1024
             for key, value in (
@@ -278,12 +323,11 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         ]
         self.assertTrue(all(0 < len(prompt) <= 32 for prompt in prompts))
         print(
-            f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} prompts={prompts}",
+            f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} "
+            f"reuse_tables={bool(reuse)} prompts={prompts}",
             flush=True,
         )
-        with tempfile.TemporaryDirectory(
-            prefix="v41-full-engine-", dir=storage
-        ) as directory:
+        with directory_context as directory:
             self.run_checkpoint(root, directory, prompts, full=True)
 
 

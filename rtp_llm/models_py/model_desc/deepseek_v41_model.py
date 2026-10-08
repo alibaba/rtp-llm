@@ -267,8 +267,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise ValueError("Engram tokenizer size disagrees with model vocabulary")
         by_global_id = {layer.layer_id: layer for layer in self.v4.layers}
         modules = []
-        # Serialize aggregate admission and staging across these workers. The
-        # table provider also reserves bytes before copying, preventing SIGBUS.
+        # Reserve and lease all tables under one admission lock. Registration
+        # may then overlap across workers without racing capacity or deletion.
         lock = Path("/tmp") / f"rtp_llm_v41_engram_admission_{os.getuid()}.lock"
         with _locked(lock):
             self._check_engram_capacity()
@@ -279,24 +279,26 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     directory=self._engram_cache_dir,
                 )
                 self._engram_tables[layer_id] = table
-                table.register_cuda(device)
-                tensors = load_engram_weights(
-                    source, max_bytes=source.weight_bytes, device=device
-                )
-                projection = V41MXFP8Linear(
-                    tensors["weight"], tensors["scales"].view(torch.float8_e8m0fnu)
-                )
-                index = layout.layer_ids.index(layer_id)
-                module = Engram(
-                    layout,
-                    index,
-                    _SharedTableEmbedding(table),
-                    projection,
-                    tensors["q_weight"],
-                    tensors["k_weight"],
-                    source.norm_eps,
-                )
-                modules.append((by_global_id[layer_id], index, module))
+        for layer_id, source in self._engram_sources.items():
+            table = self._engram_tables[layer_id]
+            table.register_cuda(device)
+            tensors = load_engram_weights(
+                source, max_bytes=source.weight_bytes, device=device
+            )
+            projection = V41MXFP8Linear(
+                tensors["weight"], tensors["scales"].view(torch.float8_e8m0fnu)
+            )
+            index = layout.layer_ids.index(layer_id)
+            module = Engram(
+                layout,
+                index,
+                _SharedTableEmbedding(table),
+                projection,
+                tensors["q_weight"],
+                tensors["k_weight"],
+                source.norm_eps,
+            )
+            modules.append((by_global_id[layer_id], index, module))
         # Publish only after every owned table and projection is ready.
         for layer, _, module in modules:
             layer.engram = module

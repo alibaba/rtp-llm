@@ -1,5 +1,6 @@
 """Native worker integration; small real weights, tokenizer, host table and kernels."""
 
+import fcntl
 import json
 import os
 import tempfile
@@ -22,6 +23,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_attention_owner_sm120 impo
     NativeTaggedCache,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
+from rtp_llm.models_py.modules.dsv4.v41_engram_host import _PinnedSharedTable
 from rtp_llm.ops import KvCacheDataType, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
@@ -403,6 +405,54 @@ class V41WorkerSM120Test(unittest.TestCase):
         self.assertIsNone(model.v4)
         self.assertEqual(model._engram_tables, {})
         self.assertTrue(model.initialize(resources()))
+
+    def test_registration_releases_admission_lock_and_cleans_all_leases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engram = checkpoint(Path(directory), full_schedule=True)
+            for fail_second in (False, True):
+                with self.subTest(fail_second=fail_second):
+                    args, weights = fixture(full_schedule=True)
+                    parallelism = ParallelismConfig()
+                    parallelism.role_type = RoleType.PREFILL
+                    model = DeepSeekV41Model(
+                        model_config(args, engram), parallelism, weights, None, 2
+                    )
+                    self.addCleanup(model.close)
+                    owners = []
+                    original = _PinnedSharedTable.register_cuda
+
+                    def register(table, device):
+                        owners.append(table)
+                        self.assertEqual(set(model._engram_tables), {1, 14})
+                        for leased in model._engram_tables.values():
+                            self.assertTrue(leased._ready_path.exists())
+                            self.assertTrue(leased._lease_path.exists())
+                        lock = Path("/tmp") / (
+                            f"rtp_llm_v41_engram_admission_{os.getuid()}.lock"
+                        )
+                        with lock.open("rb") as handle:
+                            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        if fail_second and len(owners) == 2:
+                            raise RuntimeError("injected second registration failure")
+                        return original(table, device)
+
+                    with patch.object(_PinnedSharedTable, "register_cuda", register):
+                        if fail_second:
+                            with self.assertRaisesRegex(
+                                RuntimeError, "injected second"
+                            ):
+                                model.initialize(resources())
+                        else:
+                            self.assertTrue(model.initialize(resources()))
+                    self.assertEqual(len(owners), 2)
+                    model.close()
+                    self.assertEqual(model._engram_tables, {})
+                    for table in owners:
+                        self.assertTrue(table._closed)
+                        self.assertIsNone(table._mapping)
+                        self.assertFalse(table._path.exists())
+                        self.assertFalse(table._ready_path.exists())
+                        self.assertFalse(table._lease_path.exists())
 
     def test_shared_table_leases_close_and_failed_unregister_retry(self):
         first = self.worker()
