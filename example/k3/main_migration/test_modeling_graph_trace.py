@@ -40,8 +40,20 @@ class ModelingBoundaryTest(unittest.TestCase):
             if e['name'].startswith('cuda_graph.forward(replayPrefill'):
                 e['name'] = 'cuda_graph.forward(replayPrefill)'
         self.assertEqual(analyze(data)['complete_rounds'], [])
-        data.append(event('cuda_graph.modeling(role=3,logical_b=32,physical_b=32,q=4,bucket=128)',400,10))
+        data.append(event('cuda_graph.modeling(role=3,logical_b=32,physical_b=32,q=4,bucket=128,capture_b=32,capture_t=128)',400,10))
         self.assertEqual(len(analyze(data)['complete_rounds']), 1)
+
+    def test_larger_capture_capacity_cannot_impersonate_actual_batch(self):
+        data = round_events()
+        for e in data:
+            if e['name'].startswith('cuda_graph.forward(replayPrefill'):
+                e['name'] = 'cuda_graph.forward(replayPrefill)'
+        data.append(event('cuda_graph.modeling(role=3,logical_b=32,physical_b=32,q=4,bucket=128,capture_b=64,capture_t=256)',400,10))
+        self.assertEqual(analyze(data)['complete_rounds'], [])
+        data = round_events()
+        for e in data:
+            e['name'] = e['name'].replace('capture=32', 'capture=64')
+        self.assertEqual(analyze(data)['complete_rounds'], [])
 
     def test_partial_gpu_window_cannot_pass(self):
         data = [e for e in round_events() if not (e['cat']=='kernel' and e['args'].get('correlation')==3)]
