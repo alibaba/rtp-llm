@@ -36,8 +36,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>{@code admit} = completion handover to the LRU ({@code release != delete},
  *       {@code free != available}: pure-LRU blocks stay available).</li>
  *   <li>{@code grow} = per-step decode growth ({@code incrMalloc}).</li>
- *   <li>Enqueue-batch LACK_MEM = the master-visible synchronous rejection surface
- *       (error code 602 = production {@code MALLOC_FAILED}).</li>
+ *   <li>An impossible batch request gets the master-visible synchronous
+ *       LACK_MEM rejection (error code 602 = {@code MALLOC_FAILED}); a FIFO
+ *       waiter reserves P KV only when selected by the scheduler.</li>
  * </ul>
  *
  * <p>Mandatory paths per the capacity-model acceptance list: "LRU eviction
@@ -371,6 +372,36 @@ class BlockPoolCapacityTest {
                 enqueueAndFetch(prefill, batch(2, slot(0, small)));
         assertEquals(0, ack2.getErrorsCount());
         assertEquals(1, ack2.getSuccessesCount());
+    }
+
+    @Test
+    void fifoBatchWaiterDoesNotHoldPrefillKvBeforeSelection() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "1500", 1.0);
+        var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
+        field.setAccessible(true);
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 100000,
+                10000, 8, false, 0, 256, 128));
+        var prefill = newService(model, 10);
+
+        var first = inputWithBlockKeys(101L, 2 * SPB, List.of(1L, 2L));
+        var waiting = inputWithBlockKeys(102L, 8 * SPB,
+                List.of(11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L));
+        assertEquals(1, enqueueAndFetch(prefill, batch(101, slot(0, first))).getSuccessesCount());
+        var ack = enqueueAndFetch(prefill, batch(102, slot(0, waiting)));
+        assertEquals(1, ack.getSuccessesCount(), "temporary KV shortage is not an enqueue rejection");
+        assertEquals(0, ack.getErrorsCount());
+        assertEquals(1, prefill.getWaitingCount());
+        assertEquals(2L, ((Number) prefill.getSnapshot().get("held_blocks")).longValue(),
+                "only the running request may hold P KV while the second batch waits");
+        assertEquals(0L, ((Number) prefill.getSnapshot().get("cache_evictions")).longValue());
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+        while (System.nanoTime() < deadline && prefill.getCompletedCount() < 2) {
+            Thread.sleep(10);
+        }
+        assertEquals(2, prefill.getCompletedCount(), "the waiter must run after capacity is released");
+        assertEquals(0, prefill.getWaitingCount());
+        assertFalse(prefill.isLeakDetected());
     }
 
     @Test

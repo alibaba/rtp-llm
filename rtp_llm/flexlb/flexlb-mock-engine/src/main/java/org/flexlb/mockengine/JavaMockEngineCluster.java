@@ -1661,16 +1661,15 @@ public final class JavaMockEngineCluster {
                             // engine's index state for its keys).
                             cacheKeyHits.add(shape.hitBlocks());
                             cacheKeysRequested.add(shape.blockKeys().size());
-                            // Phase 1.5 (KV capacity model v2): block-pool admission.
-                            // A request whose blocks cannot be provisioned (free + LRU
-                            // below need, or the reserve watermark would be breached) is
-                            // rejected SYNCHRONOUSLY in this ack with MALLOC_FAILED —
-                            // the engine-side KV gate the master turns into
-                            // EngineRejectedException on its dispatch path. Rejected
-                            // requests leave no residue (state rolled back below).
-                            MockLruBlockCache.BlockLease lease =
-                                    acquireBlockLease(requestId, shape);
-                            if (lease == null) {
+                            // FIFO admission matches real Prefill: EnqueueBatch queues
+                            // first; the selected stream acquires P KV in the scheduler.
+                            // Reject only requests that cannot fit even an idle pool.
+                            // The legacy non-FIFO path still provisions at enqueue.
+                            boolean fifo = performance.prefillBatchPolicy() != null;
+                            boolean impossible = fifo
+                                    && ((long) needBlocks(shape) + cache.reserveBlocks() > cache.totalBlocks()
+                                        || shape.inputLen() >= performance.prefillBatchPolicy().maxSeqLen());
+                            if (impossible || (!fifo && acquireBlockLease(requestId, shape) == null)) {
                                 prefillLackMemRejects.increment();
                                 String message = String.format(
                                         "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
@@ -3322,7 +3321,7 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private MockPerformanceModel.RequestShape selectDirectFifoCandidate(
+        private MockPerformanceModel.RequestShape selectFifoCandidate(
                 MockPerformanceModel.RequestShape queued, MockPrefillBatchPolicy.Budget budget) {
             long id = queued.input().getRequestId();
             synchronized (completionLock) {
@@ -3357,7 +3356,7 @@ public final class JavaMockEngineCluster {
             while (direct.hasNext()) {
                 var shape = direct.next();
                 boolean alive = runningTasks.containsKey(shape.input().getRequestId());
-                var candidate = alive ? selectDirectFifoCandidate(shape, budget) : null;
+                var candidate = alive ? selectFifoCandidate(shape, budget) : null;
                 if (!alive || candidate != null) {
                     direct.remove();
                     waitingPrefillRequests.decrementAndGet();
@@ -3374,12 +3373,15 @@ public final class JavaMockEngineCluster {
                 for (var shape : batch.shapes()) {
                     if (!runningTasks.containsKey(shape.input().getRequestId())) {
                         waitingPrefillRequests.decrementAndGet();
-                    } else if (budget.fits(shape.inputLen(), shape.hitTokens())) {
-                        selected.add(new BatchMember(shape, batch.batchId(), batch.dpRank()));
-                        budget.add(shape.inputLen(), shape.hitTokens());
-                        waitingPrefillRequests.decrementAndGet();
                     } else {
-                        skipped.add(shape);
+                        var candidate = selectFifoCandidate(shape, budget);
+                        if (candidate == null) {
+                            skipped.add(shape);
+                        } else {
+                            selected.add(new BatchMember(candidate, batch.batchId(), batch.dpRank()));
+                            budget.add(candidate.inputLen(), candidate.hitTokens());
+                            waitingPrefillRequests.decrementAndGet();
+                        }
                     }
                 }
                 if (!skipped.isEmpty()) remaining.add(new PrefillPendingBatch(
@@ -3391,8 +3393,7 @@ public final class JavaMockEngineCluster {
                 for (var member : arrivals) {
                     var shape = member.shape();
                     if (!runningTasks.containsKey(shape.input().getRequestId())) continue;
-                    var candidate = member.batchId() < 0 ? selectDirectFifoCandidate(shape, budget)
-                            : (budget.fits(shape.inputLen(), shape.hitTokens()) ? shape : null);
+                    var candidate = selectFifoCandidate(shape, budget);
                     if (candidate != null) {
                         selected.add(new BatchMember(candidate, member.batchId(), member.dpRank()));
                         budget.add(candidate.inputLen(), candidate.hitTokens());
