@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from rtp_llm.config.dsv41_config import V41LayerSources
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb_batched
-from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache, _shares_storage
+from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache, _overlaps
 from rtp_llm.models_py.modules.dsv4.v41_compressor import (
     V41CompressionFrame,
     V41PairMetadata,
@@ -195,10 +195,9 @@ class V41KVFrame:
             )
         for i, (cache, _, _) in enumerate(writes):
             if any(
-                _shares_storage(cache.raw, other.raw) for other, _, _ in writes[:i]
+                _overlaps(cache.raw, other.raw) for other, _, _ in writes[:i]
             ) or any(
-                value is not None and _shares_storage(cache.raw, value)
-                for value in protected
+                value is not None and _overlaps(cache.raw, value) for value in protected
             ):
                 raise ValueError(
                     "V4.1 publication caches must not alias inputs or each other"

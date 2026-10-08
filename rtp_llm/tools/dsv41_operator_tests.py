@@ -19,6 +19,7 @@ SUITES = (
     "projection",
     "attention_projection",
     "cache_codec",
+    "cache_plan",
     "engram_hash",
     "engram_lookup",
     "engram_inject",

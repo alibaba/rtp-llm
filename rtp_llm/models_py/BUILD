@@ -189,6 +189,7 @@ filegroup(
     srcs = [
         "//rtp_llm:models/dsv41_kv_cache.py",
         "modules/dsv4/v41_cache.py",
+        "modules/dsv4/v41_cache_plan.py",
         "modules/dsv4/v41_cache_transfer.py",
         "modules/dsv4/v41_pp.py",
         "modules/dsv4/v41_engram_hash.py",

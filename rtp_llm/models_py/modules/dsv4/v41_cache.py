@@ -30,6 +30,19 @@ def _shares_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
     )
 
 
+def _overlaps(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """Conservative byte bounds, allowing disjoint views of native pool storage."""
+    if left.device != right.device or not left.numel() or not right.numel():
+        return False
+
+    def end(value):
+        return value.data_ptr() + value.element_size() * (
+            1 + sum((n - 1) * stride for n, stride in zip(value.shape, value.stride()))
+        )
+
+    return left.data_ptr() < end(right) and right.data_ptr() < end(left)
+
+
 def _codec_shape(tag: str) -> tuple[int, int]:
     if tag in ("csa_kv", "hca_kv"):
         return 512, 16

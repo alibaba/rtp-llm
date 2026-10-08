@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.dsv4.v41_block import (
     _clean_state,
     readout_v41_residual,
 )
-from rtp_llm.models_py.modules.dsv4.v41_cache import _shares_storage
+from rtp_llm.models_py.modules.dsv4.v41_cache import _overlaps
 from rtp_llm.models_py.modules.dsv4.v41_collective import V41CollectiveMoE
 from rtp_llm.models_py.modules.dsv4.v41_engram_stage import V41EngramStage
 from rtp_llm.models_py.modules.dsv4.v41_projection import _tensor
@@ -192,7 +192,7 @@ class V41Stage:
             if not isinstance(plan, V41AttentionPlan):
                 raise ValueError("V4.1 layer requires an explicit attention plan")
             plan.validate(op.attention.sources, cache_rows, self.max_positions)
-            if any(_shares_storage(plan.swa.raw, prior) for prior in swas):
+            if any(_overlaps(plan.swa.raw, prior) for prior in swas):
                 raise ValueError("V4.1 layers require disjoint SWA cache allocations")
             swas.append(plan.swa.raw)
             source = plan.kv_source_layer_id
@@ -247,11 +247,11 @@ class V41Stage:
                 value for value in vars(selections.result).values() if value is not None
             )
         for i, value in enumerate(pools):
-            if any(_shares_storage(value, other) for other in pools[:i]):
+            if any(_overlaps(value, other) for other in pools[:i]):
                 raise ValueError(
                     "V4.1 cache pools must not alias across layers or tags"
                 )
-            if any(_shares_storage(value, tensor) for tensor in protected):
+            if any(_overlaps(value, tensor) for tensor in protected):
                 raise ValueError(
                     "V4.1 cache pools cannot alias forward inputs or metadata"
                 )
