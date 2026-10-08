@@ -264,7 +264,7 @@ static __device__ void topKPerRowJob(const int*   indices,
                                      int          topK) {
     static constexpr int kNumFinalItems          = 2048;
     static constexpr int kNumFinalItemsPerThread = kNumFinalItems / kNumThreadsPerBlock;
-    using FinalSort            = cub::BlockRadixSort<float, kNumThreadsPerBlock, kNumFinalItemsPerThread, int>;
+    using FinalSort            = cub::BlockRadixSort<uint32_t, kNumThreadsPerBlock, kNumFinalItemsPerThread, int>;
     using FinalSortTempStorage = std::conditional_t<useRadixSort, typename FinalSort::TempStorage, int>;
     using Scan                 = cub::BlockScan<int, kNumThreadsPerBlock>;
 
@@ -391,22 +391,25 @@ static __device__ void topKPerRowJob(const int*   indices,
 
     if (!continueToNextStep) {
         if constexpr (useRadixSort) {
-            float finalLogits[kNumFinalItemsPerThread];
+            uint32_t finalKeys[kNumFinalItemsPerThread];
             int   finalIndices[kNumFinalItemsPerThread];
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
-                finalLogits[ii] = -FLT_MAX;
+                // Ordered integer zero sorts below real -inf (0x007fffff).
+                // Float -FLT_MAX padding would outrank masked -inf candidates.
+                finalKeys[ii] = 0;
+                finalIndices[ii] = -1;
             }
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
                 int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
                 if (srcIdx < smemFinalDstIdx[0]) {
-                    finalLogits[ii]  = smemFinal.items.logits[srcIdx];
+                    finalKeys[ii] = ~convert_to_uint32_dsv4(smemFinal.items.logits[srcIdx]);
                     finalIndices[ii] = smemFinal.items.indices[srcIdx];
                 }
             }
             __syncthreads();
-            FinalSort(smemFinal.finalSort).SortDescendingBlockedToStriped(finalLogits, finalIndices);
+            FinalSort(smemFinal.finalSort).SortDescendingBlockedToStriped(finalKeys, finalIndices);
             int baseIdx = smemFoundTopKValues[0];
 #pragma unroll
             for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
@@ -415,7 +418,9 @@ static __device__ void topKPerRowJob(const int*   indices,
                 if (dstIdx < topK) {
                     smemOutput[dstIdx] = finalIndices[ii];
                     if constexpr (multipleBlocksPerRow) {
-                        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = finalLogits[ii];
+                        const uint32_t key = finalKeys[ii];
+                        const uint32_t bits = (key & 0x80000000u) ? (key ^ 0x80000000u) : ~key;
+                        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = __uint_as_float(bits);
                     }
                 }
             }

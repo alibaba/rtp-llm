@@ -27,6 +27,8 @@ Run:
 
 from __future__ import annotations
 
+import unittest
+
 import torch
 
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -170,8 +172,33 @@ def test_force_radix_sort():
     _assert_equiv(out, logits, rs, re, K=64, tag="force radix")
 
 
+def test_radix_negative_infinity_threshold_has_no_padding_indices():
+    """Sort padding must never displace real -inf candidates or publish garbage."""
+    for k in (64, 512, 1024):
+        lengths = [k + 1, k + 17, 4099, 32768]
+        backing = torch.full((4, 32768 + 19), -torch.inf, device="cuda")
+        logits = backing[:, 3 : 32768 + 3]
+        logits[1:, :17] = torch.arange(17, device="cuda", dtype=torch.float32)
+        starts = torch.zeros(4, device="cuda", dtype=torch.int32)
+        ends = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+        for radix in (False, True):
+            output = _run(logits, starts, ends, k, force_radix_sort=radix)
+            _assert_equiv(
+                output,
+                logits,
+                starts,
+                ends,
+                k,
+                tag=f"masked threshold k={k} radix={radix}",
+            )
+
+
 def test_fast_topk_v2_short_inputs_topk_512_1024():
     """Short prefill policy uses fast_topk_v2_variable for K=512/1024."""
+    if torch.cuda.get_device_capability() == (12, 0):
+        raise unittest.SkipTest(
+            "fast_topk_v2 needs 128 KiB shared memory and is disabled on SM120"
+        )
     if not _HAS_FAST_TOPK:
         print("SKIP: rtp_llm_ops.fast_topk_v2_variable not built")
         return
