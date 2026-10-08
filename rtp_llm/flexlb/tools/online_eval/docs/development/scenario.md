@@ -38,13 +38,15 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 
 ## 收结果
 
-每个 workload 实例应包含：
+workload 实例可生成多份报告 HTML。运行结束后，遍历该实例 `result.json` 中的 `workload.reports`（视图文件名 → HTML 绝对路径）取齐全部报告；`workload.yaml` 是默认视图，还可能有 YAML 声明的专属视图。`run_cases.py` 完成实例时也会在 stdout 枚举这份清单。运行前查看场景 YAML 的 [`reports:` 列表](../../config/scenarios/README.md)，或使用 `--dry-run` 查看本次选中实例的视图名。
+
+每个 workload 实例的主要产物包括：
 
 - `result.json`：步骤、检查和原始状态。
 - `workload-evidence.json`：阶段、进程代次、资源身份和请求证据。
 - `telemetry/`：Prometheus 原始采样。
-- `reports/run/<instance>/analysis.json`：可复算分析。
-- `reports/run/<instance>/report.html`：阶段与曲线报告。
+- `reports/run/<report-identity-slug>/analysis.json`：对应视图的可复算分析。
+- `reports/run/<report-identity-slug>/report.html`：对应视图的阶段与曲线报告。每份视图各有一个目录，专属视图的报告 identity 带视图后缀；不能只按文件名 `report.html` 去重。
 
 判定顺序是：证据完整性 → 合同检查 → 性能观察。`runtime_validity=INVALID` 时，即使某个业务检查显示 PASS，也不能作为成功结论。故障注入可能让压测聚合器的 `test_valid=false`，该字段需要结合场景预期解释，不能强改为 true。
 

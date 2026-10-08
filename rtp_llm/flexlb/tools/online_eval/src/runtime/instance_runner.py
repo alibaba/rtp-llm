@@ -21,6 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from reporting.view_config import DEFAULT_VIEW
 from runtime.instance_plan import (
     InstancePlanError,
     parse_catalog,
@@ -447,6 +448,28 @@ def _aggregate(lanes, instances, args, elapsed):
     }
 
 
+def _print_planned_reports(instances):
+    for instance in instances:
+        if instance.metadata.get("test_kind") == "workload":
+            test = instance.metadata.get("test")
+            names = test.get("reports") if isinstance(test, dict) else None
+            if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
+                names = [DEFAULT_VIEW]
+            print(f"  planned reports {instance.id}: {', '.join(names)}")
+
+
+def _print_generated_reports(rows):
+    for row in rows:
+        if row.get("test_kind") != "workload":
+            continue
+        workload = row.get("workload")
+        reports = workload.get("reports") if isinstance(workload, dict) else None
+        print("workload reports: " + json.dumps({
+            "instance": row["id"], "status": row["status"],
+            "reports": reports if isinstance(reports, dict) else None,
+        }, ensure_ascii=False))
+
+
 def run_structured(args: argparse.Namespace, ports) -> int:
     """Keep window -> output lock -> child list -> lane execution ordering."""
     ports._resolve_port_bases(args)
@@ -508,6 +531,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     )
     for i, lane in enumerate(lanes):
         print(f"  lane {i}: " + ", ".join((instance.id for instance in lane)))
+    _print_planned_reports(instances)
     print(json.dumps(manifest, indent=2))
     if args.dry_run:
         return 0
@@ -535,6 +559,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         payload["summary"]["interrupted"] = True
     target = Path(args.json).resolve() if args.json else out / "aggregate.json"
     _write_json(target, payload)
+    _print_generated_reports(payload["instances"])
     if getattr(args, "archive", None):
         from artifacts.archive import create_archive
 

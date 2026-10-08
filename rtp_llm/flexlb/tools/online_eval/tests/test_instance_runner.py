@@ -123,15 +123,61 @@ class InstanceRunnerTest(unittest.TestCase):
         listed = subprocess.CompletedProcess(
             [], 0, stdout=json.dumps(self.data), stderr=""
         )
+        output = io.StringIO()
         with mock.patch.object(
             runner.subprocess, "run", return_value=listed
         ) as listing, mock.patch.object(
             runner.ChildProcesses, "run", side_effect=spawn or self.fixture_child
         ) as child, contextlib.redirect_stdout(
-            io.StringIO()
+            output
         ):
             rc = runner.run_structured(args, ports)
+        self.stdout = output.getvalue()
         return rc, listing, child
+
+    def test_workload_report_views_are_previewed_and_all_paths_are_printed(self):
+        identity = self.data["instances"][0]["id"]
+        from scenario.loader import load_document
+
+        source = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
+        names = load_document(source)["reports"]
+        self.assertEqual(["workload.yaml", "master_ha_core.yaml"], names)
+        self.data["instances"][0].update(
+            test_kind="workload",
+            test={"reports": names},
+        )
+        dry = self.args(dry_run=True, instances=identity, parallel=1)
+        rc, _, child = self.run_fixture(dry)
+        self.assertEqual(0, rc)
+        child.assert_not_called()
+        self.assertIn(f"planned reports {identity}: workload.yaml, master_ha_core.yaml", self.stdout)
+
+        paths = {
+            "workload.yaml": "/tmp/run/reports/run/default/report.html",
+            "master_ha_core.yaml": "/tmp/run/reports/run/ha-core/report.html",
+        }
+
+        def completed_child(command, env, log, **kwargs):
+            self.fixture_child(command, env, log, **kwargs)
+            path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
+            result = json.loads(path.read_text())
+            result["instances"][0]["workload"] = {
+                "telemetry_gaps": {"large": "x" * 5000}, "reports": paths,
+            }
+            path.write_text(json.dumps(result))
+            return 0
+
+        self.drop_locks()
+        target = self.root / "output/selected-aggregate.json"
+        rc, _, _ = self.run_fixture(
+            self.args(instances=identity, parallel=1, json=str(target)), spawn=completed_child
+        )
+        self.assertEqual(0, rc)
+        lines = [line.removeprefix("workload reports: ") for line in self.stdout.splitlines()
+                 if line.startswith("workload reports: ")]
+        self.assertEqual(1, len(lines))
+        self.assertEqual({"instance": identity, "status": "PASS", "reports": paths}, json.loads(lines[0]))
+        self.assertEqual(paths, json.loads(target.read_text())["instances"][0]["workload"]["reports"])
 
     def test_real_child_compiler_and_runtime_use_selected_grade(self):
         # The real child CLI/compiler/runtime run in a subprocess. Only Java
