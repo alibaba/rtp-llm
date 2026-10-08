@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -244,6 +245,56 @@ class PackSlotsToPagedPrecisionTest(unittest.TestCase):
                 ref[blocks.unsqueeze(1), pos.unsqueeze(1) * TOKEN_DATA_SIZE + data_off],
             )
         )
+
+    def test_empty_first_row_initializes_masked_lane_sentinel(self) -> None:
+        cache = _make_padded_cache(2, 2, self.device)
+        _fill_unique_footer(cache)
+        original_empty = torch.empty
+
+        def poisoned_empty(*args, **kwargs):
+            result = original_empty(*args, **kwargs)
+            if result.dtype == torch.uint8:
+                result.fill_(0x7F)
+            return result
+
+        # Exercise both page layouts and the bounded grid-stride capture path.
+        for page, width in ((2, 256), (64, 8192)):
+            with self.subTest(page=page, width=width):
+                slots = torch.full(
+                    (2, width), -1, dtype=torch.int32, device=self.device
+                )
+                slots[1, 0] = 1
+                lens = torch.tensor([0, 1], dtype=torch.int32, device=self.device)
+
+                def check(paged, remapped):
+                    data = _as_block_bytes(paged)
+                    self.assertEqual(
+                        int(torch.count_nonzero(data[0, :TOKEN_DATA_SIZE])), 0
+                    )
+                    footer = page * TOKEN_DATA_SIZE
+                    self.assertEqual(
+                        int(
+                            torch.count_nonzero(data[0, footer : footer + SCALE_BYTES])
+                        ),
+                        0,
+                    )
+                    self.assertEqual(int(remapped[1, 0]), width)
+                    self.assertEqual(int(torch.count_nonzero(remapped[0])), 0)
+
+                with patch("torch.empty", poisoned_empty):
+                    paged, remapped = pack_slots_to_paged(cache, slots, page, lens)
+                    check(paged, remapped)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        paged, remapped = pack_slots_to_paged(cache, slots, page, lens)
+                    # The first row can become empty again between replays.
+                    lens[0] = 1
+                    slots[0, 0] = 2
+                    graph.replay()
+                    lens[0] = 0
+                    slots[0, 0] = -1
+                    graph.replay()
+                    check(paged, remapped)
 
 
 if __name__ == "__main__":

@@ -234,6 +234,96 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
     def test_hca_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("hca")
 
+    def test_packed_hca_mixed_empty_rows_ignore_uninitialized_storage(self) -> None:
+        batch, queries, heads, dim = 2, 4, 64, 512
+        query = torch.randn(
+            batch, queries, heads, dim, dtype=torch.bfloat16, device=self.device
+        )
+        sink = torch.linspace(-0.3, 0.4, heads, device=self.device)
+        swa_cache = self._packed_cache(
+            torch.randn(128, dim, dtype=torch.bfloat16, device=self.device),
+            block_size=64,
+        )
+        hca_cache = self._packed_cache(
+            torch.randn(1, dim, dtype=torch.bfloat16, device=self.device),
+            block_size=2,
+        )
+        swa_indices = torch.arange(128, dtype=torch.int32, device=self.device)
+        swa_indices = swa_indices.expand(batch, queries, 128).contiguous()
+        hca_indices = torch.full(
+            (batch, queries, 256), -1, dtype=torch.int32, device=self.device
+        )
+        # A gamma-3 verification crosses the first HCA compression boundary.
+        hca_indices[0, 1:, 0] = 0
+        swa_lens = torch.tensor([128, 128], dtype=torch.int32, device=self.device)
+        hca_lens = torch.tensor([1, 0], dtype=torch.int32, device=self.device)
+        op = SparseAttnV4DecodeFp8Op(heads, dim, dim**-0.5)
+        swa_values, _ = self._gather_dequantized(swa_cache, [list(range(128))])
+        hca_values, _ = self._gather_dequantized(hca_cache, [[0]])
+        original_empty = torch.empty
+
+        def forward():
+            return op.forward(
+                query,
+                swa_cache,
+                sink,
+                swa_indices,
+                None,
+                topk_length=swa_lens,
+                extra_k_cache=hca_cache,
+                extra_topk_idxs=hca_indices,
+                extra_topk_length=hca_lens,
+            )
+
+        def reference():
+            return self._reference_sparse_prefill(
+                query.flatten(0, 1),
+                sink,
+                swa_values[0],
+                swa_indices.flatten(0, 1),
+                swa_lens.repeat_interleave(queries),
+                dim**-0.5,
+                hca_values[0],
+                hca_indices.flatten(0, 1),
+                hca_lens.repeat_interleave(queries),
+            ).reshape_as(query)
+
+        def evaluate(fill, capture):
+            def allocation(*args, **kwargs):
+                result = original_empty(*args, **kwargs)
+                if (
+                    result.dtype == torch.uint8
+                    and result.ndim == 3
+                    and result.shape[-1] == 584
+                ):
+                    result.fill_(fill)
+                return result
+
+            with patch("torch.empty", allocation):
+                for _ in range(3):
+                    forward()
+                if capture:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        out = forward()
+                    query.neg_()
+                    graph.replay()
+                    torch.testing.assert_close(out, reference(), rtol=3e-2, atol=3e-2)
+                    query.neg_()
+                    graph.replay()
+                else:
+                    out = forward()
+            self.assertTrue(bool(torch.isfinite(out).all()))
+            torch.testing.assert_close(out, reference(), rtol=3e-2, atol=3e-2)
+            return out.clone()
+
+        with patch.dict("os.environ", {"DSV4_SM120_PACK_DECODE_SLOTS": "1"}):
+            for capture in (False, True):
+                with self.subTest(capture=capture):
+                    clean = evaluate(0, capture)
+                    poisoned = evaluate(0x7F, capture)
+                    torch.testing.assert_close(clean, poisoned, rtol=0, atol=0)
+
     def test_large_decode_window_uses_graph_safe_generic_fallback(self) -> None:
         width, heads, dim = 1152, 8, 512
         scale = dim**-0.5

@@ -670,6 +670,15 @@ def _pack_slots_to_paged_kernel(
             skip = col >= limit
         if skip:
             tl.store(remap_ptr + row, tl.zeros((), dtype=tl.int32))
+            if row == 0:
+                # Masked sparse-attention lanes still load slot zero. Keep
+                # its data and scales finite when the first query is empty.
+                dst_data = dst_block_ptr.to(tl.pointer_type(tl.uint64))
+                dst_scale = (dst_block_ptr + dst_page * token_data_size).to(
+                    tl.pointer_type(tl.uint64)
+                )
+                _pack_slots_zero_u64(dst_data, n_data_u64)
+                tl.store(dst_scale, tl.zeros((), dtype=tl.uint64))
         else:
             slot = tl.load(slots_ptr + row, mask=in_slots, other=-1).to(tl.int64)
             valid = in_slots & (slot >= 0)
