@@ -289,6 +289,7 @@ def _compute_swa_slot_mapping_kernel(
     pool_entries_per_block: tl.constexpr,
     tokens_per_block_for_block_table: tl.constexpr,
     ring_entries: tl.constexpr,
+    single_block_per_request: tl.constexpr,
     BLOCK_M: tl.constexpr,  # tokens per program
 ):
     """One program per (request, BLOCK_M chunk-of-tokens).
@@ -325,7 +326,11 @@ def _compute_swa_slot_mapping_kernel(
     valid_token = i < query_len
     global_pos = sp + i  # [BLOCK_M] absolute
 
-    block_in_seq = global_pos // tokens_per_block_for_block_table
+    block_in_seq = (
+        tl.full((BLOCK_M,), 0, tl.int32)
+        if single_block_per_request
+        else global_pos // tokens_per_block_for_block_table
+    )
     in_block = global_pos % ring_entries
 
     in_capacity = block_in_seq < max_blocks_per_seq
@@ -335,7 +340,9 @@ def _compute_swa_slot_mapping_kernel(
     block_id = tl.load(bt_row_ptr + safe_block_in_seq, mask=valid_token, other=-1)
 
     block_end = (block_in_seq + 1) * tokens_per_block_for_block_table
-    effective_end = tl.minimum(block_end, seq_len)
+    effective_end = (
+        seq_len if single_block_per_request else tl.minimum(block_end, seq_len)
+    )
     tail_write = (global_pos + ring_entries) >= effective_end
     valid = (block_id > 0) & in_capacity & valid_token & tail_write
     slot = tl.where(
@@ -357,6 +364,7 @@ def compute_swa_slot_mapping(
     pool_entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    single_block_per_request: bool = False,
 ) -> torch.Tensor:
     """Build ``[num_tokens]`` int64 slot_mapping for SWA paged FP8 write.
 
@@ -369,6 +377,8 @@ def compute_swa_slot_mapping(
     Only the final ``ring_entries`` tokens of each physical block/request tail
     are written. This matches state-ring writes and avoids ring collisions when
     physical blocks are much larger than the SWA ring.
+    A single-block state cache instead publishes only the final request tail
+    into column zero, independent of raw-token page boundaries.
     """
     assert (
         block_table.dtype == torch.int32
@@ -382,6 +392,8 @@ def compute_swa_slot_mapping(
     assert pool_entries_per_block >= 1
     assert tokens_per_block_for_block_table >= 1
     assert ring_entries >= 1
+    if single_block_per_request and block_table.shape[1] != 1:
+        raise ValueError("Single-block SWA requires exactly one table column")
     device = block_table.device
     slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:
@@ -402,6 +414,7 @@ def compute_swa_slot_mapping(
         pool_entries_per_block=pool_entries_per_block,
         tokens_per_block_for_block_table=tokens_per_block_for_block_table,
         ring_entries=ring_entries,
+        single_block_per_request=single_block_per_request,
         BLOCK_M=BLOCK_M,
     )
     return slot_mapping

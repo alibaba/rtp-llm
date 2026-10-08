@@ -27,6 +27,14 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_single_block_metadata_sm120",
+    srcs = ["test_v41_single_block_metadata_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_native_decode_sm120",
     srcs = [
         "test_v41_native_decode_sm120.py",

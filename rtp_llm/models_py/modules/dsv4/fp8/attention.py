@@ -245,6 +245,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    single_block_per_request: bool = False,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -256,6 +257,8 @@ def _build_suffix_pool_slot_mapping(
     assert entries_per_block > 0
     assert tokens_per_block_for_block_table > 0
     assert ring_entries > 0
+    if single_block_per_request and block_table.shape[1] != 1:
+        raise ValueError("Single-block suffix gather requires one table column")
     device = block_table.device
     B = int(seq_lens.numel())
     if B == 0:
@@ -285,8 +288,11 @@ def _build_suffix_pool_slot_mapping(
     # not compact: shifting block 2 to column 0 would read an invalid block and
     # silently zero-fill a live continuation prefix.  Any future compact table
     # must carry an explicit logical-start offset instead of being inferred
-    # from the number of allocated entries.
-    table_block = block_in_seq
+    # from the number of allocated entries. V4.1's explicit single-block mode
+    # uses a retained state ring, independent of these paged-cache semantics.
+    table_block = (
+        torch.zeros_like(block_in_seq) if single_block_per_request else block_in_seq
+    )
     in_block = abs_pos % int(ring_entries)
     max_blocks = int(block_table.shape[1])
     in_capacity = valid_pos & (table_block >= 0) & (table_block < max_blocks)
