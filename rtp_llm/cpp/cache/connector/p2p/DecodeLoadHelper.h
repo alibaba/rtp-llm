@@ -22,7 +22,9 @@ namespace rtp_llm {
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
-    bool                 has_first_token  = false;
+    bool                            has_rng_state                        = false;
+    uint64_t                        rng_offset                           = 0;
+    bool                            has_first_token                      = false;
     int64_t              first_token_id   = 0;
     int32_t              total_reuse_len  = 0;
     int32_t              local_reuse_len  = 0;

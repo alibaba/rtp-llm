@@ -1,3 +1,6 @@
+#if defined(USING_CUDA)
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
@@ -1528,6 +1531,118 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
     EXPECT_TRUE(stream_->hasOutput());
 }
+
+#if defined(USING_CUDA)
+TEST_F(StreamCacheResourceTest, testP2PRngHandoffContinuesPrefillRandomSequence) {
+    for (bool advance : {false, true}) {
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        stream_->generateConfig()->random_seed   = 42;
+        stream_->generator_                      = torch::make_generator<at::CUDAGeneratorImpl>();
+        stream_->generator_.set_current_seed(42);
+        auto prefill_generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        prefill_generator.set_current_seed(42);
+        auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat);
+        if (advance) {
+            torch::rand({8}, prefill_generator, std::nullopt, options);
+        }
+        uint64_t offset;
+        {
+            std::lock_guard<std::mutex> lock(prefill_generator.mutex());
+            offset = prefill_generator.get_offset();
+        }
+        if (advance) {
+            ASSERT_GT(offset, 0u);
+        } else {
+            EXPECT_EQ(offset, 0u);
+        }
+        auto  expected = torch::rand({8}, prefill_generator, std::nullopt, options);
+        auto& resource = stream_->streamCacheResource();
+
+        auto matched_resource = std::make_shared<KVCacheResource>();
+        matched_resource->cacheKeys().push_back(1);
+        auto broadcast_result                        = std::make_shared<P2PBroadcastClient::Result>("first-token");
+        auto server_result                           = std::make_shared<DecodeLoadHelper::Result>();
+        server_result->done_                         = true;
+        server_result->success_                      = true;
+        server_result->side_channel_payload.has_data = true;
+        server_result->side_channel_payload.has_first_token = true;
+        server_result->side_channel_payload.first_token_id  = 7;
+        server_result->side_channel_payload.has_rng_state   = true;
+        server_result->side_channel_payload.rng_offset      = offset;
+        auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                      broadcast_result,
+                                                                      server_result,
+                                                                      collector,
+                                                                      /*lease_query_timeout_ms=*/0,
+                                                                      /*no_transfer=*/true);
+        context->checkDone();
+        ASSERT_TRUE(context->success());
+        resource.p2p_load_context_ = context;
+
+        const size_t old_seq_length = stream_->seqLength();
+        const size_t old_output_pos = stream_->last_output_pos_;
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_EQ(stream_->seqLength(), old_seq_length + 1);
+        EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
+        EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
+        EXPECT_TRUE(stream_->hasOutput());
+        {
+            auto                        generator = stream_->getGenerator();
+            std::lock_guard<std::mutex> lock(generator.mutex());
+            EXPECT_EQ(generator.get_offset(), offset);
+        }
+        auto actual = torch::rand({8}, stream_->getGenerator(), std::nullopt, options);
+        EXPECT_TRUE(torch::equal(actual, expected));
+        // A second load completion must not rewind the generator to the handoff offset.
+        ASSERT_TRUE(resource.loadCacheDone());
+        auto expected_next = torch::rand({8}, prefill_generator, std::nullopt, options);
+        auto actual_next   = torch::rand({8}, stream_->getGenerator(), std::nullopt, options);
+        EXPECT_TRUE(torch::equal(actual_next, expected_next));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testP2PSeededHandoffRejectsMissingOrInvalidRngOffset) {
+    for (bool has_state : {false, true}) {
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        stream_->generateConfig()->random_seed   = 42;
+        stream_->generator_                      = torch::make_generator<at::CUDAGeneratorImpl>();
+        stream_->generator_.set_current_seed(42);
+        auto& resource = stream_->streamCacheResource();
+
+        auto matched_resource = std::make_shared<KVCacheResource>();
+        matched_resource->cacheKeys().push_back(1);
+        auto broadcast_result                        = std::make_shared<P2PBroadcastClient::Result>("first-token");
+        auto server_result                           = std::make_shared<DecodeLoadHelper::Result>();
+        server_result->done_                         = true;
+        server_result->success_                      = true;
+        server_result->side_channel_payload.has_data = true;
+        server_result->side_channel_payload.has_first_token = true;
+        server_result->side_channel_payload.first_token_id  = 7;
+        server_result->side_channel_payload.has_rng_state   = has_state;
+        server_result->side_channel_payload.rng_offset      = 1;  // Invalid Philox alignment.
+        auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                      broadcast_result,
+                                                                      server_result,
+                                                                      collector,
+                                                                      /*lease_query_timeout_ms=*/0,
+                                                                      /*no_transfer=*/true);
+        context->checkDone();
+        ASSERT_TRUE(context->success());
+        resource.p2p_load_context_ = context;
+
+        const size_t old_seq_length = stream_->seqLength();
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_TRUE(stream_->hasError());
+        EXPECT_EQ(stream_->seqLength(), old_seq_length);
+        EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    }
+}
+
+#endif
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfterLoad) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);

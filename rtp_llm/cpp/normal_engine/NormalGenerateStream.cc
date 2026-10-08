@@ -253,7 +253,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         // Publish local Prefill output for the StartLoad handler to return to Decode.
         if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
             PrefillResultStore::SideChannelData side_data;
-            auto                                tokens = currentExecuteTokens(0);
+#if defined(USING_CUDA)
+            // All sampling calls have reserved their RNG ranges before output publication.
+            // Read the position without reserving any additional random numbers.
+            auto generator = getGenerator();
+            if (generator.defined()) {
+                std::lock_guard<std::mutex> lock(generator.mutex());
+                side_data.rng_offset    = generator.get_offset();
+                side_data.has_rng_state = true;
+            }
+#endif
+            auto tokens = currentExecuteTokens(0);
             if (!tokens.empty()) {
                 side_data.has_first_token = true;
                 side_data.first_token_id  = tokens.back();

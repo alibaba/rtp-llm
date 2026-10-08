@@ -117,6 +117,8 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         response.clear_payload();
         // Fill response proto from side-channel data
         auto* payload = response.mutable_payload();
+        payload->set_has_rng_state(data.has_rng_state);
+        payload->set_rng_offset(data.rng_offset);
         payload->set_has_first_generate_token(data.has_first_token);
         if (data.has_first_token) {
             payload->set_first_generate_token_id(data.first_token_id);

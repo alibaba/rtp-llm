@@ -305,6 +305,8 @@ void DecodeLoadHelper::Result::cancel() {
 void DecodeLoadHelper::Result::updateStreamFromResponse() {
     if (response.has_payload()) {
         const auto& payload = response.payload();
+        side_channel_payload.has_rng_state = payload.has_rng_state();
+        side_channel_payload.rng_offset = payload.rng_offset();
         side_channel_payload.has_first_token =
             payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
         side_channel_payload.first_token_id   = payload.first_generate_token_id();

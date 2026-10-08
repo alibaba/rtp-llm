@@ -142,6 +142,25 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
 }
 
 void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
+#if defined(USING_CUDA)
+    auto generator = stream->getGenerator();
+    if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
+        if (!payload.has_rng_state || !generator.defined() || !stream->generateConfig()->random_seed.has_value()) {
+            stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                           "P2P handoff is missing or has unexpected request RNG state");
+            return;
+        }
+        try {
+            // The request seed is already installed. Restore before replay and first Decode sampling.
+            std::lock_guard<std::mutex> lock(generator.mutex());
+            generator.set_offset(payload.rng_offset);
+        } catch (const std::exception& error) {
+            stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                           std::string("failed to restore P2P RNG offset: ") + error.what());
+            return;
+        }
+    }
+#endif
     if (payload.has_first_token) {
         const auto output_tensor = [&](const char* name) {
             const auto it = payload.first_token_tensors.find(name);

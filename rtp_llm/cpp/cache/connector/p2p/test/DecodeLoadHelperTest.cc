@@ -312,6 +312,22 @@ TEST_F(DecodeLoadHelperTest, CompletionRejectsMissingPayload) {
     EXPECT_FALSE(result->side_channel_payload.has_data);
 }
 
+TEST_F(DecodeLoadHelperTest, CompletionPreservesRngOffsetPresence) {
+    for (uint64_t offset : {uint64_t{0}, uint64_t{1} << 63}) {
+        auto  result  = std::make_shared<DecodeLoadHelper::Result>();
+        auto* payload = result->response.mutable_payload();
+        payload->set_has_first_generate_token(true);
+        payload->set_first_generate_token_id(7);
+        payload->set_has_rng_state(true);
+        payload->set_rng_offset(offset);
+        result->complete(true);
+        ASSERT_TRUE(result->success());
+        EXPECT_TRUE(result->side_channel_payload.has_rng_state);
+        EXPECT_EQ(result->side_channel_payload.rng_offset, offset);
+    }
+}
+
+
 TEST_F(DecodeLoadHelperTest, CompletionAcceptsExplicitZeroFirstToken) {
     auto  result  = std::make_shared<DecodeLoadHelper::Result>();
     auto* payload = result->response.mutable_payload();

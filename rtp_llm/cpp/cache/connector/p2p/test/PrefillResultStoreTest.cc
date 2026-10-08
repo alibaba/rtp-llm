@@ -198,6 +198,24 @@ TEST_F(PrefillResultStoreTest, FillsTokenReuseMtpAndFirstTokenTensors) {
     EXPECT_EQ(payload.tensors().at("first_token_logits").tensor().shape_size(), 2);
 }
 
+TEST_F(PrefillResultStoreTest, RngOffsetPreservesPresenceAndFullWidth) {
+    P2PConnectorStartLoadResponsePB response;
+    auto                            result = data();
+    for (uint64_t offset : {uint64_t{0}, uint64_t{1} << 63}) {
+        result.has_rng_state = true;
+        result.rng_offset    = offset;
+        ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+        P2PConnectorStartLoadResponsePB received;
+        ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
+        EXPECT_TRUE(received.payload().has_rng_state());
+        EXPECT_EQ(received.payload().rng_offset(), offset);
+    }
+    result.has_rng_state = false;
+    result.rng_offset    = 0;
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+    EXPECT_FALSE(response.payload().has_rng_state());
+}
+
 TEST_F(PrefillResultStoreTest, SerializationFailureClearsPartialPayload) {
     auto result          = data();
     result.propose_probs = torch::ones({2}, torch::kInt64);

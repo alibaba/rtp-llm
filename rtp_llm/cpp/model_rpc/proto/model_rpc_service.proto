@@ -877,6 +877,9 @@ message SideChannelPayloadPB {
     // GenerationPrefillCudaGraphStatus value; zero means NOT_REQUESTED.
     uint32 generation_prefill_cuda_graph_status = 9;
     bool prefill_use_independent_block_pools = 10;
+    // Post-Prefill request-local CUDA RNG position; seed is in GenerateConfigPB.
+    bool has_rng_state = 11;
+    uint64 rng_offset = 12;
 }
 
 message P2PConnectorStartLoadResponsePB {
