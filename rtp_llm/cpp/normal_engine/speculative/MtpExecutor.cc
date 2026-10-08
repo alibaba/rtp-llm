@@ -2012,6 +2012,12 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy    = model_input;
+    if (batch_stream_processor_->usesFixedMtpUpdateLayout()) {
+        // Prepare the same paged MTP phase that will replay after rejection,
+        // rather than inheriting the target-verify flag from this snapshot.
+        model_input_copy.is_target_verify = false;
+        model_input_copy.is_mtp_draft_update = true;
+    }
     applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());

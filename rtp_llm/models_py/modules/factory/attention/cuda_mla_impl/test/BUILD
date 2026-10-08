@@ -68,3 +68,11 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "page_rr_mtp_update_contract_test",
+    srcs = ["page_rr_mtp_update_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    # Requires the approved CUDA13 K3 native runtime and stable-libtorch epilogue.
+    tags = ["manual"],
+)
