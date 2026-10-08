@@ -84,7 +84,7 @@ def analyze(events, actual_batch=32, verify_width=4):
         match = re.search(r'B=(\d+),capture=(\d+),Q=(\d+),T=(\d+)', name)
         if match:
             batch, bucket, width, tokens = map(int, match.groups())
-            if batch != actual_batch or tokens != batch * width:
+            if batch != actual_batch or bucket != batch or tokens != batch * width:
                 continue
         elif name == 'cuda_graph.forward(replayPrefill)':
             evidence = containing(modeling_scopes, launch)
@@ -95,7 +95,12 @@ def analyze(events, actual_batch=32, verify_width=4):
                 continue
             logical, batch, width, bucket = map(int, geometry.groups())
             tokens = batch * width
-            if logical != actual_batch or batch != actual_batch:
+            captured = re.search(r'capture_b=(\d+),capture_t=(\d+)', evidence[1]['name'])
+            if captured is None:
+                continue
+            capture_batch, capture_tokens = map(int, captured.groups())
+            if (logical != actual_batch or batch != actual_batch
+                    or capture_batch != batch or capture_tokens != tokens):
                 continue
         else:
             continue

@@ -1175,11 +1175,13 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d)",
+                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d,capture_b=%ld,capture_t=%ld)",
                 static_cast<int>(role_), inputs.attention_inputs.logical_request_count,
                 inputs.attention_inputs.input_lengths.numel(),
                 inputs.attention_inputs.physical_token_count / inputs.attention_inputs.input_lengths.numel(),
-                state.current_real_graph_seq_len);
+                state.current_real_graph_seq_len,
+                graph_instances_.at(state.current_real_graph_seq_len).mem_hold_.py_model_inputs_.attention_inputs.input_lengths.numel(),
+                graph_instances_.at(state.current_real_graph_seq_len).mem_hold_.py_model_inputs_.input_ids.numel());
             replayPrefill(state.current_real_graph_seq_len);
         }
         static const bool smoke_prefill_evidence = [] {
@@ -1221,11 +1223,13 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 "cuda_graph.forward(replayDecode,B=%d,capture=%d,Q=%d,T=%d,fake=0)",
                 state.current_batch_size, state.current_real_graph_bs, num_tokens_per_bs_, state.seq_len_sum);
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d)",
+                "cuda_graph.modeling(role=%d,logical_b=%ld,physical_b=%ld,q=%ld,bucket=%d,capture_b=%ld,capture_t=%ld)",
                 static_cast<int>(role_), inputs.attention_inputs.logical_request_count,
                 inputs.attention_inputs.input_lengths.numel(),
                 inputs.attention_inputs.physical_token_count / inputs.attention_inputs.input_lengths.numel(),
-                state.current_real_graph_bs);
+                state.current_real_graph_bs,
+                graph_instances_.at(state.current_real_graph_bs).mem_hold_.py_model_inputs_.attention_inputs.input_lengths.numel(),
+                graph_instances_.at(state.current_real_graph_bs).mem_hold_.py_model_inputs_.input_ids.numel());
             replayDecode(state.current_real_graph_bs);
         }
         static const bool smoke_evidence = [] {
