@@ -456,6 +456,8 @@ std::string buildSnapshotReport(const KVCacheEventPublisherContext& context,
 }  // namespace
 
 class KVCMPublisher::Impl {
+    enum class ReportResult { SUCCESS, FAILED, INTERRUPTED };
+
     struct PendingSnapshotReport {
         uint64_t    generation = 0;
         int64_t     version    = -1;
@@ -604,25 +606,35 @@ private:
                + std::to_string(next_request_id_.fetch_add(1, std::memory_order_relaxed));
     }
 
-    bool postReportEvent(const std::shared_ptr<KVCacheEventReporter>& reporter,
-                         const std::string& request, bool respect_retry_after = true) {
+    ReportResult postReportEvent(const std::shared_ptr<KVCacheEventReporter>& reporter,
+                                 const std::string& request, bool respect_retry_after = true,
+                                 bool require_registration = true) {
         std::string response;
-        if (respect_retry_after && !waitForReportRetry()) {
-            return false;
+        if (respect_retry_after && !waitForReportRetry(require_registration)) {
+            return ReportResult::INTERRUPTED;
         }
         const bool success = reporter->post("/api/reportEvent", request, response);
-        return observeReportResponse(response, success, respect_retry_after);
+        return observeReportResponse(response, success, respect_retry_after) ?
+                   ReportResult::SUCCESS : ReportResult::FAILED;
     }
 
-    bool waitForReportRetry() {
+    bool waitForReportRetry(bool require_registration) {
         while (!stopping_.load(std::memory_order_relaxed)) {
+            if (require_registration && !registered_.load(std::memory_order_relaxed)) {
+                return false;
+            }
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const auto deadline = report_retry_deadline_ms_.load(std::memory_order_relaxed);
             if (deadline <= now) {
                 return true;
             }
-            queue_.waitForStop(std::chrono::milliseconds(std::min<int64_t>(deadline - now, 60000)));
+            queue_.waitForStopOrInterrupt(
+                std::chrono::milliseconds(std::min<int64_t>(deadline - now, 60000)),
+                [this, deadline, require_registration] {
+                    return (require_registration && !registered_.load(std::memory_order_relaxed))
+                           || report_retry_deadline_ms_.load(std::memory_order_relaxed) != deadline;
+                });
         }
         return false;
     }
@@ -632,6 +644,7 @@ private:
         if (!feedback.valid || feedback.registration_required || (!success && feedback.ok)) {
             registered_.store(false, std::memory_order_relaxed);
             report_retry_deadline_ms_.store(0, std::memory_order_relaxed);
+            queue_.wake();
         }
         if (feedback.snapshot_required) {
             dirty_generation_.fetch_add(1, std::memory_order_relaxed);
@@ -663,10 +676,11 @@ private:
             return false;
         }
         trace_id = nextTraceId("node-register");
-        return postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER));
+        return postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER),
+                               /*respect_retry_after=*/true, /*require_registration=*/false) == ReportResult::SUCCESS;
     }
 
-    bool reconcile(uint64_t generation) {
+    ReportResult reconcile(uint64_t generation) {
         state_.store(PublisherState::RESYNCING, std::memory_order_relaxed);
         if (!pending_snapshot_report_) {
             queue_.discardPending();
@@ -676,10 +690,10 @@ private:
                 snapshot = snapshot_provider_();
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed: %s", e.what());
-                return false;
+                return ReportResult::FAILED;
             } catch (...) {
                 RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed with unknown exception");
-                return false;
+                return ReportResult::FAILED;
             }
 
             const auto trace_id      = nextTraceId("snapshot");
@@ -689,8 +703,9 @@ private:
                                                              buildSnapshotReport(context_, trace_id, snapshot)};
         }
 
-        if (!postReportEvent(snapshot_reporter_, pending_snapshot_report_->request)) {
-            return false;
+        const auto result = postReportEvent(snapshot_reporter_, pending_snapshot_report_->request);
+        if (result != ReportResult::SUCCESS) {
+            return result;
         }
 
         const auto committed_snapshot = std::move(*pending_snapshot_report_);
@@ -704,12 +719,12 @@ private:
                          static_cast<long long>(committed_snapshot.version),
                          committed_snapshot.key_count,
                          static_cast<unsigned long long>(committed_snapshot.generation));
-        return true;
+        return ReportResult::SUCCESS;
     }
 
-    bool reportMutations(const std::vector<KVCacheEvent>& batch) {
+    ReportResult reportMutations(const std::vector<KVCacheEvent>& batch) {
         if (batch.empty()) {
-            return true;
+            return ReportResult::SUCCESS;
         }
         const auto coalesced = coalesceMutations(batch);
         const auto trace_id  = nextTraceId("mutation");
@@ -719,7 +734,8 @@ private:
     bool heartbeat() {
         const auto trace_id = nextTraceId("heartbeat");
         // Snapshot rate limiting must not suppress liveness refreshes.
-        return postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), false);
+        return postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), false)
+               == ReportResult::SUCCESS;
     }
 
     void heartbeatLoop() noexcept {
@@ -745,8 +761,10 @@ private:
         }
     }
 
-    void waitBeforeRetry(std::chrono::milliseconds delay) {
-        queue_.waitForStop(delay);
+    void waitBeforeRetry(std::chrono::milliseconds delay, bool require_registration = true) {
+        queue_.waitForStopOrInterrupt(delay, [this, require_registration] {
+            return require_registration && !registered_.load(std::memory_order_relaxed);
+        });
     }
 
     void waitUntil(std::chrono::steady_clock::time_point deadline) {
@@ -754,8 +772,8 @@ private:
         if (deadline <= now) {
             return;
         }
-        queue_.waitForStop(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-                           + std::chrono::milliseconds(1));
+        waitBeforeRetry(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                        + std::chrono::milliseconds(1));
     }
 
     void workerLoop() noexcept {
@@ -766,7 +784,10 @@ private:
         const auto    max_retry_interval    = std::chrono::milliseconds(max_retry_interval_ms);
         auto          retry_interval        = base_retry_interval;
         auto          waitWithBackoff       = [&] {
-            waitBeforeRetry(retry_interval);
+            // A failure that already invalidated registration must still back off.
+            // Only a new invalidation can interrupt a wait started while registered.
+            const bool was_registered = registered_.load(std::memory_order_relaxed);
+            waitBeforeRetry(retry_interval, was_registered);
             retry_interval = std::min(retry_interval * 2, max_retry_interval);
         };
 
@@ -777,6 +798,8 @@ private:
         try {
             while (!stopping_.load(std::memory_order_relaxed)) {
                 if (!registered_.load(std::memory_order_relaxed)) {
+                    // A new registration must reconcile from a fresh snapshot.
+                    pending_snapshot_report_.reset();
                     if (!registerNode()) {
                         state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
                         RTP_LLM_LOG_WARNING("KVCMPublisher registration failed; retrying in %lld ms",
@@ -802,7 +825,11 @@ private:
                         waitUntil(next_reconcile);
                         continue;
                     }
-                    if (!reconcile(dirty_generation)) {
+                    const auto result = reconcile(dirty_generation);
+                    if (result == ReportResult::INTERRUPTED) {
+                        continue;
+                    }
+                    if (result == ReportResult::FAILED) {
                         state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
                         RTP_LLM_LOG_WARNING("KVCMPublisher reconciliation failed; retrying in %lld ms",
                                             static_cast<long long>(retry_interval.count()));
@@ -835,8 +862,12 @@ private:
 
                 auto batch = queue_.waitPop(config_.report_batch_size,
                                             std::chrono::milliseconds(std::max(config_.flush_interval_ms, 1)));
-                if (!batch.empty() && !reportMutations(batch)) {
+                const auto result = reportMutations(batch);
+                if (result != ReportResult::SUCCESS) {
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
+                    if (result == ReportResult::INTERRUPTED) {
+                        continue;
+                    }
                     state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
                     RTP_LLM_LOG_WARNING("KVCMPublisher mutation report failed; retrying in %lld ms",
                                         static_cast<long long>(retry_interval.count()));

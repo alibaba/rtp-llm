@@ -13,8 +13,18 @@ import psutil
 import requests
 
 from rtp_llm.test.utils.port_util import PortManager
-from rtp_llm.utils.util import str_to_bool
 from rtp_llm.test.smoke.pace_fixture import PaceFixture, require_ok
+
+
+def str_to_bool(s: str):
+    true_values = ("yes", "true", "1")
+    false_values = ("no", "false", "0")
+    if s.lower() in true_values:
+        return True
+    elif s.lower() in false_values:
+        return False
+    else:
+        raise ValueError("Cannot covert {} to a bool".format(s))
 
 
 class RemoteKVCMServer:

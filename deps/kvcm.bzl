@@ -102,7 +102,8 @@ def _kvcm_artifact_impl(ctx):
         ctx.download(url = artifact["urls"], output = "file/kv-cache-manager-client.rpm", sha256 = artifact["sha256"])
         ctx.file("BUILD.bazel", 'exports_files(["KVCM_SOURCE_ID", "KVCM_CLIENT_VARIANT", "KVCM_ARTIFACT_SHA256"])\n')
         variant = _client_variant(ctx)
-        ctx.file("KVCM_CLIENT_VARIANT", ("cuda" if variant.startswith("cuda") else variant) + "\n")
+        # Keep the legacy manifest key while recording the concrete SDK variant.
+        ctx.file("KVCM_CLIENT_VARIANT", ("cuda12_x86" if variant == "cuda" else variant) + "\n")
         ctx.file("file/BUILD.bazel", """
 filegroup(
     name = "file",

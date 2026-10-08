@@ -38,7 +38,13 @@ def event_contract(server, instance_id, keys):
     if not first.get("committed_snapshot_version"):
         raise AssertionError("Snapshot did not commit a reconciliation generation")
     throttled = report(6, {"blocks": [block]}, check=False)
-    retry_after_ms = int(throttled.get("retry_after_ms", 0))
+    raw_retry_after_ms = throttled.get("retry_after_ms", 0)
+    try:
+        retry_after_ms = int(raw_retry_after_ms)
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(
+            f"Repeated snapshot retry_after_ms must be an integer, got {raw_retry_after_ms!r}"
+        ) from exc
     if not 0 < retry_after_ms <= 10_000:
         raise AssertionError(f"Repeated snapshot retry_after_ms must be within 1..10000, got {retry_after_ms}")
     # Respect the server's retry hint before resending a complete snapshot.

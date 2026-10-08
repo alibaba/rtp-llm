@@ -20,7 +20,8 @@ def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13", backend="pace"
                      "PACE_MODEL_EVENTS_CHECK=" + str(model_events_check), "KVCM_LOG_LEVEL=DEBUG"] + kvcm_envs,
         kill_remote = kill_remote,
         sleep_time_qr = sleep_time_qr,
-        test_env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cuda"},
+        # These model smoke targets use L20_CU13 or H20_CU13 (CUDA 13 x86).
+        test_env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cuda130_x86"},
         env_inherit = ["KVCM_PACE_FIXTURE"],
         deps = ["//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto", "//rtp_llm/cpp/model_rpc:grpcio"],
     )

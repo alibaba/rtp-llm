@@ -32,10 +32,12 @@ public:
         {
             std::lock_guard<std::mutex> lock(mu_);
             requests_.push_back({route, request, std::chrono::steady_clock::now()});
-            if (!reply_body_.empty() && request.find(reply_body_) != std::string::npos) {
+            if (reply_body_count_ > 0 && !reply_body_.empty() && request.find(reply_body_) != std::string::npos) {
                 selected_response = reply_response_;
                 fail_request = reply_failure_;
-                reply_body_.clear();
+                if (--reply_body_count_ == 0) {
+                    reply_body_.clear();
+                }
             }
             if (fail_body_count_ > 0 && !fail_body_.empty() && request.find(fail_body_) != std::string::npos) {
                 fail_request = true;
@@ -87,10 +89,15 @@ public:
     }
 
     void replyNextBodyContaining(std::string text, std::string response, bool failure) {
+        replyNextBodiesContaining(std::move(text), std::move(response), failure, 1);
+    }
+
+    void replyNextBodiesContaining(std::string text, std::string response, bool failure, size_t count) {
         std::lock_guard<std::mutex> lock(mu_);
         reply_body_ = std::move(text);
         reply_response_ = std::move(response);
         reply_failure_ = failure;
+        reply_body_count_ = count;
     }
 
     bool waitForBody(const std::string& text, std::chrono::milliseconds timeout) {
@@ -119,6 +126,7 @@ private:
     std::string             reply_body_;
     std::string             reply_response_;
     bool                    reply_failure_{false};
+    size_t                  reply_body_count_{0};
 };
 
 class BlockingReporter final: public KVCacheEventReporter {
@@ -571,7 +579,9 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherReusesSnapshotPayloadAndExponential
     config.retry_interval_ms     = 40;
 
     auto reporter = std::make_shared<RecordingReporter>();
-    reporter->failNextBodiesContaining("EVENT_BLOCK_SNAPSHOT", 2);
+    // Rate limiting keeps registration valid, so retries reuse the pending snapshot.
+    reporter->replyNextBodiesContaining("EVENT_BLOCK_SNAPSHOT",
+        R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retry_after_ms":1})", true, 2);
     KVCMPublisher publisher(
         config,
         makeContext(),

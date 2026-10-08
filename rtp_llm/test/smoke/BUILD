@@ -95,7 +95,7 @@ cc_binary(
 py_library(
     name = "pace_smoke_fixture",
     srcs = [
-        "pace_fixture.py", "remote_kvcm_server.py", "//rtp_llm:utils/util.py",
+        "pace_fixture.py", "remote_kvcm_server.py",
     ],
     deps = ["//rtp_llm:psutil", "//rtp_llm:requests", "//rtp_llm/test/utils:test_util"],
 )

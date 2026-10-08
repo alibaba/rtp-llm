@@ -17,6 +17,8 @@ Client selection follows the BUILD configuration. The standalone Manager is shar
 
 CUDA 12.9 and CUDA 13 variants are selected by Bazel and are not overridden by `KVCM_CLIENT_VARIANT`. Other configurations default to the CUDA 12 x86 SDK. No CPU-only SDK is included in this release; `--repo_env=KVCM_CLIENT_VARIANT=cpu` requires an explicit paired CPU artifact in an override manifest. Targets that launch the packaged Manager are restricted to x86; the ARM SDK can communicate with an external Manager.
 
+The generated `KVCM_CLIENT_VARIANT` marker preserves the complete CUDA variant. The legacy manifest key `cuda` produces `cuda12_x86`; the other CUDA variants retain the names above. PACE model smoke targets tagged `L20_CU13` or `H20_CU13` require `cuda130_x86` and reject other SDK variants before starting the Manager.
+
 To override the published artifacts, pass `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json`. The manifest requires exactly one entry for the selected client variant and the `server` variant. All source IDs must match `internal_commit:opensource_commit:pace_commit` from the source lock:
 
 ```json

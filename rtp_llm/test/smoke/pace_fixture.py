@@ -52,7 +52,7 @@ class PaceFixture:
         variant = runfile("remote_kv_cache_manager_client_rpm", "KVCM_CLIENT_VARIANT").read_text().strip()
         expected_variant = os.environ.get("KVCM_SMOKE_CLIENT_VARIANT")
         if expected_variant and variant != expected_variant:
-            raise RuntimeError(f"This smoke requires a {expected_variant} SDK; select the matching build configuration and artifact")
+            raise RuntimeError(f"This smoke requires SDK variant {expected_variant}, got {variant}; select the matching build configuration and artifact")
         if backend not in ("pace", "pace_ssd"):
             raise ValueError("PACE_BACKEND must be pace or pace_ssd")
         domain = self.config.get("domain", "")
