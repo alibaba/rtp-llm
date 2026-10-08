@@ -72,30 +72,63 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+mtp_executor_test_deps = [
+    "//rtp_llm/cpp/engine_base/schedulers",
+    "//rtp_llm/cpp/cache",
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/models",
+    "//rtp_llm/cpp/normal_engine",
+    "//rtp_llm/cpp/normal_engine/test:mock_engine",
+    "//rtp_llm/cpp/testing:device_test_utils",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+    "@local_config_cuda//cuda:cuda_headers",
+    "@local_config_cuda//cuda:cudart",
+] + torch_deps() + cuda13_torch_link_deps
+
 cc_test(
     name = "mtp_executor_test",
-    srcs = glob([
-        "MtpExecutorTest.cc",
-    ]),
+    srcs = ["MtpExecutorTest.cc"],
     data = [],
     copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/engine_base/schedulers",
-        "//rtp_llm/cpp/models",
-        "//rtp_llm/cpp/normal_engine",
-        "//rtp_llm/cpp/normal_engine/test:mock_engine",
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    deps = mtp_executor_test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "mtp_linear_replay_async_test",
+    srcs = ["MtpExecutorTest.cc"],
+    copts = test_copts,
+    deps = mtp_executor_test_deps,
+    args = ["--gtest_filter=MtpExecutorTest.LinearReplay*"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_MTP_ASYNC_PREPARE": "1",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "mtp_sampler_prepare_async_test",
+    srcs = ["MtpExecutorTest.cc"],
+    args = ["--gtest_filter=MtpExecutorTest.testSingleBatchDecode"],
+    copts = test_copts,
+    deps = mtp_executor_test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
     },
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],

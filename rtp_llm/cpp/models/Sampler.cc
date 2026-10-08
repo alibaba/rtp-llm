@@ -134,8 +134,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
 #else
     torch::Tensor inputs_token_ids_cuda;
-    {
-        auto main_stream     = cuda_graph::graphGetCurrentStream();
+    auto          main_stream = cuda_graph::graphGetCurrentStream();
+    if (inputs.token_ids.is_cuda()) {
+        inputs_token_ids_cuda = inputs.token_ids;
+    } else {
         auto copy_done_event = cuda_graph::makeGraphEvent();
         {
             cuda_graph::GraphStreamGuard guard(copy_stream_);
@@ -143,8 +145,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             copy_done_event.record(copy_stream_);
         }
         copy_done_event.block(main_stream);
-        inputs_token_ids_cuda.record_stream(main_stream);
     }
+    inputs_token_ids_cuda.record_stream(main_stream);
 #endif
 
     auto all_token_ids_out     = requires_independent_output ?

@@ -142,6 +142,23 @@ static DeviceBlockPoolPtr poolForTag(const CoordinatorCacheManager& allocator, c
     throw std::runtime_error("missing test pool for tag " + tag);
 }
 
+static const TaggedBlockIdPair* updateForTag(const std::vector<TaggedBlockIdPair>& mapping, const std::string& tag) {
+    const auto found = std::find_if(mapping.begin(), mapping.end(), [&tag](const auto& entry) {
+        return entry.tag == tag;
+    });
+    return found == mapping.end() ? nullptr : &*found;
+}
+
+static size_t groupSetIdForTag(const BlockTreeCache& cache, const std::string& tag) {
+    for (const auto& group_set : cache.groupSets()) {
+        const auto& tags = group_set->groupTags();
+        if (std::find(tags.begin(), tags.end(), tag) != tags.end()) {
+            return group_set->groupSetId();
+        }
+    }
+    throw std::runtime_error("missing test group set for tag " + tag);
+}
+
 static BlockIndicesType allocateReferencedBlocks(const DeviceBlockPoolPtr& pool, size_t count) {
     auto blocks = pool->malloc(count).value();
     pool->incRef(blocks);
@@ -298,13 +315,18 @@ makeBatchResource(int batch_size, const CacheConfig& config, CacheKeysType keys,
     res->resetBatchSize(batch_size);
     res->initGroups(config.topologyPtr());
     if (reorder_resource) {
-        auto reversed = config;
-        auto groups   = config.topology().groups();
-        std::reverse(groups.begin(), groups.end());
-        reversed.setTopology(std::move(groups), config.topology().layers());
-        // Keep coordinator order unchanged and use different orders within a batch.
+        // Reordering topology is normalized back to canonical tag order. Install
+        // an actual received row permutation in this test-owned resource instead;
+        // shared holders and layer membership remain unchanged.
         for (int b = 0; b < batch_size; b += 2) {
-            res->cacheResource(b).initGroups(reversed.topologyPtr());
+            auto& rows = const_cast<GroupBlockIds&>(res->cacheResource(b).groupBlockIds());
+            const auto tags = rows.orderedTags();
+            std::reverse(rows.rows_.begin(), rows.rows_.end());
+            for (size_t index = 0; index < tags.size(); ++index) {
+                rows.tag_to_index_.at(tags[index]) = tags.size() - 1 - index;
+            }
+            rows.validate();
+            EXPECT_NE(rows.orderedTags(), config.groupTags());
         }
     }
     for (int b = 0; b < batch_size; ++b) {
@@ -532,7 +554,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TopologyRejectsMissingLayerTagMapp
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesFirstSeenTagsWithFullAfterLinear) {
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesCanonicalTagOrder) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -554,9 +576,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigUsesFirstSeenTag
     parallelism_cfg.tp_size = 1;
     auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
-    std::vector<std::string>    expected_tags{"linear0", "linear1", "full", "linear2"};
+    std::vector<std::string>    expected_tags{"full", "linear0", "linear1", "linear2"};
     std::vector<CacheGroupType> expected_types{
-        CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR};
+        CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::LINEAR};
     std::vector<int> expected_full{3, 7};
     std::vector<int> expected_linear0{0, 1};
     std::vector<int> expected_linear1{2, 4};
@@ -592,7 +614,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsExplicitPhy
 
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(publishedGroupTags(config.topology()),
-              (std::vector<std::string>{"recurrent_state", "convolution_state", "full"}));
+              (std::vector<std::string>{"convolution_state", "full", "recurrent_state"}));
     EXPECT_TRUE(config.group("recurrent_state").policy.enable_prefix_reuse);
     EXPECT_TRUE(config.group("convolution_state").policy.enable_prefix_reuse);
     EXPECT_EQ(config.group("recurrent_state").spec->memoryLayoutDType(), DataType::TYPE_FP16);
@@ -672,7 +694,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridWithMt
         const auto& sub = config.mtp_sub_configs[mtp_id];
         ASSERT_NE(sub, nullptr);
         ASSERT_EQ(sub->groupNums(), 2);
-        std::vector<std::string> expected_tags{"linear", "full"};
+        std::vector<std::string> expected_tags{"full", "linear"};
         EXPECT_EQ(publishedGroupTags(sub->topology()), expected_tags);
         ASSERT_EQ(sub->layerIdsForGroup("full").size(), 1u);
         EXPECT_EQ(sub->layerIdsForGroup("full")[0], 0);
@@ -770,7 +792,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
         config = rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
     });
 
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_EQ(config.layerIdsForGroup("full").size(), 3u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(config.layer_all_num(), 9u);
@@ -780,7 +802,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
 
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"linear", "full"}));
+        EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"full", "linear"}));
         EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("full").tag), std::vector<int>({0}));
         EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("linear").tag).empty());
     }
@@ -945,7 +967,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpPrefersExactDefaultGroupMa
 
     const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
     ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"default", "aux"}));
+    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"aux", "default"}));
     EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("default").tag), std::vector<int>({0}));
     EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("aux").tag).empty());
     EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().group("default").tag), std::vector<int>({0, 2}));
@@ -990,9 +1012,15 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasErrorIdentifiesSource
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
-    auto main_config = makeSingleLayerCacheConfig(
-        makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
-        CacheGroupType::FULL);
+    // Resolve the exact aux tag first so the rejection specifically proves
+    // that a multi-group draft's default tag cannot alias the target full tag.
+    CacheConfig main_config;
+    main_config.layer_num = 1;
+    main_config.fromGroupedSpecs(
+        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {0}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"full", "aux"});
 
     CacheConfig propose_config;
     propose_config.layer_num = 1;
@@ -1649,8 +1677,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockCopyLastBlockAcrossGr
                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);
-    EXPECT_EQ(update_mapping[0].tag, "linear");
-    EXPECT_EQ(update_mapping[1].tag, "full1");
+    ASSERT_NE(updateForTag(update_mapping, "linear"), nullptr);
+    ASSERT_NE(updateForTag(update_mapping, "full1"), nullptr);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 6);
     ASSERT_EQ(batch_res->batchSize(), 2);
     EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101}));
@@ -1749,12 +1777,14 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockReusesDroppedBatchCap
                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);
-    EXPECT_EQ(update_mapping[0].tag, "linear");
-    EXPECT_EQ(update_mapping[0].src, blocks[2]);
-    EXPECT_EQ(update_mapping[0].dst, blocks[0]);
-    EXPECT_EQ(update_mapping[1].tag, "full1");
-    EXPECT_EQ(update_mapping[1].src, blocks[3]);
-    EXPECT_EQ(update_mapping[1].dst, blocks[1]);
+    const auto* linear_update = updateForTag(update_mapping, "linear");
+    const auto* full_update   = updateForTag(update_mapping, "full1");
+    ASSERT_NE(linear_update, nullptr);
+    ASSERT_NE(full_update, nullptr);
+    EXPECT_EQ(linear_update->src, blocks[2]);
+    EXPECT_EQ(linear_update->dst, blocks[0]);
+    EXPECT_EQ(full_update->src, blocks[3]);
+    EXPECT_EQ(full_update->dst, blocks[1]);
     EXPECT_EQ(linear_pool->freeBlocksNum(), 0u);
     EXPECT_EQ(full_pool->freeBlocksNum(), 0u);
 
@@ -1885,12 +1915,13 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ReferenceIdentityMismatchDoesNotMu
     const size_t linear_ref    = linear_pool->refCount(linear_blocks.front());
     const size_t full_ref      = full_pool->refCount(full_blocks.front());
 
-    auto       groups     = config.topology().groups();
-    const auto old_tag    = groups[1].tag;
-    groups[1].tag         = "unexpected";
-    auto replacement_spec = groups[1].spec->clone();
-    replacement_spec->tag = groups[1].tag;
-    groups[1].spec        = std::move(replacement_spec);
+    auto groups = config.topology().groups();
+    auto& mismatched_group = groups.at(config.topology().groupIdForTag("full1"));
+    const auto old_tag = mismatched_group.tag;
+    mismatched_group.tag = "unexpected";
+    auto replacement_spec = mismatched_group.spec->clone();
+    replacement_spec->tag = mismatched_group.tag;
+    mismatched_group.spec = std::move(replacement_spec);
     auto layers           = config.topology().layers();
     for (auto& layer : layers) {
         std::replace(layer.group_tags.begin(), layer.group_tags.end(), old_tag, std::string("unexpected"));
@@ -1922,12 +1953,13 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FreeIdentityMismatchDoesNotPartial
     const size_t linear_ref    = linear_pool->refCount(linear_blocks.front());
     const size_t full_ref      = full_pool->refCount(full_blocks.front());
 
-    auto       groups     = config.topology().groups();
-    const auto old_tag    = groups[1].tag;
-    groups[1].tag         = "unexpected";
-    auto replacement_spec = groups[1].spec->clone();
-    replacement_spec->tag = groups[1].tag;
-    groups[1].spec        = std::move(replacement_spec);
+    auto groups = config.topology().groups();
+    auto& mismatched_group = groups.at(config.topology().groupIdForTag("full1"));
+    const auto old_tag = mismatched_group.tag;
+    mismatched_group.tag = "unexpected";
+    auto replacement_spec = mismatched_group.spec->clone();
+    replacement_spec->tag = mismatched_group.tag;
+    mismatched_group.spec = std::move(replacement_spec);
     auto layers           = config.topology().layers();
     for (auto& layer : layers) {
         std::replace(layer.group_tags.begin(), layer.group_tags.end(), old_tag, std::string("unexpected"));
@@ -2049,12 +2081,15 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHole
     }
     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
     ASSERT_EQ(path.size(), 3u);
-    EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[0]}));
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[2]->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[1]}));
-    EXPECT_EQ(path[0]->group_set_resources[1].device_blocks, (BlockIndicesType{blocks[2]}));
-    EXPECT_EQ(path[1]->group_set_resources[1].device_blocks, (BlockIndicesType{blocks[3]}));
-    EXPECT_EQ(path[2]->group_set_resources[1].device_blocks, (BlockIndicesType{blocks[4]}));
+    const auto linear_set = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "linear");
+    const auto full_set   = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "full1");
+    ASSERT_NE(linear_set, full_set);
+    EXPECT_EQ(path[0]->group_set_resources[linear_set].device_blocks, (BlockIndicesType{blocks[0]}));
+    EXPECT_TRUE(path[1]->group_set_resources[linear_set].is_empty());
+    EXPECT_EQ(path[2]->group_set_resources[linear_set].device_blocks, (BlockIndicesType{blocks[1]}));
+    EXPECT_EQ(path[0]->group_set_resources[full_set].device_blocks, (BlockIndicesType{blocks[2]}));
+    EXPECT_EQ(path[1]->group_set_resources[full_set].device_blocks, (BlockIndicesType{blocks[3]}));
+    EXPECT_EQ(path[2]->group_set_resources[full_set].device_blocks, (BlockIndicesType{blocks[4]}));
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
@@ -2379,8 +2414,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocksUsesLinearAc
         policies.push_back(group.policy);
     }
     ASSERT_EQ(policies.size(), 2u);
-    ASSERT_EQ(policies[0].group_type, CacheGroupType::LINEAR);
-    policies[0].active_tail_blocks = 4;
+    auto& linear_policy = policies.at(config.topology().groupIdForTag("linear"));
+    ASSERT_EQ(linear_policy.group_type, CacheGroupType::LINEAR);
+    linear_policy.active_tail_blocks = 4;
     setTestGroupPolicies(config, policies);
 
     auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
