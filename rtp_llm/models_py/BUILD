@@ -211,6 +211,7 @@ filegroup(
         "modules/dsv4/v41_stage_attention.py",
         "modules/dsv4/v41_stage.py",
         "modules/dsv4/v41_stage_pp.py",
+        "modules/dsv4/v41_cp.py",
         "modules/dsv4/v41_attention.py",
         "modules/dsv4/v41_indexer.py",
         "modules/dsv4/v41_compressor.py",

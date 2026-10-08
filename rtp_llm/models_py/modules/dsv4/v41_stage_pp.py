@@ -201,13 +201,7 @@ def export_v41_stage_result(
     return wire
 
 
-def run_v41_pp_stage(stage, tensors, receiver, dispatch, plans):
-    """Preflight stage one, import both replicas, then execute L21 through L39.
-
-    Calls are serialized with receiver admission/release and Engram shutdown.
-    Validation failures leave replicas untouched. Execution failures after import
-    require aborting the forward; this adapter does not roll back device writes.
-    """
+def _pp_inputs(stage, tensors, receiver, dispatch):
     if (
         not isinstance(stage, V41Stage)
         or stage.role != "prefill"
@@ -240,8 +234,23 @@ def run_v41_pp_stage(stage, tensors, receiver, dispatch, plans):
         1,
         V41IndexResult(frame.topk, frame.candidate_blocks, frame.candidate_counts),
     )
+    return dispatch, rows, state, selections
+
+
+def run_v41_pp_stage(stage, tensors, receiver, dispatch, plans, *, cp_forward=None):
+    """Preflight stage one, import both replicas, then execute L21 through L39.
+
+    Calls are serialized with receiver admission/release and Engram shutdown.
+    Validation failures leave replicas untouched. Execution failures after import
+    require aborting the forward; this adapter does not roll back device writes.
+    With CP, every peer validates its frame, full delta and stage before any peer
+    imports. The CP forward's full row maps address the unsharded cache plans.
+    """
     plans = dict(plans)
-    state, rows, hashes = stage._prepare_forward(state, rows, plans, None, selections)
+    if cp_forward is not None:
+        return _run_cp_pp(stage, tensors, receiver, dispatch, plans, cp_forward)
+    dispatch, rows, state, selections = _pp_inputs(stage, tensors, receiver, dispatch)
+    prepared = stage._prepare_forward(state, rows, plans, None, selections)
     tables = {
         span.identity: receiver.block_tables(span.identity) for span in dispatch.spans
     }
@@ -250,4 +259,66 @@ def run_v41_pp_stage(stage, tensors, receiver, dispatch, plans):
     receiver.apply(tensors, dispatch.spans)
     for span in dispatch.spans:
         receiver.require_ready(span.identity, span.start + span.count, span.chunk_id)
+    state, rows, hashes = prepared
     return stage._run_prepared(state, rows, plans, hashes, selections)
+
+
+def _run_cp_pp(stage, tensors, receiver, dispatch, plans, forward):
+    forward._check()
+    error, signature = None, bytes(32)
+    try:
+        dispatch, rows, state, selections = _pp_inputs(
+            stage, tensors, receiver, dispatch
+        )
+        rows.require_same(forward.local_rows)
+        if dispatch.cp_rank != forward.session.rank:
+            raise ValueError("V4.1 PP receiver and CP group ranks disagree")
+        indices = {
+            span.identity.request_id: index for index, span in enumerate(dispatch.spans)
+        }
+        row_map = torch.tensor(
+            [
+                [indices[request], position, 1] if valid else [-1, -1, 0]
+                for request, position, valid in zip(
+                    forward.rows.request_ids.cpu().tolist(),
+                    forward.rows.positions.cpu().tolist(),
+                    forward.rows.valid_rows.cpu().tolist(),
+                )
+            ],
+            dtype=torch.int64,
+        ).reshape(-1, 3)
+        complete = replace(dispatch, row_map=row_map).snapshot(receiver.contract)
+        tables = {
+            span.identity: receiver.block_tables(span.identity)
+            for span in dispatch.spans
+        }
+        _bind_plan(plans[21], complete, receiver.caches, tables, stage.max_positions)
+        receiver.validate(tensors, dispatch.spans)
+        signature = hashlib.sha256(
+            json.dumps(
+                {
+                    "phase": "pp-admission",
+                    "cp": forward.signature.hex(),
+                    "contract": receiver.contract.fingerprint.hex(),
+                    "round": dispatch.round_id,
+                    "spans": [span.wire_values() for span in dispatch.spans],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).digest()
+    except Exception as exc:
+        error = exc
+    forward.session._consensus(signature, error)
+    prepared = forward.prepare_stage(stage, state, rows, plans, None, selections)
+    error = None
+    try:
+        receiver.apply(tensors, dispatch.spans)
+        for span in dispatch.spans:
+            receiver.require_ready(
+                span.identity, span.start + span.count, span.chunk_id
+            )
+    except Exception as exc:
+        error = exc
+    forward.session._consensus(hashlib.sha256(signature + b"ready").digest(), error)
+    return forward.run_prepared(stage, prepared, plans, selections)

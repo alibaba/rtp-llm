@@ -332,7 +332,7 @@ class V41StageAttention:
             else None
         )
 
-    def __call__(self, frame, sinks, plan, rows, selections):
+    def __call__(self, frame, sinks, plan, rows, selections, *, read_rows=None):
         sources = self.sources
         if sources.compress_ratio and not sources.owns_index:
             if selections is None:
@@ -362,12 +362,16 @@ class V41StageAttention:
                 index_slots=plan.index_writes,
             )
         frame.kv.publish(plan.swa, plan.swa_writes, **kwargs)
+        swa_reads = plan.swa_reads if read_rows is None else plan.swa_reads[read_rows]
+        global_pages, index_pages = plan.global_pages, plan.index_pages
+        if read_rows is not None and sources.compress_ratio:
+            global_pages, index_pages = global_pages[read_rows], index_pages[read_rows]
         if sources.owns_index:
             result = self.indexer(
                 frame.query.index_query,
                 frame.query.index_weights,
                 plan.index_cache,
-                plan.index_pages,
+                index_pages,
                 rows.positions,
                 valid_rows=rows.valid_rows,
                 candidates=candidates,
@@ -390,7 +394,7 @@ class V41StageAttention:
             for row in range(rows.valid_rows.numel()):
                 if bool(rows.valid_rows[row]):
                     slots[row] = logical_to_physical_slots(
-                        plan.global_pages[row],
+                        global_pages[row],
                         selections.result.topk[row],
                         plan.global_cache.tag,
                         sources.compress_ratio,
@@ -400,7 +404,7 @@ class V41StageAttention:
             frame.query.query,
             sinks,
             plan.swa,
-            plan.swa_reads,
+            swa_reads,
             valid_rows=rows.valid_rows,
             **kwargs,
         )

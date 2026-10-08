@@ -162,7 +162,8 @@ class V41Stage:
             for op in blocks
         )
 
-    def _preflight(self, state, rows, plans, selections):
+    def _preflight(self, state, rows, plans, selections, cache_rows=None):
+        cache_rows = rows if cache_rows is None else cache_rows
         if rows.valid_rows.device != self.device:
             raise ValueError("V4.1 forward rows and stage must share a device")
         residual, previous = _clean_state(
@@ -187,7 +188,7 @@ class V41Stage:
             plan = plans[op.layer_id]
             if not isinstance(plan, V41AttentionPlan):
                 raise ValueError("V4.1 layer requires an explicit attention plan")
-            plan.validate(op.attention.sources, rows, self.max_positions)
+            plan.validate(op.attention.sources, cache_rows, self.max_positions)
             if any(_shares_storage(plan.swa.raw, prior) for prior in swas):
                 raise ValueError("V4.1 layers require disjoint SWA cache allocations")
             swas.append(plan.swa.raw)
@@ -219,6 +220,9 @@ class V41Stage:
             rows.positions,
             rows.request_ids,
             rows.valid_rows,
+            cache_rows.positions,
+            cache_rows.request_ids,
+            cache_rows.valid_rows,
         ]
         for plan in plans.values():
             protected.extend(
@@ -260,12 +264,14 @@ class V41Stage:
             if torch.backends.cuda.matmul.allow_tf32:
                 raise RuntimeError("V4.1 stage FP32 operations require TF32 disabled")
 
-    def _prepare_forward(self, state, rows, plans, windows, selections):
+    def _prepare_forward(
+        self, state, rows, plans, windows, selections, cache_rows=None
+    ):
         self._check_execution()
         if not isinstance(rows, V41ForwardRows):
             raise ValueError("V4.1 stage requires explicit forward rows")
         rows = rows.snapshot()
-        state = self._preflight(state, rows, plans, selections)
+        state = self._preflight(state, rows, plans, selections, cache_rows)
         if self.engram.layer_ids:
             if windows is None or windows.shape != (rows.valid_rows.numel(), 4):
                 raise ValueError(
@@ -277,7 +283,8 @@ class V41Stage:
         self.engram.validate_forward(hashes, rows.valid_rows, dim=self.dim)
         return state, rows, hashes
 
-    def _run_prepared(self, state, rows, plans, hashes, selections):
+    def _run_prepared(self, state, rows, plans, hashes, selections, cp_forward=None):
+        cache_rows = rows if cp_forward is None else cp_forward.rows
         for op, attention in zip(self.blocks, self.attentions):
             if op.layer_id in self.engram.layer_ids:
                 state = replace(
@@ -289,9 +296,9 @@ class V41Stage:
             if meta is not None:
                 meta = replace(
                     meta,
-                    positions=rows.positions,
-                    valid_rows=rows.valid_rows,
-                    request_ids=rows.request_ids,
+                    positions=cache_rows.positions,
+                    valid_rows=cache_rows.valid_rows,
+                    request_ids=cache_rows.request_ids,
                 )
             frame = op.prepare(
                 state,
@@ -299,9 +306,15 @@ class V41Stage:
                 rows.valid_rows,
                 pair_state=plan.pair_state,
                 pair_metadata=meta,
+                kv_exchange=None if cp_forward is None else cp_forward.exchange,
             )
             attended, selections = attention(
-                frame, op.attention.sinks, plan, rows, selections
+                frame,
+                op.attention.sinks,
+                plan,
+                rows,
+                selections,
+                read_rows=None if cp_forward is None else cp_forward.local_slice,
             )
             state = op.finish(frame, attended)
         hidden = (
@@ -309,9 +322,10 @@ class V41Stage:
             if self.end == 40
             else None
         )
-        return V41StageResult(
-            state, rows, selections, hidden, plans[20] if self.end == 21 else None
-        )
+        l20_plan = plans[20] if self.end == 21 else None
+        if l20_plan is not None and cp_forward is not None:
+            l20_plan = cp_forward.local_plan(l20_plan)
+        return V41StageResult(state, rows, selections, hidden, l20_plan)
 
     def run(self, state, rows, plans, *, windows=None, selections=None):
         state, rows, hashes = self._prepare_forward(

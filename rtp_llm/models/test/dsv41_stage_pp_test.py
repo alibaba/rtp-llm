@@ -442,6 +442,99 @@ class V41StagePPTest(unittest.TestCase):
             self.target_tables[self.identities[0]],
         )
 
+    def test_cp_peers_preflight_full_delta_before_any_replica_import(self):
+        from rtp_llm.models.test.dsv41_cp_test import SimulatedGroup, cp
+
+        for invalid in (True, False):
+            group = SimulatedGroup()
+            cases, sessions, dispatches, wires = [], [], [], []
+            for rank, records in enumerate(
+                ([[0, 1, 1]], [[1, 0, 1]], [[0, 0, 1], [1, 1, 1]], [])
+            ):
+                case = V41StagePPTest()
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                case.spans = tuple(
+                    Span(identity, 0, 0, 2) for identity in case.identities
+                )
+                dispatch = dataclasses.replace(
+                    case.dispatch,
+                    cp_rank=rank,
+                    spans=case.spans,
+                    row_map=torch.tensor(records, dtype=torch.int64).reshape(-1, 3),
+                )
+                case.current_dispatch = dispatch
+                case.receiver.cp_rank = rank
+                for op in case.driver.blocks:
+                    op.kv = SimpleNamespace(max_rows=128)
+                op = cp.V41CPExchange(
+                    cp.V41CPPlan((0, 1, 2, 3), 1, "pp-cp", 2, 512), group, "cpu"
+                )
+                op.rank, op._identity = rank, op._runtime_identity()
+                cases.append(case)
+                sessions.append(op)
+                dispatches.append(dispatch)
+                wires.append(case.wire(dispatch))
+            peers = tuple(dispatch.forward_rows("cpu") for dispatch in dispatches)
+            forwards = group.run(lambda rank: sessions[rank].begin(peers))
+            full_map = torch.tensor(
+                [
+                    [0, 1, 1],
+                    [-1, -1, 0],
+                    [1, 0, 1],
+                    [-1, -1, 0],
+                    [0, 0, 1],
+                    [1, 1, 1],
+                    [-1, -1, 0],
+                    [-1, -1, 0],
+                ]
+            )
+            if invalid:
+                wires[1]["v41_delta_header"][3] += 1
+
+            def run(rank):
+                case, forward = cases[rank], forwards[rank]
+                full_dispatch = dataclasses.replace(dispatches[rank], row_map=full_map)
+                plans = case.plans(full_dispatch)
+
+                # This fixture covers admission/import; full CP stage numerics
+                # are exercised independently by dsv41_cp_test and SM120.
+                def execute(driver, prepared, plans, selected):
+                    return driver._run_prepared(
+                        prepared[0], prepared[1], plans, prepared[2], selected
+                    )
+
+                with patch.object(forward, "run_prepared", side_effect=execute):
+                    if invalid:
+                        with self.assertRaisesRegex(RuntimeError, "mismatch"):
+                            adapter.run_v41_pp_stage(
+                                case.driver,
+                                wires[rank],
+                                case.receiver,
+                                dispatches[rank],
+                                plans,
+                                cp_forward=forward,
+                            )
+                    else:
+                        result = adapter.run_v41_pp_stage(
+                            case.driver,
+                            wires[rank],
+                            case.receiver,
+                            dispatches[rank],
+                            plans,
+                            cp_forward=forward,
+                        )
+                        self.assertEqual(
+                            result.rows.positions.numel(), peers[rank].positions.numel()
+                        )
+
+            group.run(run)
+            for case in cases:
+                if invalid:
+                    case.assert_pristine()
+                else:
+                    case.execution.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,7 +187,14 @@ class V41Block(nn.Module):
             raise RuntimeError("V4.1 FP32 delayed-mHC requires TF32 disabled")
 
     def prepare(
-        self, state, positions, valid_rows, *, pair_state=None, pair_metadata=None
+        self,
+        state,
+        positions,
+        valid_rows,
+        *,
+        pair_state=None,
+        pair_metadata=None,
+        kv_exchange=None,
     ):
         """Project a forward without writing caches; stage has already applied Engram."""
         self._check_precision()
@@ -208,6 +215,7 @@ class V41Block(nn.Module):
             valid_rows,
             pair_state=pair_state,
             pair_metadata=pair_metadata,
+            exchange=kv_exchange,
         )
         return V41BlockFrame(self._owner, residual, mixes, query, kv)
 

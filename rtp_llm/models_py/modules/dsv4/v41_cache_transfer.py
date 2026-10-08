@@ -417,10 +417,9 @@ class V41L20ReplicaReceiver:
             raise ValueError("V4.1 replica is cancelled")
         return dict(state.tables)
 
-    def apply(
+    def _prepare_import(
         self, tensors: Mapping[str, torch.Tensor], expected_spans: Sequence[V41L20Span]
-    ) -> None:
-        """Validate the complete batch before writing either region, then commit."""
+    ):
         self._usable()
         expected = _spans(expected_spans, self.contract)
         header = _host_tensor(tensors, _HEADER, (6,), torch.int64).tolist()
@@ -443,8 +442,7 @@ class V41L20ReplicaReceiver:
         if set(tensors).intersection(_WIRE_KEYS) != keys:
             raise ValueError("V4.1 delta has missing or unexpected payload fields")
         if not expected:
-            self._next_round += 1
-            return
+            return {}, [], expected
         wire_spans = _host_tensor(tensors, _SPANS, (len(expected), 6), torch.int64)
         if wire_spans.tolist() != [list(s.wire_values()) for s in expected]:
             raise ValueError("V4.1 delta spans disagree with trusted dispatch metadata")
@@ -489,6 +487,21 @@ class V41L20ReplicaReceiver:
         device = self.caches[_TAGS[0]].raw.device
         if self.backend == "triton" and device.type != "cuda":
             raise ValueError("V4.1 Triton import requires CUDA caches")
+        return slots, states, expected
+
+    def validate(self, tensors, expected_spans) -> None:
+        """Validate without mutation so CP peers can agree before importing."""
+        self._prepare_import(tensors, expected_spans)
+
+    def apply(
+        self, tensors: Mapping[str, torch.Tensor], expected_spans: Sequence[V41L20Span]
+    ) -> None:
+        """Validate the complete batch before writing either region, then commit."""
+        slots, states, expected = self._prepare_import(tensors, expected_spans)
+        if not expected:
+            self._next_round += 1
+            return
+        device = self.caches[_TAGS[0]].raw.device
         self._drained = False
         try:
             for tag, key in zip(_TAGS, _ROWS):
