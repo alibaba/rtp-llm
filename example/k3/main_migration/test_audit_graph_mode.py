@@ -1,5 +1,6 @@
 """Reject missing or inconsistent eager Native MTP evidence."""
 
+import copy
 import unittest
 
 from example.k3.main_migration.audit_orthogonal_smoke import audit, read_paged_contract
@@ -82,6 +83,128 @@ def fixture():
 
 
 class AuditGraphModeTest(unittest.TestCase):
+    def long_output_fixture(self):
+        name = "orthogonal_decode_graph_long_output_batch_64"
+        cases = [
+            {"name": f"{name}_{i:02d}", "phase": "prepare", "decode_owner_rank": i % 2}
+            for i in range(64)
+        ]
+        stage = {
+            "name": name,
+            "case_names": [case["name"] for case in cases],
+            "start_time_ns": 100,
+            "end_time_ns": 190,
+        }
+        events = [
+            {
+                "event": "mtp_target_verify_forward",
+                "input_rows": 32,
+                "stream_count": 32,
+                "time_ns": 110,
+            },
+            {
+                "event": "cuda_graph_replay",
+                "role": 2,
+                "real_batch": 32,
+                "bucket": 32,
+                "padding_rows": 0,
+                "time_ns": 120,
+            },
+            {
+                "event": "mtp_draft_decode_forward",
+                "input_rows": 32,
+                "stream_count": 32,
+                "time_ns": 130,
+            },
+            {
+                "event": "cuda_graph_replay",
+                "role": 4,
+                "real_batch": 32,
+                "real_tokens": 128,
+                "bucket": 128,
+                "padding_rows": 0,
+                "time_ns": 140,
+            },
+        ]
+        result = {
+            "passed": True,
+            "suite": "main-text-64k-capped",
+            "case_profile": "compact-64k-v1",
+            "cases": cases,
+            "stages": [stage],
+        }
+        return (
+            result,
+            {rank: [] for rank in range(8)},
+            {rank: copy.deepcopy(events) for rank in range(8)},
+        )
+
+    def test_long_output_requires_batch_32_on_both_owners_and_every_rank(self):
+        result, prefill, decode = self.long_output_fixture()
+        name = result["stages"][0]["name"]
+        self.assertTrue(
+            audit(result, prefill, decode, decode_dp=2)["path_results"][name]
+        )
+        for rank in (0, 3, 4, 7):
+            with self.subTest(rank=rank):
+                changed = copy.deepcopy(decode)
+                changed[rank] = []
+                self.assertFalse(
+                    audit(result, prefill, changed, decode_dp=2)["path_results"][name]
+                )
+
+    def test_long_output_rejects_partial_batch_wrong_bucket_and_unpaired_replay(self):
+        for mutation in (
+            "partial",
+            "bucket",
+            "outside_stage",
+            "no_draft",
+            "wrong_owner",
+        ):
+            with self.subTest(mutation=mutation):
+                result, prefill, decode = self.long_output_fixture()
+                name = result["stages"][0]["name"]
+                if mutation == "partial":
+                    for event in decode[4]:
+                        if event.get("input_rows") == 32:
+                            event["input_rows"] = event["stream_count"] = 31
+                elif mutation == "bucket":
+                    decode[4][1].update(bucket=64, padding_rows=32)
+                elif mutation == "outside_stage":
+                    decode[4][1]["time_ns"] = 95
+                elif mutation == "no_draft":
+                    decode[4].pop()
+                else:
+                    result["cases"][1]["decode_owner_rank"] = 0
+                self.assertFalse(
+                    audit(result, prefill, decode, decode_dp=2)["path_results"][name]
+                )
+
+    def test_original_short_answer_is_separate_from_full_batch_graph_gate(self):
+        result, prefill, decode = self.long_output_fixture()
+        new_name = result["stages"][0]["name"]
+        original = copy.deepcopy(result["stages"][0])
+        original["name"] = "orthogonal_decode_04_batch_64"
+        original["start_time_ns"], original["end_time_ns"] = 0, 90
+        result["stages"].insert(0, original)
+        for rank in range(8):
+            events = copy.deepcopy(decode[rank])
+            for event in events:
+                event["time_ns"] -= 100
+                if "input_rows" in event:
+                    event["input_rows"] = event["stream_count"] = 31
+                if event.get("role") == 2:
+                    event.update(real_batch=31, padding_rows=1)
+                if event.get("role") == 4:
+                    event.update(real_batch=31, real_tokens=124, padding_rows=4)
+            decode[rank][:0] = events
+        verdict = audit(result, prefill, decode, decode_dp=2)
+        self.assertTrue(verdict["path_results"][original["name"]])
+        self.assertTrue(verdict["path_results"][new_name])
+        result["stages"].pop()
+        verdict = audit(result, prefill, decode, decode_dp=2)
+        self.assertIn(f"missing runtime stage: {new_name}", verdict["errors"])
+
     def test_graph_off_requires_all_rank_fixed_width_paged_modeling(self):
         result, prefill, decode = fixture()
         verdict = audit(result, prefill, decode, decode_dp=2, decode_graph=False)

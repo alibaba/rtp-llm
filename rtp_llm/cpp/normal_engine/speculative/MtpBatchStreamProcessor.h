@@ -51,6 +51,11 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+    absl::Status gatherLinearReplayInputs(const StreamGroups& stream_groups,
+                                          const CacheConfig& cache_config,
+                                          GptModelInputs& model_input,
+                                          TensorHolder& host_holder,
+                                          std::vector<GenerateStream::LinearReplayRound>& rounds) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
@@ -66,6 +71,15 @@ public:
                                                          const GptModelOutputs&                      model_output,
                                                          const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
                                                          const torch::Tensor& draft_token_ids) const;
+
+    // CPU-only staging may overlap target verify. Finalization attaches GPU
+    // logits, processor masks and (when required) the current draft prefix.
+    SamplerInputs prepareSpecSamplerInputHost(const StreamGroups& stream_groups) const;
+    SamplerInputs finalizeSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                           SamplerInputs                               sampler_inputs,
+                                           const GptModelOutputs&                      model_output,
+                                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                           const torch::Tensor&                        draft_token_ids) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,

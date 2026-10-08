@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -40,6 +41,16 @@ public:
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
     absl::Status                incrKVBlock(int seq_len_override = -1);
+    std::shared_ptr<LinearReplayLease> linearReplayLease() const { return linear_replay_lease_; }
+    const std::vector<int32_t>& linearReplayInitialBlockIds() const { return linear_replay_initial_block_ids_; }
+    std::shared_ptr<LinearReplayBlockHold> linearReplayInitialBlockHold() const {
+        return linear_replay_initial_block_hold_;
+    }
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
+    void clearLinearReplayInitialState() {
+        linear_replay_initial_block_ids_.clear();
+        linear_replay_initial_block_hold_.reset();
+    }
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -140,6 +151,7 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    absl::Status prepareLinearReplayResources(bool prepare_tails = true);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -158,6 +170,9 @@ private:
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    std::shared_ptr<LinearReplayLease> linear_replay_lease_;
+    std::shared_ptr<LinearReplayBlockHold> linear_replay_initial_block_hold_;
+    std::vector<int32_t> linear_replay_initial_block_ids_;
 };
 
 }  // namespace rtp_llm

@@ -1,7 +1,7 @@
 """Launch one BF16-compute PD endpoint; FP8 operands are explicit options.
 
-Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
-a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
+Run as the workspace owner in a verified RDMA runtime container after a fresh
+same-cluster fleet selection. Build independently on each selected host.
 This launcher does not select hosts or certify runtime precision/Graph/RDMA.
 """
 
@@ -10,7 +10,6 @@ import csv
 import json
 import math
 import os
-import pwd
 import re
 import socket
 import subprocess
@@ -101,12 +100,23 @@ def launch_config(args):
         "LOAD_METHOD": "fastsafetensors",
         "LOAD_PYTHON_MODEL": "1",
         "ACT_TYPE": "BF16",
+        **(
+            {
+                "RTP_LLM_STREAM_ASYNC": "1",
+                "RTP_LLM_DROP_BROAD_SYNC": "1",
+                "RTP_LLM_DEVICE_INPUT": "1",
+                "RTP_LLM_MTP_ASYNC_PREPARE": "1",
+            }
+            if args.role == "DECODE"
+            else {"PREFILL_CHUNK_SIZE": "0"}
+        ),
         "SP_TYPE": "mtp",
         "SP_MODEL_TYPE": "kimi_k3_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
         "FT_DISABLE_CUSTOM_AR": "1",
         "GEN_NUM_PER_CIRCLE": "3",
+        "ENABLE_LINEAR_REPLAY": os.environ.get("ENABLE_LINEAR_REPLAY", "1"),
         "RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS": "65536",
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
@@ -155,6 +165,7 @@ def launch_config(args):
     }
     if orthogonal_smoke:
         environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
+        environment["RTP_LLM_SMOKE_EVIDENCE"] = "1"
         environment["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"] = "6.0"
         if args.role == "DECODE":
             # NCCL graph registration hangs on the SM103 DCP collective path
@@ -493,9 +504,9 @@ def main():
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return
-    if pwd.getpwuid(os.getuid()).pw_name != "luohaocheng.lhc":
+    if os.geteuid() == 0:
         raise ValueError(
-            "Must run as luohaocheng.lhc inside the verified runtime container"
+            "Run as the workspace owner inside the verified runtime container"
         )
     run = Path(args.run_dir).resolve()
     require_local(run.parent)

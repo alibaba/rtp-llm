@@ -69,6 +69,8 @@ public:
     // MTP rejection consumes filtered all_probs while an ORIGINAL response
     // needs the distribution before top-k/top-p filtering.
     bool capture_original_probs = false;
+    // False for a compact sampled-token output buffer with no input history.
+    bool token_ids_include_history = true;
 };
 
 struct SamplerOutput {

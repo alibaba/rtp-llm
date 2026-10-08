@@ -15,6 +15,33 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_replay_profile_opts_in_and_preserves_explicit_disable(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            target, draft = root / "target", root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            args = SimpleNamespace(
+                checkpoint=str(target),
+                draft_checkpoint=str(draft),
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="127.0.0.1",
+                role="DECODE",
+                server=__file__,
+                moe_strategy="mega_moe",
+                orthogonal_smoke=False,
+            )
+            with patch.dict(launch.os.environ):
+                launch.os.environ.pop("ENABLE_LINEAR_REPLAY", None)
+                environment, _ = launch.launch_config(args)
+                self.assertEqual(environment["ENABLE_LINEAR_REPLAY"], "1")
+
+                launch.os.environ["ENABLE_LINEAR_REPLAY"] = "0"
+                environment, _ = launch.launch_config(args)
+                self.assertEqual(environment["ENABLE_LINEAR_REPLAY"], "0")
+
     def test_each_pd_role_publishes_http_endpoints_for_frontend_routing(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
