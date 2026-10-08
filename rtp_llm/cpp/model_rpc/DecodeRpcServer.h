@@ -131,7 +131,9 @@ private:
                                                                size_t                  reuse_block_size,
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
+                                                               size_t                  base_seq_size_per_block,
+                                                               int                     decode_cp_rank = 0,
+                                                               int                     decode_cp_size = 1);
     static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
     static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
                                               size_t                  group_seq_size_per_block,
@@ -139,10 +141,12 @@ private:
     static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
                                        size_t               endpoint_key_index,
                                        size_t               block_offset_index,
-                                       size_t               cache_keys_per_physical_block);
+                                       size_t               cache_keys_per_physical_block,
+                                       bool                 sharded_full = false);
     static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                   const std::vector<size_t>& required_cache_key_counts,
-                                                  const std::vector<size_t>& transferred_cache_key_counts);
+                                                  const std::vector<size_t>& transferred_cache_key_counts,
+                                                  bool                       sparse_rank_keys = false);
     static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
     static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);

@@ -1,0 +1,165 @@
+--- a/csrc/smxx/fwd_kernel2.cuh
++++ b/csrc/smxx/fwd_kernel2.cuh
+@@ -64,7 +64,7 @@
+     ));
+ };
+
+-template <class Layouts, int InputStages, int OutputStages>
++template <class Layouts, int InputStages, int OutputStages, bool PersistentFP32 = false>
+ struct SharedStorageK2 {
+     using BF16 = cutlass::bfloat16_t;
+     using VOLayout = typename Layouts::VOLayout;
+@@ -75,6 +75,8 @@
+     using MMALayout = typename Layouts::MMALayout;
+
+     alignas(128) cute::ArrayEngine<BF16, cute::cosize_v<StateSmemLayout>> state_acc;
++    // Keep recurrence in FP32; BF16 state_acc/resident fragments are MMA operands only.
++    alignas(128) cute::ArrayEngine<float, PersistentFP32 ? cute::cosize_v<StateSmemLayout> : 1> persistent_state;
+
+     struct InputStorage {
+         alignas(128) cute::ArrayEngine<BF16, cute::cosize_v<VOLayout>> v;
+@@ -181,7 +183,7 @@
+     using TMAVOLayout = typename Layouts::TMAVOLayout;
+     using TMABetaSmemLayout = typename Layouts::TMABetaSmemLayout;
+     using TMAStateSmemLayout = typename Layouts::TMAStateSmemLayout;
+-    using SharedStorageT = SharedStorageK2<Layouts, InputStages, OutputStages>;
++    using SharedStorageT = SharedStorageK2<Layouts, InputStages, OutputStages, StateFP32>;
+
+     // --- shared memory
+     extern __shared__ __align__(128) unsigned char shared_mem[];
+@@ -322,6 +324,11 @@
+         __syncthreads();
+         cutlass::arch::fence_view_async_shared();
+
++        for (int i = threadIdx.x; i < cute::cosize_v<FP32StateSmemLayout>; i += NumThreads) {
++            shared_storage.persistent_state.begin()[i] =
++                reinterpret_cast<float*>(shared_storage.state_fp32_buf)[i];
++        }
++
+         // All threads: convert fp32 -> bf16 with layout transformation
+         smem_cvt_fp32_to_bf16<FP32StateSmemLayout, StateSmemLayout, VD, D, NumThreads>(
+             reinterpret_cast<float*>(shared_storage.state_fp32_buf),
+@@ -335,6 +342,7 @@
+             constexpr int kTotal = cute::cosize_v<StateSmemLayout>;
+             for (int i = threadIdx.x; i < kTotal; i += NumThreads) {
+                 buf[i] = BF16(0);
++                if constexpr (StateFP32) shared_storage.persistent_state.begin()[i] = 0.0f;
+             }
+         }
+         // generic writes -> visible to async proxy (TMA state store covers t_tiles==0)
+@@ -451,6 +459,11 @@
+             resident_thr_mma.make_fragment_C(resident_c_ref)));
+         constexpr int kResidentStateRowBlocks = D / 16;
+         ResidentStateFragment resident_state[kValueBlocksPerWarp][kResidentStateRowBlocks];
++        auto resident_c_coords = resident_thr_mma.partition_C(
++            make_identity_tensor(make_shape(Int<16>{}, Int<16>{})));
++        auto persistent_state = make_tensor(
++            make_smem_ptr(shared_storage.persistent_state.begin()),
++            typename Layouts::FP32StateSmemLayout{});
+         SeqlenT checkpoint_offset = 0;
+         if constexpr (HasCheckpoint) {
+             checkpoint_offset = checkpoint_offsets[seq_idx];
+@@ -741,8 +754,23 @@
+                         for (int d = 0; d < 2; ++d) {
+                             auto c0 = make_coord(make_coord(a, 0), 0, d);
+                             auto c1 = make_coord(make_coord(a, 1), 0, d);
+-                            state_fragment(c0) = BF16(bf16_to_f32(state_fragment(c0)) * g0 + u_acc[bi](c0));
+-                            state_fragment(c1) = BF16(bf16_to_f32(state_fragment(c1)) * g1 + u_acc[bi](c1));
++                            if constexpr (StateFP32) {
++                                auto xy0 = resident_c_coords(c0);
++                                auto xy1 = resident_c_coords(c1);
++                                const int v0 = (warp_id * kValueBlocksPerWarp + bi) * 16 + get<1>(xy0);
++                                const int k0 = m * 16 + get<0>(xy0);
++                                const int v1 = (warp_id * kValueBlocksPerWarp + bi) * 16 + get<1>(xy1);
++                                const int k1 = m * 16 + get<0>(xy1);
++                                float next0 = persistent_state(v0, k0) * g0 + u_acc[bi](c0);
++                                float next1 = persistent_state(v1, k1) * g1 + u_acc[bi](c1);
++                                persistent_state(v0, k0) = next0;
++                                persistent_state(v1, k1) = next1;
++                                state_fragment(c0) = BF16(next0);
++                                state_fragment(c1) = BF16(next1);
++                            } else {
++                                state_fragment(c0) = BF16(bf16_to_f32(state_fragment(c0)) * g0 + u_acc[bi](c0));
++                                state_fragment(c1) = BF16(bf16_to_f32(state_fragment(c1)) * g1 + u_acc[bi](c1));
++                            }
+                         }
+                     }
+
+@@ -779,8 +807,11 @@
+                          state_idx += kComputeThreads) {
+                         const int row = state_idx / D;
+                         const int col = state_idx % D;
+-                        checkpoint_state_ptr[checkpoint_base + state_idx] =
+-                            StateT(s_acc(row, col));
++                        if constexpr (StateFP32) {
++                            checkpoint_state_ptr[checkpoint_base + state_idx] = persistent_state(row, col);
++                        } else {
++                            checkpoint_state_ptr[checkpoint_base + state_idx] = StateT(s_acc(row, col));
++                        }
+                     }
+                     checkpoint_barrier.arrive_and_wait();
+                 }
+@@ -854,16 +885,16 @@
+     }
+
+     if constexpr (HasStateOut && StateFP32) {
+-        // FP32 state: all threads sync, convert bf16->fp32, then STORE warp does TMA
++        // Preserve the FP32 accumulator when exporting state; BF16 buffers are operands only.
+         using FP32StateSmemLayout = typename Layouts::FP32StateSmemLayout;
+         using TMAFP32StateSmemLayout = typename Layouts::TMAFP32StateSmemLayout;
+
+         __syncthreads();  // all warps sync — pipeline smem now free
+
+-        smem_cvt_bf16_to_fp32<StateSmemLayout, FP32StateSmemLayout, VD, D, NumThreads>(
+-            shared_storage.state_acc.begin(),
+-            reinterpret_cast<float*>(shared_storage.state_fp32_buf),
+-            threadIdx.x);
++        for (int i = threadIdx.x; i < cute::cosize_v<FP32StateSmemLayout>; i += NumThreads) {
++            reinterpret_cast<float*>(shared_storage.state_fp32_buf)[i] =
++                shared_storage.persistent_state.begin()[i];
++        }
+         cutlass::arch::fence_view_async_shared();  // generic-proxy writes -> visible to async proxy (TMA)
+         __syncthreads();  // conversion complete
+
+--- a/csrc/smxx/fwd_launch.cu
++++ b/csrc/smxx/fwd_launch.cu
+@@ -194,7 +194,7 @@
+                                K2VSplitTMAFP32StateSmemLayout{});
+
+             using SharedStorageK2T = SharedStorageK2<
+-                K2VSplitL, kInputStages, kOutputStages>;
++                K2VSplitL, kInputStages, kOutputStages, StateFP32>;
+             int smem_size_k2 = sizeof(SharedStorageK2T);
+             dim3 grid_k2(H * (D / VD), N);
+
+@@ -223,7 +223,7 @@
+             return;
+         }
+
+-        using SharedStorageK2T = SharedStorageK2<K2L, kInputStages, kOutputStages>;
++        using SharedStorageK2T = SharedStorageK2<K2L, kInputStages, kOutputStages, StateFP32>;
+         int smem_size_k2 = sizeof(SharedStorageK2T);
+
+         auto kernel2 = _flash_kda_fwd_recurrence<
+--- a/csrc/torch_api.cpp
++++ b/csrc/torch_api.cpp
+@@ -4,7 +4,11 @@
+
+ #include "flash_kda.h"
+
++// Capability is compiled with the corrected recurrence implementation.
++bool supports_fp32_recurrence() { return true; }
++
+ STABLE_TORCH_LIBRARY(flash_kda, m) {
++    m.def("supports_fp32_recurrence() -> bool");
+     m.def("get_workspace_size(int T_total, int H, int N=1) -> int");
+     m.def(
+         "fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
+@@ -20,6 +24,7 @@
+ }
+
+ STABLE_TORCH_LIBRARY_IMPL(flash_kda, CompositeExplicitAutograd, m) {
++    m.impl("supports_fp32_recurrence", TORCH_BOX(&supports_fp32_recurrence));
+     m.impl("get_workspace_size", TORCH_BOX(&get_workspace_size));
+ }
+

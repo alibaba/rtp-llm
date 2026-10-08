@@ -720,6 +720,12 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     return _group_map[group_key]
 
 
+def get_process_group(group: Group) -> torch.distributed.ProcessGroup:
+    """Return RTP's initialized process group for collective operators."""
+
+    return _get_group(group)
+
+
 # 需要注意：调用 send/recv 时如果某些 rank 没有操作，就没有对应的 ncclgroupstart/ncclgroupend
 # 这样直接使用 torch 的 send/recv 是错误的。
 def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
@@ -839,7 +845,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # all_gather_into_tensor writes every element before returning. Avoid
+    # initializing the output only to overwrite it during the collective.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,
@@ -851,6 +859,64 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
     # return torch.cat(tensor_list, dim=0)
+
+
+def all_to_all_single(
+    tensor: torch.Tensor, group: Group, *, output: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """Exchange equal contiguous dim-0 chunks across the process group."""
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "all_to_all_single requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    if output is None:
+        output = torch.empty_like(send)
+    elif (
+        output.shape != send.shape
+        or output.dtype != send.dtype
+        or output.device != send.device
+        or not output.is_contiguous()
+        or output.untyped_storage().data_ptr() == send.untyped_storage().data_ptr()
+    ):
+        raise ValueError("AllToAll output must match input and use separate contiguous storage")
+    torch.distributed.all_to_all_single(output, send, group=process_group)
+    return output
+
+
+def all_gather_into(
+    tensor: torch.Tensor,
+    output: torch.Tensor,
+    group: Group,
+) -> torch.Tensor:
+    """All-gather into a caller-owned contiguous output buffer."""
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    expected_shape = [world_size * tensor.shape[0]] + list(tensor.shape[1:])
+    if (
+        list(output.shape) != expected_shape
+        or output.dtype != tensor.dtype
+        or output.device != tensor.device
+        or not tensor.is_contiguous()
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "all_gather_into input/output mismatch: "
+            f"input={tuple(tensor.shape)}, output={tuple(output.shape)}, "
+            f"expected={tuple(expected_shape)}"
+        )
+    if world_size <= 1:
+        output.copy_(tensor)
+        return output
+    torch.distributed.all_gather_into_tensor(output, tensor, group=process_group)
+    return output
 
 
 def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
@@ -910,6 +976,9 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "all_gather_into",
+    "all_to_all_single",
+    "get_process_group",
     "reduce_scatter",
     "barrier",
 ]

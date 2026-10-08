@@ -114,6 +114,7 @@ def _register_builtin_lazy_renderers() -> None:
         ["kimi_k2", "kimi_linear"], "rtp_llm.openai.renderers.kimik2_renderer"
     )
     register_lazy_renderer(["kimi_k25"], "rtp_llm.openai.renderers.kimi_k25_renderer")
+    register_lazy_renderer(["kimi_k3"], "rtp_llm.openai.renderers.kimi_k3_renderer")
     register_lazy_renderer(["llava"], "rtp_llm.openai.renderers.llava_renderer")
     register_lazy_renderer(
         ["qwen3_coder_moe"],

@@ -935,6 +935,50 @@ TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
 }
 
+TEST(DecodeRpcServerTest, ShardedFullGroupMapsGlobalKeysToCompactDecodeSlots) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    constexpr int cp_rank = 3;
+    constexpr int cp_size = 8;
+    const auto producer_plan = buildCacheStorePlan(policy,
+                                                   /*total_logical_blocks=*/16,
+                                                   /*reuse_block_size=*/0,
+                                                   /*use_hybrid=*/true,
+                                                   cp_rank,
+                                                   cp_size);
+    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                                 /*local_block_num=*/2,
+                                                                 /*cache_key_count=*/16,
+                                                                 /*reuse_block_size=*/0,
+                                                                 /*use_hybrid=*/true,
+                                                                 kBaseSeqSizePerBlock,
+                                                                 kBaseSeqSizePerBlock,
+                                                                 cp_rank,
+                                                                 cp_size);
+    EXPECT_EQ(keyOffsetPairs(decode_plan), (KeyOffsetPairs{{3, 0}, {11, 1}}));
+    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, ShardedHandoffCountsOtherRanksKeysAsCovered) {
+    std::vector<size_t> required(16, 0);
+    std::vector<size_t> transferred(16, 0);
+    required[3] = required[11] = 2;
+    transferred[3] = transferred[11] = 2;
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, transferred, true), 16);
+    transferred[11] = 1;
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, transferred, true), 11);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {}, {}, true), 0);
+}
+
+TEST(DecodeRpcServerTest, ShardedFullGroupMarksGlobalKeySpan) {
+    std::vector<size_t> counts(16, 0);
+    DecodeRpcServer::markCacheKeyRange(
+        counts, /*endpoint_key_index=*/7, /*block_offset_index=*/1, /*key_span=*/2, /*sharded_full=*/true);
+    EXPECT_EQ(counts[6], 1);
+    EXPECT_EQ(counts[7], 1);
+    EXPECT_EQ(counts[2], 0);
+    EXPECT_EQ(counts[3], 0);
+}
+
 TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
     const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
 

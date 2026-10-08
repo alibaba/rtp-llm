@@ -153,7 +153,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "kimi_k3_mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -507,6 +507,11 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        if propose_model_config.reuse_single_mtp_module:
+            propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
+            propose_model_config.moe_prefill_max_tokens_per_rank = (
+                model_config.moe_prefill_max_tokens_per_rank
+            )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

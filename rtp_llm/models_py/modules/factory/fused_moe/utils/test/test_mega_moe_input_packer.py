@@ -92,6 +92,8 @@ class TestMegaMoEInputPacker(unittest.TestCase):
         executor.cfg = SimpleNamespace(n_activated_experts=8)
         with _env("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"):
             self.assertTrue(executor.supports_gate_pack)
+        with _env("MEGA_MOE_INPUT_PACKER_IMPL", "fast_finite"):
+            self.assertTrue(executor.supports_gate_pack)
         with _env("MEGA_MOE_INPUT_PACKER_IMPL", "legacy"):
             self.assertFalse(executor.supports_gate_pack)
 
@@ -171,17 +173,57 @@ class TestMegaMoEInputPacker(unittest.TestCase):
                 got = _make_buf(tokens, dim, topk, "cuda")
                 with _env("MOE_STRICT_FUSED", "0"):
                     TorchMegaMoEInputPacker().pack(x, weights, indices, ref, tokens)
-                FusedMegaMoEInputPacker().pack(x, weights, indices, got, tokens)
-                self.assertTrue(
-                    torch.equal(
-                        ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()
-                    )
-                )
-                self.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
-                self.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
-                self.assertTrue(
-                    torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu())
-                )
+                for impl in ("optimized", "fast_finite"):
+                    with self.subTest(impl=impl), _env("MEGA_MOE_INPUT_PACKER_IMPL", impl):
+                        FusedMegaMoEInputPacker().pack(x, weights, indices, got, tokens)
+                        self.assertTrue(
+                            torch.equal(
+                                ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()
+                            )
+                        )
+                        self.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
+                        self.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
+                        self.assertTrue(
+                            torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu())
+                        )
+
+    def test_int32_routes_match_int64_in_eager_and_graph(self):
+        torch.manual_seed(182)
+        for impl in ("legacy", "optimized", "fast_finite"):
+            for tokens in (1, 7, 629, 2049):
+                with self.subTest(impl=impl, tokens=tokens), _env(
+                    "MEGA_MOE_INPUT_PACKER_IMPL", impl
+                ):
+                    dim, topk = 3584, 16
+                    x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+                    weights = torch.rand(tokens, topk, device="cuda")
+                    ids = torch.randint(0, 896, (tokens, topk), device="cuda",
+                                        dtype=torch.int32)
+                    ref = _make_buf(tokens, dim, topk, "cuda")
+                    got = _make_buf(tokens, dim, topk, "cuda")
+                    packer = FusedMegaMoEInputPacker()
+                    def verify():
+                        packer.pack(x, weights, ids.long(), ref, tokens)
+                        for name in ("x", "x_sf", "topk_idx", "topk_weights"):
+                            a, b = getattr(ref, name), getattr(got, name)
+                            self.assertTrue(torch.equal(a.view(torch.uint8),
+                                                        b.view(torch.uint8)), name)
+                    packer.pack(x, weights, ids, got, tokens)
+                    verify()
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        packer.pack(x, weights, ids, got, tokens)
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        packer.pack(x, weights, ids, got, tokens)
+                    for step in range(3):
+                        ids.add_(1).remainder_(896)
+                        weights.mul_(0.75)
+                        x.mul_(0.5)
+                        graph.replay()
+                        verify()
 
     def test_zero_tokens_noop(self):
         buf = _make_buf(1, 128, 8, "cuda")

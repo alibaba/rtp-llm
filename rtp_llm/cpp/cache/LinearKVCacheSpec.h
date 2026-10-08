@@ -1,9 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -47,7 +50,22 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        const auto     seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        uint32_t       seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        if (desc.cp.has_value() && desc.cp->scale_seq_size.value_or(false)) {
+            const auto& parallelism = *ctx.parallelism_config;
+            const uint64_t local_shards = parallelism.prefill_cp_config.kv_cache_sharded && parallelism.tp_size > 1 ?
+                                              static_cast<uint64_t>(parallelism.tp_size) :
+                                              1;
+            const uint64_t upstream_shards = parallelism.role_type == RoleType::DECODE ?
+                                                 static_cast<uint64_t>(std::max<int64_t>(
+                                                     1, parallelism.prefill_cp_config.prefill_cp_size)) :
+                                                 local_shards;
+            const uint64_t checkpoint_shards = std::max(local_shards, upstream_shards);
+            RTP_LLM_CHECK_WITH_INFO(seq <= std::numeric_limits<uint32_t>::max() / checkpoint_shards,
+                                    "LINEAR KVCacheSpecDesc tag=%s CP checkpoint span overflows uint32",
+                                    desc.tag.c_str());
+            seq *= static_cast<uint32_t>(checkpoint_shards);
+        }
         const auto     kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         const auto     attn_tp     = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp          = static_cast<uint32_t>(attn_tp);
@@ -101,6 +119,22 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         RTP_LLM_CHECK_WITH_INFO(spec->conv_state_dtype != DataType::TYPE_INVALID,
                                 "LINEAR KVCacheSpecDesc tag=%s requires valid conv_state_dtype",
                                 desc.tag.c_str());
+        const size_t conv_item_bytes = getTypeSize(spec->conv_state_dtype);
+        const size_t q_bytes = static_cast<size_t>(linear.linear_key_head_dim) * local_k_heads * conv_item_bytes;
+        const size_t k_bytes = q_bytes;
+        const size_t v_bytes = static_cast<size_t>(linear.linear_value_head_dim) * local_v_heads * conv_item_bytes;
+        spec->transfer_segment_bytes_.push_back(spec->k_block_size_bytes());
+        for (int history = 0; history < linear.linear_conv_kernel_dim - 1; ++history) {
+            spec->transfer_segment_bytes_.push_back(q_bytes);
+            spec->transfer_segment_bytes_.push_back(k_bytes);
+            spec->transfer_segment_bytes_.push_back(v_bytes);
+        }
+        RTP_LLM_CHECK_WITH_INFO(q_bytes > 0 && v_bytes > 0
+                                    && spec->transfer_segment_bytes_.size() > 1
+                                    && std::accumulate(spec->transfer_segment_bytes_.begin(),
+                                                       spec->transfer_segment_bytes_.end(), size_t{0})
+                                           == spec->block_size_bytes(),
+                                "LINEAR KVCacheSpecDesc tag=%s has invalid transfer segments", desc.tag.c_str());
         return spec;
     }
 
@@ -128,6 +162,13 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return conv_elems * getTypeSize(conv_state_dtype);
     }
 
+    const std::vector<size_t>& transferSegmentBytes() const {
+        return transfer_segment_bytes_;
+    }
+
+    DataType ssmStateDType() const { return ssm_state_dtype; }
+    DataType convStateDType() const { return conv_state_dtype; }
+
     rtp_llm::DataType memoryLayoutDType() const override {
         return memory_layout_dtype_;
     }
@@ -149,6 +190,8 @@ private:
 
     size_t ssm_elems  = 0;
     size_t conv_elems = 0;
+
+    std::vector<size_t> transfer_segment_bytes_;
 
     DataType ssm_state_dtype  = DataType::TYPE_INVALID;
     DataType conv_state_dtype = DataType::TYPE_INVALID;

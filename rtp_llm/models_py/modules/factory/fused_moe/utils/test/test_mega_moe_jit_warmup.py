@@ -67,6 +67,9 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             max_tokens_per_rank=4096,
             moe_strategy="mega_moe",
         )
+        executor._max_tokens_per_rank = executor.cfg.max_tokens_per_rank
+        executor._activation = "swiglu"
+        executor._activation_kwargs = {}
         executor._input_packer = FusedMegaMoEInputPacker()
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)
@@ -270,6 +273,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
                 executor = executor_type.__new__(executor_type)
                 torch.nn.Module.__init__(executor)
                 executor.cfg = config
+                executor._max_tokens_per_rank = config.max_tokens_per_rank
                 with mock.patch(generator_path, return_value=[1]) as generator:
                     self.assertEqual(
                         executor._resolve_jit_warmup_token_counts(128), [1]

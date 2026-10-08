@@ -35,11 +35,15 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2
 tilelang==0.1.9
 
 # Self-built wheels against torch 2.11+cu130 with gcc-toolset-12.
-# DeepGEMM 122e18b provides opt_glm5 and isolated SM120 GEMMs.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_x86_64.whl
+# Use the same SiTU-capable DeepGEMM revision as CUDA13 ARM.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.6.1+d029add.cu132-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl
+
+# FP32-checkpoint KDA prefill uses the pinned cuLA wheel and its patched FLA runtime.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl
 
 # Unified rtp_kernel built from cuda_extension main@34e3b72a against
 # torch 2.11+cu130; includes the current fused RoPE position_ids API.

@@ -8,6 +8,12 @@ requirement([
     "numpy",
 ])
 
+cuda13_sm100_py_test(
+    name = "output_add_test",
+    srcs = ["output_add_test.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:moe", ":torch", ":triton"],
+)
+
 py_test(
     name = "test_remap_local_ids",
     srcs = ["test_remap_local_ids.py"],

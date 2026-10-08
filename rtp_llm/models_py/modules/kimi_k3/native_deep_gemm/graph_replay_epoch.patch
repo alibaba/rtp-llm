@@ -1,0 +1,30 @@
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe_situ.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe_situ.cuh
+@@ -412,10 +412,15 @@
+ 
+         // Write expert count
+         if (sm_idx == 0) {
+-            // Push this launch's grid index to every peer for tagging combine readiness; +1 differs from a zeroed workspace
+-            DG_STATIC_ASSERT(kNumRanks <= kNumDispatchThreads, "Insufficient threads for the grid index push");
++            // CUDA Graph replay reuses gridid. Use a persistent device epoch
++            // so stale peer readiness cannot satisfy a later replay.
++            const auto launch_epoch = *workspace.get_peer_grid_idx_ptr(sym_buffer.rank_idx) + 1;
++            // All dispatch threads read the previous epoch before the self
++            // slot is overwritten as part of the peer broadcast below.
++            ptx::sync_aligned(kNumDispatchThreads, kDispatchBarrierIdx);
++            DG_STATIC_ASSERT(kNumRanks <= kNumDispatchThreads, "Insufficient threads for the epoch push");
+             if (thread_idx < kNumRanks)
+-                *sym_buffer.map(workspace.get_peer_grid_idx_ptr(sym_buffer.rank_idx), thread_idx) = ptx::get_grid_idx() + 1;
++                *sym_buffer.map(workspace.get_peer_grid_idx_ptr(sym_buffer.rank_idx), thread_idx) = launch_epoch;
+             __syncwarp();
+ 
+             #pragma unroll
+@@ -1402,7 +1407,7 @@
+         ptx::sync_unaligned(kNumDispatchThreads + kNumEpilogueThreads, kDispatchWithEpilogueBarrierIdx);
+ 
+         // Iterate over all token chunks, 1 token 1 topk latency: ~3 us
+-        const auto grid_idx = ptx::get_grid_idx() + 1;
++        const auto grid_idx = *workspace.get_peer_grid_idx_ptr(sym_buffer.rank_idx);
+         for (uint32_t token_chunk_idx = epilogue_warp_idx * kNumSMs + sm_idx; token_chunk_idx < num_tokens * kNumChunks; token_chunk_idx += kNumSMs * kNumEpilogueWarps) {
+             const uint32_t token_idx = token_chunk_idx / kNumChunks;
+             const uint32_t chunk_idx = token_chunk_idx % kNumChunks;

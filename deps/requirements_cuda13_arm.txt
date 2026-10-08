@@ -10,9 +10,9 @@ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_pytho
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_jit_cache-0.6.9%2B8c4f4dcf.cu132-cp39-abi3-manylinux_2_28_aarch64.whl
 
-# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
-# against torch 2.11+cu130; SHAs encoded in filename).
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl
+# Use the same SiTU-capable DeepGEMM revision as CUDA13 x86.
+# Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.6.1+d029add.cu132-cp310-cp310-linux_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl

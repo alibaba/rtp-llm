@@ -48,6 +48,8 @@ def prepare_fp4_weight_scale_for_deepgemm(
     mn: int,
     k: int,
     num_groups: Optional[int] = None,
+    *,
+    backend=None,
 ) -> torch.Tensor:
     """Convert FP4 UE8M0 weight scale to DeepGEMM's SM100 layout.
 
@@ -61,14 +63,15 @@ def prepare_fp4_weight_scale_for_deepgemm(
     if scale.dtype != torch.float8_e8m0fnu:
         raise TypeError(f"expected FP4 UE8M0 scale, got {scale.dtype}")
 
-    import deep_gemm
+    if backend is None:
+        import deep_gemm as backend
 
     scale_fp32 = scale.float()
     if num_groups is None:
-        return deep_gemm.transform_sf_into_required_layout(
+        return backend.transform_sf_into_required_layout(
             scale_fp32, mn, k, (1, FP4_BLOCK)
         )
-    return deep_gemm.transform_sf_into_required_layout(
+    return backend.transform_sf_into_required_layout(
         scale_fp32, mn, k, (1, FP4_BLOCK), num_groups
     )
 

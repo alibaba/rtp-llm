@@ -114,7 +114,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
             num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_max_tokens_per_rank=self._max_tokens_per_rank,
             num_topk=cfg.n_activated_experts,
             hidden=D,
             intermediate_hidden=inter,
@@ -122,7 +122,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             activation="swiglu",
         )
         self._mega_y = _get_or_create_mega_se_output(
-            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
+            _mega_output_capacity(self._mega_buf, self._max_tokens_per_rank),
             D,
             torch.bfloat16,
             device,
@@ -201,7 +201,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
-        max_tokens_per_rank = int(cfg.max_tokens_per_rank)
+        max_tokens_per_rank = self._max_tokens_per_rank
         override = parse_mega_moe_se_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
@@ -241,7 +241,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             cfg.dim,
             cfg.moe_inter_dim,
             cfg.n_shared_experts,
-            int(cfg.max_tokens_per_rank),
+            self._max_tokens_per_rank,
             cfg.swiglu_limit,
             cfg.route_scale,
             num_sms,
@@ -260,7 +260,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 "shared_recipe=%s",
                 cfg.layer_id,
                 format_token_counts(token_counts),
-                cfg.max_tokens_per_rank,
+                self._max_tokens_per_rank,
                 cfg.ep_size,
                 cfg.n_routed_experts,
                 cfg.n_activated_experts,

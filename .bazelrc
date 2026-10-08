@@ -181,6 +181,9 @@ build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
 
+# Select the SM10x operator dependencies without changing the compiled targets.
+build:sm10x --define=using_cuda13_sm10x=true
+
 # Triton 3.6.0 (shipped with cuda13 lock) supports CUDA 13.x ptxas natively;
 # the ptxas wrapper that triton 3.4 needed is no longer required.  The wrapper
 # is still baked into the prod image — keep it there harmlessly, just don't

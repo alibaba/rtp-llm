@@ -7,6 +7,12 @@ _CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "situ_activation_adapter_test",
+    srcs = ["situ_activation_adapter_test.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+)
+
+py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],
     deps = [
@@ -56,6 +62,14 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "mega_moe_capacity_test",
+    srcs = ["mega_moe_capacity_test.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
     target_compatible_with = _CUDA13_ONLY,
 )
 
