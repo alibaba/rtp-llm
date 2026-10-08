@@ -655,12 +655,12 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
             }
         }
     }
-    if (config_.enable_v41_cache_dispatch && stream_groups.isFakeStream()
-        && stream_groups.totalDecodeBatchSize() == 0) {
+    if (config_.enable_v41_cache_dispatch && stream_groups.isFakeStream()) {
         // The scheduler placeholder keeps this rank in the EP round. It is not
         // a request: no token history, cache ownership or stream step is consumed.
         auto idle = allocateModelInputBuffers(StreamGroups{});
         idle.is_fake_stream = true;
+        idle.is_idle_decode = stream_groups.totalDecodeBatchSize() > 0;
         idle.lm_output_indexes = torch::empty({0}, idle.input_lengths.options());
         idle.v41_cache_spans = torch::empty({0, 6}, torch::TensorOptions(torch::kInt64));
         idle.kv_cache_block_id = torch::empty(

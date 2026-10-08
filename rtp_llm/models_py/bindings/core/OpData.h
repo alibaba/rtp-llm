@@ -125,6 +125,9 @@ struct GptModelInputs {
     torch::Tensor                                              v41_cache_spans;
     std::vector<std::shared_ptr<const KVCacheAllocationLease>> v41_cache_leases;
 
+    // Local TP1 V4.1 placeholder: an empty batch still has a collective phase.
+    bool is_idle_decode = false;
+
 public:
     std::string debugString(bool force = false) const;
 };

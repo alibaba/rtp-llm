@@ -459,10 +459,11 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
-    if (name == "idle_prefill") {
+    if (name == "idle_prefill" || name == "idle_decode") {
         auto scenario = makeMultiTagScenario();
         scenario.inputs = makeInputs({}, {}, {}, 0, {}, 2, 0, 4, 16);
         scenario.inputs.is_fake_stream = true;
+        scenario.inputs.is_idle_decode = name == "idle_decode";
         scenario.inputs.engram_token_windows = pinnedTensor({}, {0, 4});
         return scenario;
     }
@@ -543,7 +544,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     Weights weights;
     weights.layers.resize(1);
-    if (scenario_name == "idle_prefill") {
+    if (scenario_name == "idle_prefill" || scenario_name == "idle_decode") {
         auto head = std::make_shared<DenseWeights>();
         head->kernel = torch::ones({8, 1}, torch::TensorOptions(torch::kBFloat16).device(torch::kCUDA));
         weights.lm_head = std::move(head);

@@ -221,7 +221,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
     size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill       = !decode_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(!inputs.is_idle_decode || (inputs.is_fake_stream && batch_size == 0
+                                                     && inputs.combo_tokens.numel() == 0),
+                            "idle decode phase requires a zero-token fake batch");
+    py_attn_inputs.is_prefill       = !decode_batch_size && !inputs.is_idle_decode;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,

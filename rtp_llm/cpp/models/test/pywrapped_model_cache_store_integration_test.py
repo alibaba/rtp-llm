@@ -18,6 +18,7 @@ class CacheStoreForwardModel:
         self.forward_calls = 0
         self.micro_batch_calls = 0
         self.seen_input_lengths: list[list[int]] = []
+        self.seen_prefill: list[bool] = []
         self.seen_cache_store_inputs: list[dict] = []
 
     def initialize(self, resources) -> bool:
@@ -35,6 +36,7 @@ class CacheStoreForwardModel:
             else attention_inputs
         )
         self.seen_input_lengths.append(first_inputs.input_lengths.tolist())
+        self.seen_prefill.append(first_inputs.is_prefill)
 
         assert self.kv_cache is not None
         for layer_cache in self.kv_cache.get_layer_cache_groups(0):
@@ -98,15 +100,18 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_idle_prefill_runs_model_without_cache_store_or_lm_head(self) -> None:
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "idle_prefill")
+        for phase in ("prefill", "decode"):
+            with self.subTest(phase=phase):
+                model = CacheStoreForwardModel()
+                result = run_scenario(model, f"idle_{phase}")
 
-        self.assertEqual(model.forward_calls, 1)
-        self.assertEqual(model.seen_input_lengths, [[]])
-        self.assertEqual(model.seen_cache_store_inputs, [])
-        self.assertEqual(result["records"], [])
-        self.assertFalse(result["has_logits"])
-        self.assertEqual(result["hidden_rows"], 0)
+                self.assertEqual(model.forward_calls, 1)
+                self.assertEqual(model.seen_input_lengths, [[]])
+                self.assertEqual(model.seen_prefill, [phase == "prefill"])
+                self.assertEqual(model.seen_cache_store_inputs, [])
+                self.assertEqual(result["records"], [])
+                self.assertFalse(result["has_logits"])
+                self.assertEqual(result["hidden_rows"], 0)
 
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
