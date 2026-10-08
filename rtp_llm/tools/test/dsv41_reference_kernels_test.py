@@ -8,6 +8,8 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.tools.dsv41_reference_probe import construct_meta_reference
+
 
 @unittest.skipUnless(
     os.environ.get("DSV41_TEST_CHECKPOINT"), "needs official NAS source"
@@ -27,6 +29,58 @@ class OfficialKernelsTest(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(1941)
+
+    @torch.inference_mode()
+    def test_official_model_after_meta_admission(self):
+        module = importlib.import_module("model")
+        args = module.ModelArgs(
+            max_batch_size=1,
+            max_seq_len=256,
+            vocab_size=128,
+            dim=512,
+            moe_inter_dim=256,
+            n_layers=3,
+            n_mtp_layers=0,
+            n_heads=8,
+            n_routed_experts=4,
+            n_activated_experts=2,
+            head_dim=512,
+            rope_head_dim=64,
+            o_groups=1,
+            compress_ratios=(0, 2, 1),
+            kv_source_layers=(1, 2),
+            index_source_layers=(1, 2),
+            index_n_heads=4,
+            index_head_dim=128,
+            temperature=0,
+        )
+        admitted = construct_meta_reference(module, args, None, 0, 1)
+        self.assertTrue(all(value.is_meta for value in admitted.buffers()))
+        del admitted
+        with torch.device("cuda"):
+            model = module.Transformer(args)
+            for value in (*model.parameters(), *model.buffers()):
+                self.assertTrue(value.is_cuda)
+            for name, value in model.named_parameters():
+                if value.dtype == torch.float4_e2m1fn_x2:
+                    value.view(torch.uint8).random_(256)
+                elif name.endswith("scale") or "norm.weight" in name:
+                    value.copy_(torch.ones(value.shape, dtype=torch.float32))
+                else:
+                    value.copy_(torch.randn(value.shape, dtype=torch.float32) * 0.02)
+            first = None
+            for _ in range(2):
+                tokens = torch.tensor([[1, 2, 3, 4, 5]])
+                start, generated = 0, []
+                for _ in range(3):
+                    output, logits, _ = model(tokens, start)
+                    self.assertTrue(bool(torch.isfinite(logits).all()))
+                    generated.append(int(output.reshape(-1)[-1]))
+                    start += tokens.shape[1]
+                    tokens = torch.tensor([[generated[-1]]])
+                if first is None:
+                    first = generated
+                self.assertEqual(generated, first)
 
     def test_fp8_activation(self):
         x = torch.randn(7, 512, device="cuda")

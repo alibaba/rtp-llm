@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.tools.dsv41_reference_probe import (
     checkpoint_headers,
+    construct_meta_reference,
     copy_parameter,
     load_checkpoint,
     shard_spec,
@@ -20,6 +22,34 @@ from rtp_llm.tools.dsv41_reference_probe import (
 
 
 class ReferenceLoaderTest(unittest.TestCase):
+    def test_meta_audit_does_not_reuse_or_pollute_device_cache(self):
+        @lru_cache(2)
+        def frequencies(size):
+            return torch.arange(size)
+
+        module = SimpleNamespace(
+            precompute_freqs_cis=frequencies, dist=torch.distributed
+        )
+
+        class Reference(torch.nn.Module):
+            def __init__(self, size, tokenizer):
+                super().__init__()
+                self.register_buffer("freqs_cis", module.precompute_freqs_cis(size))
+
+        module.Transformer = Reference
+        for populated in (False, True):
+            frequencies.cache_clear()
+            original = frequencies(4) if populated else None
+            before = frequencies.cache_info()
+            reference = construct_meta_reference(module, 4, None, 0, 8)
+            self.assertEqual(reference.freqs_cis.device.type, "meta")
+            self.assertEqual(frequencies.cache_info(), before)
+            self.assertIs(module.precompute_freqs_cis, frequencies)
+            actual = Reference(4, None).freqs_cis
+            self.assertEqual(actual.device.type, "cpu")
+            if populated:
+                self.assertIs(actual, original)
+
     def copy(self, tensor, name, spec, dtype=None, scale=None):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "weights.safetensors"
@@ -62,6 +92,23 @@ class ReferenceLoaderTest(unittest.TestCase):
                 is not None
             ]
             self.assertEqual(owners, [expert // 48])
+
+    def test_cpu_slices_ignore_ambient_default_device(self):
+        value = torch.arange(64, dtype=torch.bfloat16).reshape(8, 8)
+        output = torch.empty((2, 8), dtype=torch.bfloat16)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.safetensors"
+            save_file({"weight": value}, path)
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                source = handle.get_slice("weight")
+                with torch.device("meta"):
+                    copy_parameter(
+                        output,
+                        source,
+                        ("weight", (2, 8), 0, 2, 4),
+                        chunk_bytes=16,
+                    )
+        torch.testing.assert_close(output, value[2:4], rtol=0, atol=0)
 
     def test_row_and_column_shards(self):
         tensor = torch.arange(64, dtype=torch.bfloat16).reshape(8, 8)

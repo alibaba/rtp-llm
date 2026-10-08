@@ -14,6 +14,7 @@ import sys
 import time
 from collections import Counter
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 from unittest.mock import patch
 
@@ -107,16 +108,29 @@ def model_args(module, root, max_seq_len):
     return module.ModelArgs(**config)
 
 
-def audit(module, converter, root, args, tokenizer, rank, world):
+def construct_meta_reference(module, args, tokenizer, rank, world):
     import torch
 
+    # The official RoPE cache key has no device. Meta admission must neither
+    # consume CPU/CUDA entries nor leave meta entries for the real constructor.
     with (
+        patch.object(
+            module,
+            "precompute_freqs_cis",
+            lru_cache(2)(module.precompute_freqs_cis.__wrapped__),
+        ),
         patch.object(module.dist, "is_initialized", return_value=True),
         patch.object(module.dist, "get_world_size", return_value=world),
         patch.object(module.dist, "get_rank", return_value=rank),
         torch.device("meta"),
     ):
-        reference = module.Transformer(args, tokenizer)
+        return module.Transformer(args, tokenizer)
+
+
+def audit(module, converter, root, args, tokenizer, rank, world):
+    import torch
+
+    reference = construct_meta_reference(module, args, tokenizer, rank, world)
     expected = dict(reference.named_parameters())
     index, headers, identities = checkpoint_headers(root)
     dtypes = {
@@ -222,7 +236,9 @@ def copy_parameter(target, source, spec, *, scale=None, chunk_bytes=64 * 1024**2
         if (out_block, in_block) not in ((32, 32), (128, 128)):
             raise ValueError("Unexpected wo_a quantization geometry")
         chunk_rows = max(out_block, chunk_rows // out_block * out_block)
-    with torch.no_grad():
+    # safetensors' frombuffer follows the ambient Torch device even when its
+    # handle was opened on CPU. Keep materialization on CPU before slicing.
+    with torch.no_grad(), torch.device("cpu"):
         for offset in range(0, rows, chunk_rows):
             count = min(chunk_rows, rows - offset)
             begin = offset + (start if axis == 0 else 0)
@@ -291,11 +307,23 @@ def load_checkpoint(reference, root, admitted):
 
 
 def sample(module, root, args, tokenizer, admitted, prompts, new_tokens):
+    """Run inside a CUDA default-device scope, as required by the official code."""
     import torch
     import torch.distributed as dist
 
     with torch.device("cuda"):
         reference = module.Transformer(args, tokenizer)
+    device = torch.device("cuda", torch.cuda.current_device())
+    misplaced = [
+        name
+        for name, value in (
+            *reference.named_parameters(),
+            *reference.named_buffers(),
+        )
+        if value.device != device
+    ]
+    if misplaced:
+        raise RuntimeError(f"Reference tensors are not on {device}: {misplaced}")
     load_checkpoint(reference, root, admitted)
     reference.eval()
     torch.cuda.synchronize()
@@ -413,15 +441,16 @@ def main():
                     f"Reference needs {required} free bytes; available {free}"
                 )
             dist.barrier()
-            report["outputs"] = sample(
-                module,
-                root,
-                args,
-                tokenizer,
-                admitted,
-                cli.prompt or ["The capital of France is", "2 + 2 ="],
-                cli.new_tokens,
-            )
+            with torch.device("cuda"):
+                report["outputs"] = sample(
+                    module,
+                    root,
+                    args,
+                    tokenizer,
+                    admitted,
+                    cli.prompt or ["The capital of France is", "2 + 2 ="],
+                    cli.new_tokens,
+                )
         if cli.report and rank == 0:
             cli.report.write_text(json.dumps(report, indent=2) + "\n")
     finally:
