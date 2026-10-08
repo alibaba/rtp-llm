@@ -480,6 +480,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
+    const bool has_fixed_width_dummy_rows = is_target_verify_ || usesFixedCapacityMtpDraftPrefillCudaGraph();
 
     // These values are ordinary host scalars, not captured tensor storage. A
     // replay can keep the same graph shape while prefix reuse changes the total
@@ -616,9 +617,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               0);
             }
         }
-        if (is_target_verify_ && has_padded_rows) {
+        if (has_fixed_width_dummy_rows && has_padded_rows) {
             // Multi-token graphs capture a fixed number of Q/K/V rows per
-            // batch. Their replay metadata must describe the same geometry:
+            // batch. Target verify and fixed-capacity MTP draft prefill both
+            // need replay metadata that describes the same geometry:
             // KVCacheWriteOp consumes the static K/V tensor size and cannot
             // represent a zero-token tail. Execute rounded rows as deterministic
             // dummy requests against reserved cache block 0; their outputs are
@@ -1007,7 +1009,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (has_padded_rows && has_fixed_width_dummy_rows) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1400,6 +1402,32 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
     const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    // Request and cache-table row counts can differ after model-specific
+    // padding. The graph key is chosen from input_lengths, while preparation
+    // copies the complete cache tables. An oversized table must use eager
+    // execution instead of reaching blockTableCopyGeometry's assertion.
+    const auto table_rows_fit = [](const torch::Tensor& source, const torch::Tensor& destination) {
+        if (!source.defined() || source.numel() == 0) {
+            return true;
+        }
+        return destination.defined() && source.dim() == destination.dim()
+               && (source.dim() != 2 || source.size(0) <= destination.size(0));
+    };
+    const auto cache_tables_fit = [&](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
+        return table_rows_fit(source.kv_cache_kernel_block_id, destination.kv_cache_kernel_block_id)
+               && table_rows_fit(source.kv_cache_kernel_block_id_device,
+                                 destination.kv_cache_kernel_block_id_device);
+    };
+    if (!cache_tables_fit(inputs.attention_inputs, captured_inputs.attention_inputs)) {
+        return false;
+    }
+    for (const auto& [tag, source] : inputs.attention_inputs_by_tag) {
+        const auto destination = captured_inputs.attention_inputs_by_tag.find(tag);
+        if (destination == captured_inputs.attention_inputs_by_tag.end()
+            || !cache_tables_fit(source, destination->second)) {
+            return false;
+        }
+    }
     if (isGenerationPrefillCudaGraph()) {
         const auto table_fits = [](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
             return source.kv_cache_kernel_block_id.defined() && destination.kv_cache_kernel_block_id.defined()

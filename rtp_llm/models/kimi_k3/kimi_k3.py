@@ -13,6 +13,7 @@ from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight, KimiK3Weight
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.ops import (
+    CacheCpPolicyDesc,
     DataType,
     HybridAttentionType,
     KvCacheDataType,
@@ -101,18 +102,22 @@ class KimiK3(BaseModel):
             )
         # ModelFactory runs this hook after init_precision_config(), so the
         # hybrid cache descriptors first exist here in the production path.
-        if model_config.attn_config.mla_fp8_compute:
-            cache_descs = model_config.kv_cache_spec_descs
-            for layer_descs in cache_descs:
-                for desc in layer_descs:
-                    if desc.cache_type == KVCacheSpecType.MLA:
-                        desc.dtype = DataType.TYPE_FP8_E4M3
-                        desc.mla_fp8_e4m3 = True
-                    elif desc.cache_type == KVCacheSpecType.LINEAR:
-                        # The target's MLA cache is FP8, but its recurrent
-                        # state and convolution cache keep their BF16 layout.
+        cache_descs = model_config.kv_cache_spec_descs
+        for layer_descs in cache_descs:
+            for desc in layer_descs:
+                if desc.cache_type == KVCacheSpecType.LINEAR:
+                    # One KDA checkpoint spans a complete PageRR stripe.
+                    # Without PageRR, the ordinary page span is unchanged.
+                    cp = desc.cp or CacheCpPolicyDesc()
+                    cp.scale_seq_size = True
+                    desc.cp = cp
+                    if model_config.attn_config.mla_fp8_compute:
+                        # FP8 MLA does not change recurrent or conv storage.
                         desc.dtype = DataType.TYPE_BF16
-            model_config.kv_cache_spec_descs = cache_descs
+                elif desc.cache_type == KVCacheSpecType.MLA and model_config.attn_config.mla_fp8_compute:
+                    desc.dtype = DataType.TYPE_FP8_E4M3
+                    desc.mla_fp8_e4m3 = True
+        model_config.kv_cache_spec_descs = cache_descs
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> KimiK3ModelConfig:
