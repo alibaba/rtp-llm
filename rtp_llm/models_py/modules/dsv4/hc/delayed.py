@@ -116,7 +116,9 @@ class DelayedHCUnit(HCUnitBase):
 
         if self._previous_ref is None:
             # Identity readout at entry selects lane zero, not the new mix.
-            y = x[..., 0, :].contiguous()
+            # A single row is already contiguous; copy so in-place norm in
+            # Block's fast path cannot overwrite the residual lane.
+            y = x[..., 0, :].clone(memory_format=torch.contiguous_format)
         else:
             previous = self._previous_ref()
             if previous is None or previous.pre_mix_out is None:

@@ -995,6 +995,13 @@ class AttentionV41FP8(AttentionFP8):
         self._prefill_output_all_reduce(out)
         return out
 
+    def _set_prefill_meta_shared(self, meta):
+        super()._set_prefill_meta_shared(meta)
+        if meta is None:
+            # The production prefill finally block must also release the
+            # V4.1 shared workspace/views, including after a layer failure.
+            self._begin_forward()
+
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
             self._shared_attention["global"] = {}

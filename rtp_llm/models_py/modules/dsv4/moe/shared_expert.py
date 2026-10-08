@@ -525,6 +525,27 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
         return out
 
 
+class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
+    """Native group-32 GEMMs through W13SharedExpert's MXFP8 linears.
+
+    This is a distinct supported quantization recipe. It does not relax the
+    strict-fused policy on the routed FP4 experts or select the block-128
+    shared-expert workspace. The BF16 return skips the standalone FP32 cast:
+    the FP32 accumulate contract is preserved by the consumer
+    (``fused_moe_epilogue`` loads and adds in FP32), matching the old
+    ``.float()`` value bit-for-bit.
+    """
+
+    name = "mxfp8"
+
+    def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
+        if x.shape[0] == 0:
+            self._out = torch.empty_like(x, dtype=torch.float32)
+            return
+        with record_function_range("dsv41.moe.shared_expert"):
+            self._out = shared_experts(x)
+
+
 class OverlapSharedExpertExecutor(SharedExpertExecutor):
     """Run shared expert on an aux stream while routed MoE runs on current stream."""
 
@@ -625,7 +646,10 @@ def get_shared_expert_executor(
     dim: int | None = None,
     inter_dim: int | None = None,
     swiglu_limit: float = 0.0,
+    native_mxfp8: bool = False,
 ) -> SharedExpertExecutor:
+    if native_mxfp8:
+        return MXFP8SharedExpertExecutor()
     mode = _mode()
     fast_path = FusedSharedExpertExecutor(
         max_tokens_per_rank=max_tokens_per_rank,
