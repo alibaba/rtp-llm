@@ -40,7 +40,7 @@ def fp8(n, k, block=32):
     return weight, scales
 
 
-def fixture():
+def fixture(experts=4):
     args = V4Args(
         vocab_size=128,
         dim=512,
@@ -53,7 +53,7 @@ def fixture():
         compress_ratios=[0, 0, 2, 2, 1, 1],
         index_n_heads=32,
         moe_inter_dim=512,
-        n_routed_experts=4,
+        n_routed_experts=experts,
         n_activated_experts=2,
         n_hash_layers=0,
         norm_eps=1e-20,
@@ -89,16 +89,16 @@ def fixture():
             w[getattr(W, f"v4_hc_{part}_scale")] = torch.tensor(
                 [0.5, 0.6, 0.7], device="cuda"
             )
-        w[W.v4_router_w] = (torch.randn(4, 512, device="cuda") * 0.025).bfloat16()
-        w[W.v4_router_bias] = torch.randn(4, device="cuda") * 0.1
+        w[W.v4_router_w] = (torch.randn(experts, 512, device="cuda") * 0.025).bfloat16()
+        w[W.v4_router_bias] = torch.randn(experts, device="cuda") * 0.1
         w[W.v4_shared_w13_w], w[W.v4_shared_w13_s] = fp8(1024, 512)
         w[W.v4_shared_w2_w], w[W.v4_shared_w2_s] = fp8(512, 512)
         for name in ("w1", "w2", "w3"):
             w[getattr(W, f"v4_routed_{name}_w")] = torch.randint(
-                0, 256, (4, 512, 256), device="cuda", dtype=torch.uint8
+                0, 256, (experts, 512, 256), device="cuda", dtype=torch.uint8
             )
             w[getattr(W, f"v4_routed_{name}_s")] = torch.full(
-                (4, 512, 16), 121, device="cuda", dtype=torch.uint8
+                (experts, 512, 16), 121, device="cuda", dtype=torch.uint8
             )
         if layer_id in (2, 4):
             w[W.v4_compressor_wkv] = (

@@ -1,7 +1,8 @@
 """Upstream V4.1 text worker on the base paged-cache runtime.
 
 Adapted from e4a9162f6f. Serving registration remains gated while this worker
-is qualified incrementally; only eager short PP1/CP1/TP1/EP1 prefill is admitted.
+is qualified incrementally; eager short PP1/CP1/TP1 prefill admits DP1/EP1
+or a single eight-rank DP8/EP8 NCCL group.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import json
 import os
 import shutil
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,10 +21,14 @@ import torch
 
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules.dsv4.engram import Engram, EngramLayout, NgramHashState
+from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     clear_prefill_meta_shared_fp8,
 )
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    build_block_tables_batched,
+    primary_attention_inputs,
+)
 from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import _locked, _PinnedSharedTable
 from rtp_llm.models_py.modules.dsv4.v41_engram_weights import (
@@ -74,6 +80,70 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._worker_pid = os.getpid()
         self._worker_state = "new"
         self._worker_stream = None
+        self._dp_group = None
+
+    def _configure_dp_group(self):
+        args = self._v4_args
+        if (args.dp_size, args.ep_size, args.world_size) == (1, 1, 1):
+            return
+        if (args.dp_size, args.ep_size, args.world_size) != (8, 8, 8):
+            raise NotImplementedError(
+                "V4.1 worker requires PP1/CP1/TP1 with DP1/EP1 or DP8/EP8"
+            )
+        dist = torch.distributed
+        if (
+            not dist.is_initialized()
+            or dist.get_backend() != "nccl"
+            or dist.get_world_size() != 8
+            or not args.dp_rank == args.ep_rank == args.world_rank == dist.get_rank()
+        ):
+            raise ValueError("V4.1 DP8 worker requires its exact NCCL WORLD roster")
+        if self._dp_group is not None and self._dp_group is not dist.group.WORLD:
+            raise RuntimeError("V4.1 DP group changed; replace the worker")
+        self._dp_group = dist.group.WORLD
+
+    def _agree_dp(self, error, phase, device):
+        if self._dp_group is not None:
+            # Bind the whole model schedule before any rank enters layer
+            # collectives. Request lengths/IDs remain rank-local.
+            config = {
+                key: value
+                for key, value in asdict(self._v4_args).items()
+                if not key.endswith("_rank")
+            }
+            options = {
+                key: os.environ.get(key)
+                for key in (
+                    "DSV4_MOE_CHUNK_PREFILL",
+                    "DSV4_CHUNK_TOKENS",
+                    "DSV4_MOE_CHUNK_TOKENS",
+                    "DSV4_MOE_EXTENT_COUNT_FUSE",
+                    "DSV4_MOE_FORWARD_COUNT_PLAN",
+                )
+            }
+            digest = hashlib.sha256(
+                json.dumps((phase, config, options), sort_keys=True).encode()
+            ).digest()
+            signature = torch.tensor(
+                [int(error is None), *digest], dtype=torch.uint8, device=device
+            ).view(1, 33)
+            peers = torch.empty((8, 33), dtype=torch.uint8, device=device)
+            try:
+                torch.distributed.all_gather_into_tensor(
+                    peers, signature, group=self._dp_group
+                )
+                peers = peers.cpu()
+            except BaseException:
+                self._worker_state = "failed"
+                raise
+            if not bool((peers[:, 0] == 1).all()) or not bool(
+                (peers[:, 1:] == peers[0, 1:]).all()
+            ):
+                if error is not None:
+                    raise error
+                raise RuntimeError("V4.1 DP peer rejected request or model schedule")
+        if error is not None:
+            raise error
 
     def _check_worker(self):
         if os.getpid() != self._worker_pid:
@@ -128,10 +198,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
             if (
                 args.pp_size != 1
                 or args.tp_size != 1
-                or args.ep_size != 1
-                or args.dp_size != 1
-                or args.world_size != 1
                 or self.parallelism_config.local_cp_enabled()
+                or self.parallelism_config.enable_sp
+                or self.parallelism_config.ffn_tp_size != 1
+                or self.parallelism_config.ffn_sp_size != 1
+                or self.parallelism_config.use_ub_comm
                 or not args.fp8_kv_cache
                 or args.commit_only
                 or init_resource.is_speculative
@@ -139,8 +210,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 or self._gen_num_per_cycle != 1
             ):
                 raise NotImplementedError(
-                    "V4.1 worker currently requires eager PP1/CP1/TP1/DP1/EP1 prefill"
+                    "V4.1 worker currently requires eager PP1/CP1/TP1 prefill"
                 )
+            self._configure_dp_group()
             if self._materialized:
                 return super()._initialize_impl(init_resource)
             device = next(iter(self.weight.global_weights.values())).device
@@ -151,10 +223,20 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 raise NotImplementedError(
                     "V4.1 worker currently requires SM120 weights"
                 )
-            self._engram_sources = self._plan_engram()
-            self._check_engram_capacity()
+            error = None
             try:
-                result = super()._initialize_impl(init_resource)
+                self._engram_sources = self._plan_engram()
+                self._check_engram_capacity()
+            except Exception as exc:
+                error = exc
+            self._agree_dp(error, "initialize-preflight", device)
+            try:
+                error = None
+                try:
+                    result = super()._initialize_impl(init_resource)
+                except Exception as exc:
+                    error = exc
+                self._agree_dp(error, "initialize-ready", device)
             except BaseException:
                 self._worker_state = "failed"
                 self.close()
@@ -244,17 +326,22 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     def _validate_prefill(self, inputs, attn):
         lengths, prefixes = attn.input_lengths, attn.prefix_lengths
+        idle = self._dp_group is not None and inputs.input_ids.numel() == 0
         if (
             lengths is None
             or prefixes is None
             or lengths.ndim != 1
             or prefixes.shape != lengths.shape
-            or not 0 < lengths.numel() <= self._max_generate_batch_size
+            or not (0 if idle else 1)
+            <= lengths.numel()
+            <= self._max_generate_batch_size
             or lengths.dtype not in (torch.int32, torch.int64)
             or prefixes.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("V4.1 prefill requires matching integer request lengths")
         lengths, prefixes = lengths.cpu(), prefixes.cpu()
+        if idle and lengths.numel():
+            raise ValueError("V4.1 idle DP rank must have no requests")
         if (
             bool((lengths <= 0).any())
             or bool((prefixes < 0).any())
@@ -294,6 +381,71 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise NotImplementedError("V4.1 worker CUDA graphs are not integrated")
         return None
 
+    def _validate_forward(self, inputs, fmha_impl):
+        if fmha_impl is not None or torch.cuda.is_current_stream_capturing():
+            raise NotImplementedError("V4.1 worker requires eager prefill")
+        if torch.cuda.current_stream(self._weight_device()) != self._worker_stream:
+            raise NotImplementedError(
+                "V4.1 worker requires its initialization CUDA stream"
+            )
+        mm = inputs.multimodal_inputs
+        if (
+            mm.multimodal_features
+            or mm.mm_extra_input
+            or (mm.mm_features_locs is not None and mm.mm_features_locs.numel())
+        ):
+            raise NotImplementedError("V4.1 worker image inputs are not integrated")
+        if bool(
+            (
+                inputs.input_ids
+                == self._v4_args.v41_config.get("image_token_id", 129264)
+            ).any()
+        ):
+            raise NotImplementedError("V4.1 worker image tokens are not integrated")
+        if self.kv_cache is None:
+            return
+        ids = inputs.input_ids
+        if (
+            ids.ndim != 1
+            or ids.device != self._weight_device()
+            or (not ids.numel() and self._dp_group is None)
+            or ids.dtype not in (torch.int32, torch.int64)
+            or not ids.is_contiguous()
+            or bool(((ids < 0) | (ids >= self._v4_args.vocab_size)).any())
+        ):
+            raise ValueError("V4.1 prefill requires valid token IDs (nonempty for EP1)")
+        attn = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
+        if (
+            attn is None
+            or not attn.is_prefill
+            or attn.is_cuda_graph
+            or getattr(attn, "is_target_verify", False)
+        ):
+            raise NotImplementedError("V4.1 worker decode/verify is not integrated")
+        self._validate_prefill(inputs, attn)
+        if ids.numel():
+            if self._dp_group is not None:
+                tables = build_block_tables_batched(
+                    self.kv_cache, inputs.attention_inputs
+                )
+                lengths = attn.input_lengths.to(ids.device)
+                prefixes = attn.prefix_lengths.to(ids.device)
+                # Use the owner's existing read-only page checks for every
+                # layer before peers enter the first expert collective.
+                for layer in self.v4.layers:
+                    with bind_attn_cache(
+                        layer.attn, self.kv_cache, tables, cp_ctx=None
+                    ):
+                        layer.attn._require_qualified_prefill(
+                            lengths, prefixes, cp_on=False
+                        )
+            self._prepare_engram(inputs)
+        elif (
+            inputs.engram_token_windows is not None
+            and inputs.engram_token_windows.numel()
+        ):
+            raise ValueError("V4.1 idle DP rank cannot carry token history")
+
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
         with self._worker_lock:
@@ -301,60 +453,23 @@ class DeepSeekV41Model(DeepSeekV4Model):
             if self._worker_state != "ready":
                 raise RuntimeError("V4.1 worker is not initialized")
             try:
-                if fmha_impl is not None or torch.cuda.is_current_stream_capturing():
-                    raise NotImplementedError("V4.1 worker requires eager prefill")
-                if (
-                    torch.cuda.current_stream(self._weight_device())
-                    != self._worker_stream
-                ):
-                    raise NotImplementedError(
-                        "V4.1 worker requires its initialization CUDA stream"
+                error = None
+                try:
+                    self._validate_forward(inputs, fmha_impl)
+                except Exception as exc:
+                    error = exc
+                with torch.cuda.stream(self._worker_stream):
+                    self._agree_dp(
+                        error,
+                        ("forward", self.kv_cache is not None),
+                        self._weight_device(),
                     )
-                mm = inputs.multimodal_inputs
-                if (
-                    mm.multimodal_features
-                    or mm.mm_extra_input
-                    or (mm.mm_features_locs is not None and mm.mm_features_locs.numel())
-                ):
-                    raise NotImplementedError(
-                        "V4.1 worker image inputs are not integrated"
-                    )
-                if bool(
-                    (
-                        inputs.input_ids
-                        == self._v4_args.v41_config.get("image_token_id", 129264)
-                    ).any()
-                ):
-                    raise NotImplementedError(
-                        "V4.1 worker image tokens are not integrated"
-                    )
-                if self.kv_cache is not None:
-                    ids = inputs.input_ids
-                    if (
-                        ids.ndim != 1
-                        or ids.device != self._weight_device()
-                        or not ids.numel()
-                        or ids.dtype not in (torch.int32, torch.int64)
-                        or bool(((ids < 0) | (ids >= self._v4_args.vocab_size)).any())
-                    ):
-                        raise ValueError(
-                            "V4.1 prefill requires nonempty valid token IDs"
-                        )
-                    attn = primary_attention_inputs(
-                        inputs.attention_inputs, self.kv_cache
-                    )
-                    if (
-                        attn is None
-                        or not attn.is_prefill
-                        or attn.is_cuda_graph
-                        or getattr(attn, "is_target_verify", False)
-                    ):
-                        raise NotImplementedError(
-                            "V4.1 worker decode/verify is not integrated"
-                        )
-                    self._validate_prefill(inputs, attn)
-                    self._prepare_engram(inputs)
-                return super().forward(inputs, fmha_impl)
+                try:
+                    return super().forward(inputs, fmha_impl)
+                except BaseException:
+                    if self._dp_group is not None:
+                        self._worker_state = "failed"
+                    raise
             finally:
                 self._clear_forward_state()
 
