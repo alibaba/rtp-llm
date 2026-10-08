@@ -56,6 +56,39 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_loader_worker_sm120",
+    srcs = [
+        "test_v41_loader_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_checkpoint_engine_sm120",
+    srcs = [
+        "test_v41_checkpoint_engine_sm120.py",
+        "test_v41_loader_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
     name = "test_v41_native_prefill_sm120",
     srcs = [
         "test_v41_native_prefill_sm120.py",
