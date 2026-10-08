@@ -1,4 +1,4 @@
-"""Checkpoint-to-NormalEngine prefill; full NAS execution is explicitly opt-in."""
+"""Checkpoint-to-NormalEngine generation; full NAS execution is opt-in."""
 
 import gc
 import hashlib
@@ -41,7 +41,7 @@ from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
-def run_rank(rank, port, checkpoint, directory, prompts, full):
+def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     os.environ.update(
@@ -54,6 +54,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
             "DSV4_MOE_CHUNK_TOKENS": "32",
             "DSV4_MOE_EXTENT_COUNT_FUSE": "1",
             "FAKE_BALANCE_EXPERT": "0",
+            "RTP_LLM_STREAM_ASYNC": "0",
+            "RTP_LLM_DEVICE_INPUT": "0",
             "MOEDBG": "0",
         }
     )
@@ -106,6 +108,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
             register = _PinnedSharedTable.register_cuda
             calls = {"initialize": 0, "active": 0, "idle": 0}
             observations = {}
+            sequences = {}
+            hashes = {}
+            outputs_by_prompt = {}
 
             def checked_register(table, device):
                 began = time.monotonic()
@@ -144,15 +149,44 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
                 assert bool(hidden.isfinite().all())
                 if request.input_ids.numel():
-                    key = tuple(request.input_ids.tolist())
+                    attn = next(iter(request.attention_inputs.values()))
+                    assert request.v41_cache_spans.shape == (1, 6)
+                    request_id, _, _, _, start, count = request.v41_cache_spans[
+                        0
+                    ].tolist()
+                    ids = request.input_ids.tolist()
+                    if attn.is_prefill:
+                        assert start == 0 and count == len(ids)
+                        assert request_id not in sequences
+                        sequences[request_id] = ids.copy()
+                        hashes[request_id] = []
+                        history = []
+                    else:
+                        history = sequences[request_id].copy()
+                        assert start == len(history) and count == 1
+                        assert attn.sequence_lengths.tolist() == [start]
+                        sequences[request_id].extend(ids)
+                    windows = []
+                    for token in ids:
+                        window = [token, *reversed(history[-3:])]
+                        windows.append(window + [-1] * (4 - len(window)))
+                        history.append(token)
+                    assert request.engram_token_windows.tolist() == windows
+                    key = tuple(sequences[request_id])
                     value = hidden.cpu()
                     if key in observations:
                         torch.testing.assert_close(
                             value, observations[key], rtol=0.03, atol=0.05
                         )
                     observations[key] = value
+                    hashes[request_id].append(
+                        hashlib.sha256(
+                            value.view(torch.uint8).numpy().tobytes()
+                        ).hexdigest()
+                    )
                     calls["active"] += 1
-                    completed.set()
+                    if len(hashes[request_id]) == new_tokens:
+                        completed.set()
                 else:
                     calls["idle"] += 1
                 return PyModelOutputs(hidden)
@@ -160,7 +194,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
             with patch.object(model, "initialize", checked_initialize), patch.object(
                 model, "forward", checked_forward
             ), patch.object(_PinnedSharedTable, "register_cuda", checked_register):
-                engine = native_ops.NativeEngine(model, config, parallelism, head)
+                engine = native_ops.NativeEngine(
+                    model, config, parallelism, head, pdfusion=new_tokens > 1
+                )
                 assert calls["initialize"] == 1 and model._materialized
                 assert not hasattr(model, "weight")
                 tables = list(model._engram_tables.values())
@@ -175,26 +211,40 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
                     active = phase in (1, 2) or rank == (0 if phase == 0 else 7)
                     requests = [prompts[phase % 2]] if active else []
                     completed.clear()
-                    engine.enqueue(requests)
+                    engine.enqueue(requests, new_tokens)
                     if active:
-                        assert completed.wait(300), "prefill forward did not complete"
+                        assert completed.wait(
+                            300
+                        ), "generation forwards did not complete"
                     result = engine.outputs()
-                    assert result["steps"] == [1] * len(requests)
+                    assert result["steps"] == [new_tokens] * len(requests)
                     assert len(result["tokens"]) == len(requests)
                     for prompt, tokens in zip(requests, result["tokens"]):
-                        assert tokens[:-1] == prompt and len(tokens) == len(prompt) + 1
-                        assert 0 <= tokens[-1] < config.vocab_size
-                        digest = hashlib.sha256(
-                            observations[tuple(prompt)]
-                            .view(torch.uint8)
-                            .numpy()
-                            .tobytes()
-                        ).hexdigest()
+                        assert tokens[: len(prompt)] == prompt
+                        assert len(tokens) == len(prompt) + new_tokens
+                        assert all(0 <= token < config.vocab_size for token in tokens)
+                        request_id = len(sequences)
+                        assert sequences[request_id] == tokens[:-1]
+                        assert len(hashes[request_id]) == new_tokens
+                        value = (tokens, hashes[request_id])
+                        key = tuple(prompt)
+                        if key in outputs_by_prompt:
+                            assert value == outputs_by_prompt[key]
+                        outputs_by_prompt[key] = value
                         print(
-                            f"rank={rank} phase={phase} output_token={tokens[-1]} hidden_sha256={digest}",
+                            f"rank={rank} phase={phase} output_tokens={tokens[len(prompt):]} "
+                            f"hidden_sha256={hashes[request_id]}",
                             flush=True,
                         )
                     dist.barrier(group=control)
+                peers = [None] * 8
+                dist.all_gather_object(peers, outputs_by_prompt, group=control)
+                for prompt in prompts:
+                    results = [
+                        peer[tuple(prompt)] for peer in peers if tuple(prompt) in peer
+                    ]
+                    assert len(results) == 8
+                    assert all(value == results[0] for value in results)
                 stop_requested.set()
                 assert stopped.wait(60), "engine missed coordinated stop"
                 result = engine.stop()
@@ -209,7 +259,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
                 assert not list(Path(directory).glob("*.lease.*"))
                 assert not list(Path(directory).glob("*.json"))
                 print(
-                    f"checkpoint-to-native-engine full_nas={full} prefill liveness PASS",
+                    f"checkpoint-to-native-engine full_nas={full} new_tokens={new_tokens} generation liveness PASS",
                     flush=True,
                 )
     except BaseException:
@@ -228,19 +278,19 @@ def run_rank(rank, port, checkpoint, directory, prompts, full):
 
 
 class V41CheckpointEngineSM120Test(unittest.TestCase):
-    def run_checkpoint(self, checkpoint, directory, prompts, *, full):
+    def run_checkpoint(self, checkpoint, directory, prompts, *, full, new_tokens=1):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         mp.spawn(
             run_rank,
-            args=(port, str(checkpoint), str(directory), prompts, full),
+            args=(port, str(checkpoint), str(directory), prompts, full, new_tokens),
             nprocs=8,
             join=True,
         )
 
-    def test_bounded_checkpoint_cold_engine(self):
+    def run_bounded_checkpoint(self, new_tokens):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -251,13 +301,31 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             torch.cuda.empty_cache()
             directory = root / "cache"
             directory.mkdir()
-            self.run_checkpoint(root, directory, [[3, 4, 5], [6, 7]], full=False)
+            self.run_checkpoint(
+                root, directory, [[3, 4, 5], [6, 7]], full=False, new_tokens=new_tokens
+            )
+
+    def test_bounded_checkpoint_cold_engine(self):
+        self.run_bounded_checkpoint(1)
+
+    def test_bounded_checkpoint_cold_decode(self):
+        self.run_bounded_checkpoint(9)
 
     @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1",
         "full checkpoint execution requires explicit host/device admission",
     )
     def test_full_nas_checkpoint_prefill_liveness(self):
+        self.run_full_checkpoint(1)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1",
+        "full checkpoint execution requires explicit host/device admission",
+    )
+    def test_full_nas_checkpoint_decode_liveness(self):
+        self.run_full_checkpoint(9)
+
+    def run_full_checkpoint(self, new_tokens):
         from transformers import AutoTokenizer
 
         root = Path(os.environ["DSV41_TEST_CHECKPOINT"]).resolve()
@@ -328,7 +396,9 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             flush=True,
         )
         with directory_context as directory:
-            self.run_checkpoint(root, directory, prompts, full=True)
+            self.run_checkpoint(
+                root, directory, prompts, full=True, new_tokens=new_tokens
+            )
 
 
 if __name__ == "__main__":
