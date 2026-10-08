@@ -117,9 +117,9 @@ def main():
         "--decode-urls",
         nargs="+",
         required=True,
-        help="owner0 URL; additionally owner1 URL for DP2/TP4",
+        help="DP1/TP8 performance owner0 URL; DP2/TP4 is correctness-only",
     )
-    parser.add_argument("--tp", type=int, choices=(4, 8), required=True)
+    parser.add_argument("--tp", type=int, choices=(8,), required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path, required=True)
@@ -205,12 +205,12 @@ def main():
             time.sleep(0.2)
         raise RuntimeError("Serving queues did not drain")
 
-    def request_group(label, profile_name=None):
-        count = 32 * len(urls)
+    def request_group(label, profile_name=None, per_owner=32):
+        count = per_owner * len(urls)
         barrier = threading.Barrier(count)
 
         def one(index):
-            owner, local = divmod(index, 32)
+            owner, local = divmod(index, per_owner)
             route = decode[owner]
             payload = {
                 "model": "kimi-k3",
@@ -316,6 +316,9 @@ def main():
 
     save()
     summary["initial_queues"] = drain()
+    # Seed the Prefill Memory Cache before concurrent arrivals. This single
+    # request does not replace any of the required same-shape B32 warmups.
+    request_group("prefill-cache-seed", per_owner=1)
     request_group("materialize")
     for window in range(1, 4):
         warmup_labels = []
