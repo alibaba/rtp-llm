@@ -121,6 +121,12 @@ py_test(
 )
 
 py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "cuda_graph_gate_test",
     srcs = ["cuda_graph_gate_test.py"],
     deps = ["//rtp_llm:testlib"],
