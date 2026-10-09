@@ -38,7 +38,10 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _try_call(label: str, q, k_cache, topk_3d, softmax_scale, head_dim_v=512):
-    from flash_mla import flash_mla_with_kvcache, get_mla_metadata  # type: ignore
+    from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore
+        flash_mla_with_kvcache,
+        get_mla_metadata,
+    )
 
     B, q_len, H, _ = q.shape
     topk = topk_3d.shape[-1]
@@ -100,7 +103,7 @@ class FlashMlaLayoutProbe(unittest.TestCase):
 
     def setUp(self) -> None:
         try:
-            import flash_mla  # type: ignore
+            import rtp_llm.models_py.utils.flash_mla_legacy as flash_mla  # type: ignore
         except Exception as e:  # noqa: BLE001
             self.skipTest(f"flash_mla not importable: {e}")
         try:
