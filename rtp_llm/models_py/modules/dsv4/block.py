@@ -110,6 +110,8 @@ class Block(nn.Module):
                 raise ValueError("V4.1 has no token-to-expert hash layers")
             from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
             from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
+            from rtp_llm.models_py.utils.arch import is_sm120
+            from rtp_llm.utils.model_weight import W
 
             attn_cls = AttentionV41FP8
             attn_extra = dict(
@@ -117,7 +119,10 @@ class Block(nn.Module):
                 shared_attention=shared_attention,
                 gen_num_per_cycle=gen_num_per_cycle,
             )
-            moe_extra = dict(expert_recipe=V41_EXPERT_RECIPE)
+            moe_extra = dict(
+                expert_recipe=V41_EXPERT_RECIPE,
+                router_fp32=is_sm120(layer_weights[W.v4_attn_q_norm].device),
+            )
         self.attn = attn_cls(
             layer_id=layer_id,
             cache_layer_id=self.cache_layer_id,

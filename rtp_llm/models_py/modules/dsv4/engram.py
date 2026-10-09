@@ -539,7 +539,7 @@ class HostEngramEmbedding:
 def dequantize_block_weight(
     weight: torch.Tensor, scales: torch.Tensor, block_size: int = 32
 ) -> torch.Tensor:
-    """Materialize only the small WKV projection, never an embedding table."""
+    """Materialize a block-scaled projection with bounded startup scratch."""
     if weight.ndim != 2:
         raise ValueError("Engram WKV must be a matrix")
     expected = tuple(math.ceil(size / block_size) for size in weight.shape)

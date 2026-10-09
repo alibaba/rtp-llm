@@ -301,6 +301,7 @@ class V41TransformerSM120Test(unittest.TestCase):
             if i:
                 self.assertIs(layer.attn_hc._previous_ref(), model.layers[i - 1].ffn_hc)
             self.assertEqual(layer.ffn._strategy.cfg.expert_recipe, V41_EXPERT_RECIPE)
+            self.assertTrue(layer.ffn.gate.fp32_logits)
             self.assertIsInstance(layer.ffn._shared_executor, MXFP8SharedExpertExecutor)
         prior = None
         for lengths, prefixes in (([5, 3], [0, 0]), ([3, 4], [5, 3]), ([1], [0])):

@@ -31,6 +31,7 @@ def rounded_norm_rope(
     out=None,
     inplace=False,
     group_heads=None,
+    round_norm_to_input_dtype=True,
 ):
     assert out is None or not inplace
     normalized = values.float()

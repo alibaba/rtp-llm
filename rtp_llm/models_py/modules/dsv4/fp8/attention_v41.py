@@ -603,6 +603,7 @@ class AttentionV41FP8(AttentionFP8):
         super().__init__(*args, **kwargs)
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
+        self.round_kv_norm_to_input_dtype = is_sm120(self.wo_a_w.device)
         self.swa_single_block_per_request = True
         self.v41_config = v41_config
         # Read once: changing this policy in a running cache namespace is unsafe.
@@ -662,6 +663,15 @@ class AttentionV41FP8(AttentionFP8):
         self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
+        self._wo_a_bf16_v41 = None
+        if self.round_kv_norm_to_input_dtype:
+            from rtp_llm.models_py.modules.dsv4.engram import dequantize_block_weight
+
+            # The released reference contracts wo_a in BF16 without re-quantizing
+            # attention activations. Retain 64 MiB per full-width Flash layer.
+            self._wo_a_bf16_v41 = dequantize_block_weight(
+                self.wo_a_w, self.wo_a_s, block_size=32
+            ).view(self.n_groups, self.o_lora_rank, -1)
         self._wo_a_groups_v41 = torch.nn.ModuleList()
         scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
         for group in range(self.n_groups):
@@ -707,6 +717,13 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
         o = o.reshape(-1, self.n_heads, self.head_dim)
+        if self._wo_a_bf16_v41 is not None:
+            apply_rotary_emb(
+                o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
+            )
+            grouped = o.reshape(o.shape[0], self.n_groups, -1)
+            projected = torch.einsum("tgd,grd->tgr", grouped, self._wo_a_bf16_v41)
+            return self.wo_b(projected.flatten(1), out=out)
         if _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
         ):
@@ -2544,6 +2561,11 @@ class AttentionV41FP8(AttentionFP8):
             x, common, shared_input_quant=shared_input_quant
         )
         qkv = self._ensure_prefill_kv_full(qkv, common)
+        swa_cache_input = qkv.kv_full
+        if self.round_kv_norm_to_input_dtype:
+            # Fresh prefill rows must see the same codec as cached decode rows.
+            # The persistent ring may omit early rows in a long prompt.
+            qkv = qkv._replace(kv_full=swa_codec.roundtrip_swa(qkv.kv_full))
         # Launch the first bounded hidden-state transfer after the QKV gather.
         # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
@@ -2583,7 +2605,10 @@ class AttentionV41FP8(AttentionFP8):
                     x, common.cp_ctx, first_tile, x_buffers[0], weights
                 )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
-        fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+        fuse_swa_fresh = (
+            not self.round_kv_norm_to_input_dtype
+            and self._can_fuse_swa_fresh(qkv, common)
+        )
         swa, swa_starts = (
             self._swa_prefill_workspace(qkv, common, fuse_cache_write=fuse_swa_fresh)
             if self.compress_ratio
@@ -2597,7 +2622,8 @@ class AttentionV41FP8(AttentionFP8):
             else None
         )
         if not fuse_swa_fresh:
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            # Re-quantizing the fresh rounded copy can choose a different scale.
+            self._prefill_write_swa_fp8_paged(common, swa_cache_input)
         if not self.compress_ratio or not self.is_kv_source:
             return common, qkv, swa, swa_starts, swa_only_workspace
         starts = common.prefix_lengths

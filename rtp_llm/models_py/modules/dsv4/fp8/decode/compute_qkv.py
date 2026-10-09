@@ -74,6 +74,7 @@ def decode_compute_qkv(
         freqs_cis,
         rd,
         eps=attn.eps,
+        round_norm_to_input_dtype=getattr(attn, "round_kv_norm_to_input_dtype", False),
     )
 
     return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)

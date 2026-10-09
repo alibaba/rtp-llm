@@ -5493,7 +5493,14 @@ class AttentionFP8(nn.Module):
                 else:
                     kv_in = self._lin(self.wkv, x_3d)
                 return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                    kv_in,
+                    self.kv_norm,
+                    common.freqs_cis,
+                    rd,
+                    eps=self.eps,
+                    round_norm_to_input_dtype=getattr(
+                        self, "round_kv_norm_to_input_dtype", False
+                    ),
                 )
 
         qr = compute_qr()
