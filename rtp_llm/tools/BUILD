@@ -1,6 +1,12 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "dsv41_phase_smoke",
+    testonly = True,
+    srcs = ["dsv41_phase_smoke.py"],
+)
+
+py_library(
     name = "dsv41_trace",
     srcs = ["dsv41_trace.py"],
     deps = ["//rtp_llm:torch"],

@@ -1,4 +1,10 @@
 py_test(
+    name = "dsv41_phase_smoke_test",
+    srcs = ["dsv41_phase_smoke_test.py"],
+    deps = ["//rtp_llm/tools:dsv41_phase_smoke"],
+)
+
+py_test(
     name = "dsv41_reference_probe_test",
     srcs = ["dsv41_reference_probe_test.py"],
     deps = ["//rtp_llm/tools:dsv41_reference_probe"],
