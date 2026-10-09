@@ -1,9 +1,10 @@
 import asyncio
+import importlib
 import json
 import struct
 import sys
 from enum import Enum
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -195,6 +196,30 @@ def _prefill_role_addr(ip="prefill", grpc_port=9000):
 
 def _decode_role_addr(ip="decode", grpc_port=9001):
     return RoleAddr(role=RoleType.DECODE, ip=ip, http_port=8001, grpc_port=grpc_port)
+
+
+class MultimodalFpsValidationTest(TestCase):
+    def test_fractional_fps_is_rejected_at_api_boundary(self):
+        from pydantic import ValidationError
+
+        from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+            MMPreprocessConfigPart,
+        )
+        from rtp_llm.openai.api_datatype import (
+            MMPreprocessConfigPart as OpenAIPreprocessConfigPart,
+        )
+
+        for config in (
+            MMPreprocessConfigPart,
+            OpenAIPreprocessConfigPart,
+            GenerateConfig,
+        ):
+            with self.subTest(config=config.__module__):
+                for fps in (0.5, 1.9):
+                    with self.assertRaises(ValidationError):
+                        config(fps=fps)
+                self.assertEqual(config(fps=2).fps, 2)
+                self.assertEqual(config(fps=2.0).fps, 2)
 
 
 class ModelRpcClientTest(TestCase):
@@ -1562,6 +1587,84 @@ class ClientSpanSettlementTest(TestCase):
         _record_client_span_latency(span, outputs)
 
         self.assertEqual(span.attributes, {})
+
+    def test_greennet_gate_failure_finishes_client_span(self):
+        for error in (
+            FtRuntimeException(ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"),
+            FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, "unavailable"),
+            asyncio.CancelledError(),
+        ):
+            with self.subTest(error=type(error).__name__):
+                span = _FakeClientSpan()
+                client = self._build_client(span, total=1)
+                input_pb = GenerateInputPB(request_id=7)
+                input_pb.multimodal_inputs.add(multimodal_url="image://test")
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+                    return_value=input_pb,
+                ), patch.object(
+                    client, "_wait_greennet_verdict", new=AsyncMock(side_effect=error)
+                ):
+
+                    async def run():
+                        with self.assertRaises(type(error)):
+                            await client.enqueue(self._make_input()).__anext__()
+
+                    asyncio.run(run())
+                self.assertTrue(span.finished)
+                self.assertEqual(span.status, "ERROR")
+                self.assertEqual(span.end_count, 1)
+
+    def test_greennet_transport_failure_is_not_content_rejection(self):
+        # String patch lookup can resolve through rtp_llm.__getattr__ to the
+        # mocked ops module before the real greennet_hook has been imported.
+        greennet_hook = importlib.import_module("rtp_llm.multimodal.greennet_hook")
+        structured = ErrorDetailsPB(
+            error_code=ExceptionType.UNSAFE_INPUT_CONTENT.value, error_message="blocked"
+        ).SerializeToString()
+        for error, expected in (
+            (_FakeRpcError(StatusCode.UNAVAILABLE), ExceptionType.MM_PROCESS_ERROR),
+            (
+                _FakeRpcError(StatusCode.DEADLINE_EXCEEDED),
+                ExceptionType.MM_PROCESS_ERROR,
+            ),
+            (
+                _FakeRpcError(
+                    StatusCode.PERMISSION_DENIED,
+                    {"grpc-status-details-bin": structured},
+                ),
+                ExceptionType.UNSAFE_INPUT_CONTENT,
+            ),
+        ):
+            with self.subTest(status=error.code()):
+                client = self._build_client(_FakeClientSpan(), total=1)
+                inp = self._make_input()
+                inp.generate_config.role_addrs = [
+                    RoleAddr(
+                        role=RoleType.VIT,
+                        ip="127.0.0.1",
+                        grpc_port=8001,
+                        http_port=8000,
+                    )
+                ]
+                stub = MagicMock()
+                stub.WaitGreenNetVerdict = AsyncMock(side_effect=error)
+                with patch.object(
+                    greennet_hook,
+                    "greennet_enabled",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                    return_value=stub,
+                ):
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        asyncio.run(
+                            client._wait_greennet_verdict(
+                                inp, GenerateInputPB(request_id=7)
+                            )
+                        )
+                    stub.WaitGreenNetVerdict.assert_awaited_once()
+                    self.assertEqual(raised.exception.exception_type, expected)
 
     def test_finished_frame_is_not_blocked_by_rpc_termination(self):
         span = _FakeClientSpan()

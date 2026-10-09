@@ -39,6 +39,7 @@ from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
     restore_final_constraint,
 )
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import (
     GrpcAccessRecord,
@@ -123,7 +124,6 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 # Model types whose dash_sc protocol uses the empty-think second pass.
 _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
-_INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
 _DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
@@ -313,6 +313,13 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type in (
+        ExceptionType.UNSAFE_INPUT_CONTENT,
+        ExceptionType.UNSAFE_OUTPUT_CONTENT,
+    ):
+        return _DashFtErrorMapping(
+            DASH_ERROR_BAD_REQUEST, f"DataInspectionFailed: {exc.message}"
+        )
     raw_reason = getattr(
         exc,
         "admission_reject_reason",
@@ -742,7 +749,7 @@ def _apply_dash_sc_controls_to_generate_config(
         request_max_think = request_controls.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+        generate_config.max_thinking_tokens = INT32_MAX if max_think < 0 else max_think
     if request_max_think == 0 or request_controls.enable_thinking is False:
         thinking_mode = ThinkingMode.DISABLED
     elif request_controls.enable_thinking is True or request_max_think is not None:
@@ -886,6 +893,15 @@ async def iter_real_model_stream_infer(
             else ThinkingMode.DISABLED
         )
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        env_budget = (
+            generate_env_config.max_thinking_tokens
+            if generate_env_config is not None
+            else None
+        )
+        if env_budget is not None:
+            generate_config.max_thinking_tokens = (
+                INT32_MAX if int(env_budget) < 0 else int(env_budget)
+            )
         _apply_dash_sc_controls_to_generate_config(
             generate_config,
             sampling,
