@@ -107,8 +107,6 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
         const int64_t col_index   = index % aligned_hidden_units;
         const int     input_id    = input_ids[token_index];
 
-        VectorType embedding_vec = reinterpret_cast<const VectorType*>(
-            &(embedding_table[input_id * hidden_units + col_index * vector_size]))[0];
         VectorType pos_embed_vec  = {.0f, .0f, .0f, .0f};
         VectorType type_embed_vec = {.0f, .0f, .0f, .0f};
 
@@ -118,7 +116,7 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
         }
         if constexpr (USE_TYPE_ID_EMB) {
             assert(type_table != nullptr);
-            type_embed_vec = LDST128BITS(type_table[input_pos[token_index] * hidden_units + col_index * vector_size]);
+            type_embed_vec = LDST128BITS(type_table[input_type[token_index] * hidden_units + col_index * vector_size]);
         }
         if constexpr (USE_MASK) {
             assert(input_mask != nullptr);
@@ -131,6 +129,9 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
                 continue;
             }
         }
+
+        VectorType embedding_vec = reinterpret_cast<const VectorType*>(
+            &(embedding_table[input_id * hidden_units + col_index * vector_size]))[0];
 
 #pragma unroll
         for (int i = 0; i < vector_size; ++i) {

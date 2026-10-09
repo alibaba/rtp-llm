@@ -112,10 +112,11 @@ from ctypes import cdll
 cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
 try:
+    # Alias for backward compatibility
     from libth_transformer_config import (
+        ActivationType,
         ArpcConfig,
         AttentionConfigs,
-        GrpcConfig,
         BatchDecodeSchedulerConfig,
         CacheCapacityPolicyDesc,
         CacheCpPolicyDesc,
@@ -125,67 +126,64 @@ try:
         CacheReusePolicyDesc,
         CacheStoreConfig,
         CacheTailPolicyDesc,
+        ConcurrencyConfig,
         CpBlockMappingMode,
         CpBlockSliceMode,
         CpPrefillSliceLayout,
+        CPRotateMethod,
         DashScGrpcConfig,
-        KVCacheSpecType,
-        OpaqueBlockEntryCountMode,
-        ConcurrencyConfig,
+        DataType,
         DeviceResourceConfig,
+        EPLBConfig,
         EplbMode,
         FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
         GrammarConfig,
+        GrpcConfig,
         HWKernelConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
         KVCacheConfig,
+        KvCacheDataType,
         KVCacheSpecDesc,
+        KVCacheSpecType,
+        LinearAttentionConfig,
         MiscellaneousConfig,
         MlaOpsType,
         ModelConfig,
         ModelSpecificConfig,
         MoeConfig,
         NcclCommConfig,
-        PDSepConfig,
+        OpaqueBlockEntryCountMode,
         ParallelismConfig,
+        PDSepConfig,
+        PrefillCPConfig,
         ProfilingDebugLoggingConfig,
+        QuantAlgo,
+        RoleType,
         RopeCache,
         RopeConfig,
         RopeStyle,
+        RuntimeConfig,
+        SpecialTokens,
+        SpeculativeExecutionConfig,
+        SpeculativeType,
         TaskType,
         VitConfig,
         VitSeparation,
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
-        CPRotateMethod,
-        PrefillCPConfig,
     )
-    # Alias for backward compatibility
-    from libth_transformer_config import (
-        QuantAlgo,
-        RoleType,
-        RuntimeConfig,
-        SpecialTokens,
-        SpeculativeExecutionConfig,
-        SpeculativeType,
-        EPLBConfig,
-        ActivationType,
-        DataType,
-        KvCacheDataType,
-        ModelConfig,
-        HybridAttentionConfig,
-        HybridAttentionType,
-        LinearAttentionConfig,
-    )
+
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
+    from libth_transformer_config import MMPreprocessConfig, MultimodalInput
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
-    from libth_transformer_config import MultimodalInput, MMPreprocessConfig
 
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
@@ -353,13 +351,12 @@ def _load_engine_ops(required: bool = False) -> None:
         # process teardown in the current binary build.
         _load_compute_ops(required=required)
         try:
-            from libth_transformer import EmbeddingCppOutput
+            from libth_transformer import EmbeddingCppOutput, RtpEmbeddingOp, RtpLLMOp
 
             # MultimodalInput is registered by the config module
             # (libth_transformer_config) in this build; alias it here so
             # callers keep using the historical MultimodalInputCpp name.
             from libth_transformer_config import MultimodalInput as MultimodalInputCpp
-            from libth_transformer import RtpEmbeddingOp, RtpLLMOp
 
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
             globals()["MultimodalInputCpp"] = MultimodalInputCpp
@@ -403,3 +400,12 @@ def __getattr__(name: str):
         if name in globals():
             return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_multimodal_feature_hash(embedding: torch.Tensor) -> torch.Tensor:
+    """Return CPU row hashes using the same implementation as prefill expansion."""
+    # Preserve main's compute-before-engine initialization and teardown order.
+    _load_engine_ops(required=True)
+    return importlib.import_module("libth_transformer").get_multimodal_feature_hash(
+        embedding
+    )
