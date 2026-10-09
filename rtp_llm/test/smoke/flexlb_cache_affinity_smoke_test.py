@@ -513,7 +513,7 @@ class CacheAffinitySmoke:
             if not isinstance(entry, dict) or not isinstance(entry.get("ip_port"), str):
                 raise ValueError(f"invalid {field} entry: {entry!r}")
             addresses.append(entry["ip_port"])
-        expected = {f"127.0.0.1:{port}" for port in expected_ports}
+        expected = {f"127.0.0.1:{port}@0" for port in expected_ports}
         if len(addresses) != len(expected) or set(addresses) != expected:
             raise ValueError(f"{field}={addresses!r}, expected {sorted(expected)!r}")
 
@@ -550,13 +550,16 @@ class CacheAffinitySmoke:
             states[endpoint] = CacheIndexState(
                 observed_version, initialized, indexed_version
             )
-        expected = {f"127.0.0.1:{port}" for port in expected_ports}
+        expected = {f"127.0.0.1:{port}@0" for port in expected_ports}
         if set(states) != expected:
             raise CacheStatusSchemaError(
                 f"prefill cache states={sorted(states)!r}, "
                 f"expected {sorted(expected)!r}"
             )
-        return states
+        return {
+            f"127.0.0.1:{port}": states[f"127.0.0.1:{port}@0"]
+            for port in expected_ports
+        }
 
     def _snapshot_cache_index_states(
         self, flexlb_http: int, prefill_ports: Sequence[int]
