@@ -33,6 +33,8 @@ def difference(left, right):
 
 def aligned_sparse_inputs(reference, captured, window_rows):
     """Compare logical positions across official/native KV storage orders."""
+    if type(window_rows) is not int or window_rows < 1:
+        raise ValueError("Sparse SWA segment must contain at least one row")
     reference_kv = reference["kv"].reshape(-1, 512)
     native_kv = captured["kv"].reshape(-1, 512)
     if reference_kv.shape != native_kv.shape:
@@ -42,9 +44,20 @@ def aligned_sparse_inputs(reference, captured, window_rows):
         raise ValueError("Sparse KV is missing the initial SWA rows")
     # Official stores [SWA, global]; native stores [global, SWA].
     aligned_kv = torch.cat((native_kv[global_rows:], native_kv[:global_rows]))
-    native_indices = captured["indices"].reshape(window_rows, -1).cpu()
-    native_lengths = captured["lengths"].cpu().tolist()
-    reference_indices = reference["indices"].reshape(window_rows, -1).cpu()
+    lengths = captured["lengths"]
+    if lengths.ndim != 1 or not lengths.numel():
+        raise ValueError("Sparse lengths must describe nonempty query rows")
+    query_rows = lengths.numel()
+    if (
+        captured["indices"].numel() % query_rows
+        or reference["indices"].numel() % query_rows
+        or reference["indices"].shape[-2] != query_rows
+        or captured["indices"].shape[0] != query_rows
+    ):
+        raise ValueError("Sparse index plans disagree with query row count")
+    native_indices = captured["indices"].reshape(query_rows, -1).cpu()
+    native_lengths = lengths.cpu().tolist()
+    reference_indices = reference["indices"].reshape(query_rows, -1).cpu()
     selections = []
     for row, limit in enumerate(native_lengths):
         if not 0 <= limit <= native_indices.shape[1]:
@@ -88,6 +101,32 @@ def aligned_sparse_inputs(reference, captured, window_rows):
     return difference(reference_kv, aligned_kv), selections
 
 
+def history_identities(traces, native_traces=None):
+    """Admit one contiguous short prefill/decode history, before cache writes."""
+    if not traces:
+        raise ValueError("Replay history requires an initial prefill trace")
+    identities = [trace_identity(trace["metadata"]) for trace in traces]
+    end = 0
+    for step, identity in enumerate(identities):
+        span = len(identity["input_ids"])
+        if identity["start_pos"] != end:
+            raise ValueError("Replay trace history has a gap, overlap or reset")
+        if (step == 0 and span < 2) or (step > 0 and span != 1):
+            raise ValueError("Replay requires prefill then single-token decode")
+        end += span
+        if end > 128:
+            raise ValueError("Replay history must fit within the first SWA ring")
+    if native_traces is not None:
+        if len(native_traces) != len(traces):
+            raise ValueError("Native/reference histories have different step counts")
+        native = [trace_identity(trace["metadata"]) for trace in native_traces]
+        if native != identities:
+            raise ValueError(
+                "Native/reference histories have divergent consumed prefixes"
+            )
+    return identities
+
+
 class SelectedEmbedding(torch.nn.Module):
     """Prepared official dequantized rows; no host reads inside forward."""
 
@@ -110,6 +149,7 @@ class NASReader:
         self.values = {}
         self.hashes = {}
         self.selected_rows = {}
+        self.selected_row_reads = []
 
     def load(self, name):
         if name not in self.values:
@@ -141,6 +181,7 @@ class NASReader:
                 rows.contiguous().view(torch.uint8).numpy().tobytes()
             ).hexdigest(),
         }
+        self.selected_row_reads.append({"name": name, **self.selected_rows[name]})
         # CPU float8 index_select is unavailable in some Torch versions.
         rows = rows.view(torch.uint8)[inverse].view(rows.dtype)
         return rows.reshape(*ids.shape, shape[1])
@@ -191,7 +232,7 @@ def official_attention(module, converter, args, reader, layer):
     return shards
 
 
-def run_official_attention(module, shards, x):
+def run_official_attention(module, shards, x, start_pos=0, *, history=False):
     partials, captures, latent_captures = [], [], []
     sparse = module.sparse_attn
 
@@ -230,7 +271,7 @@ def run_official_attention(module, shards, x):
                 stack.callback(
                     shard.compressor.register_forward_hook(record_latent).remove
                 )
-            shard(x, 0)
+            shard(x, start_pos)
     if len(partials) != 8 or len(captures) != 8:
         raise ValueError("Replay did not capture all eight TP output partials")
     for capture in captures[1:]:
@@ -247,6 +288,33 @@ def run_official_attention(module, shards, x):
     }
     if latent_captures:
         result["latent"] = latent_captures[0]
+    if history:
+        result["window_cache"] = shards[0].window_kv_cache.clone()
+        if shards[0].compressor is not None:
+            result["global_cache"] = shards[0].compress_kv_cache.clone()
+            result["index_cache"] = shards[0].indexer.k_cache.clone()
+            if shards[0].compress_ratio == 2:
+                for name in ("kv_state", "score_state"):
+                    result[name] = getattr(shards[0].compressor, name).clone()
+        for shard in shards[1:]:
+            torch.testing.assert_close(
+                shard.window_kv_cache, result["window_cache"], rtol=0, atol=0
+            )
+            if shard.compressor is not None:
+                torch.testing.assert_close(
+                    shard.compress_kv_cache, result["global_cache"], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    shard.indexer.k_cache, result["index_cache"], rtol=0, atol=0
+                )
+                if shard.compress_ratio == 2:
+                    for name in ("kv_state", "score_state"):
+                        torch.testing.assert_close(
+                            getattr(shard.compressor, name),
+                            result[name],
+                            rtol=0,
+                            atol=0,
+                        )
     return result
 
 
