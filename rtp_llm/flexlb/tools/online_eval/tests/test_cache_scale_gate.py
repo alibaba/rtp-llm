@@ -40,7 +40,10 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(spec["title"], "YAML title")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["P engine count"])
-        self.assertEqual(len(spec["panels"]), 2)
+        self.assertEqual([p["id"] for p in spec["panels"]], [
+            "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
+            "prefill-tps", "prefill-qps", "client-latency",
+        ])
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
@@ -52,7 +55,10 @@ class CacheGateTest(unittest.TestCase):
         panels = report_panels(curves, view("cache_scale_in_overview.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
+        self.assertEqual([s["name"] for s in panels[2]["series"]],
+                         ["P Waiting / engine", "P engine count"])
         self.assertEqual(panels[0]["series"][1]["points"], panels[1]["series"][-1]["points"])
+        self.assertEqual(panels[2]["series"][0]["points"], curves[-1]["points"])
         self.assertIsNone(panels[0]["series"][0]["points"][0]["y"])
         for panel, axis in zip(panels, ("ratio", "qps")):
             self.assertEqual("left", panel["axes"][axis]["position"])
@@ -241,6 +247,9 @@ class CacheGateTest(unittest.TestCase):
             spec = write_report(root, e, analyze(e))
             self.assertEqual([s["name"] for s in spec["panels"][0]["series"]],
                              ["Survivor window hit ratio"])
+            self.assertEqual(spec["panels"][2]["id"], "prefill-queue")
+            self.assertEqual([s["name"] for s in spec["panels"][2]["series"]],
+                             ["P Waiting / engine"])
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "WARN")

@@ -331,6 +331,8 @@ def observe(ctx, p, deadline):
             row = sample()
         evidence["post_end"] = row["t"]
         event("observation_end")
+        flow.stop_sending(deadline)
+        event("sending_stopped")
         evidence["removals"] = intermediate_removals + [
             f.result(timeout=max(0.01, deadline.remaining())) for f in futures
         ]

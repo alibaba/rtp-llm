@@ -28,6 +28,46 @@ panels:
     count: {title: 上报 P 数量, position: right}
   caption: 左轴是全局客户端发出、成功和失败 QPS，不等于幸存者成功 QPS；各请求归属见下方证据。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
   empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
+- id: prefill-queue
+  title: Prefill 排队 / 运行 · P 数量
+  names: [P Waiting / engine, P Waiting max, P Running / engine, P engine count]
+  axes:
+    queue: {title: 每个 P 的请求数, position: left}
+    count: {title: 上报 P 数量, position: right}
+  caption: Waiting / Running 来自归档 Prometheus 的 Prefill 原始时间序列；平均值和单 P 最大值按当时仍上报的 P 计算。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 gate 窗口、snapshot、日志或请求文件补算曲线。
+- id: prefill-forward
+  title: Prefill model forward 耗时 · P 数量
+  names: [P simulated model forward, P engine count]
+  axes:
+    ms: {title: Mock Prefill 平均执行时间 / ms, position: left}
+    count: {title: 上报 P 数量, position: right}
+  caption: Mock 最近完成的 Prefill 执行时间在各 P 间取平均；这是模拟执行耗时，空闲期可能维持上一个值。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+- id: prefill-tps
+  title: Prefill model forward TPS · P 数量
+  names: [P model forward TPS, P model forward TPS incl. cache, P engine count]
+  axes:
+    tokens: {title: 平均每 P tokens / 秒, position: left}
+    count: {title: 上报 P 数量, position: right}
+  caption: 左轴为各 P 上报的 model forward TPS 平均值；incl. cache 曲线包含缓存复用口径。两条曲线用于观察处理速度，不能替代完成请求 QPS。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+- id: prefill-qps
+  title: Prefill 接收 / 完成 QPS · 客户端发出 QPS
+  names: [P accepted QPS, P completed QPS, Client sent QPS, P engine count]
+  axes:
+    qps: {title: 请求 / 秒, position: left}
+    count: {title: 上报 P 数量, position: right}
+  caption: P accepted / completed 来自 Mock Prefill 计数器，Client sent 来自客户端发出计数器；曲线按各自 10 秒速率窗口计算，差值反映队列与处理延迟。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+- id: client-latency
+  title: TTFT / 调度 / 总延迟 p99 · P 数量
+  names: [TTFT p99, Schedule latency p99, Total latency p99, P engine count]
+  axes:
+    seconds: {title: 客户端 p99 / 秒, position: left}
+    count: {title: 上报 P 数量, position: right}
+  caption: 客户端监控的 10 秒速率窗口直方图 p99。无完成样本或监控缺采时断线；三个延迟指标可用图例单独查看。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从请求日志或门禁窗口补算曲线。
 sections:
   audit: 监控曲线审计
   monitoring: 监控与请求诊断（不参与门禁）

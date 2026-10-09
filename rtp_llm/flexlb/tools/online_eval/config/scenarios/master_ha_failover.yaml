@@ -2,6 +2,7 @@ schema_version: 2
 case: master_ha_failover
 profiles:
 - batch-window
+- single-nonbatch
 environment:
   backend: java_mock
   master_layout: dual_standalone
