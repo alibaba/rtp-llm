@@ -367,11 +367,7 @@ class CacheAffinitySmoke:
     ) -> ManagedProcess:
         env = os.environ.copy()
         env.pop("FLEXLB_MONITOR_METRIC_WHITELIST", None)
-        route = self._flexlb_route()
-        route["hosts"] = {
-            PREFILL_DOMAIN: [f"127.0.0.1:{port}" for port in prefill_ports],
-            DECODE_DOMAIN: [f"127.0.0.1:{port}" for port in decode_ports],
-        }
+        route = self._flexlb_route(prefill_ports, decode_ports)
         env.update(
             {
                 "JAVA_HOME": str(Path(java).resolve().parent.parent),
@@ -992,7 +988,9 @@ class CacheAffinitySmoke:
         }
 
     @staticmethod
-    def _flexlb_route() -> Dict[str, object]:
+    def _flexlb_route(
+        prefill_ports: Sequence[int], decode_ports: Sequence[int]
+    ) -> Dict[str, object]:
         return {
             "service_id": SERVICE_ID,
             "role_endpoints": [
@@ -1002,11 +1000,19 @@ class CacheAffinitySmoke:
                         "address": PREFILL_DOMAIN,
                         "protocol": "http",
                         "path": "/",
+                        "discovery": {
+                            "type": "static-env",
+                            "hosts": [f"127.0.0.1:{port}" for port in prefill_ports],
+                        },
                     },
                     "decode_endpoint": {
                         "address": DECODE_DOMAIN,
                         "protocol": "http",
                         "path": "/",
+                        "discovery": {
+                            "type": "static-env",
+                            "hosts": [f"127.0.0.1:{port}" for port in decode_ports],
+                        },
                     },
                 }
             ],
