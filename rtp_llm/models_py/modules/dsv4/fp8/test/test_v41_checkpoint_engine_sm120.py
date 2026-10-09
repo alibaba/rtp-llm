@@ -34,6 +34,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import f
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
     compressor_bf16,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
+    expert_down_reference,
+    load_reference_kernel,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import mhc_fp32
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
@@ -90,12 +94,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_compressor = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR") == "1"
     compare_recipe = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR_RECIPE") == "1"
     compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
+    compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
     paired = (
         compare_tp8
         or compare_mhc
         or compare_compressor
         or compare_recipe
         or compare_sparse
+        or compare_down
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -123,6 +129,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
             "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn",
         ]
+    if compare_down:
+        for base in (
+            "tp8_projection_mhc_fp32_compressor_recipe",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+        ):
+            profiles.extend(
+                (f"{base}_shared_down_reference", f"{base}_expert_down_reference")
+            )
     trace_steps = dict.fromkeys(profiles, 0)
     try:
         if paired and precision != "baseline":
@@ -131,6 +145,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             raise ValueError(
                 "Sparse comparison requires TP8, mHC and compressor recipe controls"
             )
+        if compare_down and not (
+            compare_tp8 and compare_mhc and compare_recipe and compare_sparse
+        ):
+            raise ValueError(
+                "Expert output comparison requires all ten preceding controls"
+            )
+        reference_kernel = load_reference_kernel() if compare_down else None
+        reference_hash = (
+            hashlib.sha256(Path(reference_kernel.__file__).read_bytes()).hexdigest()
+            if reference_kernel is not None
+            else None
+        )
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
@@ -209,7 +235,11 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 profile = current_profile[0]
                 recipe = "compressor_recipe" in profile
                 sparse = "sparse_sink_div_rn" in profile
-                sparse_decode = sparse and not profile.endswith("_prefill")
+                sparse_decode = sparse and "sparse_sink_div_rn_prefill" not in profile
+                down = profile.endswith(
+                    ("_shared_down_reference", "_expert_down_reference")
+                )
+                routed_down = profile.endswith("_expert_down_reference")
                 tracing = (
                     bool(trace_directory) and rank == 0 and trace_steps[profile] < 3
                 )
@@ -226,6 +256,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 ), sparse_sink_div_rn(
                     sparse,
                     decode=sparse_decode,
+                ), expert_down_reference(
+                    down,
+                    routed=routed_down,
+                    kernel=reference_kernel,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -256,6 +290,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             "hca_bf16_projection": recipe,
                             "sparse_sink_div_rn_prefill": sparse,
                             "sparse_sink_div_rn_decode": sparse_decode,
+                            **(
+                                {
+                                    "shared_down_reference": True,
+                                    "routed_down_reference": routed_down,
+                                    "down_reference_kernel_sha256": reference_hash,
+                                }
+                                if down
+                                else {}
+                            ),
                         },
                     )
                     trace_steps[profile] += 1

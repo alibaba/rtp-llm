@@ -195,6 +195,7 @@ py_test(
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
         "v41_compressor_precision.py",
+        "v41_expert_precision.py",
         "v41_mhc_precision.py",
         "v41_reference_precision.py",
         "v41_sparse_precision.py",
