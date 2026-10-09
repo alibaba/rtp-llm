@@ -18,6 +18,7 @@ def sm8x_suites():
                 name = "random_seed",
                 task_info = "data/model/qwen25/test_random_seed.json",
                 smoke_args = "--act_type FP16 --warm_up 0",
+                envs = ["PERF_TEST=1"],
                 gpu_type = ["L20_CU13"],
             ),
             smoke_test(
