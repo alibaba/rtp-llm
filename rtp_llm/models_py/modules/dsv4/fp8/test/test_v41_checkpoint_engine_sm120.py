@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import f
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
     _locked,
@@ -77,7 +78,13 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     stop_requested = threading.Event()
     stopped = threading.Event()
     precision = os.environ.get("DSV41_TEST_REFERENCE_PRECISION", "baseline")
+    compare_tp8 = os.environ.get("DSV41_TEST_COMPARE_TP8") == "1"
+    profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
+    current_profile = [precision]
+    trace_steps = dict.fromkeys(profiles, 0)
     try:
+        if compare_tp8 and precision != "baseline":
+            raise ValueError("TP8 comparison requires unpatched production math")
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
@@ -153,10 +160,13 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     engine.request_stop()
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
-                tracing = bool(trace_directory) and rank == 0 and calls["active"] < 3
+                profile = current_profile[0]
+                tracing = (
+                    bool(trace_directory) and rank == 0 and trace_steps[profile] < 3
+                )
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
-                ) as snapshots:
+                ) as snapshots, tp8_projection(profile == "tp8_projection"):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
                     snapshots["hidden"] = hidden.detach().cpu()
@@ -170,16 +180,21 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         .float()
                         .cpu()
                     )
+                    trace_root = Path(trace_directory)
+                    if not full:
+                        trace_root /= f"bounded-context{context}-tokens{new_tokens}"
+                    if compare_tp8:
+                        trace_root /= profile
                     save_model_trace(
-                        Path(trace_directory)
-                        / f"native-prompt0-step{calls['active']}.pt",
+                        trace_root / f"native-prompt0-step{trace_steps[profile]}.pt",
                         snapshots,
                         {
                             "input_ids": request.input_ids.tolist(),
                             "cache_spans": request.v41_cache_spans.tolist(),
-                            "precision_profile": precision,
+                            "precision_profile": profile,
                         },
                     )
+                    trace_steps[profile] += 1
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
                 assert bool(hidden.isfinite().all())
                 if request.input_ids.numel():
@@ -206,7 +221,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         windows.append(window + [-1] * (4 - len(window)))
                         history.append(token)
                     assert request.engram_token_windows.tolist() == windows
-                    key = tuple(sequences[request_id])
+                    key = (profile, tuple(sequences[request_id]))
                     value = hidden.cpu()
                     if key in observations:
                         torch.testing.assert_close(
@@ -251,7 +266,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 peers = [None] * 8
                 dist.all_gather_object(peers, identities, group=control)
                 assert all(peer == identities for peer in peers)
-                for phase in range(4):
+                for iteration in range(4 * len(profiles)):
+                    phase = iteration % 4
+                    profile = profiles[iteration // 4]
+                    current_profile[0] = profile
                     active = phase in (1, 2) or rank == (0 if phase == 0 else 7)
                     requests = [prompts[phase % 2]] if active else []
                     completed.clear()
@@ -271,24 +289,25 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         assert sequences[request_id] == tokens[:-1]
                         assert len(hashes[request_id]) == new_tokens
                         value = (tokens, hashes[request_id])
-                        key = tuple(prompt)
+                        key = (profile, tuple(prompt))
                         if key in outputs_by_prompt:
                             assert value == outputs_by_prompt[key]
                         outputs_by_prompt[key] = value
                         print(
-                            f"rank={rank} phase={phase} output_tokens={tokens[len(prompt):]} "
+                            f"rank={rank} phase={phase} precision={profile} "
+                            f"output_tokens={tokens[len(prompt):]} "
                             f"hidden_sha256={hashes[request_id]}",
                             flush=True,
                         )
                     dist.barrier(group=control)
                 peers = [None] * 8
                 dist.all_gather_object(peers, outputs_by_prompt, group=control)
-                for prompt in prompts:
-                    results = [
-                        peer[tuple(prompt)] for peer in peers if tuple(prompt) in peer
-                    ]
-                    assert len(results) == 8
-                    assert all(value == results[0] for value in results)
+                for profile in profiles:
+                    for prompt in prompts:
+                        key = (profile, tuple(prompt))
+                        results = [peer[key] for peer in peers if key in peer]
+                        assert len(results) == 8
+                        assert all(value == results[0] for value in results)
                 stop_requested.set()
                 assert stopped.wait(60), "engine missed coordinated stop"
                 result = engine.stop()
@@ -304,7 +323,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 assert not list(Path(directory).glob("*.json"))
                 print(
                     f"checkpoint-to-native-engine full_nas={full} new_tokens={new_tokens} "
-                    f"context={context} precision={precision} generation liveness PASS",
+                    f"context={context} precision={profiles} generation liveness PASS",
                     flush=True,
                 )
     except BaseException:

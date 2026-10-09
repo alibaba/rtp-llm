@@ -143,7 +143,7 @@ py_test(
         "test_v41_attention_owner_sm120.py",
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
-    deps = _DSV4_FP8_TEST_DEPS,
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_trace"],
     tags = ["RTX_5000_PRO", "manual"],
     env = {"GPU_COUNT": "8"},
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
@@ -171,6 +171,7 @@ py_test(
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
         "v41_reference_precision.py",
+        "v41_tp8_projection.py",
         "test_v41_loader_worker_sm120.py",
         "test_v41_worker_sm120.py",
         "test_v41_transformer_sm120.py",

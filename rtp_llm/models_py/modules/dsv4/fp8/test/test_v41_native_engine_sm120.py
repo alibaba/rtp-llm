@@ -7,6 +7,7 @@ import tempfile
 import threading
 import traceback
 import unittest
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -24,13 +25,13 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_dp_worker_sm120 import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     checkpoint,
-    context_tables,
     decode_inputs,
     inputs,
     model_config,
     tagged_cache,
 )
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
+from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 
 
 def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
@@ -108,6 +109,45 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
             ):
                 collective._register_process_groups_to_cpp()
             forward = model.forward
+            diagnostic_directory = os.environ.get("DSV41_TEST_FAILURE_TRACE_DIR")
+            reference_traces = []
+
+            @contextmanager
+            def failure_boundaries(worker):
+                with capture_model_boundaries(
+                    worker.v4
+                ) as tensors, ExitStack() as stack:
+                    for layer in worker.v4.layers:
+                        original = layer.attn._project_output
+                        label = f"layer{layer.layer_id:02d}.attn"
+
+                        def project(
+                            output, freqs, out=None, *, op=original, name=label
+                        ):
+                            tensors[name + ".projection_input"] = (
+                                output.detach().clone()
+                            )
+                            tensors[name + ".freqs"] = freqs.detach().clone()
+                            result = op(output, freqs, out=out)
+                            tensors[name + ".projection_output"] = (
+                                result.detach().clone()
+                            )
+                            return result
+
+                        stack.enter_context(
+                            patch.object(layer.attn, "_project_output", project)
+                        )
+                    yield tensors
+
+            def reference_forward(request):
+                if not diagnostic_directory:
+                    return reference.forward(request).hidden_states.clone()
+                with failure_boundaries(reference) as tensors:
+                    result = reference.forward(request).hidden_states.clone()
+                tensors["hidden"] = result.cpu()
+                reference_traces.append(tensors)
+                return result
+
             initialize = model.initialize
             initialization_calls = []
             expected_tokens = {}
@@ -115,33 +155,49 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
             calls = {"idle": 0, "active": 0, "decode": 0, "idle_decode": 0}
             injection = {"baseline": 0, "pending": {}, "deferred": False}
             growth = {"pages": 0, "long_prefill": 0}
+            reference_pages = 32
+            next_reference_page = 1
+            if new_tokens > 1:
+                reference.kv_cache = tagged_cache(reference, pages=reference_pages)
 
             def continuation_reference(request):
+                nonlocal next_reference_page
                 attn = next(iter(request.attention_inputs.values()))
                 lengths = attn.input_lengths.tolist()
                 ids = request.input_ids.tolist()
                 offset = 0
-                rows = []
                 keys = []
+                starts = []
+                histories = []
                 for row, span in enumerate(request.v41_cache_spans.tolist()):
                     request_id, _, _, _, start, count = span
                     if attn.is_prefill:
                         assert start == 0 and count == lengths[row]
                         prompt = ids[offset : offset + count]
+                        page_count = (context + 255) // 256
+                        assert next_reference_page + page_count <= reference_pages
                         state = {
-                            "cache": tagged_cache(
-                                reference, pages=8 if context > 256 else 4
-                            ),
                             "prompt": tuple(prompt),
                             "tokens": prompt.copy(),
                             "pages": {},
+                            "tables": {
+                                tag: torch.arange(
+                                    next_reference_page,
+                                    next_reference_page
+                                    + (
+                                        1
+                                        if tag in ("swa_kv", "csa_state")
+                                        else page_count
+                                    ),
+                                    device="cuda",
+                                    dtype=torch.int32,
+                                )[None]
+                                for tag in reference.kv_cache.group_tags
+                            },
                         }
-                        state["tables"] = (
-                            context_tables(state["cache"]) if context > 256 else None
-                        )
+                        next_reference_page += page_count
                         assert request_id not in continuations
                         continuations[request_id] = state
-                        reference.kv_cache = state["cache"]
                         oracle = inputs(
                             reference.kv_cache, prompt, [count], tables=state["tables"]
                         )
@@ -157,7 +213,8 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                             reversed(sequence[max(0, len(sequence) - 4) : -1])
                         )
                         history += [-1] * (3 - len(history))
-                        reference.kv_cache = state["cache"]
+                        histories.append(history)
+                        starts.append(start)
                         oracle = decode_inputs(
                             reference.kv_cache,
                             [sequence[-1]],
@@ -188,11 +245,28 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                         rtol=0,
                         atol=0,
                     )
-                    rows.append(reference.forward(oracle).hidden_states.clone())
                     keys.append(request_id)
                     offset += count
                 assert offset == len(ids)
-                return torch.cat(rows), keys
+                # Preserve the native row count: BF16 grouped wo_a can select a
+                # different GEMM reduction when a batch is split into single rows.
+                # Reference cache allocations and page IDs remain independent.
+                tables = {
+                    tag: torch.cat([continuations[key]["tables"][tag] for key in keys])
+                    for tag in reference.kv_cache.group_tags
+                }
+                if attn.is_prefill:
+                    oracle = inputs(reference.kv_cache, ids, lengths, tables=tables)
+                else:
+                    oracle = decode_inputs(
+                        reference.kv_cache,
+                        ids,
+                        starts,
+                        histories,
+                        prompt_lengths=lengths,
+                        tables=tables,
+                    )
+                return reference_forward(oracle), keys
 
             def checked_initialize(resource):
                 assert isinstance(resource, PyModelInitResources)
@@ -202,6 +276,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
 
             def checked_forward(request, fmha_impl=None):
                 try:
+                    reference_traces.clear()
                     stop = torch.tensor([int(stop_requested.is_set())], device="cuda")
                     dist.all_reduce(stop, op=dist.ReduceOp.MIN)
                     if stop.item():
@@ -227,15 +302,44 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                             rtol=0,
                             atol=0,
                         )
-                        expected = reference.forward(
-                            oracle_request
-                        ).hidden_states.clone()
-                    actual = forward(request, fmha_impl).hidden_states.clone()
+                        expected = reference_forward(oracle_request)
+                    with (
+                        failure_boundaries(model)
+                        if diagnostic_directory and ids
+                        else nullcontext({})
+                    ) as actual_trace:
+                        actual = forward(request, fmha_impl).hidden_states.clone()
                     assert_released(model)
                     if ids:
-                        torch.testing.assert_close(
-                            actual, expected, rtol=0.03, atol=0.05
-                        )
+                        try:
+                            torch.testing.assert_close(
+                                actual, expected, rtol=0.03, atol=0.05
+                            )
+                        except AssertionError:
+                            if diagnostic_directory:
+                                metadata = {
+                                    "input_ids": ids,
+                                    "cache_spans": request.v41_cache_spans.tolist(),
+                                    "is_prefill": attn.is_prefill,
+                                }
+                                actual_trace["hidden"] = actual.cpu()
+                                expected_trace = {
+                                    name: torch.cat(
+                                        [trace[name] for trace in reference_traces]
+                                    )
+                                    for name in reference_traces[0]
+                                }
+                                for label, trace in (
+                                    ("reference", expected_trace),
+                                    ("native", actual_trace),
+                                ):
+                                    save_model_trace(
+                                        Path(diagnostic_directory)
+                                        / f"rank{rank}-{label}.pt",
+                                        trace,
+                                        metadata,
+                                    )
+                            raise
                         last = (
                             torch.tensor(lengths, device="cuda").cumsum(0) - 1
                             if attn.is_prefill
@@ -292,7 +396,8 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                     return PyModelOutputs(actual)
                 except BaseException:
                     traceback.print_exc()
-                    raise
+                    sys.stderr.flush()
+                    os._exit(1)
 
             with patch.object(model, "forward", checked_forward), patch.object(
                 model, "initialize", checked_initialize

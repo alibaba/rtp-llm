@@ -90,6 +90,10 @@ def reference_precision(profile):
 
             def quantized_fresh(layer, qkv, common):
                 qkv = original(layer, qkv, common)
+                if getattr(layer, "round_kv_norm_to_input_dtype", False):
+                    # The production owner now rounds its fresh attention copy
+                    # while preserving the original rows for the cache writer.
+                    return qkv
                 return qkv._replace(kv_full=swa_roundtrip(qkv.kv_full))
 
             stack.enter_context(
