@@ -559,6 +559,13 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     stream_->generate_input_->generate_config->reuse_cache = true;
     ASSERT_TRUE(resource.reuseCache());
 
+    // prefill-only makes reuse ineffective without mutating the requested setting
+    stream_->generate_input_->generate_config->max_new_tokens = 0;
+    ASSERT_TRUE(stream_->generate_input_->generate_config->reuse_cache);
+    ASSERT_FALSE(resource.reuseCache());
+    stream_->generate_input_->generate_config->max_new_tokens = 1;
+    ASSERT_TRUE(resource.reuseCache());
+
     // engine=true, query=false -> false
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_FALSE(resource.reuseCache());
@@ -571,6 +578,54 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     // engine=false, query=false -> false
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_FALSE(resource.reuseCache());
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuseForAllocation) {
+    for (const bool ignore_request_switches : {false, true}) {
+        SCOPED_TRACE(ignore_request_switches);
+        prepareResource(/*reuse_cache=*/true);
+        auto& resource = stream_->streamCacheResource();
+
+        stream_->generateConfig()->max_new_tokens                = 0;
+        stream_->generateConfig()->num_return_sequences          = 1;
+        stream_->generateConfig()->reuse_cache                   = true;
+        resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
+        resource.resource_context_.enable_device_cache           = true;
+        resource.resource_context_.enable_memory_cache           = true;
+        resource.resource_context_.enable_disk_cache             = true;
+        resource.resource_context_.enable_remote_cache           = true;
+
+        const auto real_allocator = cache_manager_->coordinator_manager_;
+        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+        cache_manager_->coordinator_manager_ = allocator;
+        EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+            .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
+                EXPECT_FALSE(info.reuse_cache);
+                EXPECT_FALSE(info.enable_cache_lookup);
+                return real_allocator->initMallocForCommonLen(info);
+            }));
+        EXPECT_CALL(*allocator, incrMalloc(testing::_))
+            .Times(2)
+            .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
+                EXPECT_FALSE(info.reuse_cache);
+                EXPECT_FALSE(info.enable_cache_lookup);
+                return real_allocator->incrMalloc(info);
+            }));
+
+        const auto init_status = resource.initKVBlock();
+        EXPECT_TRUE(init_status.ok()) << init_status;
+        EXPECT_GT(resource.curBlocksNum(), 0);
+        EXPECT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_FALSE(resource.asyncLoadCache());
+        EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+        EXPECT_EQ(resource.allocator_load_context_, nullptr);
+        EXPECT_EQ(stream_->reuseLength(), 0);
+        EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+        EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
+        cache_manager_->coordinator_manager_ = real_allocator;
+        stream_->releaseResource();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigured) {
@@ -750,6 +805,53 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
 
     ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_TRUE(resource.incrKVBlock().ok());
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillOnlySkipsBlockTreeLoadsAndStores) {
+    for (const bool ignore_request_switches : {false, true}) {
+        for (const bool seed_host : {false, true}) {
+            SCOPED_TRACE("ignore=" + std::to_string(ignore_request_switches) + " host=" + std::to_string(seed_host));
+            auto  backend                = prepareStorageBackendResource(/*block_matches=*/false, seed_host);
+            auto& resource               = stream_->streamCacheResource();
+            auto  config                 = stream_->generateConfig();
+            config->max_new_tokens       = 0;
+            config->num_return_sequences = 1;
+            config->reuse_cache          = true;
+            resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
+            resource.resource_context_.enable_memory_cache           = true;
+            resource.resource_context_.enable_disk_cache             = true;
+
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            ASSERT_GT(resource.curBlocksNum(), 0);
+            EXPECT_FALSE(resource.asyncLoadCache());
+            EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+            EXPECT_EQ(resource.allocator_load_context_, nullptr);
+            EXPECT_EQ(stream_->reuseLength(), 0);
+            EXPECT_EQ(stream_->hostReuseLength(), 0);
+            EXPECT_EQ(stream_->diskReuseLength(), 0);
+            EXPECT_EQ(stream_->remoteReuseLength(), 0);
+            EXPECT_EQ(backend->matchCalls(), 0u);
+
+            const auto real_allocator = cache_manager_->coordinator_manager_;
+            auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+            EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_)).Times(0);
+            EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([real_allocator](const FreeInfo& info) {
+                real_allocator->free(info);
+            }));
+            cache_manager_->coordinator_manager_ = allocator;
+            stream_->generate_status_->status    = StreamState::FINISHED;
+            stream_->fillSubGenerateStatus(StreamState::FINISHED);
+            stream_->releaseResource();
+            cache_manager_->coordinator_manager_ = real_allocator;
+            backend->shutdown();
+
+            EXPECT_TRUE(resource.isResourceReleased());
+            EXPECT_EQ(resource.curBlocksNum(), 0);
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+            EXPECT_EQ(backend->writeCalls(), 0u);
+            EXPECT_TRUE(config->reuse_cache);
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_ReturnsFalse) {

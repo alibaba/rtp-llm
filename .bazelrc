@@ -68,6 +68,7 @@ build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
 build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:sm12x --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:sm12x --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
+build:sm120 --config=sm12x
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true

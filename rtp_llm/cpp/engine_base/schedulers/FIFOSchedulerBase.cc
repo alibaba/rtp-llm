@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -104,6 +106,15 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (hasMixedExecutionModes(streams)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     std::vector<bool> enqueue_successes;
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
@@ -128,10 +139,18 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     return {std::move(enqueue_successes), streams};
 }
 
-size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
+size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>&                   streams,
+                                                   const std::unordered_set<GenerateStream*>* admitted_streams) {
     RTP_LLM_PROFILE_FUNCTION();
     size_t moved_count = 0;
     for (auto it = streams.begin(); it != streams.end();) {
+        // Persistent CanRun/LoadInitiated events do not imply admission in this round.
+        // Non-admitted streams still need timeout maintenance, but only errors may advance to cleanup.
+        if (admitted_streams && admitted_streams->find(it->get()) == admitted_streams->end()
+            && !(*it)->checkTimeoutAndHasError()) {
+            ++it;
+            continue;
+        }
         auto state     = (*it)->getStatus();
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
@@ -148,7 +167,8 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
     return moved_count;
 }
 
-void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams,
+                                                                              bool include_running_mode) {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
@@ -166,8 +186,47 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
+    std::unordered_map<int64_t, bool> group_prefill_only;
+    std::unordered_set<int64_t>       mixed_force_batch_group_ids;
+    for (const auto& stream : waiting_streams) {
+        if (!stream->isGroup()) {
+            continue;
+        }
+        const bool prefill_only = isPrefillOnly(stream);
+        const auto result       = group_prefill_only.emplace(stream->groupId(), prefill_only);
+        if (!result.second && result.first->second != prefill_only) {
+            mixed_force_batch_group_ids.insert(stream->groupId());
+        }
+    }
+
+    for (const auto& stream : waiting_streams) {
+        if (stream->isGroup() && mixed_force_batch_group_ids.count(stream->groupId()) > 0 && !stream->hasError()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+        }
+    }
+
+    bool has_scheduling_type     = false;
+    bool scheduling_prefill_only = false;
+    // Existing streams that will be returned this round define its execution mode. PDFusion prefill
+    // rounds exclude held running decodes; new_streams_ remains relevant for state-machine promotions.
+    const auto set_scheduling_type = [&](const std::list<GenerateStreamPtr>& streams) {
+        if (!has_scheduling_type && !streams.empty()) {
+            has_scheduling_type     = true;
+            scheduling_prefill_only = isPrefillOnly(streams.front());
+        }
+    };
+    if (include_running_mode) {
+        set_scheduling_type(running_streams_);
+    }
+    set_scheduling_type(new_streams_);
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
+
+        const bool prefill_only = isPrefillOnly(stream);
+        if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
+            ++it;
+            continue;
+        }
 
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
@@ -184,6 +243,10 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             }
             admitted_streams.push_back(stream);
             admitted_stream_ptrs.insert(stream.get());
+            if (!has_scheduling_type) {
+                has_scheduling_type     = true;
+                scheduling_prefill_only = prefill_only;
+            }
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;
             }
@@ -198,21 +261,8 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
         }
     }
 
-    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream = *it;
-        if (!stream->hasError() && admitted_stream_ptrs.find(stream.get()) == admitted_stream_ptrs.end()) {
-            ++it;
-            continue;
-        }
-        const auto state     = stream->getStatus();
-        const auto new_state = stream->moveToNext();
-        if (new_state != state) {
-            addStreamToNewState(stream, new_state);
-            it = waiting_streams.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    evaluateAndUpdateStreams(waiting_streams, &admitted_stream_ptrs);
+    return admitted_stream_ptrs;
 }
 
 size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {

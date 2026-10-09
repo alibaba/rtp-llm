@@ -90,6 +90,11 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.top_p, 0.95)
         self.assertEqual(generate_config.max_new_tokens, 100)
 
+    def test_min_new_tokens_is_a_scalar_integer(self):
+        self.assertEqual(GenerateConfig(min_new_tokens=3).min_new_tokens, 3)
+        with self.assertRaises(ValueError):
+            GenerateConfig(min_new_tokens=[1, 2])
+
     def test_think_mode_accepts_strings_and_legacy_aliases(self):
         cases = {
             "disabled": ("disabled", ThinkingMode.DISABLED),

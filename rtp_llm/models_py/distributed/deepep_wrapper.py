@@ -569,10 +569,9 @@ def init_deepep_wrapper(
     """
 
     if not DeepEPWrapper.supported():
-        logging.warning(
-            "DeepEP is not supported on this device, skipping initialization"
+        raise RuntimeError(
+            "DeepEP was explicitly requested but the DeepEP provider is unavailable"
         )
-        return
 
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph

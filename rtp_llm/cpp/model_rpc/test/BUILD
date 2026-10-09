@@ -21,11 +21,25 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+py_test(
+    name = "rpc_error_code_proto_test",
+    size = "small",
+    srcs = ["rpc_error_code_proto_test.py"],
+    deps = [
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
     deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:pydantic",
         "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/test/model_test/test_util",
@@ -139,7 +153,10 @@ cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
     env = {},
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],

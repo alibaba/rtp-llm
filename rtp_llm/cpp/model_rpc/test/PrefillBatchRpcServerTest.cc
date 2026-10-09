@@ -1472,6 +1472,34 @@ TEST(PrefillBatchRpcServerTest, CancelAllClearsAndCancelsDeferredContexts) {
     EXPECT_EQ(shutdown_status.error_message(), "Prefill batch server is shutting down");
 }
 
+TEST_F(PrefillBatchTraceTest, FusionInvalidInputAndWriterEndRpcSpanWithInvalidArgument) {
+    TestPrefillBatchRpcServer server;
+    for (const int64_t request_id : {4501, 4502}) {
+        SCOPED_TRACE(request_id);
+        auto request = makeVitRequest(request_id);
+        request.clear_multimodal_inputs();
+        request.mutable_generate_config()->set_max_new_tokens(request_id == 4501 ? -1 : 1);
+        const auto status = server.LocalRpcServer::GenerateStreamCall(nullptr, &request, nullptr);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        ErrorDetailsPB details;
+        ASSERT_TRUE(details.ParseFromString(status.error_details()));
+        EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+        EXPECT_NE(details.error_message().find(request_id == 4501 ? "max_new_tokens" : "writer"), std::string::npos);
+    }
+
+    auto spans = finishTelemetry();
+    auto rpc   = findSpans(spans, "rtp_llm.generate_stream_call");
+    ASSERT_EQ(rpc.size(), 2u);
+    for (const auto* span : rpc) {
+        EXPECT_EQ(span->GetStatus(), trace_api::StatusCode::kError);
+        const auto& attrs = span->GetAttributes();
+        EXPECT_EQ(nostd::get<std::string>(attrs.at("rpc.response.status_code")), "INVALID_ARGUMENT");
+        EXPECT_EQ(nostd::get<int64_t>(attrs.at("rtp_llm.grpc_status_code")),
+                  static_cast<int64_t>(grpc::StatusCode::INVALID_ARGUMENT));
+        EXPECT_EQ(nostd::get<std::string>(attrs.at("error.type")), "InvalidArgument");
+    }
+}
+
 TEST_F(PrefillBatchTraceTest, VitCoversFusionPreparationIncludingTokenExpansion) {
     TestPrefillBatchRpcServer server;
     auto                      processor   = std::make_shared<VitTraceProcessor>();
@@ -1553,7 +1581,9 @@ TEST_F(PrefillBatchTraceTest, VitPreservesErrorsAndEndsOnException) {
         EXPECT_EQ(result.ToString(), "embedding failed");
     }
     processor->throws = true;
-    EXPECT_THROW(server.prepareInput(makeVitRequest(4301), input, parent), std::runtime_error);
+    const auto exception_result = server.prepareInput(makeVitRequest(4301), input, parent);
+    EXPECT_EQ(exception_result.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(exception_result.ToString(), "embedding failed");
     EXPECT_EQ(processor->calls, 4);
     parent->End();
     auto spans = finishTelemetry();

@@ -1,33 +1,36 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig, HWKernelConfig, RuntimeConfig
+from rtp_llm.ops import (
+    GrammarConfig,
+    HWKernelConfig,
+    MoeConfig,
+    PDSepConfig,
+    RoleType,
+    RuntimeConfig,
+)
 
 
-def _new_grammar_config():
-    return GrammarConfig.__new__(GrammarConfig)
-
-
-def _new_hw_kernel_config():
-    return HWKernelConfig.__new__(HWKernelConfig)
+def _new_config(config_type):
+    return config_type.__new__(config_type)
 
 
 class _LegacyGrammarConfig:
     def __reduce__(self):
         legacy_state = ("xgrammar", True, 3, "tokenizer-info", [7, 11])
-        return _new_grammar_config, (), legacy_state
+        return _new_config, (GrammarConfig,), legacy_state
 
 
 class _PreviousGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 4, "previous-tokenizer-info", [5, 9], 2048)
-        return _new_grammar_config, (), previous_state
+        return _new_config, (GrammarConfig,), previous_state
 
 
 class _PreviousSixTupleGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 6, "six-tokenizer-info", [13, 17], 4096, True)
-        return _new_grammar_config, (), previous_state
+        return _new_config, (GrammarConfig,), previous_state
 
 
 class _LegacyHWKernelConfig:
@@ -48,7 +51,111 @@ class _LegacyHWKernelConfig:
             True,
             True,
         )
-        return _new_hw_kernel_config, (), legacy_state
+        return _new_config, (HWKernelConfig,), legacy_state
+
+
+class _LegacyMoeConfig:
+    def __reduce__(self):
+        legacy_state = (
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            7,
+            8192,
+            True,
+            128,
+            "legacy",
+        )
+        return _new_config, (MoeConfig,), legacy_state
+
+
+class _MalformedPDSepConfig:
+    def __reduce__(self):
+        return _new_config, (PDSepConfig,), (RoleType.PDFUSION,) * 20
+
+
+class _InvalidTypePDSepConfig:
+    def __reduce__(self):
+        state = [
+            RoleType.PDFUSION,
+            True,
+            "not-an-int",
+        ] + [0] * 18
+        return _new_config, (PDSepConfig,), tuple(state)
+
+
+class _LegacyPDSepConfig:
+    def __reduce__(self):
+        legacy_state = (
+            RoleType.PDFUSION,
+            True,
+            101,
+            102,
+            103,
+            104,
+            105,
+            106,
+            107,
+            108,
+            109,
+            110,
+            111,
+            112,
+            113,
+            114,
+            115,
+            116,
+            117,
+            True,
+            118,
+        )
+        return _new_config, (PDSepConfig,), legacy_state
+
+
+class MoeConfigPickleTest(unittest.TestCase):
+    def test_non_default_fp4_moe_op_round_trip(self):
+        config = MoeConfig()
+        config.fp4_moe_op = "cutlass"
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.fp4_moe_op, "cutlass")
+
+    def test_legacy_twelve_tuple_defaults_fp4_moe_op(self):
+        restored = pickle.loads(pickle.dumps(_LegacyMoeConfig()))
+
+        self.assertEqual(restored.moe_strategy, "legacy")
+        self.assertEqual(restored.fp4_moe_op, "auto")
+
+
+class PDSepConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        config = PDSepConfig()
+        config.prefill_stop_stream_wait_timeout_ms = 118
+        config.prefill_prepare_resource_pool_size = 119
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
+        self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
+
+    def test_legacy_format_defaults_new_field(self):
+        restored = pickle.loads(pickle.dumps(_LegacyPDSepConfig()))
+
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
+        self.assertEqual(restored.prefill_prepare_resource_pool_size, 0)
+
+    def test_rejects_invalid_state_length(self):
+        with self.assertRaisesRegex(RuntimeError, "expected 21 or 22 fields"):
+            pickle.loads(pickle.dumps(_MalformedPDSepConfig()))
+
+    def test_rejects_invalid_state_type_with_context(self):
+        with self.assertRaisesRegex(RuntimeError, "PDSepConfig unpickle error"):
+            pickle.loads(pickle.dumps(_InvalidTypePDSepConfig()))
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
@@ -120,7 +227,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
                 self.subTest(state=state),
                 self.assertRaisesRegex(RuntimeError, "Invalid state"),
             ):
-                config = _new_grammar_config()
+                config = _new_config(GrammarConfig)
                 config.__setstate__(state)
 
 
@@ -182,7 +289,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
-                config = _new_hw_kernel_config()
+                config = _new_config(HWKernelConfig)
                 config.__setstate__(tuple(range(size)))
 
     def test_current_layout_rejects_wrong_field_type(self):
@@ -205,7 +312,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             [32, 64],
         )
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
-            config = _new_hw_kernel_config()
+            config = _new_config(HWKernelConfig)
             config.__setstate__(malformed_state)
 
 

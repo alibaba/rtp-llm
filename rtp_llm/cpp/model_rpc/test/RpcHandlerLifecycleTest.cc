@@ -196,6 +196,24 @@ private:
     std::unique_ptr<grpc::Server> server_;
 };
 
+class LifecycleGenerateService: public RpcService::Service {
+public:
+    explicit LifecycleGenerateService(LocalRpcServer& handler): handler_(handler) {}
+
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        auto status = handler_.GenerateStreamCall(context, request, writer);
+        returned.set_value(status);
+        return status;
+    }
+
+    std::promise<grpc::Status> returned;
+
+private:
+    LocalRpcServer& handler_;
+};
+
 class LifecycleDecodeService: public RpcService::Service {
 public:
     grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* rpc) override {
@@ -250,7 +268,7 @@ protected:
         EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), free_before);
     }
 
-    void runSynchronousHandler(Handler kind, OutputAction action) {
+    void runSynchronousHandler(Handler kind, OutputAction action, bool prefill_only = false) {
         TestLogCapture   capture("rpc_handler_lifecycle");
         auto             engine      = std::make_shared<SteppedEngine>(action);
         auto             meta        = std::make_shared<RpcServerRuntimeMeta>();
@@ -269,30 +287,45 @@ protected:
         prefill.resource().workers.clear();
         auto request = lifecycleRequest();
         request.mutable_generate_config()->set_can_use_pd_separation(kind == Handler::PREFILL);
+        if (prefill_only) {
+            request.mutable_generate_config()->set_prefill_only(true);
+            request.mutable_generate_config()->set_max_new_tokens(0);
+        }
         auto* role = request.mutable_generate_config()->add_role_addrs();
         role->set_role(RoleAddrPB::DECODE);
         role->set_ip("127.0.0.1");
         role->set_grpc_port(peer_server.port);
-        auto polling = engine->polling.get_future();
-        auto call =
-            std::async(std::launch::async, [&] { return handler.GenerateStreamCall(nullptr, &request, nullptr); });
-        // No output payload is emitted by this fixture, so a writer is unnecessary.
+        LifecycleGenerateService service(handler);
+        ScopedRpcServer          server(&service);
+        auto stub = RpcService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext client;
+        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+        auto       polling        = engine->polling.get_future();
+        auto       call           = service.returned.get_future();
+        auto       rpc            = stub->GenerateStreamCall(&client, request);
         const bool reached_output = polling.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
         const bool returned       = call.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
         if (!returned) {
             // A regression must fail the test rather than leave a future blocked.
+            client.TryCancel();
             (void)engine->stop();
         }
         EXPECT_TRUE(reached_output);
         EXPECT_TRUE(returned) << "handler waited for scheduler completion";
-        if (kind == Handler::LOCAL && action == OutputAction::THROW) {
-            EXPECT_THROW(call.get(), std::runtime_error);
-        } else {
-            auto status = call.get();
-            EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
-            if (action != OutputAction::COMPLETE) {
-                EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
-            }
+        ASSERT_EQ(call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        const auto        status = call.get();
+        GenerateOutputsPB response;
+        while (rpc->Read(&response)) {}
+        const auto client_status = rpc->Finish();
+        EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
+        EXPECT_EQ(client_status.ok(), action == OutputAction::COMPLETE);
+        if (action != OutputAction::COMPLETE) {
+            EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details()));
+            EXPECT_EQ(details.error_code(),
+                      static_cast<int>(action == OutputAction::FAIL ? ErrorCode::PRIORITY_PREEMPTED :
+                                                                      ErrorCode::EXECUTION_EXCEPTION));
         }
         ASSERT_TRUE(reached_output);
         ASSERT_TRUE(returned);
@@ -310,7 +343,11 @@ protected:
             EXPECT_EQ(capture.content().find(kUnexpectedExit, diagnostic + std::string(kUnexpectedExit).size()),
                       std::string::npos);
         } else {
-            EXPECT_EQ(diagnostic, std::string::npos);
+            EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
+        }
+        if (prefill_only) {
+            EXPECT_TRUE(engine->stream->generateConfig()->isPrefillOnly());
+            EXPECT_EQ(engine->stream->outputTokenLen(), 0);
         }
         if (action == OutputAction::COMPLETE) {
             engine->stream->reportEvent(StreamEvents::GenerateDone);
@@ -411,6 +448,12 @@ TEST_F(RpcHandlerLifecycleTest, LocalFailurePreservesPriorityPreemption) {
 }
 TEST_F(RpcHandlerLifecycleTest, LocalExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::THROW);
+}
+TEST_F(RpcHandlerLifecycleTest, LocalPrefillOnlySuccessReturnsBeforeSchedulerWithoutCanceling) {
+    runSynchronousHandler(Handler::LOCAL, OutputAction::COMPLETE, true);
+}
+TEST_F(RpcHandlerLifecycleTest, PrefillOnlyFallbackReturnsBeforeSchedulerWithoutCanceling) {
+    runSynchronousHandler(Handler::PREFILL, OutputAction::COMPLETE, true);
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::COMPLETE);
