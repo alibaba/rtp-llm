@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     save_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import mhc_fp32
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
@@ -79,12 +80,17 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     stopped = threading.Event()
     precision = os.environ.get("DSV41_TEST_REFERENCE_PRECISION", "baseline")
     compare_tp8 = os.environ.get("DSV41_TEST_COMPARE_TP8") == "1"
+    compare_mhc = os.environ.get("DSV41_TEST_COMPARE_MHC") == "1"
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
+    if compare_mhc:
+        profiles.append("mhc_fp32")
+        if compare_tp8:
+            profiles.append("tp8_projection_mhc_fp32")
     current_profile = [precision]
     trace_steps = dict.fromkeys(profiles, 0)
     try:
-        if compare_tp8 and precision != "baseline":
-            raise ValueError("TP8 comparison requires unpatched production math")
+        if (compare_tp8 or compare_mhc) and precision != "baseline":
+            raise ValueError("Paired comparison requires unpatched production math")
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
@@ -166,7 +172,11 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 )
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
-                ) as snapshots, tp8_projection(profile == "tp8_projection"):
+                ) as snapshots, tp8_projection(
+                    profile.startswith("tp8_projection")
+                ), mhc_fp32(
+                    profile.endswith("mhc_fp32")
+                ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
                     snapshots["hidden"] = hidden.detach().cpu()
@@ -183,7 +193,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     trace_root = Path(trace_directory)
                     if not full:
                         trace_root /= f"bounded-context{context}-tokens{new_tokens}"
-                    if compare_tp8:
+                    if compare_tp8 or compare_mhc:
                         trace_root /= profile
                     save_model_trace(
                         trace_root / f"native-prompt0-step{trace_steps[profile]}.pt",
@@ -285,6 +295,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         assert tokens[: len(prompt)] == prompt
                         assert len(tokens) == len(prompt) + new_tokens
                         assert all(0 <= token < config.vocab_size for token in tokens)
+                        if not full:
+                            assert 127 not in tokens, "fixture sampled its image token"
                         request_id = len(sequences)
                         assert sequences[request_id] == tokens[:-1]
                         assert len(hashes[request_id]) == new_tokens
@@ -369,6 +381,10 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             args, weights = fixture(experts=16, full_schedule=True, max_seq_len=context)
+            # Greedy ties choose the lower ID. Keep the synthetic image token
+            # from interrupting text-only generation under diagnostic math.
+            head = weights.global_weights[W.lm_head]
+            head[127].copy_(head[126])
             save_checkpoint(root, args, weights)
             del weights
             gc.collect()
