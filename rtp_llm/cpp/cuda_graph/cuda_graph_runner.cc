@@ -27,8 +27,7 @@ int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) 
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
     const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
-    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion,
-                            "CUDA graph block table capacity overflow");
+    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion, "CUDA graph block table capacity overflow");
     return static_cast<int64_t>(physical * expansion);
 }
 }  // namespace
@@ -55,13 +54,11 @@ int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topol
     return width;
 }
 
-int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                      size_t               fake_physical_block_count) {
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count) {
     RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
     int64_t width = 0;
     for (const auto& group : topology.groups()) {
-        width = std::max(width,
-                         expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
+        width = std::max(width, expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
     }
     return width;
 }
@@ -1176,6 +1173,25 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
         }
+        {
+            // Count per bucket so every captured bucket's first serving replay
+            // is observable without logging every decode step.
+            RTP_LLM_CHECK_WITH_INFO(state.current_real_graph_bs > 0
+                                        && static_cast<size_t>(state.current_real_graph_bs)
+                                               < decode_cuda_graph_replay_log_counts_.size(),
+                                    "decode CUDA graph replay bucket %d exceeds counter range %zu",
+                                    state.current_real_graph_bs,
+                                    decode_cuda_graph_replay_log_counts_.size());
+            const uint64_t replay_count = decode_cuda_graph_replay_log_counts_[state.current_real_graph_bs].fetch_add(
+                                              1, std::memory_order_relaxed)
+                                          + 1;
+            if ((replay_count & (replay_count - 1)) == 0) {
+                RTP_LLM_LOG_INFO("decode CUDA graph replay: bucket_bs=%d real_bs=%d replay_count=%llu",
+                                 state.current_real_graph_bs,
+                                 state.real_request_count,
+                                 static_cast<unsigned long long>(replay_count));
+            }
+        }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
@@ -1274,6 +1290,7 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     }
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
+    state.real_request_count = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
     if (capture_range_.empty()) {
         if (observe_fallback) {
@@ -2186,6 +2203,7 @@ CudaGraphRunner* CudaGraphRunner::initializeCapture(std::unique_ptr<CudaGraphRun
     try {
         runner->initCapture();
     } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("CUDA graph capture initialization failed: %s", e.what());
         if (runner->captureSessionMayBeDirty()) {
             RTP_LLM_LOG_ERROR("Retaining failed CUDA graph runner during fail-fast initialization because "
                               "destroying a partially captured graph is unsafe");

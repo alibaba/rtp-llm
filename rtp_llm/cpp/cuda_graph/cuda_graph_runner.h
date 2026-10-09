@@ -43,11 +43,9 @@ class CudaGraphRunner: public GraphBase {
 public:
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               max_seq_len,
-                                                size_t               max_reserved_step);
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               fake_physical_block_count);
+    static int64_t
+    captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
@@ -75,7 +73,8 @@ public:
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
-        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id) {
+        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id),
+        decode_cuda_graph_replay_log_counts_(graph_params.max_context_batch_size + 1) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -85,6 +84,9 @@ public:
         RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
                                 "CUDA graph requires a positive kernel block table width");
         max_bs_ = graph_params.max_context_batch_size;
+        for (auto& counter : decode_cuda_graph_replay_log_counts_) {
+            counter.store(0, std::memory_order_relaxed);
+        }
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
                     is_prefill_cuda_graph_mode_ ?
@@ -170,6 +172,12 @@ public:
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphSize(const CudaGraphState& state) const;
+    uint64_t       getDecodeReplayCount(size_t bucket) const {
+        RTP_LLM_CHECK_WITH_INFO(bucket > 0 && bucket < decode_cuda_graph_replay_log_counts_.size(),
+                                "invalid decode CUDA graph replay bucket %zu",
+                                bucket);
+        return decode_cuda_graph_replay_log_counts_[bucket].load(std::memory_order_relaxed);
+    }
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
@@ -274,8 +282,9 @@ private:
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =
         static_cast<size_t>(GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
-                                  generation_prefill_cuda_graph_fallback_log_counts_;
-    mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
+                                       generation_prefill_cuda_graph_fallback_log_counts_;
+    mutable std::atomic<uint64_t>      generation_prefill_cuda_graph_replay_log_count_{0};
+    std::vector<std::atomic<uint64_t>> decode_cuda_graph_replay_log_counts_;
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

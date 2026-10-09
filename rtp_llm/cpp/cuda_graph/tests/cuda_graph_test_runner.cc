@@ -201,6 +201,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphSize(state_) : 0;
     }
 
+    uint64_t getDecodeReplayCount(size_t bucket) const {
+        return runner_ != nullptr ? runner_->getDecodeReplayCount(bucket) : 0;
+    }
+
     bool captureSessionMayBeDirty() const {
         return runner_ != nullptr && runner_->captureSessionMayBeDirty();
     }
@@ -284,5 +288,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getGenerationPrefillStatus", &CudaGraphTestRunner::getGenerationPrefillStatus)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("getDecodeReplayCount", &CudaGraphTestRunner::getDecodeReplayCount)
         .def("captureSessionMayBeDirty", &CudaGraphTestRunner::captureSessionMayBeDirty);
 }

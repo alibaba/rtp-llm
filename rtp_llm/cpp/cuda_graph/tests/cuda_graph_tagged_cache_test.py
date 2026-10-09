@@ -1589,6 +1589,43 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self.assertEqual(runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch")
         self.assertFalse(runner.canPrepare(wide))
 
+    def test_decode_replay_observations_require_serving_replay(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedDecodePaddingModel(),
+            HIDDEN_SIZE,
+            64,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4, 16],
+            GROUP_TAGS,
+        )
+        for bucket in (4, 16):
+            self.assertEqual(runner.getDecodeReplayCount(bucket), 0)
+
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=9)
+        self.assertTrue(runner.canRun(inputs))
+        self.assertEqual(runner.getCurrentRealGraphSize(), 16)
+        runner.prepare(inputs)
+        self.assertEqual(runner.getDecodeReplayCount(16), 0)
+        runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(runner.getDecodeReplayCount(16), 1)
+        self.assertEqual(runner.getDecodeReplayCount(4), 0)
+
+        smaller = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
+        self.assertTrue(runner.canRun(smaller))
+        runner.forward(smaller)
+        torch.cuda.synchronize()
+        self.assertEqual(runner.getDecodeReplayCount(4), 1)
+        self.assertEqual(runner.getDecodeReplayCount(16), 1)
+
+        outside = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=17)
+        self.assertFalse(runner.canRun(outside))
+        self.assertFalse(runner.canPrepare(outside))
+        self.assertEqual(runner.getDecodeReplayCount(4), 1)
+        self.assertEqual(runner.getDecodeReplayCount(16), 1)
+
+
     def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
