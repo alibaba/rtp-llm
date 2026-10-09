@@ -47,6 +47,7 @@ flashattn = flashattn2 + ["flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
+requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
@@ -109,7 +110,7 @@ py_library(
     }) + select({
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
         "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({

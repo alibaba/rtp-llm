@@ -36,7 +36,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -841,7 +844,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                from rtp_llm.models_py.utils.flash_mla_legacy import (
+                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                )
 
                 _swa_attn = self.v4.layers[0].attn
                 _H_swa = int(_swa_attn.n_heads)
