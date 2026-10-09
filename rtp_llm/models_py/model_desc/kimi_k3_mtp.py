@@ -43,11 +43,23 @@ class KimiK3MtpModel(KimiK3Model):
                 (batch + request_alignment - 1) // request_alignment * request_alignment
             )
             attention = self.layers[0].attention
-            attention._mtp_bf16_collectives = KimiK3MtpBf16Collectives(
-                attention.input.weight.device,
-                max_tokens=batch * q,
-                hidden_size=self.config.hidden_size,
-            )
+            # Proposal and update runners initialize this shared model.
+            # Captured kernels retain raw pointers into the first workspace.
+            existing = attention._mtp_bf16_collectives
+            if existing is None:
+                attention._mtp_bf16_collectives = KimiK3MtpBf16Collectives(
+                    attention.input.weight.device,
+                    max_tokens=batch * q,
+                    hidden_size=self.config.hidden_size,
+                )
+            elif (
+                existing.tp_size != self.tp_size
+                or existing.hidden_size != self.config.hidden_size
+                or existing.max_tokens < batch * q
+            ):
+                raise ValueError(
+                    "Cannot replace MTP workspaces retained by CUDA Graphs"
+                )
         return ready
 
     def _project_local_mtp_input(self, inputs):
