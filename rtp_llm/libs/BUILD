@@ -51,6 +51,20 @@ filegroup(
     ],
 )
 
+_CUDA13_FLASHINFER_SOS = [
+    ":libflashinfer_single_prefill_so",
+    ":libflashinfer_single_decode_so",
+    ":libflashinfer_batch_paged_prefill_so",
+    ":libflashinfer_batch_paged_decode_so",
+    ":libflashinfer_batch_ragged_prefill_so",
+    ":libflashinfer_single_prefill_256_so",
+    ":libflashinfer_single_decode_256_so",
+    ":libflashinfer_batch_paged_prefill_256_so",
+    ":libflashinfer_batch_paged_decode_256_so",
+    ":libflashinfer_batch_ragged_prefill_256_so",
+    ":libflashinfer_sm90_so",
+]
+
 filegroup(
     name = "whl_package_libs",
     srcs = [],
@@ -59,5 +73,9 @@ filegroup(
         ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
-    ],
+    ] + select({
+        "//:using_cuda13_x86": _CUDA13_FLASHINFER_SOS,
+        "//:using_cuda13_arm": _CUDA13_FLASHINFER_SOS,
+        "//conditions:default": [],
+    }),
 )
