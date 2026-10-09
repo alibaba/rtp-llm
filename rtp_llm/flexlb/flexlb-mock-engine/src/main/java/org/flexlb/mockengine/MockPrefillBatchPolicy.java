@@ -14,7 +14,7 @@ record MockPrefillBatchPolicy(int maxRequests, long maxTokens, long maxKvLen,
         MockPrefillBatchPolicy policy = new MockPrefillBatchPolicy(
                 node.path("max_requests").asInt(0), node.path("max_batch_tokens").asLong(0),
                 node.path("max_batch_kv_len").asLong(0), node.path("max_seq_len").asLong(0),
-                node.path("cp_size").asInt(1), node.path("force_single").asBoolean(false),
+                node.path("cp_size").asInt(1), node.path("force_single").asBoolean(true),
                 node.path("max_batch_tokens_without_cache").asLong(0),
                 node.path("max_waiting_requests").asInt(0), node.path("max_inited_kv_streams").asInt(0),
                 node.path("fault_limits_enabled").asBoolean(false),

@@ -592,7 +592,8 @@ deep engine-side queues, so the cap must be explicitly requested. Do not
 - `max_batch_tokens_without_cache` 是停止继续准入的计算量配额，CP padding
   逐序列计算后乘宽度；当前候选可以使累计量越过配额，下一条停止准入。
 - `cp_enabled` 指定 CP 是否启用；未声明时由 `cp_size > 1` 推导。
-  未启用 CP 时 `cp_size` 必须为 1；`force_single` 仅在 CP 启用时生效。
+  未启用 CP 时 `cp_size` 必须为 1；`force_single` 默认 true，仅在 CP 启用时生效，
+  已采集配置中的显式 false 保持有效。
   请求上限、CP 宽度和模型长度应使用目标真实部署的有效配置。
 - `max_inited_kv_streams` 限制已持有非空 KV lease 的请求数量；达到上限时，
   已初始化 KV 的请求可以继续推进，空 lease 不占此配额。

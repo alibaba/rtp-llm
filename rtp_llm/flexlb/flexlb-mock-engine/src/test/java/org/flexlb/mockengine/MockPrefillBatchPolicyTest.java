@@ -140,4 +140,19 @@ class MockPrefillBatchPolicyTest {
         assertTrue(cp.fits(1, 0, 1)); cp.add(1, 0, 1); // padded 4
         assertFalse(cp.fits(1, 0, 1));
     }
+
+    @Test void loaderUsesRealCpDefaultAndPreservesExplicitCapturedValues() throws Exception {
+        var node = new ObjectMapper().createObjectNode();
+        node.put("max_requests", 4).put("max_batch_tokens", 100).put("max_seq_len", 1000);
+        node.put("cp_size", 4);
+        var implicit = MockPrefillBatchPolicy.load(node).newBudget();
+        implicit.add(1, 0, 1);
+        assertFalse(implicit.fits(1, 0, 1), "real CP force-single defaults to true");
+        node.put("force_single", false);
+        var captured = MockPrefillBatchPolicy.load(node).newBudget();
+        captured.add(1, 0, 1);
+        assertTrue(captured.fits(1, 0, 1), "explicit real capture must be preserved");
+        node.put("cp_enabled", false);
+        assertThrows(IllegalArgumentException.class, () -> MockPrefillBatchPolicy.load(node));
+    }
 }
