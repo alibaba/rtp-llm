@@ -44,10 +44,6 @@ from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
-from rtp_llm.utils.scr_template_utils import (
-    register_backend_visitor_template_hook,
-    register_server_config_template_hook,
-)
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
@@ -605,9 +601,6 @@ class DashScApp:
                     model_config=model_config,
                     source_role="dash",
                 )
-                # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
-                register_server_config_template_hook(self.py_env_configs)
-                register_backend_visitor_template_hook(backend_visitor, self.py_env_configs)
 
                 base_tok = TokenizerFactory.create(
                     model_config.ckpt_path,
@@ -650,9 +643,7 @@ class DashScApp:
                     and grammar_config.grammar_backend.strip().lower() == "xgrammar"
                 ):
                     grammar_validator = GrammarValidator(
-                        build_model_grammar_tokenizer_info_json(
-                            base_tok, model_config
-                        ),
+                        build_model_grammar_tokenizer_info_json(base_tok, model_config),
                         grammar_config,
                         self.py_env_configs.grammar_admission_config,
                     )

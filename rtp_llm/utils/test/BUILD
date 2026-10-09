@@ -334,6 +334,18 @@ py_test(
 py_test(
     name = "scr_vip_test",
     srcs = ["scr_vip_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "gang_info_test",
+    srcs = ["gang_info_test.py"],
     deps = ["//rtp_llm:utils"],
 )
 

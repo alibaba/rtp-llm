@@ -32,7 +32,7 @@ class RestoreContextTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "local listener port layout"):
                 RestoreContext("seed", "192.0.2.20").resolve_world_info(
-                    world, SimpleNamespace(world_size=1)
+                    world, SimpleNamespace(world_size=1), "/unused/annotations"
                 )
         self.assertEqual(world.self.ip, "192.0.2.10")
         self.assertEqual(world.self.cache_store_listen_port, 9002)
@@ -60,8 +60,12 @@ class RestoreContextTest(unittest.TestCase):
             "rtp_llm.utils.scr_endpoint_provider.local_comm_enabled", return_value=False
         ):
             context = RestoreContext("seed", "192.0.2.20")
-            self.assertIs(context.resolve_world_info(world, pc), world)
-            self.assertIs(context.resolve_world_info(world, pc), world)
+            self.assertIs(
+                context.resolve_world_info(world, pc, "/unused/annotations"), world
+            )
+            self.assertIs(
+                context.resolve_world_info(world, pc, "/unused/annotations"), world
+            )
         reader.assert_called_once_with("seed")
 
 

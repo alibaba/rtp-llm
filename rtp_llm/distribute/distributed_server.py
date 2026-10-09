@@ -20,6 +20,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.utils import scr_vip
+from rtp_llm.utils.gang_info import read_c2_gang_info
 from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
 
 
@@ -148,6 +149,7 @@ def get_local_world_info(
     ip = scr_vip.internal_ip(
         parallelism_config,
         server_config.ip or socket.gethostbyname(socket.gethostname()),
+        distribute_config.gang_annocation_path,
     )
     self_info = WorkerInfo(
         ip=ip,
@@ -193,10 +195,65 @@ def get_local_world_info(
         num_nodes=num_nodes,
         initialized=True,
     )
-    return (
-        scr_vip.world_info(result, parallelism_config)
-        if scr_vip.enabled(parallelism_config)
-        else result
+    return result
+
+
+def get_frontend_world_info(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+    parallelism_config: ParallelismConfig,
+) -> WorldInfo:
+    """Resolve only the TP leaders needed by this frontend's local workers.
+
+    A TP group can span nodes, leaving a frontend with no local TP leader.
+    Backends register before frontends start. Read those leaders' actual ports
+    from the existing registry, without changing backend/local membership or
+    including unrelated DP groups. The temporary store is not retained for SCR.
+    """
+    current = get_world_info(server_config, distribute_config, parallelism_config)
+    pc = parallelism_config
+    if pc.ffn_disaggregate_config.enable_ffn_disaggregate:
+        return current
+    present = {member.world_rank for member in current.members}
+    leaders = dict.fromkeys(
+        member.world_rank // pc.tp_size * pc.tp_size for member in current.members
+    )
+    missing = [rank for rank in leaders if rank not in present]
+    if not missing:
+        return current
+    master_ip, master_port = get_master(distribute_config, pc)
+    timeout = distribute_config.dist_comm_timeout
+    store = TCPStore(
+        host_name=master_ip,
+        port=int(master_port or server_config.start_port) - 1,
+        world_size=None,
+        is_master=False,
+        wait_for_workers=False,
+        **({"timeout": timedelta(seconds=timeout)} if timeout is not None else {}),
+    )
+    members = list(current.members)
+    for rank in missing:
+        address = store.get(
+            DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+        ).decode("utf-8")
+        ip, port = split_ip_port(address)
+        if not ip or not 0 < int(port) < 65535:
+            raise ValueError(
+                f"Invalid registered TP leader address for rank {rank}: {address!r}"
+            )
+        members.append(
+            WorkerInfo(
+                ip=ip,
+                local_rank=rank % pc.local_world_size,
+                world_rank=rank,
+                name=f"rank_{rank}",
+                server_port=int(port),
+                worker_info_port_num=0,
+                remote_server_port=distribute_config.remote_server_port,
+            )
+        )
+    return WorldInfo(
+        members, current.master, current.self, current.num_nodes, current.initialized
     )
 
 
@@ -216,8 +273,12 @@ class DistributedServer(object):
         distribute_config = py_env_configs.distribute_config
         pc = py_env_configs.parallelism_config
         ip = scr_vip.internal_ip(
-            pc, server_config.ip or socket.gethostbyname(socket.gethostname())
+            pc,
+            server_config.ip or socket.gethostbyname(socket.gethostname()),
+            distribute_config.gang_annocation_path,
         )
+        # internal_ip has validated the platform network before transports open.
+        scr_vip.configure_network(pc)
         self.worker_info = WorkerInfo(
             ip=ip,
             local_rank=pc.local_rank,
@@ -478,7 +539,12 @@ def get_master(
 ) -> (str, str):
     port = ""
     if scr_vip.enabled(parallelism_config):
-        return scr_vip.topology(parallelism_config, wait=True)[0], port
+        return (
+            scr_vip.topology(
+                parallelism_config, distribute_config.gang_annocation_path, wait=True
+            )[0],
+            port,
+        )
     if parallelism_config.local_world_size < parallelism_config.world_size:
         # from config file
         if distribute_config.distribute_config_file:
@@ -539,17 +605,7 @@ def get_master_from_file(distribute_config) -> (str, str):
 
 
 def get_master_from_c2(distribute_config) -> (str, str):
-    file_name = distribute_config.gang_annocation_path
-    if not os.path.exists(file_name):
-        raise Exception(f"not found file: {file_name}")
-    with open(file_name, "r") as reader:
-        content = reader.read()
-    infos = [x for x in content.split("\n") if "app.c2.io/biz-detail-ganginfo" in x]
-    if len(infos) != 1:
-        raise Exception("ganginfo length is not equal to 1, " f"actual: {infos}")
-    gang_info = infos[0].replace("\\", "")
-    logging.info(f"gang info: {gang_info[gang_info.index('=') + 2: -1]}")
-    gang_info_json = json.loads(gang_info[gang_info.index("=") + 2 : -1])
+    gang_info_json = read_c2_gang_info(distribute_config.gang_annocation_path)
     logging.info(f"gang info json: {gang_info_json}")
     return get_master_from_json(gang_info_json)
 

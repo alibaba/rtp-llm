@@ -1,9 +1,9 @@
 """Stable, controller-owned intra-gang addresses for multi-node SCR.
 
 RTPLLM_ENABLE_SCR selects this path for multi-node checkpoint/restore phases.
-The platform provides scr_vxlan0, /etc/c2/ganginfo and the network-manager
-readiness socket. Missing or invalid platform state fails startup; it never
-falls back to Pod IPs. RTP does not assign an address range. External service
+C2 gang membership comes from the existing Pod annotations projection.
+The platform provides scr_vxlan0 and the network-manager readiness socket.
+Missing or invalid platform state fails startup; it never falls back to Pod IPs. RTP does not assign an address range. External service
 advertisements still use Pod IPs.
 """
 
@@ -16,8 +16,9 @@ import subprocess
 import time
 from pathlib import Path
 
+from rtp_llm.utils.gang_info import read_c2_gang_info
+
 VIP_INTERFACE = "scr_vxlan0"
-GANG_INFO_PATH = Path("/etc/c2/ganginfo")
 NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
 
 
@@ -27,17 +28,14 @@ def enabled(pc) -> bool:
     return template_phase_active() and pc.world_size > pc.local_world_size
 
 
-def read_topology(
-    world_size: int, local_world_size: int, *, external=False
-) -> dict[int, str]:
+def _read_topology(world_size: int, local_world_size: int, annotation_path: str):
     if local_world_size <= 0 or world_size % local_world_size:
         raise ValueError("SCR VIP requires equally sized nodes")
-    raw = GANG_INFO_PATH.read_text()
-    rows = json.loads(raw)
+    rows = read_c2_gang_info(annotation_path)
     if not isinstance(rows, dict):
         raise ValueError("SCR gang info must be an object")
     nodes = {}
-    external_nodes = {}
+    real_ip_by_vip = {}
     for name, info in rows.items():
         match = re.search(r"(?:^|-)rank-(\d+)$", name)
         if match is None:
@@ -54,10 +52,23 @@ def read_topology(
                 "SCR gang info requires distinct VIPs and unique node ranks"
             )
         nodes[rank] = vip
-        external_nodes[rank] = real
+        real_ip_by_vip[vip] = real
     if set(nodes) != set(range(world_size // local_world_size)):
         raise ValueError("SCR gang info does not match the complete node topology")
-    return external_nodes if external else nodes
+    return nodes, real_ip_by_vip
+
+
+def read_topology(
+    world_size: int, local_world_size: int, annotation_path: str
+) -> dict[int, str]:
+    return _read_topology(world_size, local_world_size, annotation_path)[0]
+
+
+def real_ip_by_vip(
+    world_size: int, local_world_size: int, annotation_path: str
+) -> dict[str, str]:
+    """Read the current underlay, including after a Pod moves during restore."""
+    return _read_topology(world_size, local_world_size, annotation_path)[1]
 
 
 def validate_device(address: str) -> None:
@@ -85,7 +96,7 @@ def validate_device(address: str) -> None:
         probe.bind((address, 0))
 
 
-def topology(pc, *, wait: bool = False) -> dict[int, str]:
+def topology(pc, annotation_path: str, *, wait: bool = False) -> dict[int, str]:
     if not 0 <= pc.world_rank < pc.world_size:
         raise ValueError("SCR world rank is outside the topology")
     if pc.local_world_size <= 0 or pc.world_size % pc.local_world_size:
@@ -104,8 +115,8 @@ def topology(pc, *, wait: bool = False) -> dict[int, str]:
     deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:
-            nodes = read_topology(pc.world_size, pc.local_world_size)
-            validate_device(nodes[pc.world_rank // pc.local_world_size])
+            nodes = read_topology(pc.world_size, pc.local_world_size, annotation_path)
+            validate_device(nodes[int(os.environ["RANK_ID"])])
             return nodes
         except (
             OSError,
@@ -119,52 +130,48 @@ def topology(pc, *, wait: bool = False) -> dict[int, str]:
             time.sleep(0.5)
 
 
-def internal_ip(pc, fallback: str) -> str:
+def internal_ip(pc, fallback: str, annotation_path: str) -> str:
     if not enabled(pc):
         return fallback
-    return topology(pc, wait=True)[pc.world_rank // pc.local_world_size]
+    return topology(pc, annotation_path, wait=True)[int(os.environ["RANK_ID"])]
 
 
-def world_info(current, pc):
-    """Validate stable endpoints after SCR's communicator restore barrier.
+def configure_network(pc) -> None:
+    """Select the platform interface before constructing collective transports."""
+    if not enabled(pc):
+        return
+    for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"):
+        configured = os.environ.get(name)
+        if configured not in (None, VIP_INTERFACE):
+            raise ValueError(
+                f"SCR VIP requires {name}={VIP_INTERFACE}, got {configured!r}"
+            )
+    os.environ["NCCL_SOCKET_IFNAME"] = VIP_INTERFACE
+    os.environ["GLOO_SOCKET_IFNAME"] = VIP_INTERFACE
 
-    This path keeps checkpointed TCP endpoints, rather than claiming an endpoint
-    manifest rebuilt transports. A moved VIP or rank/port layout is an error.
-    The network manager and SCR interposer own underlay and NCCL/RDMA recovery.
+
+def validate_world_info(current, pc, annotation_path: str):
+    """Validate checkpointed endpoints without changing membership or port layout.
+
+    The network manager owns underlay and transport recovery. RTP verifies its
+    existing VIP topology after the restore barrier, including frontend subsets.
     """
-    from rtp_llm.distribute.distributed_server import WorldInfo
-    from rtp_llm.distribute.worker_info import WorkerInfo
-
-    # C2 may republish an unmerged gang map while the restored process resumes.
-    # Require the same complete topology and network readiness as cold startup.
-    nodes = topology(pc, wait=True)
+    nodes = topology(pc, annotation_path, wait=True)
     if current.self is None:
         raise ValueError("SCR VIP world requires a local worker")
-    for member in current.members:
+    if current.self.world_rank != pc.world_rank:
+        raise ValueError("SCR VIP local worker does not match world rank")
+    for member in [
+        *current.members,
+        current.self,
+        *([current.master] if current.master else []),
+    ]:
         if (
-            member.ip != nodes[member.world_rank // pc.local_world_size]
+            not 0 <= member.world_rank < pc.world_size
+            or member.ip != nodes[member.world_rank // pc.local_world_size]
             or member.local_rank != member.world_rank % pc.local_world_size
         ):
             raise RuntimeError(
                 "SCR restore cannot change the checkpointed VIP/rank topology"
             )
-    base = current.self
-    members = [
-        WorkerInfo(
-            ip=nodes[rank // pc.local_world_size],
-            local_rank=rank % pc.local_world_size,
-            world_rank=rank,
-            name=f"rank_{rank}",
-            server_port=base._server_port,
-            worker_info_port_num=base._worker_info_port_num,
-            remote_server_port=base._remote_server_port,
-        )
-        for rank in range(pc.world_size)
-    ]
-    return WorldInfo(
-        members=members,
-        self=members[pc.world_rank],
-        master=members[0],
-        num_nodes=len(nodes),
-        initialized=True,
-    )
+    return current

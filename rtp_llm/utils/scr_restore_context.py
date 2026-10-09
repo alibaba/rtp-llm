@@ -20,7 +20,7 @@ class RestoreContext:
 
         return read_restore_manifest(self.generation)
 
-    def resolve_world_info(self, current, parallelism_config):
+    def resolve_world_info(self, current, parallelism_config, annotation_path: str):
         """Apply the same endpoint/readiness policy in backend and frontend."""
         from rtp_llm.utils import scr_vip
         from rtp_llm.utils.scr_endpoint_provider import (
@@ -33,7 +33,9 @@ class RestoreContext:
                 raise RuntimeError(
                     "SCR VIP and endpoint manifest modes are mutually exclusive"
                 )
-            return scr_vip.world_info(current, parallelism_config)
+            return scr_vip.validate_world_info(
+                current, parallelism_config, annotation_path
+            )
 
         manifest = self.endpoint_manifest
         # Single-Pod control channels use loopback; CacheStore and P/D RPC

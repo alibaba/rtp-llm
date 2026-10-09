@@ -324,7 +324,10 @@ class EngineConfig:
 
 
 def update_worker_addrs(
-    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
+    runtime_config: RuntimeConfig,
+    parallelism_config: ParallelismConfig,
+    world_info,
+    annotation_path: str,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info."""
     if world_info is None:
@@ -336,14 +339,14 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
-    external_nodes = (
-        scr_vip.read_topology(
+    real_ip_by_vip = (
+        scr_vip.real_ip_by_vip(
             parallelism_config.world_size,
             parallelism_config.local_world_size,
-            external=True,
+            annotation_path,
         )
         if scr_vip.enabled(parallelism_config)
-        else {}
+        else None
     )
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
@@ -354,9 +357,10 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
-            cache_ip = external_nodes.get(
-                member.world_rank // parallelism_config.local_world_size,
-                advertise_ip or member.ip,
+            cache_ip = (
+                real_ip_by_vip[member.ip]
+                if real_ip_by_vip is not None
+                else advertise_ip or member.ip
             )
             worker_addrs.append(
                 f"{cache_ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"

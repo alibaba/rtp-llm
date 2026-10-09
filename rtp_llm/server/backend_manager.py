@@ -70,6 +70,7 @@ class BackendManager(object):
             engine_config.runtime_config,
             engine_config.parallelism_config,
             world_info,
+            self.py_env_configs.distribute_config.gang_annocation_path,
         )
         self._engine_config = engine_config
         self._world_info = world_info
@@ -144,12 +145,14 @@ class BackendManager(object):
         world_info = context.resolve_world_info(
             current,
             self.py_env_configs.parallelism_config,
+            self.py_env_configs.distribute_config.gang_annocation_path,
         )
         self.py_env_configs.server_config.ip = context.pod_ip
         update_worker_addrs(
             self._engine_config.runtime_config,
             self._engine_config.parallelism_config,
             world_info,
+            self.py_env_configs.distribute_config.gang_annocation_path,
         )
         self._world_info = world_info
         refresh = getattr(self.engine, "update_runtime_endpoints", None)

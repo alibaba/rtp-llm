@@ -101,7 +101,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                 current = SimpleNamespace(num_nodes=nodes)
                 restored = SimpleNamespace(num_nodes=nodes)
                 visitor = Mock()
-                hook = _BackendVisitorTemplateHook(visitor, configs)
+                hook = _BackendVisitorTemplateHook(visitor, configs, current)
                 manifest = (
                     {"generation": "generation-2", "phase": manifest_phase}
                     if manifest_phase
@@ -195,6 +195,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     backend._engine_config.runtime_config,
                     configs.parallelism_config,
                     restored,
+                    configs.distribute_config.gang_annocation_path,
                 )
                 self.assertIs(backend._world_info, restored)
                 backend.engine.update_runtime_endpoints.assert_called_once_with(

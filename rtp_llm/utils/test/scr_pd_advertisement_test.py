@@ -74,7 +74,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
             local_world = resolve_world_info(current, generation="g1")
-            update_worker_addrs(runtime, self.pc, local_world)
+            update_worker_addrs(runtime, self.pc, local_world, "/unused/annotations")
             self.assertEqual(
                 get_dp_addrs_from_world_info(local_world, self.pc), ["127.0.0.1:18631"]
             )
@@ -93,7 +93,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         runtime = NS()
         with patch("socket.gethostbyname", side_effect=["192.0.2.20", "192.0.2.21"]):
             for ip in ["192.0.2.20", "192.0.2.21"]:
-                update_worker_addrs(runtime, self.pc, self.world)
+                update_worker_addrs(runtime, self.pc, self.world, "/unused/annotations")
                 self.assertEqual(
                     runtime.worker_addrs, [ip + ":18632:18634", ip + ":18642:18644"]
                 )
@@ -105,14 +105,14 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 1, 2, 1
         runtime = NS()
         with patch("socket.gethostbyname", return_value="192.0.2.30"):
-            update_worker_addrs(runtime, self.pc, self.world)
+            update_worker_addrs(runtime, self.pc, self.world, "/unused/annotations")
         self.assertEqual(runtime.worker_addrs, ["192.0.2.30:18642:18644"])
         self.assertEqual(runtime.worker_grpc_addrs, ["127.0.0.1:18641"])
 
     def test_frontend_identity_refreshes_without_publishing_loopback(self):
         configs = NS(
             server_config=object(),
-            distribute_config=object(),
+            distribute_config=NS(gang_annocation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -129,7 +129,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         ), patch(
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
-            _BackendVisitorTemplateHook(visitor, configs).restore_fixup(
+            _BackendVisitorTemplateHook(visitor, configs, self.world).restore_fixup(
                 RestoreContext("generation-2", "192.0.2.20")
             )
         self.assertEqual(visitor.source_ip, "192.0.2.20")
@@ -157,7 +157,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         configs = NS(
             server_config=NS(ip="192.0.2.1"),
-            distribute_config=NS(),
+            distribute_config=NS(gang_annocation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -169,12 +169,14 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "server-config", scr._ServerConfigTemplateHook(configs)
         )
         lifecycle.register_fixup(
-            "visitor", scr._BackendVisitorTemplateHook(visitor, configs)
+            "visitor", scr._BackendVisitorTemplateHook(visitor, configs, world)
         )
         lifecycle.register(
             "kv",
             CallbackHook(
-                fixup=lambda _g: update_worker_addrs(runtime_config, self.pc, world),
+                fixup=lambda _g: update_worker_addrs(
+                    runtime_config, self.pc, world, "/unused/annotations"
+                ),
                 release=lambda _g: releases.append(
                     (
                         configs.server_config.ip,
