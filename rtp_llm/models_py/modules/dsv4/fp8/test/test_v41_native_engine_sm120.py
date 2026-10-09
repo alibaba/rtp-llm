@@ -1,6 +1,8 @@
 """Bounded 40-layer DP8 generation through NormalEngine's live scheduler loop."""
 
 import os
+import resource
+import signal
 import socket
 import sys
 import tempfile
@@ -18,7 +20,11 @@ import torch.multiprocessing as mp
 
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as native_ops
 from rtp_llm.models_py.distributed import collective_torch as collective
-from rtp_llm.models_py.model_desc.deepseek_v4_model import Dsv4SharedRuntimeBufferStore
+from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+    DeepSeekV4Model,
+    Dsv4SharedRuntimeBufferStore,
+)
+from rtp_llm.models_py.model_desc.v41_errors import V41InputRejected
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_dp_worker_sm120 import (
     assert_released,
     make_workers,
@@ -34,7 +40,18 @@ from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 
 
-def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
+def run_rank(
+    rank,
+    port,
+    config,
+    initialize_model,
+    new_tokens=1,
+    context=256,
+    reject_inputs=False,
+    fatal_error=None,
+):
+    if fatal_error:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     os.environ.update(
@@ -66,14 +83,24 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
     inject_armed = threading.Event()
     inject_boundary = threading.Event()
     inject_release = threading.Event()
+    reject_armed = threading.Event()
+    reject_boundary = threading.Event()
+    reject_release = threading.Event()
+    rejected = threading.Event()
     try:
         with torch.inference_mode():
             model, reference = make_workers(
                 rank, config, initialize_model=initialize_model, max_seq_len=context
             )
+            token_vocab = 127 if reject_inputs else 128
+            if reject_inputs:
+                model._v4_args.v41_config["image_token_id"] = 127
+                reference._v4_args.v41_config["image_token_id"] = 127
             assert model._materialized == initialize_model
             torch.manual_seed(41950)
             head = torch.randn(128, 512, device="cuda", dtype=torch.bfloat16)
+            if reject_inputs:
+                head[127].copy_(head[126])
             bridge_calls = {"stage": 0, "phase": 0}
             register = native_ops.register_comm_ops
 
@@ -109,6 +136,37 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
             ):
                 collective._register_process_groups_to_cpp()
             forward = model.forward
+            validate = model._validate_forward
+            base_forward = DeepSeekV4Model.forward
+            fatal_marker = Path(config["checkpoint_path"]) / f"fatal-rank{rank}"
+
+            def validate_with_failure(request, fmha_impl):
+                if (
+                    fatal_error == "preflight"
+                    and rank == 0
+                    and request.input_ids.numel()
+                ):
+                    raise RuntimeError("injected native preflight failure")
+                result = validate(request, fmha_impl)
+                if (
+                    fatal_error == "schedule"
+                    and rank == 0
+                    and request.input_ids.numel()
+                ):
+                    return not result
+                return result
+
+            def forward_with_failure(worker, request, fmha_impl=None):
+                result = base_forward(worker, request, fmha_impl)
+                if (
+                    fatal_error == "compute"
+                    and worker is model
+                    and rank == 0
+                    and request.input_ids.numel()
+                ):
+                    raise RuntimeError("injected native compute failure")
+                return result
+
             diagnostic_directory = os.environ.get("DSV41_TEST_FAILURE_TRACE_DIR")
             reference_traces = []
 
@@ -152,7 +210,13 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
             initialization_calls = []
             expected_tokens = {}
             continuations = {}
-            calls = {"idle": 0, "active": 0, "decode": 0, "idle_decode": 0}
+            calls = {
+                "idle": 0,
+                "active": 0,
+                "decode": 0,
+                "idle_decode": 0,
+                "rejected": 0,
+            }
             injection = {"baseline": 0, "pending": {}, "deferred": False}
             growth = {"pages": 0, "long_prefill": 0}
             reference_pages = 32
@@ -276,6 +340,9 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
 
             def checked_forward(request, fmha_impl=None):
                 try:
+                    assert (
+                        not fatal_marker.exists()
+                    ), "native engine retried a fatal dispatch"
                     reference_traces.clear()
                     stop = torch.tensor([int(stop_requested.is_set())], device="cuda")
                     dist.all_reduce(stop, op=dist.ReduceOp.MIN)
@@ -285,6 +352,31 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                     attn = next(iter(request.attention_inputs.values()))
                     lengths = attn.input_lengths.tolist()
                     ids = request.input_ids.tolist()
+                    if reject_inputs:
+                        invalid = torch.tensor(
+                            [int(127 in ids and calls["rejected"] < 2)], device="cuda"
+                        )
+                        dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
+                        if invalid.item():
+                            caches = [
+                                group.kv_cache_base.view(torch.uint8)
+                                for layer in model.v4.layers
+                                for group in model.kv_cache.get_layer_cache_groups(
+                                    layer.layer_id
+                                )
+                            ]
+                            before = [cache.clone() for cache in caches]
+                            try:
+                                forward(request, fmha_impl)
+                            except V41InputRejected:
+                                for cache, snapshot in zip(caches, before):
+                                    assert torch.equal(cache, snapshot)
+                                assert model._worker_state == "ready"
+                                assert_released(model)
+                                calls["rejected"] += 1
+                                rejected.set()
+                                raise
+                            raise AssertionError("native invalid input was admitted")
                     if attn.is_prefill and injection["pending"]:
                         for key, tokens in injection["pending"].items():
                             assert continuations[key]["tokens"] == tokens
@@ -393,7 +485,36 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                             assert inject_release.wait(
                                 60
                             ), "late prompts were not enqueued"
+                    if reject_inputs:
+                        pause = torch.tensor(
+                            [int(reject_armed.is_set())], device="cuda"
+                        )
+                        dist.all_reduce(pause, op=dist.ReduceOp.MIN)
+                        if pause.item():
+                            reject_armed.clear()
+                            reject_boundary.set()
+                            assert reject_release.wait(
+                                60
+                            ), "rejection input was not enqueued"
                     return PyModelOutputs(actual)
+                except V41InputRejected:
+                    raise
+                except RuntimeError as error:
+                    if fatal_error:
+                        assert model._worker_state == "failed"
+                        expected_error = {
+                            "preflight": "native preflight failed on a DP peer",
+                            "schedule": "native DP model schedules disagree",
+                            "compute": "injected native compute failure",
+                        }[fatal_error]
+                        assert expected_error in str(error)
+                        fatal_marker.touch()
+                        if fatal_error != "compute":
+                            dist.barrier()
+                        raise
+                    traceback.print_exc()
+                    sys.stderr.flush()
+                    os._exit(1)
                 except BaseException:
                     traceback.print_exc()
                     sys.stderr.flush()
@@ -401,6 +522,10 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
 
             with patch.object(model, "forward", checked_forward), patch.object(
                 model, "initialize", checked_initialize
+            ), patch.object(
+                model, "_validate_forward", validate_with_failure
+            ), patch.object(
+                DeepSeekV4Model, "forward", forward_with_failure
             ):
                 engine = native_ops.NativeEngine(
                     model,
@@ -422,6 +547,29 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                 peers = [None] * 8
                 dist.all_gather_object(peers, identities, group=control)
                 assert all(peer == identities for peer in peers)
+                if reject_inputs:
+                    for round_id in range(2):
+                        reject_boundary.clear()
+                        reject_release.clear()
+                        rejected.clear()
+                        reject_armed.set()
+                        assert reject_boundary.wait(
+                            60
+                        ), "engine did not pause for rejection"
+                        requests = (
+                            [[127]]
+                            if rank == 0
+                            else ([[3, 4]] if round_id == 1 and rank == 7 else [])
+                        )
+                        engine.enqueue(requests, new_tokens)
+                        dist.barrier(group=control)
+                        reject_release.set()
+                        messages = engine.errors()
+                        assert len(messages) == len(requests)
+                        assert all("V4.1" in message for message in messages)
+                        assert rejected.wait(60), "peer did not reject the native batch"
+                        dist.barrier(group=control)
+                    assert calls["rejected"] == 2
                 phases = (
                     (
                         (253, 255) if rank == 0 else (),
@@ -441,7 +589,10 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                 )
                 for phase, lengths in enumerate(phases):
                     requests = [
-                        [(rank * 7 + phase * 13 + row * 3 + i) % 128 for i in range(n)]
+                        [
+                            (rank * 7 + phase * 13 + row * 3 + i) % token_vocab
+                            for i in range(n)
+                        ]
                         for row, n in enumerate(lengths)
                     ]
                     engine.enqueue(requests, new_tokens)
@@ -462,7 +613,12 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                     injection["baseline"] = calls["decode"]
                     inject_armed.set()
                     requests = (
-                        [[(31 + i) % 128 for i in range(253 if context > 256 else 3)]]
+                        [
+                            [
+                                (31 + i) % token_vocab
+                                for i in range(253 if context > 256 else 3)
+                            ]
+                        ]
                         if rank == 0
                         else []
                     )
@@ -478,7 +634,7 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
                             if context > 256
                             else (2 if rank == 0 else 3)
                         )
-                        late = [[(first + i) % 128 for i in range(count)]]
+                        late = [[(first + i) % token_vocab for i in range(count)]]
                     engine.enqueue(late, new_tokens)
                     dist.barrier(group=control)
                     inject_release.set()
@@ -504,7 +660,9 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
             if context > 256:
                 assert growth["pages"] > 0 and growth["long_prefill"] > 0, growth
             assert bridge_calls["stage"] == 1
-            assert bridge_calls["phase"] == calls["active"] + calls["idle"]
+            assert bridge_calls["phase"] == (
+                calls["active"] + calls["idle"] + calls["rejected"]
+            )
             reference.close()
             model.close()
             dist.barrier(group=control)
@@ -531,7 +689,14 @@ def run_rank(rank, port, config, initialize_model, new_tokens=1, context=256):
 
 
 class V41NativeEngineSM120Test(unittest.TestCase):
-    def run_engine(self, initialize_model, new_tokens=1, context=256):
+    def run_engine(
+        self,
+        initialize_model,
+        new_tokens=1,
+        context=256,
+        reject_inputs=False,
+        fatal_error=None,
+    ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
             torch.manual_seed(41900)
@@ -540,12 +705,29 @@ class V41NativeEngineSM120Test(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             sock.close()
-            mp.spawn(
-                run_rank,
-                args=(port, config, initialize_model, new_tokens, context),
-                nprocs=8,
-                join=True,
+            expectation = (
+                self.assertRaises(mp.ProcessExitedException)
+                if fatal_error
+                else nullcontext()
             )
+            with expectation as caught:
+                mp.spawn(
+                    run_rank,
+                    args=(
+                        port,
+                        config,
+                        initialize_model,
+                        new_tokens,
+                        context,
+                        reject_inputs,
+                        fatal_error,
+                    ),
+                    nprocs=8,
+                    join=True,
+                )
+            if fatal_error:
+                self.assertEqual(caught.exception.exit_code, -signal.SIGABRT)
+                self.assertTrue((Path(root) / "fatal-rank0").exists())
 
     def test_eight_rank_scheduler_loop(self):
         self.run_engine(initialize_model=True)
@@ -558,6 +740,18 @@ class V41NativeEngineSM120Test(unittest.TestCase):
 
     def test_two_page_cold_pdfusion_and_late_prefill(self):
         self.run_engine(initialize_model=False, new_tokens=9, context=512)
+
+    def test_collective_rejection_then_prefill_and_decode(self):
+        self.run_engine(initialize_model=False, new_tokens=9, reject_inputs=True)
+
+    def test_unexpected_preflight_failure_stops_engine(self):
+        self.run_engine(initialize_model=False, fatal_error="preflight")
+
+    def test_compute_failure_stops_engine(self):
+        self.run_engine(initialize_model=False, fatal_error="compute")
+
+    def test_schedule_disagreement_stops_engine(self):
+        self.run_engine(initialize_model=False, fatal_error="schedule")
 
 
 if __name__ == "__main__":

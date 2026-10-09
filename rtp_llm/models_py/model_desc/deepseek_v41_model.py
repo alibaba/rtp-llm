@@ -21,6 +21,7 @@ from typing import Any
 import torch
 
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+from rtp_llm.models_py.model_desc.v41_errors import V41InputRejected
 from rtp_llm.models_py.modules.dsv4.engram import Engram, EngramLayout, NgramHashState
 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
@@ -106,7 +107,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise RuntimeError("V4.1 DP group changed; replace the worker")
         self._dp_group = dist.group.WORLD
 
-    def _agree_dp(self, error, phase, device):
+    def _agree_dp(self, error, phase, device, *, native_dispatch=False):
+        recoverable = isinstance(error, (ValueError, NotImplementedError))
+        status = (
+            1 if error is None else (0 if recoverable or not native_dispatch else 2)
+        )
         if self._dp_group is not None:
             # Bind the whole model schedule before any rank enters layer
             # collectives. Request lengths/IDs remain rank-local.
@@ -132,7 +137,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 ).encode()
             ).digest()
             signature = torch.tensor(
-                [int(error is None), *digest], dtype=torch.uint8, device=device
+                [status, *digest], dtype=torch.uint8, device=device
             ).view(1, 33)
             peers = torch.empty((8, 33), dtype=torch.uint8, device=device)
             try:
@@ -143,13 +148,32 @@ class DeepSeekV41Model(DeepSeekV4Model):
             except BaseException:
                 self._worker_state = "failed"
                 raise
-            if not bool((peers[:, 0] == 1).all()) or not bool(
-                (peers[:, 1:] == peers[0, 1:]).all()
-            ):
+            rejected = not bool((peers[:, 0] == 1).all())
+            same_schedule = bool((peers[:, 1:] == peers[0, 1:]).all())
+            if native_dispatch:
+                if bool((peers[:, 0] == 2).any()):
+                    self._worker_state = "failed"
+                    raise RuntimeError(
+                        "V4.1 native preflight failed on a DP peer"
+                    ) from error
+                if rejected:
+                    raise V41InputRejected(
+                        str(error)
+                        if error is not None
+                        else "V4.1 DP peer rejected request"
+                    ) from error
+                if not same_schedule:
+                    self._worker_state = "failed"
+                    raise RuntimeError("V4.1 native DP model schedules disagree")
+            if rejected or not same_schedule:
                 if error is not None:
                     raise error
                 raise RuntimeError("V4.1 DP peer rejected request or model schedule")
         if error is not None:
+            if native_dispatch:
+                if recoverable:
+                    raise V41InputRejected(str(error)) from error
+                self._worker_state = "failed"
             raise error
 
     def _check_worker(self):
@@ -543,10 +567,17 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 except Exception as exc:
                     error = exc
                 with torch.cuda.stream(self._worker_stream):
+                    native_dispatch = inputs.v41_cache_spans is not None
                     self._agree_dp(
                         error,
-                        ("forward", self.kv_cache is not None, prefill),
+                        (
+                            "forward",
+                            self.kv_cache is not None,
+                            prefill,
+                            native_dispatch,
+                        ),
                         self._weight_device(),
+                        native_dispatch=native_dispatch,
                     )
                 try:
                     return super().forward(inputs, fmha_impl)

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
@@ -967,6 +968,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
+        if (inputs.v41_cache_spans.defined()) {
+            py::gil_scoped_acquire gil;
+            const py::object rejected =
+                py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected");
+            if (e.matches(rejected)) {
+                throw V41InputRejected(e.what());
+            }
+        }
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {

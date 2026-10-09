@@ -103,6 +103,19 @@ public:
         return result;
     }
 
+    std::vector<std::string> errors() {
+        py::gil_scoped_release release;
+        std::vector<std::string> messages;
+        for (const auto& stream : streams_) {
+            auto output = stream->nextOutput(60000);
+            RTP_LLM_CHECK(!output.ok());
+            RTP_LLM_CHECK(output.status().code() == ErrorCode::INVALID_PARAMS);
+            messages.push_back(output.status().ToString());
+        }
+        streams_.clear();
+        return messages;
+    }
+
     // The test calls this on every rank at an agreed model-forward boundary.
     // This bounds the live loop without racing different collective rounds.
     void requestStop() {
@@ -148,6 +161,7 @@ PYBIND11_MODULE(libth_v41_native_engine_test, m) {
         .def("enqueue", &rtp_llm::test::V41NativeEngineTest::enqueue,
              py::arg("requests"), py::arg("new_tokens") = 1)
         .def("outputs", &rtp_llm::test::V41NativeEngineTest::outputs)
+        .def("errors", &rtp_llm::test::V41NativeEngineTest::errors)
         .def("request_stop", &rtp_llm::test::V41NativeEngineTest::requestStop)
         .def("stop", &rtp_llm::test::V41NativeEngineTest::stop);
 }
