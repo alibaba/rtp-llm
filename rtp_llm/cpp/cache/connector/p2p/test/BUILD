@@ -51,8 +51,8 @@ cc_test(
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -72,8 +72,8 @@ cc_test(
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -92,8 +92,8 @@ cc_test(
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -110,6 +110,6 @@ cc_test(
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

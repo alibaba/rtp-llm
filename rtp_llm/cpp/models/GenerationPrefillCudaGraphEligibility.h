@@ -86,7 +86,7 @@ inline bool supportsGenerationPrefillCudaGraphCacheTopology(const std::vector<Gr
     return groups.size() == 1 && groups.front().policy.group_type == CacheGroupType::FULL;
 }
 
-// The CUDA 12.9 open-source image currently packages DeepGEMM 2.1.1. Its
+// The retained CUDA 12.9 compat open-source image currently packages DeepGEMM 2.1.1. Its
 // masked grouped GEMM dispatch has an SM90 recipe, but no SM12x recipe. Keep
 // the first-version capability check explicit and fail closed until each new
 // architecture passes the masked-MoE graph replay test.

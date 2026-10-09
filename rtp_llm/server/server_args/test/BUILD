@@ -11,6 +11,6 @@ py_test(
         "//rtp_llm/config/test:kv_cache_event_test_values",
         "//rtp_llm/server",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

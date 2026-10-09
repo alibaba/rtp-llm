@@ -5,15 +5,10 @@ py_test_deps = [
 py_test(
     name = "decode_attn_metadata_test",
     srcs = ["decode_attn_metadata_test.py"],
-    deps = py_test_deps,
+    deps = ["//rtp_llm/models_py:dsv4_decode_cpu"],
     tags = [
-        "SM100_ARM_CU13",
         "open_skip",
     ],
-    exec_properties = {
-        "gpu": "SM100_ARM_CU13",
-        "gpu_count": "1",
-    },
 )
 
 py_test(
@@ -33,15 +28,10 @@ py_test(
 py_test(
     name = "kv_write_decode_test",
     srcs = ["kv_write_decode_test.py"],
-    deps = py_test_deps,
+    deps = ["//rtp_llm/models_py:dsv4_decode_cpu"],
     tags = [
-        "SM100_ARM_CU13",
         "open_skip",
     ],
-    exec_properties = {
-        "gpu": "SM100_ARM_CU13",
-        "gpu_count": "1",
-    },
 )
 
 py_test(

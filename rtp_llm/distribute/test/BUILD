@@ -32,9 +32,9 @@ py_test(
     flaky = True,
     imports = ["aios/kmonitor/python_client"],
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "2",
     },
     env = {"GPU_COUNT": "2"},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

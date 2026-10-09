@@ -857,3 +857,26 @@ py_library(
         ":aiohttp",
     ]
 )
+
+# CPU-clean variant of :testlib for tests that never load CUDA artifacts at
+# runtime. It keeps the pure-py rtp_llm subset and the minimal runtime config
+# .so (libth_transformer_config), and does not carry :th_transformer /
+# :rtp_compute_ops / :rtp_llm_lib, so its runfiles stay free of the CUDA
+# toolchain closure.
+py_library(
+    name = "testlib_lite",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        ":config",
+        ":utils",
+        ":ops",
+        ":openai_api",
+        ":pydantic",
+        "//rtp_llm/test/utils:test_util",
+        "@rtp_deps//:extension_lib",
+        ":aiohttp",
+    ]
+)

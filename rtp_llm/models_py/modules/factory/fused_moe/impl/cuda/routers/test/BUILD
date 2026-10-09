@@ -6,9 +6,9 @@ py_test(
     name = "deepep_normal_router_hook_test",
     srcs = ["deepep_normal_router_hook_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     # Imports the CUDA router but exercises the extension contract with CPU tensors.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -49,8 +49,8 @@ py_test (
     name = "pure_tp_router_skip_allreduce_test",
     srcs = ["pure_tp_router_skip_allreduce_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     # The CUDA router imports librtp_compute_ops, so this CPU-tensor contract
     # test still runs in the CUDA image where the runtime library is present.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
