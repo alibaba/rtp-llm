@@ -105,6 +105,11 @@ class ForwardEpScope:
         self.active = False
         self.closed = False
         self.thread_id = get_ident()
+        # Optional zero-arg callable that returns this forward's authoritative
+        # stage counts, backing an already-launched asynchronous gather.  Set
+        # once at scope creation; consumed by the first ``get_counts`` plan
+        # establishment exactly like the synchronous gather callable.
+        self.eager_gather: Optional[Callable[[], list]] = None
 
     def _validate(self, strategy: Any, group: Any, world: int, device: Any) -> None:
         if (
@@ -282,9 +287,21 @@ def make_prefill_scope(
             or strategy.cfg.ep_rank != ctx.group_rank
         ):
             raise RuntimeError("layers disagree on the stage-local EP roster")
-    return ForwardEpScope(
+    scope = ForwardEpScope(
         model, tuple(strategies), ctx, local_rows, device, widths.pop()
     )
+    # Eagerly launch the one authoritative count gather of this chunk-forward
+    # off the critical stream, so the plan-establishing readback (the first MoE
+    # layer's extent query) waits on a completed transfer instead of draining
+    # the queue it just filled.  Strategies without the hook (CPU tests, other
+    # backends) keep the lazy in-``get_counts`` gather unchanged.
+    starter = getattr(strategies[0], "start_authoritative_counts_gather", None)
+    if starter is not None:
+        handle = starter(local_rows, device)
+        if handle is not None:
+            finisher = strategies[0].finish_authoritative_counts_gather
+            scope.eager_gather = lambda: finisher(handle)
+    return scope
 
 
 def prefill_forward_scope(model: Any, cp_ctx: Any, local_rows: int, device: Any):

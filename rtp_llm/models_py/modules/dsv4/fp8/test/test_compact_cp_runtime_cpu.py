@@ -27,6 +27,7 @@ FP8 = Path(__file__).resolve().parents[1]
 DSV4 = FP8.parent
 PREFIX = "rtp_llm.models_py.modules.dsv4.fp8"
 METHODS = (
+    "_project_prefill",
     "start_prefill",
     "wait_prefill_gather",
     "finish_prefill",
@@ -69,6 +70,22 @@ def load_file(name, path):
         par, child = name.rsplit(".", 1)
         setattr(package(par), child, m)
     return m
+
+
+# Architecture is a hardware leaf of this CPU transport fixture. Execute the
+# real upstream projection helper, but reject non-CPU inputs rather than claiming
+# to exercise its SM120 numerical path. The projection itself remains the existing
+# deterministic leaf double installed by World.leaves below.
+def _cpu_is_sm120(device):
+    if torch.device(device).type != "cpu":
+        raise AssertionError("CPU transport fixture received a non-CPU device")
+    return False
+
+
+arch = types.ModuleType("rtp_llm.models_py.utils.arch")
+arch.is_sm120 = _cpu_is_sm120
+package("rtp_llm.models_py.utils").arch = arch
+sys.modules[arch.__name__] = arch
 
 
 package(PREFIX)
@@ -1196,7 +1213,19 @@ class RuntimeContracts(unittest.TestCase):
         with world.leaves():
             h3 = runtime.start(m, local, m._cp_ctx, meta, other, "indexer", None)
         self.assertIsNot(h2.meta, h3.meta)
-        self.assertIsNot(h2.tail_dest, h3.tail_dest)
+        # with the plan cache ON (default) the geometry-pure constants are
+        # process-shared (chunk- and request-invariant, read-only everywhere);
+        # with DSV4_CP_COMPACT_PLAN_CACHE=0 they are rebuilt per workspace as
+        # before.  Either way the per-forward state (meta snapshot, receiver
+        # slots, masked meta) stays isolated per workspace.
+        if runtime._plan_cache_enabled():
+            self.assertIs(h2.tail_dest, h3.tail_dest)
+            self.assertIs(h2.boundaries, h3.boundaries)
+        else:
+            self.assertIsNot(h2.tail_dest, h3.tail_dest)
+            self.assertIsNot(h2.boundaries, h3.boundaries)
+        self.assertIsNot(h2.receiver_slots, h3.receiver_slots)
+        self.assertIsNot(h2.masked_meta.kv_slots, h3.masked_meta.kv_slots)
 
     def test_pool_rebind_and_normal_table_version_reject_before_writer(self):
         for field in (

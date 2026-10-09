@@ -124,6 +124,26 @@ class CPContext:
     kv_cache_sharded: bool = False
     # Set only by the validated per-forward builder under the default-off flag.
     compact_geometry_verified: bool = False
+    # Host-known absolute position of local token 0, derived from the same
+    # host mirrors (prefix lengths / real lengths / zigzag chunk lengths) that
+    # built ``global_positions`` — identical value to ``global_positions[0]``
+    # without a blocking D2H.  None when not host-derivable; callers must
+    # fall back to reading the device tensor.
+    first_global_position: Optional[int] = None
+    # Host mirror of the FULL (unsliced) per-request prefix lengths when the
+    # framework source tensor was host-visible (pinned CPU).  Values are
+    # identical to the device ``prefix_lengths`` arg forwarded to the prefill
+    # metadata builders; used to keep scalar reductions off the GPU hot path.
+    prefix_lengths_full_host: Optional[Tuple[int, ...]] = None
+    # Host mirror of the FULL (unsliced) per-request real input lengths — the
+    # values ``input_lengths_global`` was built from
+    # (``prefill_actual_input_lengths_cpu``).  Lets the metadata builders read
+    # per-request lengths without a device readback.
+    input_lengths_full_host: Optional[Tuple[int, ...]] = None
+    # Deferred compact-CP geometry verdict (device-resident mask/restore):
+    # a ``_PendingVerify`` resolver owned by ``_compact_cp_runtime``.  None
+    # means the verdict was eager (or the compact path is off).
+    _compact_geometry_pending: Optional[Any] = None
 
 
 @dataclass
@@ -345,6 +365,196 @@ class CudaAsyncCPGatherImpl:
         return full
 
 
+# ---------------------------------------------------------------------------
+# Pinned HtoD staging (host run-ahead)
+# ---------------------------------------------------------------------------
+#
+# ``Tensor.to(device)`` / ``torch.tensor(..., device=cuda)`` from a host tensor
+# with ``non_blocking=False`` is ``memcpy_and_sync``: it synchronizes the
+# CURRENT stream, i.e. the host waits until every kernel queued so far
+# (including the previous chunk's tail) has executed.  At one such transfer
+# per metadata tensor per chunk-forward, the host can never run ahead across
+# chunk boundaries.  Staging through a pinned buffer with
+# ``non_blocking=True`` keeps the copy stream-ordered for consumers (same
+# stream, same bytes, same dtype) while the host never blocks.
+
+_PINNED_STAGE_FLAG = "DSV4_CP_PINNED_STAGE"
+_PINNED_STAGE_SLOTS = 4
+_PINNED_STAGE_RINGS: dict = {}
+
+
+def _pinned_stage_enabled() -> bool:
+    value = os.environ.get(_PINNED_STAGE_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_PINNED_STAGE_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+class _PinnedH2DRing:
+    """Ring of pinned staging buffers for one (device, dtype, shape) key.
+
+    A slot whose previous HtoD is still in flight is never overwritten:
+    checkout first looks for a never-used or completed slot (``event.query()``
+    is host-non-blocking), grows the ring up to ``slots``, and only then
+    synchronizes the least-recently-handed-out slot (correctness fence; with
+    ``slots`` deeper than the host run-ahead this never fires on the hot
+    path).  ``event_factory`` is injectable so the ring logic is testable
+    without CUDA.
+    """
+
+    def __init__(
+        self,
+        shape,
+        dtype,
+        slots: int = _PINNED_STAGE_SLOTS,
+        event_factory=None,
+        buffer_factory=None,
+    ):
+        if slots <= 0:
+            raise ValueError("pinned staging ring needs at least one slot")
+        self._shape = tuple(shape)
+        self._dtype = dtype
+        self._slots = int(slots)
+        self._event_factory = event_factory
+        self._buffer_factory = buffer_factory
+        self._entries: list = []  # each entry: [pinned buffer, event, pending]
+        self._next = 0
+
+    def _make_event(self):
+        factory = self._event_factory or torch.cuda.Event
+        return factory()
+
+    def _grow(self) -> list:
+        buffers = self._buffer_factory or (
+            lambda: torch.empty(self._shape, dtype=self._dtype, pin_memory=True)
+        )
+        entry = [buffers(), self._make_event(), False]
+        self._entries.append(entry)
+        return entry
+
+    def checkout(self) -> list:
+        n = len(self._entries)
+        for i in range(n):
+            entry = self._entries[(self._next + i) % n]
+            if not entry[2] or entry[1].query():
+                self._next = (self._next + i + 1) % n
+                return entry
+        if n < self._slots:
+            return self._grow()
+        oldest = self._entries[self._next]
+        oldest[1].synchronize()
+        self._next = (self._next + 1) % n
+        return oldest
+
+    def commit(self, entry: list) -> None:
+        """Record that the buffer's HtoD is in flight on the current stream."""
+        entry[1].record()
+        entry[2] = True
+
+
+def stage_host_to_device(
+    src: torch.Tensor, device: torch.device, dtype: Optional[torch.dtype] = None
+) -> torch.Tensor:
+    """Host→device transfer that never stream-syncs the current stream.
+
+    Byte-faithful: identical values/dtype to ``src.to(device=device,
+    dtype=dtype)``; the staged copy is enqueued on the current stream, so all
+    later work on that stream observes the data exactly as with the legacy
+    blocking copy.  Falls back to the legacy blocking copy for non-CUDA
+    targets, CUDA sources, non-contiguous sources, or when
+    ``DSV4_CP_PINNED_STAGE=0``.
+
+    Every async read is from this module's own ring buffers (never freed,
+    event-fenced): an async copy must never read a caller-owned host tensor
+    whose free is not stream-ordered.
+    """
+    if device.type != "cuda" or src.device.type != "cpu" or not _pinned_stage_enabled():
+        return src.to(device=device, dtype=dtype)
+    if not src.is_contiguous():
+        return src.to(device=device, dtype=dtype)
+    key = (device.index, src.dtype, tuple(src.shape))
+    ring = _PINNED_STAGE_RINGS.get(key)
+    try:
+        if ring is None:
+            ring = _PinnedH2DRing(src.shape, src.dtype)
+            _PINNED_STAGE_RINGS[key] = ring
+        entry = ring.checkout()
+    except RuntimeError:
+        # Pinned-pool pressure: the legacy blocking copy keeps bytes identical.
+        return src.to(device=device, dtype=dtype)
+    entry[0].copy_(src)  # host→host memcpy; no GPU interaction at all
+    out = entry[0].to(device=device, dtype=dtype, non_blocking=True)
+    ring.commit(entry)
+    return out
+
+
+def first_position_for_meta(
+    cp_ctx: Optional[CPContext], positions: torch.Tensor
+) -> int:
+    """Host-known first absolute position under CP; legacy sync fallback otherwise.
+
+    Under CP the metadata ``positions`` IS ``cp_ctx.global_positions`` (same
+    device values), whose first element equals the host-derived
+    ``first_global_position`` — so the blocking ``positions[0].item()``
+    readback is skipped whenever the mirror exists.
+    """
+    first = (
+        getattr(cp_ctx, "first_global_position", None) if cp_ctx is not None else None
+    )
+    if first is not None:
+        return int(first)
+    flat = positions.reshape(-1)
+    if flat.numel() == 0:
+        # A prefill forward with zero rank-local tokens is never a valid
+        # request shape: it is the signature of the broken pp1 + fastgen
+        # combination (the chunk cursor advances only under PPScheduler,
+        # pp_size > 1), which hands the model an empty context batch.  The
+        # previous behavior was an opaque ``IndexError`` here; fail closed
+        # with the cause instead.  No valid forward can reach this branch, so
+        # the non-empty path is byte-identical to the legacy readback.
+        raise RuntimeError(
+            "first_position_for_meta: empty positions tensor and no "
+            "CPContext.first_global_position host mirror — the model received a "
+            "zero-token CP prefill forward.  Known cause: pp_size==1 with "
+            "enable_fast_gen=1 (the fastgen chunk cursor is advanced only by "
+            "PPScheduler, i.e. only when pp_size>1); run pp1 vehicles with "
+            "enable_fast_gen=0."
+        )
+    return int(flat[0].item())
+
+
+# Cache only geometry-derived zigzag plans and uploads, keyed by rank, device,
+# chunk layout and real input lengths. Content-dependent masks and restore
+# indices remain per-forward; reading them to form a key would reintroduce D2H
+# synchronization. Consumers must treat cached tensors as read-only.
+# Enabled by default; DSV4_CP_CONTEXT_PLAN_CACHE=0 disables reuse.
+_CONTEXT_PLAN_CACHE_FLAG = "DSV4_CP_CONTEXT_PLAN_CACHE"
+_CONTEXT_PLAN_CACHE_MAX_ENTRIES = 32
+_CONTEXT_PLAN_CACHE: "dict" = {}
+
+
+def _context_plan_cache_enabled() -> bool:
+    value = os.environ.get(_CONTEXT_PLAN_CACHE_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_CONTEXT_PLAN_CACHE_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+def _context_plan_lookup(key):
+    entry = _CONTEXT_PLAN_CACHE.get(key)
+    if entry is not None:
+        # LRU touch; insertion order is the eviction order.
+        del _CONTEXT_PLAN_CACHE[key]
+        _CONTEXT_PLAN_CACHE[key] = entry
+    return entry
+
+
+def _context_plan_store(key, entry) -> None:
+    _CONTEXT_PLAN_CACHE[key] = entry
+    while len(_CONTEXT_PLAN_CACHE) > _CONTEXT_PLAN_CACHE_MAX_ENTRIES:
+        _CONTEXT_PLAN_CACHE.pop(next(iter(_CONTEXT_PLAN_CACHE)))
+
+
 def build_cp_context_for_forward(
     cp_info,
     cp_size: int,
@@ -364,17 +574,23 @@ def build_cp_context_for_forward(
     """
     position_offset: Union[int, torch.Tensor] = 0
     position_offset_cpu: Optional[torch.Tensor] = None
+    position_offset_full_host: Optional[Tuple[int, ...]] = None
     if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
-        position_offset = prefix_lengths.to(device=device, dtype=torch.long)
         # prefix_lengths arrives from the input gatherer as a pinned HOST tensor
-        # (PP requires device-input mode off), so this copy is free -- while every
-        # scalar build_cp_context derives from the device copy is a blocking D2H.
-        # It runs once per forward, i.e. once per chunk per rank.
+        # (PP requires device-input mode off).  Even pinned, a non_blocking=False
+        # copy is memcpy_and_sync (stream-position drain); the staged copy is
+        # stream-ordered for consumers but never blocks the host.  It runs once
+        # per forward, i.e. once per chunk per rank.
+        position_offset = stage_host_to_device(prefix_lengths, device, torch.long)
         position_offset_cpu = (
             prefix_lengths.to(torch.long)
             if not prefix_lengths.is_cuda
             else prefix_lengths.detach().to("cpu", torch.long)
         )
+        if not prefix_lengths.is_cuda:
+            # Full (unsliced) host mirror of the same source tensor the prefill
+            # metadata builders receive — identical integer values.
+            position_offset_full_host = tuple(int(v) for v in prefix_lengths.tolist())
     return build_cp_context(
         cp_info,
         cp_size,
@@ -383,6 +599,7 @@ def build_cp_context_for_forward(
         device,
         position_offset=position_offset,
         position_offset_cpu=position_offset_cpu,
+        position_offset_full_host=position_offset_full_host,
         kv_cache_sharded=kv_cache_sharded,
     )
 
@@ -395,15 +612,22 @@ def build_cp_context(
     device: torch.device,
     position_offset: Union[int, torch.Tensor] = 0,
     position_offset_cpu: Optional[torch.Tensor] = None,
+    position_offset_full_host: Optional[Tuple[int, ...]] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
+    # Keep the pre-transfer host sources: they carry the same values as the
+    # device copies and let downstream host-side validation skip a D2H.
+    padding_mask_host = padding_mask if padding_mask.device.type == "cpu" else None
+    restore_indices_host = (
+        restore_indices if restore_indices.device.type == "cpu" else None
+    )
     if padding_mask.device != device:
-        padding_mask = padding_mask.to(device)
+        padding_mask = stage_host_to_device(padding_mask, device)
     if restore_indices.device != device:
-        restore_indices = restore_indices.to(device)
+        restore_indices = stage_host_to_device(restore_indices, device)
     padded_seq_len = int(padding_mask.shape[0])
 
     if cp_size * chunk_length != padded_seq_len:
@@ -415,31 +639,14 @@ def build_cp_context(
     actual_input_lengths_cpu = getattr(
         cp_info, "prefill_actual_input_lengths_cpu", None
     )
-    input_lengths_global: Optional[torch.Tensor] = None
-    cu_seqlens_global: Optional[torch.Tensor] = None
-    input_lengths_host: Optional[list] = None
-    if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
-        input_lengths_global = actual_input_lengths_cpu.to(
-            device=device, dtype=torch.int32
-        ).contiguous()
-        zero = torch.zeros(1, dtype=torch.int32, device=device)
-        cu_seqlens_global = torch.cat(
-            [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
-        ).contiguous()
-        # Reuse the CPU lengths for host decisions instead of synchronizing the GPU copy.
-        input_lengths_host = [int(v) for v in actual_input_lengths_cpu.tolist()]
-
-    # Host int64 mirror of the per-request real lengths. actual_input_lengths_cpu
-    # is already a CPU tensor, so this is free -- and every scalar derived from it
-    # below would otherwise be a blocking D2H off input_lengths_global.
-    input_lengths_cpu: Optional[torch.Tensor] = None
-    if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
-        input_lengths_cpu = (
-            actual_input_lengths_cpu.detach().to(torch.long).contiguous()
-        )
-
+    # Host-side chunk-length plan.  Hoisted above the device uploads (moved;
+    # identical values) so the context-plan cache key — pure host ints —
+    # is known before any device work is issued.
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
-    if input_lengths_global is not None and input_lengths_global.numel() == 1:
+    if (
+        actual_input_lengths_cpu is not None
+        and int(actual_input_lengths_cpu.numel()) == 1
+    ):
         # Single request: the assert below forces sum(chunk_lengths) ==
         # chunk_length, so with B==1 the only possible value is chunk_length
         # itself. Take it from the shape and skip the per-forward D2H.
@@ -459,6 +666,57 @@ def build_cp_context(
         assert per_req_chunk % 2 == 0, (
             f"prefill_cp_chunk_lengths[{i}]={per_req_chunk} must be even "
             "for zigzag CP"
+        )
+
+    # Process-level geometry plan cache (default on).  The key covers
+    # every input the cached tensors depend on; the framework mask/restore
+    # CONTENT is deliberately not in the key (device-resident in production —
+    # reading it would re-add the DtoH this cache removes), so only
+    # geometry-pure tensors are cached and the content-derived tensors below
+    # (local_is_real / unpad_restore / seq_len_full) stay per-chunk.
+    plan = None
+    plan_key = None
+    if (
+        _context_plan_cache_enabled()
+        and actual_input_lengths_cpu is not None
+        and int(actual_input_lengths_cpu.numel()) > 0
+    ):
+        plan_key = (
+            int(cp_size),
+            int(cp_rank),
+            int(chunk_length),
+            int(padded_seq_len),
+            tuple(int(v) for v in chunk_lengths),
+            tuple(int(v) for v in actual_input_lengths_cpu.tolist()),
+            str(device),
+        )
+        plan = _context_plan_lookup(plan_key)
+
+    input_lengths_global: Optional[torch.Tensor] = None
+    cu_seqlens_global: Optional[torch.Tensor] = None
+    input_lengths_host: Optional[list] = None
+    if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
+        # Reuse the CPU lengths for host decisions instead of synchronizing the GPU copy.
+        input_lengths_host = [int(v) for v in actual_input_lengths_cpu.tolist()]
+        if plan is not None:
+            input_lengths_global = plan[0]
+            cu_seqlens_global = plan[1]
+        else:
+            input_lengths_global = stage_host_to_device(
+                actual_input_lengths_cpu, device, torch.int32
+            ).contiguous()
+            zero = torch.zeros(1, dtype=torch.int32, device=device)
+            cu_seqlens_global = torch.cat(
+                [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
+            ).contiguous()
+
+    # Host int64 mirror of the per-request real lengths. actual_input_lengths_cpu
+    # is already a CPU tensor, so this is free -- and every scalar derived from it
+    # below would otherwise be a blocking D2H off input_lengths_global.
+    input_lengths_cpu: Optional[torch.Tensor] = None
+    if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
+        input_lengths_cpu = (
+            actual_input_lengths_cpu.detach().to(torch.long).contiguous()
         )
 
     if input_lengths_global is not None:
@@ -497,12 +755,20 @@ def build_cp_context(
         prefix_lengths_cpu = prefix_lengths.detach().to("cpu", torch.long).contiguous()
 
     if input_lengths_global is not None:
-        real_lengths = input_lengths_global.to(device=device, dtype=torch.long)
-        real_lengths_cpu = (
-            input_lengths_cpu
-            if input_lengths_cpu is not None
-            else real_lengths.detach().to("cpu", torch.long)
-        )
+        if plan is not None:
+            real_lengths = plan[2]
+            real_lengths_cpu = (
+                input_lengths_cpu
+                if input_lengths_cpu is not None
+                else real_lengths.detach().to("cpu", torch.long)
+            )
+        else:
+            real_lengths = input_lengths_global.to(device=device, dtype=torch.long)
+            real_lengths_cpu = (
+                input_lengths_cpu
+                if input_lengths_cpu is not None
+                else real_lengths.detach().to("cpu", torch.long)
+            )
     else:
         # No actual lengths means no padding information beyond the mask.
         # For the single-stream fallback this collapses to seq_len_full below.
@@ -513,39 +779,66 @@ def build_cp_context(
         )
         real_lengths_cpu = real_lengths.detach().to("cpu", torch.long)
 
-    # C++ ZigZagProcessor applies the zigzag plan independently per prefill
-    # stream/request, then concatenates the rank-local chunks.  Generate the
-    # same padded-concat coordinates here; the previous single-stream formula
-    # is only valid for B==1.
-    padded_positions = []
-    per_req_positions = []
-    req_ids = []
-    padded_seq_offset = 0
-    for req_id, per_req_chunk in enumerate(chunk_lengths):
-        pair_size = per_req_chunk // 2
-        padded_len = per_req_chunk * cp_size
-        arange_pair = torch.arange(pair_size, dtype=torch.long, device=device)
-        even_padded = padded_seq_offset + cp_rank * pair_size + arange_pair
-        odd_padded = (
-            padded_seq_offset + padded_len - (cp_rank + 1) * pair_size + arange_pair
-        )
-        req_relative = torch.cat(
-            [even_padded - padded_seq_offset, odd_padded - padded_seq_offset]
-        )
-        if req_id < int(real_lengths_cpu.numel()):
-            max_real_pos = max(int(real_lengths_cpu[req_id]) - 1, 0)
-        else:
-            max_real_pos = max(padded_len - 1, 0)
-        per_req_positions.append(req_relative.clamp_max(max_real_pos))
-        padded_positions.append(torch.cat([even_padded, odd_padded]))
-        req_ids.append(
-            torch.full((per_req_chunk,), req_id, dtype=torch.int32, device=device)
-        )
-        padded_seq_offset += padded_len
+    if plan is not None:
+        # Warm cache hit: the zigzag plan and the global lengths/cu tables are
+        # process-cached constants for this geometry (byte-identical values).
+        relative_positions = plan[3]
+        local_positions = plan[4]
+        req_id_per_token = plan[5]
+        req_id_per_token_long = plan[6]
+    else:
+        # C++ ZigZagProcessor applies the zigzag plan independently per prefill
+        # stream/request, then concatenates the rank-local chunks.  Generate the
+        # same padded-concat coordinates here; the previous single-stream formula
+        # is only valid for B==1.
+        padded_positions = []
+        per_req_positions = []
+        req_ids = []
+        padded_seq_offset = 0
+        for req_id, per_req_chunk in enumerate(chunk_lengths):
+            pair_size = per_req_chunk // 2
+            padded_len = per_req_chunk * cp_size
+            arange_pair = torch.arange(pair_size, dtype=torch.long, device=device)
+            even_padded = padded_seq_offset + cp_rank * pair_size + arange_pair
+            odd_padded = (
+                padded_seq_offset + padded_len - (cp_rank + 1) * pair_size + arange_pair
+            )
+            req_relative = torch.cat(
+                [even_padded - padded_seq_offset, odd_padded - padded_seq_offset]
+            )
+            if req_id < int(real_lengths_cpu.numel()):
+                max_real_pos = max(int(real_lengths_cpu[req_id]) - 1, 0)
+            else:
+                max_real_pos = max(padded_len - 1, 0)
+            per_req_positions.append(req_relative.clamp_max(max_real_pos))
+            padded_positions.append(torch.cat([even_padded, odd_padded]))
+            req_ids.append(
+                torch.full((per_req_chunk,), req_id, dtype=torch.int32, device=device)
+            )
+            padded_seq_offset += padded_len
 
-    relative_positions = torch.cat(padded_positions).contiguous()
-    local_positions = torch.cat(per_req_positions).contiguous()
-    req_id_per_token = torch.cat(req_ids).contiguous()
+        relative_positions = torch.cat(padded_positions).contiguous()
+        local_positions = torch.cat(per_req_positions).contiguous()
+        req_id_per_token = torch.cat(req_ids).contiguous()
+        req_id_per_token_long = None
+
+    if plan_key is not None:
+        # The long cast is part of the cached plan so warm chunks skip it too.
+        if req_id_per_token_long is None:
+            req_id_per_token_long = req_id_per_token.to(torch.long)
+        if plan is None:
+            _context_plan_store(
+                plan_key,
+                (
+                    input_lengths_global,
+                    cu_seqlens_global,
+                    real_lengths,
+                    relative_positions,
+                    local_positions,
+                    req_id_per_token,
+                    req_id_per_token_long,
+                ),
+            )
 
     local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
     unpad_restore_is_prefix = False
@@ -568,13 +861,34 @@ def build_cp_context(
         # so restore rows must be selected with the full concat padding mask.
         unpad_restore = restore_indices[padding_mask == 1].to(torch.long)
         seq_len_full = int(unpad_restore.shape[0])
-    prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
+    if plan_key is not None:
+        # The long cast is part of the cached plan (freshly computed on the
+        # store path above); warm chunks skip it entirely.
+        prefix_per_token = prefix_lengths.gather(0, req_id_per_token_long)
+    else:
+        prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
     global_positions = (prefix_per_token + local_positions).contiguous()
     prefix_length = int(prefix_lengths_cpu[0]) if prefix_lengths_cpu.numel() > 0 else 0
     if input_lengths_global is not None:
         seq_len_total = int((prefix_lengths_cpu + real_lengths_cpu[:B]).max())
     else:
         seq_len_total = prefix_length + seq_len_full
+
+    # Host mirror of global_positions[0]: token 0 belongs to request 0, so its
+    # position is prefix[0] + clamp(cp_rank * pair0, max=real[0]-1) — the same
+    # host values that built the device tensors above.  When real lengths are
+    # absent the clamp bound is padded_len-1, which cp_rank * pair0 never
+    # reaches (cp_rank * pair <= (cp_size-1) * pair < 2 * cp_size * pair - 1).
+    first_global_position: Optional[int] = None
+    if (
+        prefix_lengths_cpu.numel() > 0
+        and len(chunk_lengths) > 0
+        and chunk_lengths[0] > 0
+    ):
+        first_local = int(cp_rank) * (int(chunk_lengths[0]) // 2)
+        if int(real_lengths_cpu.numel()) > 0:
+            first_local = min(first_local, max(int(real_lengths_cpu[0]) - 1, 0))
+        first_global_position = int(prefix_lengths_cpu[0]) + first_local
 
     context = CPContext(
         cp_size=int(cp_size),
@@ -596,14 +910,27 @@ def build_cp_context(
         unpad_restore_is_prefix=unpad_restore_is_prefix,
         chunk_lengths_per_req=tuple(chunk_lengths),
         kv_cache_sharded=bool(kv_cache_sharded),
+        first_global_position=first_global_position,
+        prefix_lengths_full_host=position_offset_full_host,
+        input_lengths_full_host=(
+            tuple(input_lengths_host) if input_lengths_host is not None else None
+        ),
     )
     if os.environ.get("DSV4_CP_COMPACT_COMPRESSOR", "0") == "1":
         from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (
             verified_geometry,
         )
 
+        # The pre-transfer host sources carry the same values as the device
+        # copies; validating on them avoids two blocking D2H syncs per chunk.
         context.compact_geometry_verified = verified_geometry(
-            context, padding_mask, restore_indices
+            context,
+            padding_mask_host if padding_mask_host is not None else padding_mask,
+            (
+                restore_indices_host
+                if restore_indices_host is not None
+                else restore_indices
+            ),
         )
     return context
 
@@ -1273,9 +1600,25 @@ def build_cp_full_prefill_positions(
 
     positions = []
     b_idx = []
+    # Host mirrors of the same framework CPU sources that built
+    # ``input_lengths_global`` / ``prefix_lengths``: identical integers with no
+    # per-request device readback.  Domain-checked against the device tensors;
+    # any mismatch falls back to the legacy per-request ``.item()`` reads.
+    lengths_host = cp_ctx.input_lengths_full_host
+    prefixes_host = cp_ctx.prefix_lengths_full_host
+    host_bounds = (
+        lengths_host is not None
+        and prefixes_host is not None
+        and len(lengths_host) == int(lengths.numel())
+        and len(prefixes_host) >= int(lengths.numel())
+    )
     for req_id in range(int(lengths.numel())):
-        length = int(lengths[req_id].item())
-        start = int(prefixes[req_id].item())
+        if host_bounds:
+            length = int(lengths_host[req_id])
+            start = int(prefixes_host[req_id])
+        else:
+            length = int(lengths[req_id].item())
+            start = int(prefixes[req_id].item())
         if length <= 0:
             continue
         positions.append(
@@ -1297,6 +1640,32 @@ def build_cp_full_prefill_positions(
         prefixes.to(device=device, dtype=torch.long).contiguous(),
         cu_seq,
     )
+
+
+def build_cp_full_prefill_positions_shared(
+    cp_ctx: CPContext,
+    device: torch.device,
+    shared: Optional[dict] = None,
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]":
+    """Per-forward memo of :func:`build_cp_full_prefill_positions`.
+
+    The 3-bucket meta build calls the positions builder 3x per forward (CSA
+    compressor meta, HCA compressor meta, CSA nested indexer compressor meta)
+    with the same per-forward ``cp_ctx`` — identical outputs.  When ``shared``
+    (the per-forward memo dict from ``build_and_propagate_prefill_meta_fp8``)
+    is provided, the first build is reused; ``shared=None`` is exactly the
+    legacy per-call build.  Consumers treat the returned tensors as read-only
+    (they always were: kernel inputs to ``prepare_metadata``).
+    """
+    if shared is None:
+        return build_cp_full_prefill_positions(cp_ctx, device)
+    probe = (id(cp_ctx), str(device))
+    ent = shared.get("cp_full_pos")
+    if ent is not None and ent[0] == probe:
+        return ent[1]
+    out = build_cp_full_prefill_positions(cp_ctx, device)
+    shared["cp_full_pos"] = (probe, out)
+    return out
 
 
 def combine_topk_swa_indices_cp_b1(

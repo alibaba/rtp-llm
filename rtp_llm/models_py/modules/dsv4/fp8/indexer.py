@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     CPContext,
     build_cp_full_prefill_positions,
+    build_cp_full_prefill_positions_shared,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
@@ -75,6 +76,80 @@ def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+# Run the prefill indexer score+topk tail on a dedicated side stream so it
+# overlaps the same layer's main-stream attention prep (main compressor write,
+# Q materialize, workspace gathers). The tail is pure local kernels (no NCCL);
+# the prefix (incl. the nested compressor's CP gather) stays on the caller's
+# stream in the same program order as the serialized path. Default ON,
+# fail-closed parse; capture-active falls back to the serialized call.
+_INDEXER_TAIL_STREAM_FLAG = "DSV4_FP8_INDEXER_TAIL_STREAM"
+
+
+def _indexer_tail_stream_enabled() -> bool:
+    value = os.environ.get(_INDEXER_TAIL_STREAM_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_INDEXER_TAIL_STREAM_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+# One process-local side stream per device. The tail stream only ever runs
+# ``fp8_mqa_indexer_score`` + the topk kernels reading prefix products that
+# are fenced in by event; consecutive CSA layers serialize on it in program
+# order, which reproduces the serialized path's tail ordering exactly.
+_INDEXER_TAIL_STREAMS: Dict[Any, Any] = {}
+
+
+def _get_indexer_tail_stream(device: torch.device):
+    dev = torch.device(device)
+    stream = _INDEXER_TAIL_STREAMS.get(dev)
+    if stream is None:
+        stream = torch.cuda.Stream(device=dev)
+        _INDEXER_TAIL_STREAMS[dev] = stream
+    return stream
+
+
+class _IndexerScoreState(NamedTuple):
+    """Prefix products consumed by the score+topk tail.
+
+    ``forward_prefill_tail_on_stream`` returns these by (payload) reference to
+    the pending handle, so the caching allocator cannot recycle their storage
+    while the tail stream is still reading them (the resolve join orders the
+    main stream after the tail before any ref drops).
+    """
+
+    q_fp8: torch.Tensor
+    w_fold: torch.Tensor
+    k_quant_flat: torch.Tensor
+    k_scale_buf: torch.Tensor
+    out_shape: tuple
+
+
+class _PendingIndexerTopk(NamedTuple):
+    """Indexer topk running on the tail side stream.
+
+    ``resolve(consumer_stream)`` establishes the happens-before edge
+    (consumer waits the tail-completion event) and pins the allocation against
+    reuse on the consumer stream, then returns the plain
+    ``[T_total, K] int32`` tensor — the exact object the serialized path
+    hands to ``combine_topk_swa_indices*``.
+    """
+
+    out_buf: torch.Tensor
+    done_event: Any
+    tail_stream: Any
+    state: _IndexerScoreState
+
+    def resolve(self, consumer_stream: Any) -> torch.Tensor:
+        consumer_stream.wait_event(self.done_event)
+        # The buffer was allocated on the tail stream; record the consumer's
+        # use so the allocator cannot reuse its storage for a later tail
+        # before this stream's readers complete. (CPU tensors — the CPU test
+        # path — do not participate in stream-ordered allocation.)
+        if self.out_buf.is_cuda:
+            self.out_buf.record_stream(consumer_stream)
+        return self.out_buf
 
 
 # Exact SGLang radix-select TopK used by the shared DeepSeek V4 Flash/Pro FP8
@@ -123,6 +198,43 @@ def _fp8_prefill_topk_canonicalize() -> bool:
         "yes",
         "on",
     )
+
+
+def _compressed_k_scalars_host(
+    cp_ctx,
+    prefix_lengths: torch.Tensor,
+    eff_input_lengths: torch.Tensor,
+    ratio: int,
+):
+    """``(T, end_pos)`` from the CP host mirrors; ``None`` when unprovable.
+
+    ``T`` is ``sum((prefix_b + len_b) // ratio)`` and ``end_pos`` is
+    ``prefix_0 + len_0`` — the exact integers the legacy path reads back with
+    two device syncs (``cu_kv_seqlens[-1].item()`` /
+    ``seq_total_per_req[0].item()``).  The mirrors are host copies of the same
+    framework CPU sources that built the device args; they are trusted only
+    when their domains match the device args' element counts exactly
+    (otherwise the legacy sync runs).  Non-negative floor division on Python
+    ints equals the int32/int64 device computation at these magnitudes.
+    """
+    if cp_ctx is None:
+        return None
+    prefix_host = getattr(cp_ctx, "prefix_lengths_full_host", None)
+    lengths_host = getattr(cp_ctx, "input_lengths_full_host", None)
+    if prefix_host is None or lengths_host is None:
+        return None
+    if prefix_lengths is None or eff_input_lengths is None:
+        return None
+    if int(prefix_lengths.numel()) != len(prefix_host):
+        return None
+    if int(eff_input_lengths.numel()) != len(lengths_host):
+        return None
+    if len(prefix_host) != len(lengths_host) or not prefix_host:
+        return None
+    totals = [
+        (int(p) + int(l)) // int(ratio) for p, l in zip(prefix_host, lengths_host)
+    ]
+    return sum(totals), int(prefix_host[0]) + int(lengths_host[0])
 
 
 def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
@@ -739,6 +851,7 @@ class IndexerFP8(PoolBackedModule):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        shared: Optional[Any] = None,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 
@@ -754,6 +867,11 @@ class IndexerFP8(PoolBackedModule):
         pass ``kv_block_table=None`` / ``kv_eb=0`` and the per-row
         ``block_table_i32`` is emitted empty (matches the warmup short-
         circuit in :meth:`forward`).
+
+        ``shared`` (optional): the per-forward cross-bucket memo dict
+        from ``build_and_propagate_prefill_meta_fp8``; the CP full-positions
+        build is shared through it (byte-identical values).  ``None`` keeps
+        the legacy per-call build.
 
         Today's caller still hands us a single-request layout (``bsz==1``
         with the full request flattened into ``seqlen``), so the
@@ -809,6 +927,12 @@ class IndexerFP8(PoolBackedModule):
             ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
+                # Host mirrors of the framework length/prefix sources carry the
+                # same integers; read T/end_pos from them when the domains match
+                # so the two device readbacks below stay off the chunk head.
+                host_scalars = _compressed_k_scalars_host(
+                    cp_ctx, prefix_lengths, eff_input_lengths, ratio
+                )
                 seq_total_per_req = prefix_lengths.to(
                     device=device, dtype=torch.int64
                 ) + eff_input_lengths.to(
@@ -821,7 +945,11 @@ class IndexerFP8(PoolBackedModule):
                 cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
                     torch.int32
                 )
-                T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
+                T = (
+                    host_scalars[0]
+                    if host_scalars is not None
+                    else int(cu_kv_seqlens[-1].item())
+                )  # total compressed K across batch
                 M = int(position_ids.numel())  # T_total
 
                 positions_d = position_ids.to(
@@ -885,7 +1013,11 @@ class IndexerFP8(PoolBackedModule):
             # is still passed to ``self.compressor(x, sp, meta=...)`` but
             # is ignored there because ``meta.is_batched=True``. Keep the
             # request-0 values for diagnostics / B==1 collapse equivalence.
-            end_pos = int(seq_total_per_req[0].item())
+            end_pos = (
+                host_scalars[1]
+                if host_scalars is not None
+                else int(seq_total_per_req[0].item())
+            )
             is_fresh_prefill = sp_int == 0
         else:
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
@@ -1002,7 +1134,9 @@ class IndexerFP8(PoolBackedModule):
                                 cp_b_idx,
                                 cp_seq_start_per_req,
                                 cp_cu_seq_per_req,
-                            ) = build_cp_full_prefill_positions(cp_ctx, device)
+                            ) = build_cp_full_prefill_positions_shared(
+                                cp_ctx, device, shared
+                            )
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
@@ -1077,7 +1211,80 @@ class IndexerFP8(PoolBackedModule):
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
-        M = attention_inputs.M
+        state = self._prefill_score_prefix(
+            x,
+            qr,
+            attention_inputs,
+            workspace=workspace,
+            cp_gather_stream=cp_gather_stream,
+            post_gather_stream=post_gather_stream,
+        )
+        if isinstance(state, torch.Tensor):
+            return state
+        return self._prefill_score_tail(state, attention_inputs)
+
+    def forward_prefill_tail_on_stream(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        workspace: "PrefillWorkspace",
+        tail_stream: Any,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Any:
+        """``forward`` with the score+topk tail issued on ``tail_stream``.
+
+        The prefix (compute_q → nested compressor → weights → quant →
+        gather_k) runs on the CALLER's stream in the same program order as
+        :meth:`forward` — every NCCL collective keeps its stream and issue
+        order. Only the tail (``fp8_mqa_indexer_score`` + per-row topk —
+        local kernels reading prefix products) is fenced onto the side
+        stream. The returned :class:`_PendingIndexerTopk` must be resolved
+        (``consumer_stream.wait_event``) before any consumer reads the topk.
+
+        Byte-identical to :meth:`forward`: same kernels, same inputs, same
+        intra-chain order — only the tail's stream placement moves. Early
+        exits (warmup / T==0) return the same plain tensor as ``forward``.
+        """
+        state = self._prefill_score_prefix(
+            x,
+            qr,
+            attention_inputs,
+            workspace=workspace,
+            cp_gather_stream=cp_gather_stream,
+            post_gather_stream=post_gather_stream,
+        )
+        if isinstance(state, torch.Tensor):
+            return state
+        current_stream = torch.cuda.current_stream(x.device)
+        in_event = torch.cuda.Event()
+        in_event.record(current_stream)
+        tail_stream.wait_event(in_event)
+        with torch.cuda.stream(tail_stream):
+            out_buf = self._prefill_score_tail(state, attention_inputs)
+            done_event = torch.cuda.Event()
+            done_event.record(tail_stream)
+        return _PendingIndexerTopk(out_buf, done_event, tail_stream, state)
+
+    def _prefill_score_prefix(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        workspace: "PrefillWorkspace",
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Any:
+        """Everything ``forward`` does up through the K-cache gather.
+
+        Returns a plain tensor for the early exits (warmup / T==0), else an
+        :class:`_IndexerScoreState` with the tail's inputs. Runs entirely on
+        the caller's stream; the pool clear + pending-gather drain happen
+        here so the tail never touches the nested pool context.
+        """
         T = attention_inputs.T
         sp = attention_inputs.sp_int
         K = self.index_topk
@@ -1164,50 +1371,71 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
-            # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
-
-            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
-            w_score = w_fold.view(M, self.n_heads)
-            score_chunk_rows = _fp8_prefill_score_chunk_rows()
-            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
-            if not chunked_score:
-                score_chunk_rows = M
-            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
-
-            # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
-            # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
-            # per-row valid count is ``-1`` from the kernel. For long prefill,
-            # score in row chunks because DeepGEMM returns dense [rows, T].
-            for row_start in range(0, M, score_chunk_rows):
-                row_end = min(M, row_start + score_chunk_rows)
-                with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
-                        w_score[row_start:row_end],
-                        k_quant_flat,
-                        k_scale_flat,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        clean_logits=False,
-                    )  # [chunk_rows, T] fp32
-
-                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
-                        logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        out_buf[row_start:row_end],
-                        K,
-                        self.compress_ratio,
-                    )
-                del logits
-
-            return out_buf.view(out_shape)
+            return _IndexerScoreState(
+                q_fp8=q_fp8,
+                w_fold=w_fold,
+                k_quant_flat=k_quant_flat,
+                k_scale_buf=k_scale_buf,
+                out_shape=out_shape,
+            )
         finally:
             self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()
+
+    def _prefill_score_tail(
+        self,
+        state: _IndexerScoreState,
+        attention_inputs: _IndexerFP8PrefillMeta,
+    ) -> torch.Tensor:
+        """The score+topk loop — a pure function of the prefix products.
+
+        Runs on the caller's current stream (the serialized ``forward``) or
+        the dedicated tail stream (``forward_prefill_tail_on_stream``); the
+        kernel sequence and inputs are identical either way.
+        """
+        M = attention_inputs.M
+        K = self.index_topk
+        # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
+        # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
+        k_scale_flat = state.k_scale_buf.view(torch.float32).squeeze(-1)
+
+        q_score = state.q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+        w_score = state.w_fold.view(M, self.n_heads)
+        score_chunk_rows = _fp8_prefill_score_chunk_rows()
+        chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
+        if not chunked_score:
+            score_chunk_rows = M
+        out_buf = torch.empty((M, K), dtype=torch.int32, device=state.q_fp8.device)
+
+        # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
+        # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
+        # per-row valid count is ``-1`` from the kernel. For long prefill,
+        # score in row chunks because DeepGEMM returns dense [rows, T].
+        for row_start in range(0, M, score_chunk_rows):
+            row_end = min(M, row_start + score_chunk_rows)
+            with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                logits = fp8_mqa_indexer_score(
+                    q_score[row_start:row_end],
+                    w_score[row_start:row_end],
+                    state.k_quant_flat,
+                    k_scale_flat,
+                    attention_inputs.ks[row_start:row_end],
+                    attention_inputs.ke[row_start:row_end],
+                    clean_logits=False,
+                )  # [chunk_rows, T] fp32
+
+            with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                _run_prefill_topk(
+                    logits,
+                    attention_inputs.ks[row_start:row_end],
+                    attention_inputs.ke[row_start:row_end],
+                    out_buf[row_start:row_end],
+                    K,
+                    self.compress_ratio,
+                )
+            del logits
+
+        return out_buf.view(state.out_shape)
 
     # --------------------------------------------------------------
     # Overlap orchestration entry points

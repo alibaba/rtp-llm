@@ -55,6 +55,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     _fp8_gather_enabled,
     build_cp_full_prefill_positions,
+    build_cp_full_prefill_positions_shared,
     cp_actual_owned_kv_len_scalar,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
@@ -80,7 +81,12 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     build_cp_byte_sliced_slot_compaction,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
-from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+    IndexerFP8,
+    _get_indexer_tail_stream,
+    _indexer_tail_stream_enabled,
+    _PendingIndexerTopk,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -236,6 +242,172 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
+def _any_prefix_continuation(
+    prefix_lengths: Optional[torch.Tensor],
+    prefix_lengths_full_host: Optional[Tuple[int, ...]],
+) -> bool:
+    """Continuation check with the CP host mirror when its domain matches.
+
+    ``prefix_lengths_full_host`` is the host mirror of the same framework CPU
+    source tensor that produced the device ``prefix_lengths`` (full, unsliced);
+    when the lengths agree the ``any(prefix > 0)`` predicate is identical and
+    the blocking ``.item()`` readback is skipped.  Otherwise the legacy device
+    reduction runs unchanged.
+    """
+    if (
+        prefix_lengths_full_host is not None
+        and prefix_lengths is not None
+        and int(prefix_lengths.numel()) == len(prefix_lengths_full_host)
+    ):
+        return any(p > 0 for p in prefix_lengths_full_host)
+    return bool((prefix_lengths > 0).any().item())
+
+
+def _first_prefix_int(
+    prefix_lengths: Optional[torch.Tensor],
+    prefix_lengths_full_host: Optional[Tuple[int, ...]],
+) -> int:
+    """``int(prefix_lengths[0])`` from the CP host mirror when domains match."""
+    if (
+        prefix_lengths_full_host is not None
+        and len(prefix_lengths_full_host) >= 1
+        and prefix_lengths is not None
+        and int(prefix_lengths.numel()) == len(prefix_lengths_full_host)
+    ):
+        return int(prefix_lengths_full_host[0])
+    return int(prefix_lengths[0].item())
+
+
+def _gather_len_max_host(
+    cp_ctx,
+    prefix_lengths: Optional[torch.Tensor],
+    write_B: int,
+    window_size: int,
+) -> Optional[int]:
+    """``combined_gather_lens.max()`` from the CP host mirrors; None if unprovable.
+
+    Under the CP write trio the fused gather-lens kernel computes
+    ``gather_len[b] = query_len[b] + min(prefix_len[b], window_size - 1)``
+    with ``query_len == input_lengths_global[b]`` (the global cu_seqlens
+    diff) and ``prefix_len == prefix_lengths[b]`` (seq_len - query_len).
+    The host mirrors are the same framework CPU sources those device tensors
+    were built from, so the max is the identical integer with no device
+    readback.  Trusted only when every domain length matches exactly.
+    """
+    if cp_ctx is None:
+        return None
+    prefix_host = getattr(cp_ctx, "prefix_lengths_full_host", None)
+    lengths_host = getattr(cp_ctx, "input_lengths_full_host", None)
+    if prefix_host is None or lengths_host is None:
+        return None
+    if prefix_lengths is None or int(prefix_lengths.numel()) != len(prefix_host):
+        return None
+    lengths_global = getattr(cp_ctx, "input_lengths_global", None)
+    if lengths_global is None or int(lengths_global.numel()) != len(lengths_host):
+        return None
+    if len(prefix_host) < write_B or len(lengths_host) < write_B:
+        return None
+    return max(
+        int(lengths_host[b]) + min(int(prefix_host[b]), int(window_size) - 1)
+        for b in range(write_B)
+    )
+
+
+def _prefill_maxes_host(
+    prefix_full_host: Optional[Tuple[int, ...]],
+    lengths_full_host: Optional[Tuple[int, ...]],
+    ratio: int,
+    window_size: int,
+    *,
+    prefix_arg: Optional[torch.Tensor],
+    lengths_arg: Optional[torch.Tensor],
+) -> Optional[Tuple[int, int]]:
+    """``(N_max, gather_len_max)`` for ``_build_workspace_meta`` from mirrors.
+
+    ``N_max = max((prefix_b + len_b) // ratio)`` and
+    ``gather_len_max = max(len_b + min(prefix_b, window_size - 1))`` — the
+    exact integers the legacy path reads with one stacked device
+    ``tolist()``.  Non-negative floor division on Python ints equals the
+    int32 device computation at these magnitudes.  Mirrors are trusted only
+    when their lengths equal the device args' element counts exactly.
+    """
+    if prefix_full_host is None or lengths_full_host is None:
+        return None
+    if prefix_arg is None or lengths_arg is None:
+        return None
+    if int(prefix_arg.numel()) != len(prefix_full_host):
+        return None
+    if int(lengths_arg.numel()) != len(lengths_full_host):
+        return None
+    if len(prefix_full_host) != len(lengths_full_host) or not prefix_full_host:
+        return None
+    n_max = max(
+        (int(p) + int(l)) // int(ratio)
+        for p, l in zip(prefix_full_host, lengths_full_host)
+    )
+    g_max = max(
+        int(l) + min(int(p), int(window_size) - 1)
+        for p, l in zip(prefix_full_host, lengths_full_host)
+    )
+    return n_max, g_max
+
+
+def _memo_identity(t: Optional[torch.Tensor]) -> Optional[tuple]:
+    """Identity probe for the per-forward shared-build memo.
+
+    Within one ``build_and_propagate_prefill_meta_fp8`` call every ratio-bucket
+    build receives tensors over the same storages (the ``_flat_1d`` reshape
+    returns a fresh VIEW object per call, so ``id()`` is meaningless here —
+    ``data_ptr`` + layout is the identity that matters for read-only sharing).
+    An exact probe match proves the memoized values were computed from the same
+    bytes; any mismatch rebuilds (fail-safe — a missed share is today's
+    behavior, a false share is the only real hazard).  ``_version`` is
+    unavailable under InferenceMode (mirrors
+    ``_compact_cp_runtime._tensor_identity``).
+    """
+    if t is None:
+        return None
+    version = None if t.is_inference() else t._version
+    return (
+        t.data_ptr(),
+        version,
+        tuple(t.shape),
+        tuple(t.stride()),
+        str(t.device),
+        t.dtype,
+    )
+
+
+def _suffix_gather_lens_max_host(
+    prefix_lengths: Optional[torch.Tensor],
+    prefix_lengths_full_host: Optional[Tuple[int, ...]],
+    count: int,
+    window_size: int,
+) -> Optional[int]:
+    """``gather_lens.max()`` for the suffix slot-mapping builders, from the CP
+    host mirror; ``None`` when unprovable.
+
+    Both suffix builders are called with ``gather_lens = clamp_max(
+    prefix_lengths, window_size - 1)[:count]``, whose max is ``max_b
+    min(prefix_b, win-1)`` over the first ``count`` requests — the identical
+    integer the legacy path reads back with a blocking device ``.item()``
+    (``clamp_max``/slice are elementwise, so max commutes with both).  Trusted
+    only when the mirror's length matches the device arg's element count
+    exactly and ``count`` is in range; otherwise the caller falls back to the
+    legacy readback.
+    """
+    if prefix_lengths_full_host is None or prefix_lengths is None:
+        return None
+    if int(prefix_lengths.numel()) != len(prefix_lengths_full_host):
+        return None
+    if int(count) <= 0 or int(count) > len(prefix_lengths_full_host):
+        return None
+    return max(
+        min(int(p), int(window_size) - 1)
+        for p in prefix_lengths_full_host[: int(count)]
+    )
+
+
 def _build_suffix_pool_slot_mapping(
     *,
     block_table: torch.Tensor,
@@ -244,6 +416,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    max_gather_host: Optional[int] = None,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -251,6 +424,12 @@ def _build_suffix_pool_slot_mapping(
     request ``b`` gathers absolute positions
     ``[seq_lens[b] - gather_lens[b], seq_lens[b])``. The block-table row
     token coverage is intentionally separate from the in-block ring modulo.
+
+    ``max_gather_host`` is the host-mirror-proven value of
+    ``gather_lens.max()``; when provided it replaces both the CPU-source max
+    and the blocking device readback.  Callers derive it via
+    ``_suffix_gather_lens_max_host`` (domain-checked) so the value is the
+    identical integer the legacy path would compute.
     """
     assert entries_per_block > 0
     assert tokens_per_block_for_block_table > 0
@@ -265,7 +444,10 @@ def _build_suffix_pool_slot_mapping(
     assert int(gather_lens_l.numel()) == B
     # P1b: host-side sources take the max on the host (free) instead of
     # syncing the just-uploaded device copy (a deep-queue D2H drain).
-    if gather_lens.device.type == "cpu" and gather_lens.numel():
+    # a mirror-proven ``max_gather_host`` skips the readback entirely.
+    if max_gather_host is not None:
+        max_gather = int(max_gather_host)
+    elif gather_lens.device.type == "cpu" and gather_lens.numel():
         max_gather = int(gather_lens.reshape(-1).max().item())
     else:
         max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
@@ -306,12 +488,15 @@ def _build_suffix_cp_sliced_slot_mapping(
     tokens_per_block_for_block_table: int,
     cp_rank: int,
     cp_size: int,
+    max_gather_host: Optional[int] = None,
 ) -> torch.Tensor:
     """Build suffix slots for CP-sliced SWA_KV local blocks.
 
     The block table is still indexed by the logical/cache-key block size. The
     physical local SWA block stores only this rank's slice of the full SWA ring,
     whose size is independent of the logical block-table row size.
+
+    ``max_gather_host``: see ``_build_suffix_pool_slot_mapping``.
     """
     assert local_entries_per_block > 0
     assert tokens_per_block_for_block_table > 0
@@ -325,7 +510,9 @@ def _build_suffix_cp_sliced_slot_mapping(
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     # P1b: host-side sources take the max on the host (free) — see the
     # sibling builder above.
-    if gather_lens.device.type == "cpu" and gather_lens.numel():
+    if max_gather_host is not None:
+        max_gather = int(max_gather_host)
+    elif gather_lens.device.type == "cpu" and gather_lens.numel():
         max_gather = int(gather_lens.reshape(-1).max().item())
     else:
         max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
@@ -1708,7 +1895,9 @@ class AttentionFP8(nn.Module):
         valid = in_capacity_row.unsqueeze(0) & (block_id >= 0)
 
         safe_slot = torch.where(
-            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
+            valid,
+            block_id * eb + in_block.unsqueeze(0),
+            torch.zeros_like(block_id),
         )
 
         gathered = pool_view.index_select(0, safe_slot.reshape(-1))
@@ -2893,9 +3082,27 @@ class AttentionFP8(nn.Module):
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            raw = self.indexer(
-                x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
-            )
+            # ``DSV4_FP8_INDEXER_TAIL_STREAM`` (default on): run the
+            # indexer's score+topk tail on a dedicated side stream so it
+            # overlaps the main-stream attention prep below; the pending
+            # resolves (event join) just before ``combine_topk`` consumes it.
+            # Byte-identical: same kernels, same inputs, same chain order.
+            if (
+                _indexer_tail_stream_enabled()
+                and x.is_cuda
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                raw = self.indexer.forward_prefill_tail_on_stream(
+                    x,
+                    qkv.qr,
+                    common.csa_meta.indexer_meta,
+                    workspace=common.workspace,
+                    tail_stream=_get_indexer_tail_stream(x.device),
+                )
+            else:
+                raw = self.indexer(
+                    x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
+                )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -3177,6 +3384,17 @@ class AttentionFP8(nn.Module):
         # compressor just above; overlap already drained via finish_prefill in
         # the orchestrator before reaching here (_skip_compressor_write=True).
         qkv = self._materialize_prefill_q(qkv, common)
+
+        # Join the indexer tail side stream here — after the main
+        # compressor write + Q materialize (the ~500 µs of prep the tail
+        # overlapped), before ``_attn_via_workspace`` feeds the topk to
+        # ``combine_topk_swa_indices*``. The wait is a stream-level event
+        # wait, not a host sync.
+        if isinstance(cmp_topk_runtime, _PendingIndexerTopk):
+            with record_function_range("dsv4.fp8.attn.compressed.indexer_tail_join"):
+                cmp_topk_runtime = cmp_topk_runtime.resolve(
+                    torch.cuda.current_stream(x.device)
+                )
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -4182,6 +4400,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        shared: Optional[dict] = None,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -4280,22 +4499,61 @@ class AttentionFP8(nn.Module):
         # bit-equal to the retired scalar slice; for B>1 it is the only correct
         # option since requests interleave on the flat token axis.
         with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
-            freqs_cis = self.freqs_cis.index_select(
-                0,
-                position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
+            # This block is bucket-invariant (identical args reach
+            # every ratio-bucket build).  The freqs gather is shareable only
+            # when the reps bind the same freqs_cis object (SWA uses base
+            # rope_theta, CSA/HCA share the compress-rope object — the probe
+            # decides; a miss rebuilds, which is the legacy behavior).
+            _ft_probe = (
+                int(win),
+                id(cp_ctx),
+                _memo_identity(self.freqs_cis),
+                _memo_identity(position_ids_eff),
+                _memo_identity(cu_seqlens_for_k),
+                _memo_identity(prefix_lengths),
+                _memo_identity(req_id_per_token),
             )
-            from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
-
-            topk_idxs, topk_length_kv_full = (
-                _swa_ops.compute_window_topk_and_length_varlen(
-                    win,
-                    cu_seqlens_for_k,
-                    position_ids_eff,
-                    prefix_lengths,
-                    req_id_per_token,
+            _ft = None
+            if shared is not None:
+                _ent = shared.get("freqs_topk")
+                if _ent is not None and _ent[0] == _ft_probe:
+                    _ft = _ent[1]
+            if _ft is not None:
+                freqs_cis, topk_idxs, topk_length_kv_full, any_cont = _ft
+            else:
+                freqs_cis = self.freqs_cis.index_select(
+                    0,
+                    position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
                 )
-            )
-            any_cont = bool((prefix_lengths > 0).any().item())
+                from rtp_llm.models_py.modules.dsv4.fp8 import (
+                    _swa_ops_triton as _swa_ops,
+                )
+
+                topk_idxs, topk_length_kv_full = (
+                    _swa_ops.compute_window_topk_and_length_varlen(
+                        win,
+                        cu_seqlens_for_k,
+                        position_ids_eff,
+                        prefix_lengths,
+                        req_id_per_token,
+                    )
+                )
+                # Host mirror of the framework prefix source, carried on the CP
+                # context; identical values/domain to the device ``prefix_lengths``
+                # arg, so the continuation check skips a blocking D2H.
+                any_cont = _any_prefix_continuation(
+                    prefix_lengths,
+                    (
+                        getattr(cp_ctx, "prefix_lengths_full_host", None)
+                        if cp_on
+                        else None
+                    ),
+                )
+                if shared is not None:
+                    shared["freqs_topk"] = (
+                        _ft_probe,
+                        (freqs_cis, topk_idxs, topk_length_kv_full, any_cont),
+                    )
 
         with record_function_range("dsv4.fp8.meta.swa_varlen"):
             swa_meta = self._build_swa_prefill_meta_varlen(
@@ -4309,6 +4567,7 @@ class AttentionFP8(nn.Module):
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 topk_length_kv_full=topk_length_kv_full,
+                shared=shared,
             )
 
         # Bind freqs_cis to this layer's compressor / indexer chain
@@ -4317,7 +4576,25 @@ class AttentionFP8(nn.Module):
 
         # row_seqlens_full: [1] long tensor. Reused by SWA pool read/write
         # helpers (BF16 path) — they refuse a None for the per-row seqlens.
-        row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
+        # ``torch.full`` fills on device (a kernel launch), unlike
+        # ``torch.tensor([v], device=...)`` which is a pageable HtoD copy plus
+        # a stream sync.  Same values, dtype, and shape. Identical for
+        # every ratio bucket — build once per forward under the shared memo.
+        row_seqlens_full = None
+        if shared is not None:
+            _rs_probe = (int(seqlen_full), str(device))
+            _ent = shared.get("row_seqlens_full")
+            if _ent is not None and _ent[0] == _rs_probe:
+                row_seqlens_full = _ent[1]
+        if row_seqlens_full is None:
+            row_seqlens_full = torch.full(
+                (1,), seqlen_full, device=device, dtype=torch.long
+            )
+            if shared is not None:
+                shared["row_seqlens_full"] = (
+                    (int(seqlen_full), str(device)),
+                    row_seqlens_full,
+                )
 
         # ``use_varlen`` stays explicit because lower builders share one
         # metadata contract.
@@ -4340,6 +4617,7 @@ class AttentionFP8(nn.Module):
                     max_seqlen_q=max_seqlen_q,
                     has_prefix=any_cont,
                     swa_slot_mapping=swa_meta.slot_mapping,
+                    shared=shared,
                 )
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.meta.hca"):
@@ -4358,6 +4636,7 @@ class AttentionFP8(nn.Module):
                     max_seqlen_q=max_seqlen_q,
                     has_prefix=any_cont,
                     swa_slot_mapping=swa_meta.slot_mapping,
+                    shared=shared,
                 )
 
         return PrefillMeta(
@@ -4406,6 +4685,7 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         has_prefix: bool,
         swa_slot_mapping: Optional[torch.Tensor] = None,
+        shared: Optional[dict] = None,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -4446,7 +4726,7 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.meta.csa.bind_pool"):
             self._set_compressor_pool_context()
         with record_function_range("dsv4.fp8.meta.csa.indexer_prepare"):
-            indexer_meta = self.indexer.prepare(
+            indexer_kwargs = dict(
                 bsz=1,
                 seqlen=seqlen,
                 sp_int=sp_int,
@@ -4463,6 +4743,12 @@ class AttentionFP8(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 has_prefix=has_prefix,
             )
+            if shared is not None:
+                # The nested compressor's CP full-positions build shares
+                # the per-forward memo. Keep the fallback call unchanged when
+                # sharing is disabled.
+                indexer_kwargs["shared"] = shared
+            indexer_meta = self.indexer.prepare(**indexer_kwargs)
         cp_ctx_local = getattr(self, "_cp_ctx", None)
         cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
         if cp_active:
@@ -4477,7 +4763,7 @@ class AttentionFP8(nn.Module):
                     cp_b_idx,
                     cp_seq_start_per_req,
                     cp_cu_seq_per_req,
-                ) = build_cp_full_prefill_positions(cp_ctx_local, device)
+                ) = build_cp_full_prefill_positions_shared(cp_ctx_local, device, shared)
                 assert cp_ctx_local.input_lengths_global is not None
                 compressor_meta = self.compressor.prepare_metadata(
                     cp_positions,
@@ -4523,6 +4809,7 @@ class AttentionFP8(nn.Module):
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 swa_slot_mapping=swa_slot_mapping,
+                shared=shared,
             )
         return CsaPrefillMeta(
             indexer_meta=indexer_meta,
@@ -4547,6 +4834,7 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         has_prefix: bool,
         swa_slot_mapping: Optional[torch.Tensor] = None,
+        shared: Optional[dict] = None,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
@@ -4563,7 +4851,9 @@ class AttentionFP8(nn.Module):
                         cp_b_idx,
                         cp_seq_start_per_req,
                         cp_cu_seq_per_req,
-                    ) = build_cp_full_prefill_positions(cp_ctx_local, device)
+                    ) = build_cp_full_prefill_positions_shared(
+                        cp_ctx_local, device, shared
+                    )
                     assert cp_ctx_local.input_lengths_global is not None
                     compressor_meta = self.compressor.prepare_metadata(
                         cp_positions,
@@ -4608,6 +4898,7 @@ class AttentionFP8(nn.Module):
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 swa_slot_mapping=swa_slot_mapping,
+                shared=shared,
             )
         return HcaPrefillMeta(
             compressor_meta=compressor_meta,
@@ -4631,6 +4922,7 @@ class AttentionFP8(nn.Module):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         swa_slot_mapping: Optional[torch.Tensor] = None,
+        shared: Optional[dict] = None,
     ) -> Optional[WorkspaceMeta]:
         """Static index/dim metadata for the vLLM-style workspace + dual-
         gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
@@ -4715,83 +5007,177 @@ class AttentionFP8(nn.Module):
                 prefix_lengths.numel() == batch_size
             ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             B = batch_size
-            sp_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
-            S_i32 = input_lengths.to(device=device, dtype=torch.int32)
-
-            # CP awareness:
-            # Under CP both pools (compressor + SWA) hold the FULL gathered
-            # sequence, and ``qkv.kv_full`` consumed by the BF16 overlay
-            # has been all-gathered into ``[seq_len_full, D]``. So for
-            # workspace sizing + per-token slot mapping we must use the
-            # GLOBAL per-request lengths (``cp_ctx.input_lengths_global``)
-            # plus a synthesised ``[seq_len_full]`` global position /
-            # req_id stream. ``cu_seqlens`` (qsl) stays rank-local because
-            # the kernel form of ``combine_topk_swa_indices`` is replaced
-            # by the CP combine path under attention, which consumes explicit
-            # ``cp_ctx.global_positions`` directly.
+            # The ratio-invariant half of this builder (everything except
+            # the ``ratio``-dependent N/M/maxes, the cmp pool pieces, the dense
+            # topk grid, the cmp reader, and the raw-q-merge gate) is identical
+            # across the CSA and HCA bucket builds — compute it once per
+            # forward under the shared memo.  ``shared=None`` runs the legacy
+            # per-bucket build with identical values (the memo only reorders
+            # independent tensor constructions, never their contents).
             cp_ctx_local = getattr(self, "_cp_ctx", None)
             cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
-            if cp_active:
-                # B>=1 multi-request supported. Pools (compressor + SWA) hold
-                # the FULL gathered sequence and ``qkv.kv_full`` is the
-                # all-gathered ``[seq_len_full, D]`` tensor.
-                # ``cp_ctx.input_lengths_global`` is the per-request global
-                # length array (B entries). We
-                # synthesise a ``[seq_len_full]`` global per-token stream
-                # of (position_ids, req_id_per_token) by bucketising
-                # against per-request cumulative starts so the existing
-                # ``new_k_slot_in_flat`` formula
-                # ``req*M + N + P_req + (pos - sp_req)`` lands each global
-                # token in workspace[req_id]'s SWA tail correctly. For
-                # B==1 this collapses to the previous arange + sp_global.
-                assert (
-                    cp_ctx_local.input_lengths_global is not None
-                ), "CP workspace meta requires cp_ctx.input_lengths_global"
-                S_i32 = cp_ctx_local.input_lengths_global.to(
-                    device=device, dtype=torch.int32
-                )
-                B = int(S_i32.shape[0])
-                seq_len_full = int(cp_ctx_local.seq_len_full)
-                if cp_ctx_local.cu_seqlens_global is not None:
-                    cu_seqlens_full_eff = _flat_1d(
-                        cp_ctx_local.cu_seqlens_global.to(
-                            device=device, dtype=torch.int32
-                        )
-                    ).contiguous()
+            ws_probe = (
+                int(win),
+                int(seqlen),
+                int(batch_size),
+                bool(cp_active),
+                id(cp_ctx_local),
+                _memo_identity(prefix_lengths),
+                _memo_identity(input_lengths),
+                _memo_identity(cu_seqlens),
+                _memo_identity(position_ids),
+                _memo_identity(req_id_per_token),
+                _memo_identity(swa_bt),
+                int(swa_eb),
+                int(swa_tokens_per_block),
+            )
+            bundle = None
+            if shared is not None:
+                _ent = shared.get("ws_swa")
+                if _ent is not None and _ent[0] == ws_probe:
+                    bundle = _ent[1]
+            if bundle is None:
+                sp_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
+                S_i32 = input_lengths.to(device=device, dtype=torch.int32)
+
+                # CP awareness:
+                # Under CP both pools (compressor + SWA) hold the FULL gathered
+                # sequence, and ``qkv.kv_full`` consumed by the BF16 overlay
+                # has been all-gathered into ``[seq_len_full, D]``. So for
+                # workspace sizing + per-token slot mapping we must use the
+                # GLOBAL per-request lengths (``cp_ctx.input_lengths_global``)
+                # plus a synthesised ``[seq_len_full]`` global position /
+                # req_id stream. ``cu_seqlens`` (qsl) stays rank-local because
+                # the kernel form of ``combine_topk_swa_indices`` is replaced
+                # by the CP combine path under attention, which consumes explicit
+                # ``cp_ctx.global_positions`` directly.
+                cu_seqlens_full_eff = None
+                position_ids_eff = None
+                req_id_per_token_eff = None
+                seq_len_full = 0
+                if cp_active:
+                    # B>=1 multi-request supported. Pools (compressor + SWA) hold
+                    # the FULL gathered sequence and ``qkv.kv_full`` is the
+                    # all-gathered ``[seq_len_full, D]`` tensor.
+                    # ``cp_ctx.input_lengths_global`` is the per-request global
+                    # length array (B entries). We
+                    # synthesise a ``[seq_len_full]`` global per-token stream
+                    # of (position_ids, req_id_per_token) by bucketising
+                    # against per-request cumulative starts so the existing
+                    # ``new_k_slot_in_flat`` formula
+                    # ``req*M + N + P_req + (pos - sp_req)`` lands each global
+                    # token in workspace[req_id]'s SWA tail correctly. For
+                    # B==1 this collapses to the previous arange + sp_global.
+                    assert (
+                        cp_ctx_local.input_lengths_global is not None
+                    ), "CP workspace meta requires cp_ctx.input_lengths_global"
+                    S_i32 = cp_ctx_local.input_lengths_global.to(
+                        device=device, dtype=torch.int32
+                    )
+                    B = int(S_i32.shape[0])
+                    seq_len_full = int(cp_ctx_local.seq_len_full)
+                    if cp_ctx_local.cu_seqlens_global is not None:
+                        cu_seqlens_full_eff = _flat_1d(
+                            cp_ctx_local.cu_seqlens_global.to(
+                                device=device, dtype=torch.int32
+                            )
+                        ).contiguous()
+                    else:
+                        cum_after = torch.cumsum(S_i32, 0).to(torch.int32)
+                        cu_seqlens_full_eff = torch.cat(
+                            [
+                                torch.zeros(1, dtype=torch.int32, device=device),
+                                cum_after,
+                            ]
+                        ).contiguous()
                 else:
-                    cum_after = torch.cumsum(S_i32, 0).to(torch.int32)
-                    cu_seqlens_full_eff = torch.cat(
-                        [
-                            torch.zeros(1, dtype=torch.int32, device=device),
-                            cum_after,
-                        ]
-                    ).contiguous()
+                    position_ids_eff = _flat_1d(
+                        position_ids.to(device=device, dtype=torch.int64)
+                    )
+                    req_id_per_token_eff = _flat_1d(
+                        req_id_per_token.to(device=device, dtype=torch.int64)
+                    )
+
+                seq_total_per_req = sp_i32 + S_i32  # [B]
+                P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
+                gather_len_per_req = S_i32 + P_per_req  # [B]
+
+                swa_seq_lens = seq_total_per_req.contiguous()
+                swa_gather_lens = gather_len_per_req.contiguous()
+                swa_cache_seq_lens = sp_i32.contiguous()
+                swa_cache_gather_lens = P_per_req.contiguous()
+                qsl = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
+                swa_bt_int32 = (
+                    swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+                )
+                bundle = (
+                    B,
+                    seq_len_full,
+                    sp_i32,
+                    S_i32,
+                    cu_seqlens_full_eff,
+                    position_ids_eff,
+                    req_id_per_token_eff,
+                    seq_total_per_req,
+                    P_per_req,
+                    gather_len_per_req,
+                    swa_seq_lens,
+                    swa_gather_lens,
+                    swa_cache_seq_lens,
+                    swa_cache_gather_lens,
+                    qsl,
+                    swa_bt_int32,
+                )
+                if shared is not None:
+                    shared["ws_swa"] = (ws_probe, bundle)
             else:
-                position_ids_eff = _flat_1d(
-                    position_ids.to(device=device, dtype=torch.int64)
-                )
-                req_id_per_token_eff = _flat_1d(
-                    req_id_per_token.to(device=device, dtype=torch.int64)
-                )
+                (
+                    B,
+                    seq_len_full,
+                    sp_i32,
+                    S_i32,
+                    cu_seqlens_full_eff,
+                    position_ids_eff,
+                    req_id_per_token_eff,
+                    seq_total_per_req,
+                    P_per_req,
+                    gather_len_per_req,
+                    swa_seq_lens,
+                    swa_gather_lens,
+                    swa_cache_seq_lens,
+                    swa_cache_gather_lens,
+                    qsl,
+                    swa_bt_int32,
+                ) = bundle
 
-            seq_total_per_req = sp_i32 + S_i32  # [B]
+            # ---- Ratio-specific per-bucket pieces (verbatim legacy) --------
             N_per_req = seq_total_per_req // ratio  # [B]
-            P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
-            gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # Single .item() sync — stack two scalars then one D2H tolist().
-            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
-            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            # Host mirrors carry the same integers as ``sp_i32``/``S_i32``;
+            # read (N_max, gather_len_max) from them when domains match so
+            # the stacked device tolist() stays off the chunk head.
+            host_maxes = (
+                _prefill_maxes_host(
+                    getattr(cp_ctx_local, "prefix_lengths_full_host", None),
+                    getattr(cp_ctx_local, "input_lengths_full_host", None),
+                    ratio,
+                    win,
+                    prefix_arg=prefix_lengths,
+                    lengths_arg=S_i32,
+                )
+                if cp_active
+                else None
+            )
+            if host_maxes is not None:
+                N_max, gather_len_max = host_maxes
+            else:
+                # Single stacked .tolist() sync when mirrors are unavailable.
+                maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
+                N_max, gather_len_max = (int(v) for v in maxes.tolist())
             N = N_max
             M = N_max + gather_len_max
 
-            swa_seq_lens = seq_total_per_req.contiguous()
             cmp_seq_lens = N_per_req.contiguous()
-            swa_gather_lens = gather_len_per_req.contiguous()
-            swa_cache_seq_lens = sp_i32.contiguous()
-            swa_cache_gather_lens = P_per_req.contiguous()
-            qsl = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
-            swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
             cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
 
             # Per-token scatter target — pre-baked once so
@@ -4935,21 +5321,59 @@ class AttentionFP8(nn.Module):
                     )
                 )
 
-        swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
-            block_table=swa_bt_int32,
-            seq_lens=swa_cache_seq_lens,
-            gather_lens=swa_cache_gather_lens,
-            entries_per_block=swa_eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=swa_eb,
-        )
-        swa_cache_compaction = self._build_swa_cp_byte_compaction(
-            swa_cache_slot_mapping,
-            full_entries_per_block=swa_eb,
-            validation_site="swa.gather_cp_byte.slot_indices",
-            negative_mode="skip_any",
-            gather_lens=swa_cache_gather_lens,
-        )
+        # The SWA prefix-tail read slots + byte-sliced compaction are
+        # bucket-invariant (SWA pool, ratio-free inputs) — the CSA and HCA
+        # builds share one construction under the per-forward memo.
+        swa_cache_pair = None
+        if shared is not None:
+            _scm_probe = (
+                ws_probe,
+                bool(swa_byte_sliced),
+                (
+                    _memo_identity(self._pool_raw_u8(SWA_KV))
+                    if swa_byte_sliced
+                    else None
+                ),
+            )
+            _ent = shared.get("ws_swa_cache_map")
+            if _ent is not None and _ent[0] == _scm_probe:
+                swa_cache_pair = _ent[1]
+        if swa_cache_pair is not None:
+            swa_cache_slot_mapping, swa_cache_compaction = swa_cache_pair
+        else:
+            swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                block_table=swa_bt_int32,
+                seq_lens=swa_cache_seq_lens,
+                gather_lens=swa_cache_gather_lens,
+                entries_per_block=swa_eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                ring_entries=swa_eb,
+                # ``swa_cache_gather_lens == clamp_max(prefix_lengths,
+                # win-1)`` — its max is host-derivable from the CP prefix mirror
+                # (domain-checked; legacy readback on a miss).
+                max_gather_host=_suffix_gather_lens_max_host(
+                    prefix_lengths,
+                    (
+                        getattr(cp_ctx_local, "prefix_lengths_full_host", None)
+                        if cp_active
+                        else None
+                    ),
+                    B,
+                    win,
+                ),
+            )
+            swa_cache_compaction = self._build_swa_cp_byte_compaction(
+                swa_cache_slot_mapping,
+                full_entries_per_block=swa_eb,
+                validation_site="swa.gather_cp_byte.slot_indices",
+                negative_mode="skip_any",
+                gather_lens=swa_cache_gather_lens,
+            )
+            if shared is not None:
+                shared["ws_swa_cache_map"] = (
+                    _scm_probe,
+                    (swa_cache_slot_mapping, swa_cache_compaction),
+                )
 
         swa_pool_slot_mapping = None
         cmp_pool_slot_mapping = None
@@ -4990,6 +5414,10 @@ class AttentionFP8(nn.Module):
                 entries_per_block=cmp_eb,
                 tokens_per_block_for_block_table=cmp_eb,
                 ring_entries=cmp_eb,
+                # ``gather_lens == cmp_seq_lens == (prefix+S)//ratio`` —
+                # its max is exactly the host-derived ``N_max`` when the
+                # mirrors were provable (``host_maxes``); else legacy.
+                max_gather_host=N_max if host_maxes is not None else None,
             )
 
         return WorkspaceMeta(
@@ -5108,6 +5536,7 @@ class AttentionFP8(nn.Module):
         position_ids: torch.Tensor,
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
+        shared: Optional[dict] = None,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -5221,41 +5650,99 @@ class AttentionFP8(nn.Module):
             and cp_ctx.cu_seqlens_global is not None
             and cp_ctx.input_lengths_global is not None
         )
-        query_start_loc = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
-        combined_seq_lens = (
-            prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
-        ).contiguous()
-        if cp_on_write:
-            write_B = int(cp_ctx.input_lengths_global.numel())
-            write_query_start_loc = _flat_1d(
-                cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
-            ).contiguous()
-            write_combined_seq_lens = (
-                prefix_lengths.to(torch.int32)[:write_B]
-                + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
-            ).contiguous()
-            write_num_tokens = cp_ctx.seq_len_full
+        # The Group-1 write metadata (incl. the CP write trio) is
+        # bucket-invariant — every ratio bucket rebuilds it identically.
+        # Compute once per forward under the shared memo; ``shared=None`` runs
+        # the legacy per-bucket build with identical values.
+        _g1 = None
+        if shared is not None:
+            _g1_probe = (
+                int(win),
+                int(seqlen),
+                int(batch_size),
+                bool(cp_on_write),
+                id(cp_ctx),
+                _memo_identity(cu_seqlens),
+                _memo_identity(input_lengths),
+                _memo_identity(prefix_lengths),
+                _memo_identity(bt),
+                int(eb),
+                int(swa_tokens_per_block),
+                bool(self._swa_cp_byte_sliced()),
+                (
+                    _memo_identity(self._pool_raw_u8(SWA_KV))
+                    if self._swa_cp_byte_sliced()
+                    else None
+                ),
+            )
+            _ent = shared.get("swa_g1")
+            if _ent is not None and _ent[0] == _g1_probe:
+                _g1 = _ent[1]
+        if _g1 is not None:
+            (
+                query_start_loc,
+                combined_seq_lens,
+                write_B,
+                write_query_start_loc,
+                write_combined_seq_lens,
+                write_num_tokens,
+                bt_swa,
+                slot_mapping,
+                slot_compaction,
+            ) = _g1
         else:
-            write_B = B
-            write_query_start_loc = query_start_loc
-            write_combined_seq_lens = combined_seq_lens
-            write_num_tokens = num_tokens
-        bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
-        slot_mapping = _swa_ops.compute_swa_slot_mapping(
-            block_table=bt_swa,
-            query_start_loc=write_query_start_loc,
-            seq_lens=write_combined_seq_lens,
-            num_tokens=write_num_tokens,
-            pool_entries_per_block=eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=eb,
-        )
-        slot_compaction = self._build_swa_cp_byte_compaction(
-            slot_mapping,
-            full_entries_per_block=eb,
-            validation_site="swa.quantize_and_insert_cp_byte.slot_mapping",
-            negative_mode="skip_minus_one",
-        )
+            query_start_loc = cu_seqlens.to(
+                device=device, dtype=torch.int32
+            ).contiguous()
+            combined_seq_lens = (
+                prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
+            ).contiguous()
+            if cp_on_write:
+                write_B = int(cp_ctx.input_lengths_global.numel())
+                write_query_start_loc = _flat_1d(
+                    cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
+                ).contiguous()
+                write_combined_seq_lens = (
+                    prefix_lengths.to(torch.int32)[:write_B]
+                    + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+                ).contiguous()
+                write_num_tokens = cp_ctx.seq_len_full
+            else:
+                write_B = B
+                write_query_start_loc = query_start_loc
+                write_combined_seq_lens = combined_seq_lens
+                write_num_tokens = num_tokens
+            bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
+            slot_mapping = _swa_ops.compute_swa_slot_mapping(
+                block_table=bt_swa,
+                query_start_loc=write_query_start_loc,
+                seq_lens=write_combined_seq_lens,
+                num_tokens=write_num_tokens,
+                pool_entries_per_block=eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                ring_entries=eb,
+            )
+            slot_compaction = self._build_swa_cp_byte_compaction(
+                slot_mapping,
+                full_entries_per_block=eb,
+                validation_site="swa.quantize_and_insert_cp_byte.slot_mapping",
+                negative_mode="skip_minus_one",
+            )
+            if shared is not None:
+                shared["swa_g1"] = (
+                    _g1_probe,
+                    (
+                        query_start_loc,
+                        combined_seq_lens,
+                        write_B,
+                        write_query_start_loc,
+                        write_combined_seq_lens,
+                        write_num_tokens,
+                        bt_swa,
+                        slot_mapping,
+                        slot_compaction,
+                    ),
+                )
 
         # CSA/HCA: Group-1 only. Their attention meta lives on workspace_meta.
         if not is_swa_only:
@@ -5297,10 +5784,19 @@ class AttentionFP8(nn.Module):
             num_decodes=0,
             window_size=win,
         )
-        # Single .item() sync per forward — ``combined_gather_lens`` already
-        # encodes ``input_lengths[b] + min(prefix_lengths[b], win-1)`` per
-        # request; its max is exactly ``combined_gather_len_max``.
-        combined_gather_len_max = int(combined_gather_lens.max().item())
+        # ``combined_gather_lens`` encodes ``input_lengths[b] +
+        # min(prefix_lengths[b], win-1)`` per request; its max is exactly
+        # ``combined_gather_len_max``.  Under the CP write trio the host
+        # mirrors prove the same integer with no readback (domain-checked);
+        # otherwise the single .item() sync per forward runs as before.
+        combined_gather_len_max = _gather_len_max_host(
+            cp_ctx if cp_on_write else None,
+            prefix_lengths,
+            write_B,
+            win,
+        )
+        if combined_gather_len_max is None:
+            combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
 
         # cache_* + combined_* only populated on continuation (via_concat).
@@ -5330,6 +5826,19 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
+                # ``cache_gather_lens == clamp_max(prefix_lengths,
+                # win-1)[:write_B]`` — its max is host-derivable from the CP
+                # prefix mirror (domain-checked; legacy readback on a miss).
+                max_gather_host=_suffix_gather_lens_max_host(
+                    prefix_lengths,
+                    (
+                        getattr(cp_ctx, "prefix_lengths_full_host", None)
+                        if cp_on_write
+                        else None
+                    ),
+                    write_B,
+                    win,
+                ),
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
@@ -5349,7 +5858,10 @@ class AttentionFP8(nn.Module):
                 combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices_cp(
                     topk_indices=topk_indices_empty,
                     global_positions=_flat_1d(cp_ctx.global_positions),
-                    sp_int=int(prefix_lengths[0].item()),
+                    sp_int=_first_prefix_int(
+                        prefix_lengths,
+                        getattr(cp_ctx, "prefix_lengths_full_host", None),
+                    ),
                     window_size=win,
                     compress_ratio=1,
                     topk=0,

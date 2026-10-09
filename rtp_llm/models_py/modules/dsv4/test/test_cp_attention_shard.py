@@ -37,6 +37,14 @@ def _stub_and_import():
             profiler = types.ModuleType(profiler_name)
             profiler.record_function_range = lambda *args, **kwargs: nullcontext()
             sys.modules[profiler_name] = profiler
+        diag_name = "rtp_llm.models_py.modules.dsv4._cp_diagnostics"
+        if diag_name not in sys.modules:
+            diag = types.ModuleType(diag_name)
+            diag._CP_GATHER_STATS = False
+            diag._cp_gather_kind = lambda profile_name: profile_name
+            diag._cp_gather_record = lambda *a, **k: None
+            diag._cp_gather_stats_drain = lambda *a, **k: None
+            sys.modules[diag_name] = diag
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:

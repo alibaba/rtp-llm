@@ -246,6 +246,10 @@ FWD_ENV = dict(
     _prefill_fast_path_enabled=lambda v, *a: v.fast,
     _profiler=types.SimpleNamespace(disable_record_function_ranges=nullcontext),
     prefill_forward_scope=coordinator,
+    # Async-head preparation: forward_layers kicks/consumes the async head builder; with the
+    # flag off both are inert no-ops.
+    _maybe_kick_async_head=lambda *a, **k: None,
+    _head_prebuild=types.SimpleNamespace(consume_async_head=lambda *a, **k: None),
 )
 forward_layers = extract(ROOT / "prefill/forward.py", {"forward_layers"}, FWD_ENV)[
     "forward_layers"

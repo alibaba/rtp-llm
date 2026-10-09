@@ -2,8 +2,10 @@
 
 Per-call handles own transient tensors; scratch is scoped to the forward."""
 
+import logging
 import os
 from dataclasses import dataclass, replace
+from typing import Optional
 
 import torch
 
@@ -15,9 +17,140 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_packed_rows import (
 
 FLAG = "DSV4_CP_COMPACT_COMPRESSOR"
 
+# Process-level caches for the chunk/request-invariant plan constants.
+# Both default ON; the values they cache are pure functions of the geometry
+# (no request state), so caching is byte-identical.  Kill switches exist so a
+# bad deployment can revert to the per-forward rebuild without a rebuild.
+_PLAN_CACHE_FLAG = "DSV4_CP_COMPACT_PLAN_CACHE"
+_DEFERRED_VERIFY_FLAG = "DSV4_CP_COMPACT_DEFERRED_VERIFY"
+
 
 def enabled():
     return os.environ.get(FLAG, "0") == "1"
+
+
+def _flag_enabled(name: str, default: str) -> bool:
+    value = os.environ.get(name, default)
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+def _plan_cache_enabled() -> bool:
+    # Enabled by default; set the flag to 0 to use the uncached path.
+    return _flag_enabled(_PLAN_CACHE_FLAG, "1")
+
+
+def _deferred_verify_enabled() -> bool:
+    # Enabled by default; set the flag to 0 to use the uncached path.
+    return _flag_enabled(_DEFERRED_VERIFY_FLAG, "1")
+
+
+# (order, argsort(order)) for the one validated padded geometry (CP4 zigzag,
+# 4096 padded tokens).  Pure host constant — built once per process instead of
+# per chunk, avoiding repeated host arange/cat/sort operations.
+_ZIGZAG_CONSTANTS: Optional[tuple] = None
+
+
+def _zigzag_constants():
+    global _ZIGZAG_CONSTANTS
+    if _ZIGZAG_CONSTANTS is None:
+        order = torch.cat(
+            [
+                torch.cat(
+                    (
+                        torch.arange(r * 512, (r + 1) * 512),
+                        torch.arange((7 - r) * 512, (8 - r) * 512),
+                    )
+                )
+                for r in range(4)
+            ]
+        )
+        _ZIGZAG_CONSTANTS = (order, torch.argsort(order))
+    return _ZIGZAG_CONSTANTS
+
+
+def _verify_content(mask, restore):
+    """The content verdict: identical ops on identical values as the original
+    blocking path (the order constant is the same pure geometry value, now
+    process-cached)."""
+    _, expected = _zigzag_constants()
+    return bool(
+        mask.shape == (4096,)
+        and torch.all(mask == 1)
+        and restore.shape == (4096,)
+        and torch.equal(restore, expected)
+    )
+
+
+class _PendingVerify:
+    """Deferred content verdict for device-resident mask/restore.
+
+    The two blocking pageable DtoH reads (16 KB each, with full stream
+    drains) are replaced by one non_blocking pinned DtoH pair enqueued on the
+    current stream at context-build time plus an event.  ``resolve`` runs at
+    the first ``select_geometry`` call — the compact path's first consumer —
+    long after the copy completed, so the host never drains the queue.  The
+    comparison itself is the unchanged ``_verify_content`` over the pinned
+    (byte-exact) copies.
+    """
+
+    def __init__(self, padding_mask, restore_indices):
+        # Hold the sources so a resolve-time failure can fall back to the
+        # legacy blocking read (they are framework-owned for the forward).
+        self._mask_src = padding_mask
+        self._restore_src = restore_indices
+        self._pinned_mask = torch.empty(
+            tuple(padding_mask.shape), dtype=padding_mask.dtype, pin_memory=True
+        )
+        self._pinned_restore = torch.empty(
+            tuple(restore_indices.shape), dtype=restore_indices.dtype, pin_memory=True
+        )
+        self._pinned_mask.copy_(padding_mask, non_blocking=True)
+        self._pinned_restore.copy_(restore_indices, non_blocking=True)
+        self._event = torch.cuda.Event()
+        self._event.record()
+
+    def resolve(self) -> bool:
+        try:
+            self._event.synchronize()
+            mask = self._pinned_mask.reshape(-1)
+            restore = self._pinned_restore.reshape(-1).to(torch.long)
+        except Exception:
+            # Same legacy blocking reads as the pre-deferral path.
+            mask = self._mask_src.detach().to(device="cpu").reshape(-1)
+            restore = (
+                self._restore_src.detach()
+                .to(device="cpu", dtype=torch.long)
+                .reshape(-1)
+            )
+        return _verify_content(mask, restore)
+
+
+def resolve_compact_geometry_verified(cp) -> bool:
+    """Single reader-side entry point for the (possibly deferred) verdict.
+
+    Only ``select_geometry`` consumes the verdict; it runs at the first
+    CSA/HCA layer's compressor, well after the context build, so the deferred
+    readback has completed and ``resolve`` never stalls the hot path.  A
+    forward without a pending check keeps the eager verdict; a forward whose
+    verdict was never resolved fails safe (``False`` = generic path).
+    """
+    if getattr(cp, "compact_geometry_verified", False):
+        return True
+    pending = getattr(cp, "_compact_geometry_pending", None)
+    if pending is None:
+        return False
+    cp._compact_geometry_pending = None
+    verdict = bool(pending.resolve())
+    cp.compact_geometry_verified = verdict
+    if not getattr(resolve_compact_geometry_verified, "_logged", False):
+        logging.getLogger(__name__).info(
+            "[dsv4-compact-cp] deferred geometry verify resolved (verdict=%s)",
+            verdict,
+        )
+        resolve_compact_geometry_verified._logged = True
+    return verdict
 
 
 def verified_geometry(cp, padding_mask, restore_indices):
@@ -36,25 +169,26 @@ def verified_geometry(cp, padding_mask, restore_indices):
         return False
     # CPContext generates the two local intervals itself. Validate the two
     # externally supplied maps once, including actual gathered-rank ordering.
+    # Device-resident sources take the deferred readback: the verdict is
+    # provisional until ``resolve_compact_geometry_verified`` (called by
+    # ``select_geometry``, the only consumer) forces it.  Provisional False
+    # fails safe — a non-resolving reader keeps the generic path.
+    if (
+        _deferred_verify_enabled()
+        and padding_mask.is_cuda
+        and restore_indices.is_cuda
+        and torch.cuda.is_available()
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        try:
+            cp._compact_geometry_pending = _PendingVerify(padding_mask, restore_indices)
+            return False
+        except Exception:
+            # Pinned alloc / copy launch failure: keep the legacy verdict.
+            cp._compact_geometry_pending = None
     mask = padding_mask.detach().to(device="cpu").reshape(-1)
     restore = restore_indices.detach().to(device="cpu", dtype=torch.long).reshape(-1)
-    order = torch.cat(
-        [
-            torch.cat(
-                (
-                    torch.arange(r * 512, (r + 1) * 512),
-                    torch.arange((7 - r) * 512, (8 - r) * 512),
-                )
-            )
-            for r in range(4)
-        ]
-    )
-    return bool(
-        mask.shape == (4096,)
-        and torch.all(mask == 1)
-        and restore.shape == (4096,)
-        and torch.equal(restore, torch.argsort(order))
-    )
+    return _verify_content(mask, restore)
 
 
 @dataclass(frozen=True)
@@ -113,12 +247,142 @@ class Geometry:
         }
 
 
+# Process-level cache for the geometry-pure plan constants.  Every entry is a
+# pure function of (rank, state_entries, state_block, ratio, width, device) —
+# the values are chunk- and request-invariant, so one build per process
+# replaces the per-forward host list build + pageable ``torch.tensor(...,
+# device=cuda)`` upload (the deep queue drain in the chunk head).  Consumers
+# treat every cached tensor as read-only (verified by tests).
+_GEOMETRY_PLAN_CACHE: dict = {}
+
+
+def _build_geometry_plan(g: "Geometry", device) -> tuple:
+    """Construct the geometry-pure plan tensors (one process build)."""
+    tail_index_vals = []
+    tail_dest_vals = []
+    local_map = tuple(p for lo, hi in g.intervals() for p in range(lo, hi))
+    lut = {p: i for i, p in enumerate(local_map)}
+    tail_index_vals = [lut[p] for p in g.tails()]
+    tail_dest_vals = [p for r in range(4) for p in g.tails(r)]
+    boundary_vals = list(g.wire_boundaries())
+    flat = torch.tensor(
+        tail_index_vals + tail_dest_vals + boundary_vals,
+        dtype=torch.long,
+        device=device,
+    )
+    n_tail = len(tail_index_vals)
+    n_dest = len(tail_dest_vals)
+    tail_indices = flat[:n_tail]
+    tail_dest = flat[n_tail : n_tail + n_dest]
+    boundaries = flat[n_tail + n_dest :]
+    local_boundaries = boundaries[
+        g.rank * (1024 // g.ratio) : (g.rank + 1) * (1024 // g.ratio)
+    ]
+    covered_state = torch.zeros(4096, dtype=torch.bool, device=device)
+    covered_state[tail_dest] = True
+    arange_base = torch.arange(4096, device=device, dtype=torch.long)
+    return (
+        tail_indices,
+        tail_dest,
+        boundaries,
+        local_boundaries,
+        covered_state,
+        arange_base,
+    )
+
+
+def _geometry_plan(g: "Geometry", device) -> tuple:
+    """Process-cached geometry-pure plan constants (byte-identical values).
+
+    Kill switch ``DSV4_CP_COMPACT_PLAN_CACHE=0`` rebuilds per call, matching
+    the pre-cache per-forward behavior exactly.
+    """
+    if not _plan_cache_enabled():
+        return _build_geometry_plan(g, device)
+    key = (
+        g.rank,
+        g.state_entries,
+        g.state_block,
+        g.ratio,
+        g.width,
+        str(device),
+    )
+    cached = _GEOMETRY_PLAN_CACHE.get(key)
+    if cached is None:
+        cached = _build_geometry_plan(g, device)
+        _GEOMETRY_PLAN_CACHE[key] = cached
+        logging.getLogger(__name__).info(
+            "[dsv4-compact-cp] geometry plan cached (rank=%d ratio=%d device=%s); "
+            "per-chunk plan uploads eliminated",
+            g.rank,
+            g.ratio,
+            device,
+        )
+    return cached
+
+
+def _build_chunk_plan(g: "Geometry", device, meta, pool_cap) -> tuple:
+    """The per-forward chunk plan: geometry constants from the process cache,
+    start-dependent vectors and meta-dependent gathers computed per forward.
+
+    Byte-faithful: the geometry constants are the same values the pre-cache
+    code built per forward; the per-forward parts are the unchanged device
+    ops (index_select / sort / adds) over them and the per-chunk meta.
+    """
+    (
+        tail_indices,
+        tail_dest,
+        boundaries,
+        local_boundaries,
+        covered_state,
+        arange_base,
+    ) = _geometry_plan(g, device)
+    # The original fused writer checks a negative KV slot only after
+    # reading raw operands. Use ONLY owned boundary programs, not a
+    # full grid with remote slots masked; otherwise it reads unstaged
+    # bytes. The separate state writer retains its full original grid.
+    masked = replace(
+        meta,
+        positions=meta.positions.index_select(0, local_boundaries),
+        b_idx=meta.b_idx.index_select(0, local_boundaries),
+        state_slots=meta.state_slots.index_select(0, local_boundaries),
+        kv_slots=meta.kv_slots.index_select(0, local_boundaries),
+        token_to_req=meta.token_to_req.index_select(0, local_boundaries),
+    )
+    expected_positions = arange_base + g.start
+    receiver = meta.kv_slots.index_select(0, boundaries)
+    ordered_slots = receiver.sort().values
+    # Forward-constant pack slots for this role's owned boundaries;
+    # the metadata snapshot is immutable for the forward.
+    boundary_kv_slots = masked.kv_slots
+    expected_wire_ids = boundaries + g.start
+    local_boundary_ids = local_boundaries + g.start
+    _assert_fused(
+        _plan_metadata_checks(
+            meta,
+            expected_positions,
+            covered_state,
+            ordered_slots,
+            receiver,
+            pool_cap,
+            g,
+        )
+    )
+    return (
+        tail_indices,
+        tail_dest,
+        boundaries,
+        local_boundaries,
+        masked,
+        receiver,
+        boundary_kv_slots,
+        expected_wire_ids,
+        local_boundary_ids,
+    )
+
+
 def select_geometry(module, cp, meta, fused):
-    if (
-        not enabled()
-        or cp is None
-        or not getattr(cp, "compact_geometry_verified", False)
-    ):
+    if not enabled() or cp is None or not resolve_compact_geometry_verified(cp):
         return None
     if (
         not fused.is_cuda
@@ -154,6 +418,122 @@ def _assert_device(condition, message):
     # Asynchronous device assertion, before every dependent read/write. No
     # per-layer DtoH conversion or treating invalid slots as a permissible skip.
     torch._assert_async(condition, message)
+
+
+def _plan_metadata_checks(
+    meta,
+    expected_positions,
+    covered_state,
+    ordered_slots,
+    receiver_slots,
+    pool_cap,
+    geometry,
+):
+    """(condition, message) battery for the per-forward compact CP plan cache.
+
+    This list is the single source of truth for the guard predicates: the
+    production path asserts their fused conjunction in ONE async device
+    assert, and tests drive the same list unfused.  Every predicate and
+    message is the original one — no check is skipped, weakened, or made
+    host-synchronous.
+
+    ``receiver_slots`` (the forward-constant wire-destination plan) and
+    ``pool_cap`` (guarded per layer by ``assert_binding``) are checked here
+    once per forward instead of once per layer; ``assert_binding`` revalidates
+    the pool identity before every replicate, so the capacity operand cannot
+    change without the battery re-running (pool_cap is part of the cache key).
+    """
+    checks = [
+        (
+            (meta.positions == expected_positions).all(),
+            "compact CP nonsequential full metadata",
+        ),
+        ((meta.b_idx == 0).all(), "compact CP multiple requests"),
+        (
+            (meta.token_to_req == 0).all(),
+            "compact CP foreign token request mapping",
+        ),
+        (
+            ((meta.state_slots < 0) | covered_state).all(),
+            "compact CP missing state raw rows",
+        ),
+        (
+            (ordered_slots[1:] != ordered_slots[:-1]).all(),
+            "compact CP duplicate destinations",
+        ),
+    ]
+    if pool_cap is not None:
+        checks.append(
+            (
+                ((receiver_slots >= 0) & (receiver_slots < pool_cap)).all(),
+                "compact CP invalid destination",
+            )
+        )
+    if meta.is_batched:
+        if meta.seq_start_per_req is None or meta.cu_seq_per_req is None:
+            raise ValueError("compact CP missing B1 raw windows")
+        checks.append(
+            (
+                (meta.seq_start_per_req == geometry.start).all(),
+                "compact CP foreign prefix",
+            )
+        )
+        cu = meta.cu_seq_per_req.reshape(-1)
+        if cu.numel() != 2:
+            # The pre-fusion code compared against ``torch.tensor([0, 4096],
+            # device=...)``: numel==1 broadcast to a never-true comparison and
+            # numel>2 raised a broadcast RuntimeError.  Both are malformed-meta
+            # rejections before any write; fail closed with the guard message.
+            raise ValueError("compact CP bad raw windows")
+        checks.append(
+            (
+                (cu[0] == 0) & (cu[1] == 4096),
+                "compact CP bad raw windows",
+            )
+        )
+    return checks
+
+
+def _assert_fused(checks):
+    """One async device assert for a whole battery of independent conditions.
+
+    ``torch._assert_async`` requires a scalar (multi-element input raises), so
+    the per-check 0-dim conditions are stacked and reduced first.  The fused
+    message concatenates every original message so failure logs keep the full
+    predicate content.
+
+    The CUDA device-assert path rejects a message of 255+ chars
+    ("Message length must be smaller than 255").  Batteries whose joined
+    message would exceed that are split into the fewest chunks that fit, each
+    chunk carrying whole messages — every predicate's text is still asserted
+    verbatim, and small batteries stay at exactly one assert.
+    """
+    if not checks:
+        return
+    if len(checks) == 1:
+        _assert_device(checks[0][0], checks[0][1])
+        return
+    # Greedy whole-message packing under the 255-char device-assert limit;
+    # each chunk asserts its own sub-conjunction so the message names the
+    # predicates that actually fail.
+    chunks: list = []
+    cur_conds: list = []
+    cur_msg = ""
+    for condition, message in checks:
+        candidate = message if not cur_msg else cur_msg + "; " + message
+        if len(candidate) > 250 and cur_conds:
+            chunks.append((cur_conds, cur_msg))
+            cur_conds, cur_msg = [condition], message
+        else:
+            cur_conds.append(condition)
+            cur_msg = candidate
+    if cur_conds:
+        chunks.append((cur_conds, cur_msg))
+    for conds, msg in chunks:
+        if len(conds) == 1:
+            _assert_device(conds[0], msg)
+        else:
+            _assert_device(torch.stack(conds).all(), msg)
 
 
 def split_pool(pool, head_dim):
@@ -256,7 +636,9 @@ def _pool_identity(module):
 
 
 class CompactPending:
-    def __init__(self, *, geometry, local, meta, workspace, role, stream, group):
+    def __init__(
+        self, *, geometry, local, meta, workspace, role, stream, group, pool_cap
+    ):
         self.geometry = g = geometry
         meta = _snapshot_meta(meta, workspace)
         self.local, self.meta, self.workspace = local, meta, workspace
@@ -279,6 +661,7 @@ class CompactPending:
         key = (
             g,
             device,
+            pool_cap,
             identity(meta.positions),
             identity(meta.b_idx),
             identity(meta.state_slots),
@@ -288,80 +671,7 @@ class CompactPending:
         )
         indices = cache.get(key)
         if indices is None:
-            local_map = tuple(p for lo, hi in g.intervals() for p in range(lo, hi))
-            lut = {p: i for i, p in enumerate(local_map)}
-            tail_indices = torch.tensor(
-                [lut[p] for p in g.tails()], dtype=torch.long, device=device
-            )
-            tail_dest = torch.tensor(
-                [p for r in range(4) for p in g.tails(r)],
-                dtype=torch.long,
-                device=device,
-            )
-            boundaries = torch.tensor(
-                g.wire_boundaries(), dtype=torch.long, device=device
-            )
-            local_boundaries = boundaries[
-                g.rank * (1024 // g.ratio) : (g.rank + 1) * (1024 // g.ratio)
-            ]
-            # The original fused writer checks a negative KV slot only after
-            # reading raw operands. Use ONLY owned boundary programs, not a
-            # full grid with remote slots masked; otherwise it reads unstaged
-            # bytes. The separate state writer retains its full original grid.
-            own = torch.zeros_like(meta.kv_slots, dtype=torch.bool)
-            masked = replace(
-                meta,
-                positions=meta.positions.index_select(0, local_boundaries),
-                b_idx=meta.b_idx.index_select(0, local_boundaries),
-                state_slots=meta.state_slots.index_select(0, local_boundaries),
-                kv_slots=meta.kv_slots.index_select(0, local_boundaries),
-                token_to_req=meta.token_to_req.index_select(0, local_boundaries),
-            )
-            expected_positions = (
-                torch.arange(4096, device=device, dtype=torch.long) + g.start
-            )
-            covered_state = torch.zeros_like(own)
-            covered_state[tail_dest] = True
-            _assert_device(
-                (meta.positions == expected_positions).all(),
-                "compact CP nonsequential full metadata",
-            )
-            _assert_device((meta.b_idx == 0).all(), "compact CP multiple requests")
-            _assert_device(
-                (meta.token_to_req == 0).all(),
-                "compact CP foreign token request mapping",
-            )
-            _assert_device(
-                ((meta.state_slots < 0) | covered_state).all(),
-                "compact CP missing state raw rows",
-            )
-            receiver = meta.kv_slots.index_select(0, boundaries)
-            ordered_slots = receiver.sort().values
-            _assert_device(
-                (ordered_slots[1:] != ordered_slots[:-1]).all(),
-                "compact CP duplicate destinations",
-            )
-            if meta.is_batched:
-                if meta.seq_start_per_req is None or meta.cu_seq_per_req is None:
-                    raise ValueError("compact CP missing B1 raw windows")
-                _assert_device(
-                    (meta.seq_start_per_req == g.start).all(),
-                    "compact CP foreign prefix",
-                )
-                _assert_device(
-                    (
-                        meta.cu_seq_per_req == torch.tensor([0, 4096], device=device)
-                    ).all(),
-                    "compact CP bad raw windows",
-                )
-            indices = (
-                tail_indices,
-                tail_dest,
-                boundaries,
-                local_boundaries,
-                masked,
-                receiver,
-            )
+            indices = _build_chunk_plan(g, device, meta, pool_cap)
             cache[key] = indices
         (
             self.tail_indices,
@@ -370,6 +680,9 @@ class CompactPending:
             self.local_boundaries,
             self.masked_meta,
             self.receiver_slots,
+            self.boundary_kv_slots,
+            self.expected_wire_ids,
+            self.local_boundary_ids,
         ) = indices
         self.send = local.index_select(0, self.tail_indices)
         getter = workspace.cp_gather_main if role == "main" else workspace.cp_gather_idx
@@ -444,12 +757,13 @@ class CompactPending:
         ) != self.owner:
             raise RuntimeError("compact CP handle ownership changed")
         data, scales, layout = split_pool(module._kv_pool_view, module.head_dim)
-        slots = self.meta.kv_slots.index_select(0, self.local_boundaries)
+        # Forward-constant pack slots / wire ids, computed once at plan
+        # creation (the metadata snapshot and the geometry are immutable for
+        # the forward).  The receiver range guard runs in that same per-forward
+        # battery: ``assert_binding`` above revalidates the pool identity per
+        # layer, so the capacity operand of that check cannot drift.
+        slots = self.boundary_kv_slots
         receiver = self.receiver_slots
-        cap = data.shape[0] * data.shape[1]
-        _assert_device(
-            ((receiver >= 0) & (receiver < cap)).all(), "compact CP invalid destination"
-        )
         fused = os.environ.get("DSV4_CP_COMPACT_TRANSPORT_FUSION", "0") == "1"
         if fused:
             from ._compact_cp_transport_triton import (
@@ -471,8 +785,9 @@ class CompactPending:
                 check=False,
             )
             # Wire identity is absolute logical boundary, NEVER sender physical slot.
-            identity = self.local_boundaries + self.geometry.start
-            payload[:, :8].copy_(identity.contiguous().view(torch.uint8).reshape(-1, 8))
+            payload[:, :8].copy_(
+                self.local_boundary_ids.contiguous().view(torch.uint8).reshape(-1, 8)
+            )
         received = torch.empty(
             (payload.shape[0] * 4, payload.shape[1]),
             dtype=torch.uint8,
@@ -481,7 +796,7 @@ class CompactPending:
         torch.distributed.all_gather_into_tensor(received, payload, group=self.group)
         actual_ids = received[:, :8].contiguous().view(torch.int64).reshape(-1)
         _assert_device(
-            (actual_ids == self.boundaries + self.geometry.start).all(),
+            (actual_ids == self.expected_wire_ids).all(),
             "compact CP foreign logical rows",
         )
         if fused:
@@ -517,6 +832,16 @@ def start(module, local, cp, meta, workspace, role, stream):
     ):
         raise RuntimeError("compact CP stage group/rank mismatch")
     stream = stream if stream is not None else torch.cuda.current_stream(local.device)
+    # Host metadata only: the pool's row capacity for the per-forward receiver
+    # range guard.  ``split_pool`` still validates the pool layout at replicate
+    # time, and ``assert_binding`` pins the pool identity to this module, so a
+    # different pool can never silently reuse the cached battery.
+    pool = module._kv_pool_view
+    pool_cap = (
+        int(pool.shape[0]) * int(pool.shape[1])
+        if pool is not None and pool.dim() == 3
+        else None
+    )
     handle = CompactPending(
         geometry=g,
         local=local,
@@ -525,6 +850,7 @@ def start(module, local, cp, meta, workspace, role, stream):
         role=role,
         stream=stream,
         group=group,
+        pool_cap=pool_cap,
     )
     handle.binding = _pool_identity(module)
     return handle

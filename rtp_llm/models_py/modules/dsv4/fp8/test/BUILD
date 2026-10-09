@@ -227,11 +227,14 @@ py_test(
     py_test(
         name = name,
         srcs = [name + ".py"],
-        data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+        data = [
+            "//rtp_llm/models_py:prefill_optimization_source_data",
+            "//rtp_llm/models_py/modules/dsv4/test:cpu_test_support",
+        ],
         deps = ["//rtp_llm:torch"],
         env = {"CUDA_VISIBLE_DEVICES": ""},
     )
-    for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu"]
+    for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu", "test_compact_cp_assert_fusion_cpu", "test_attention_prefix_host_mirror_cpu", "test_compact_cp_plan_cache_cpu", "test_indexer_tail_stream_cpu"]
 ]
 
 

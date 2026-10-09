@@ -39,9 +39,13 @@ _PREQUANT_INPUT_FLAG = "DSV4_MOE_PREQUANT_INPUT"
 _PREQUANT_INPUT_REQUIRED_FLAG = "DSV4_MOE_PREQUANT_INPUT_REQUIRED"
 _LOCAL_REPLAY_FLAG = "DSV4_MOE_LOCAL_REPLAY"
 _LOCAL_REPLAY_REQUIRED_FLAG = "DSV4_MOE_LOCAL_REPLAY_REQUIRED"
-# The current 32K CP4 schedule presents 1024 owner rows/rank; 512 is retained
-# for the declared smaller capture bucket.  Other shapes fall back unless the
-# benchmark explicitly requests REQUIRED=1.
+# Launch the forward-scoped authoritative count gather off the critical stream
+# at scope entry (side stream + pinned readback + event) so the host wait lands
+# after the layer-0 launches instead of draining the queue at layer-0 MoE.
+# Same collective, same values, same validations; only host wait placement moves.
+_EAGER_COUNT_GATHER_FLAG = "DSV4_MOE_EAGER_COUNT_GATHER"
+
+_EAGER_GATHER_LOGGED = False
 _LOCAL_REPLAY_OWNER_ROWS = (512, 1024)
 _LOCAL_REPLAY_MAX_GRAPHS_PER_LAYER = 2
 # A pool is shared only by graphs with the exact same device/current-stream/
@@ -70,6 +74,13 @@ def _local_replay_enabled() -> bool:
 
 def _local_replay_required() -> bool:
     return os.environ.get(_LOCAL_REPLAY_REQUIRED_FLAG, "0") == "1"
+
+
+def _eager_count_gather_enabled() -> bool:
+    value = os.environ.get(_EAGER_COUNT_GATHER_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_EAGER_COUNT_GATHER_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
 
 
 def _is_sm120_runtime() -> bool:
@@ -119,6 +130,10 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         self._local_replay_entries: dict[tuple, dict] = {}
         self._local_replay_captures = 0
         self._local_replay_replays = 0
+        # Lazily-built eager count-gather state (side stream, dedicated device
+        # buffers, pinned readback, event).  Never shared with the synchronous
+        # ``_gather_counts`` buffers so the two paths cannot race.
+        self._eager_counts_state: Optional[dict] = None
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
@@ -163,13 +178,16 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         local_tokens = int(local_tokens)
         scope = current_scope()
         if scope is not None:
+            gather = scope.eager_gather
+            if gather is None:
+                gather = lambda: self._gather_counts(local_tokens, group, world, device)
             counts = scope.get_counts(
                 self,
                 local_tokens,
                 group,
                 world,
                 device,
-                lambda: self._gather_counts(local_tokens, group, world, device),
+                gather,
                 full=True,
             )
             return max(counts)
@@ -283,6 +301,72 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         )
         return [int(v) for v in self._count_tensor.view(-1).cpu().tolist()]
 
+    # ---- eager count gather (DSV4_MOE_EAGER_COUNT_GATHER) ------------------
+    #
+    # The count values must reach the host (all_to_all split sizes are a host
+    # API), but the readback does not have to drain the main stream.  The
+    # gather input is a host-known scalar, so the whole chain — fill, NCCL
+    # all_gather, pinned D2H — is issued on a dedicated side stream at forward
+    # scope entry.  The host waits on the event only when the first MoE layer
+    # actually consumes the counts, after it has queued that layer's attention.
+    # The collective is the same all_gather on the same stage group, issued at
+    # the same per-forward program point on every rank (before this forward's
+    # all_to_alls, after the previous forward's), so wire order is unchanged.
+
+    def start_authoritative_counts_gather(self, local_rows: int, device):
+        """Launch the forward's count all_gather off the critical stream.
+
+        Returns an opaque handle for ``finish_authoritative_counts_gather``,
+        or None when the eager route is disabled/unavailable (callers then use
+        the legacy synchronous gather unchanged).
+        """
+        if not _eager_count_gather_enabled():
+            return None
+        if device.type != "cuda":
+            return None
+        group, world, _ = self._stage()
+        state = self._eager_counts_state
+        if (
+            state is None
+            or state["device"] != device
+            or state["world"] != world
+            or state["group"] is not group
+        ):
+            state = {
+                "device": device,
+                "world": world,
+                "group": group,
+                "stream": torch.cuda.Stream(device=device),
+                "event": torch.cuda.Event(),
+                "dev_in": torch.empty((1,), dtype=torch.int64, device=device),
+                "dev_out": torch.empty((world, 1), dtype=torch.int64, device=device),
+                "pin": torch.empty((world,), dtype=torch.int64, pin_memory=True),
+            }
+            self._eager_counts_state = state
+        stream = state["stream"]
+        with torch.cuda.stream(stream):
+            state["dev_in"].fill_(int(local_rows))
+            torch.distributed.all_gather_into_tensor(
+                state["dev_out"], state["dev_in"], group=group
+            )
+            state["pin"].copy_(state["dev_out"].view(-1), non_blocking=True)
+            state["event"].record(stream)
+        global _EAGER_GATHER_LOGGED
+        if not _EAGER_GATHER_LOGGED:
+            _EAGER_GATHER_LOGGED = True
+            logging.info(
+                "[DSV4 MoE] %s: eager count gather engaged on device %s",
+                BACKEND_NAME,
+                device,
+            )
+        return (state, world)
+
+    def finish_authoritative_counts_gather(self, handle) -> list:
+        """Host wait for the eager gather; identical values to ``_gather_counts``."""
+        state, world = handle
+        state["event"].synchronize()
+        return [int(v) for v in state["pin"][:world].tolist()]
+
     def _exchange_counts(self, n_local: int, group, world: int, device) -> list:
         """One stage-local all_gather of the local row count."""
         return self._gather_counts(n_local, group, world, device)
@@ -299,6 +383,9 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         """Reuse current-call counts only when rank-uniform and matching rows/device; else gather."""
         scope = current_scope()
         if scope is not None:
+            gather = scope.eager_gather
+            if gather is None:
+                gather = lambda: self._gather_counts(n_local, group, world, device)
             return list(
                 scope.get_counts(
                     self,
@@ -306,7 +393,7 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
                     group,
                     world,
                     device,
-                    lambda: self._gather_counts(n_local, group, world, device),
+                    gather,
                 )
             )
         if pending is not None and _count_fuse_enabled():

@@ -47,6 +47,16 @@ def _load_cp_module():
     profiler_module = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
     profiler_module.record_function_range = torch.profiler.record_function
     sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler_module
+    # cp.py imports its diagnostics sibling; stub it like _profiler so the
+    # standalone loader keeps working without the full package chain.
+    diagnostics_module = types.ModuleType(
+        "rtp_llm.models_py.modules.dsv4._cp_diagnostics"
+    )
+    diagnostics_module._CP_GATHER_STATS = False
+    diagnostics_module._cp_gather_kind = lambda profile_name: profile_name
+    diagnostics_module._cp_gather_record = lambda *a, **k: None
+    diagnostics_module._cp_gather_stats_drain = lambda *a, **k: None
+    sys.modules["rtp_llm.models_py.modules.dsv4._cp_diagnostics"] = diagnostics_module
 
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
@@ -269,14 +279,20 @@ def test_cp2_gather_last_by_request_handles_split_owners() -> None:
     cp_info = _CpInfo(
         padding_mask,
         restore_indice,
-        prefill_actual_input_lengths_cpu=torch.tensor(actual_lengths, dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor(
+            actual_lengths, dtype=torch.int32
+        ),
         prefill_cp_chunk_lengths=torch.tensor(chunk_lengths, dtype=torch.int32),
     )
 
     ctx0 = build_cp_context(cp_info, cp_size, 0, chunk_length, torch.device("cpu"))
     ctx1 = build_cp_context(cp_info, cp_size, 1, chunk_length, torch.device("cpu"))
-    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(chunk_length, 2)
-    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(chunk_length, 2)
+    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(
+        chunk_length, 2
+    )
+    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(
+        chunk_length, 2
+    )
 
     rank0_last = torch.zeros(2, 2)
     rank0_last[1] = local0[6]

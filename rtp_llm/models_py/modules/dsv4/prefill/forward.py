@@ -108,10 +108,13 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
+    first_position_for_meta,
+    stage_host_to_device,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
+    propagate_prebuilt_prefill_meta_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     as_attention_inputs_by_tag,
@@ -276,6 +279,21 @@ def _last_hidden_by_request(
     return flat[-1:].contiguous()
 
 
+def _maybe_kick_async_head(
+    v4, kv_cache, block_tables_by_type, cp_ctx, input_ids
+) -> None:
+    """Async-head kick point (end of ``forward_layers``): hand the builder thread the
+    predicted next chunk's head build. Never raises; fully gated inside
+    ``_head_prebuild.maybe_kick_async_head`` (flag off ⇒ no-op)."""
+    if cp_ctx is None or cp_ctx.cp_size <= 1:
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+
+    _head_prebuild.maybe_kick_async_head(
+        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device
+    )
+
+
 def set_cp_info(
     v4: V4Transformer,
     parallelism_config: Optional[ParallelismConfig],
@@ -358,7 +376,26 @@ def forward_layers(
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
+    # ``DSV4_PREFILL_ASYNC_HEAD`` (default on): consume the previous
+    # chunk's builder-thread prebuild (context + metadata) when it validates
+    # against this chunk's real inputs; miss ⇒ the legacy eager build below
+    # runs byte-identically. The bundle's block-table-dependent fields are
+    # rebuilt against the real table at the propagate call further down.
+    _async_head_bundle = None
     if cp_info is not None and cp_size > 1:
+        from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+
+        _async_head_bundle = _head_prebuild.consume_async_head(
+            cp_info,
+            getattr(attn_inputs, "prefix_lengths", None),
+            input_ids.device,
+            cp_size,
+            cp_rank,
+            int(input_ids.size(0)),
+        )
+        if _async_head_bundle is not None:
+            cp_ctx = _async_head_bundle.cp_ctx
+    if cp_ctx is None and cp_info is not None and cp_size > 1:
         cp_ctx = build_cp_context_for_forward(
             cp_info,
             cp_size,
@@ -496,57 +533,83 @@ def forward_layers(
     # own forward.
     with record_range_ctx():
         if v4.fp8_kv_cache:
-            sp_int_for_meta = int(positions[0].item())
-            sp_per_req: Optional[torch.Tensor] = None
-            req_id_per_token: Optional[torch.Tensor] = None
-            if cp_ctx is not None:
-                # Under CP, rank-local token order is zigzagged. The first token of
-                # each rank-local request chunk is therefore not necessarily the
-                # request's absolute start position. Use CP metadata instead of
-                # deriving request ids from rank-local cu_seqlens.
-                sp_per_req = cp_ctx.prefix_lengths.to(
-                    device=positions.device, dtype=torch.int64
-                ).contiguous()
-                req_id_per_token = cp_ctx.req_id_per_token.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
-            elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
-                starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
-                sp_per_req = (
-                    positions.index_select(0, starts).to(torch.int64).contiguous()
-                )
-                req_id_per_token = (
-                    torch.searchsorted(
-                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
-                        torch.arange(
-                            int(cu_seqlens[-1].item()),
-                            device=positions.device,
-                            dtype=torch.int64,
-                        ),
-                        right=True,
+            if _async_head_bundle is not None:
+                # the bundle's meta args were built (and validated) for
+                # exactly this chunk's geometry/prefix — skip the eager prep.
+                sp_int_for_meta = _async_head_bundle.sp_int
+                _ma = _async_head_bundle.meta_args
+                sp_per_req = _ma["sp_per_req"]
+                req_id_per_token = _ma["req_id_per_token"]
+                batch_size = _ma["batch_size"]
+                input_lengths = _ma["input_lengths"]
+                prefix_lengths = _ma["prefix_lengths"]
+                max_seqlen_q = _ma["max_seqlen_q"]
+            else:
+                # Host-known under CP (same value as positions[0]); the legacy
+                # readback remains for the non-CP path.
+                sp_int_for_meta = first_position_for_meta(cp_ctx, positions)
+                sp_per_req: Optional[torch.Tensor] = None
+                req_id_per_token: Optional[torch.Tensor] = None
+                if cp_ctx is not None:
+                    # Under CP, rank-local token order is zigzagged. The first token of
+                    # each rank-local request chunk is therefore not necessarily the
+                    # request's absolute start position. Use CP metadata instead of
+                    # deriving request ids from rank-local cu_seqlens.
+                    sp_per_req = cp_ctx.prefix_lengths.to(
+                        device=positions.device, dtype=torch.int64
+                    ).contiguous()
+                    req_id_per_token = cp_ctx.req_id_per_token.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+                elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                    starts = cu_seqlens[:-1].to(
+                        device=positions.device, dtype=torch.int64
                     )
-                    .sub_(1)
-                    .to(torch.int32)
-                    .contiguous()
-                )
-            batch_size = 1
-            if cu_seqlens is not None and cu_seqlens.numel() >= 2:
-                batch_size = int(cu_seqlens.numel() - 1)
-            input_lengths: Optional[torch.Tensor] = None
-            prefix_lengths: Optional[torch.Tensor] = None
-            max_seqlen_q = 0
-            if attn_inputs is not None:
-                il = getattr(attn_inputs, "input_lengths", None)
-                if il is not None and il.numel() > 0:
-                    input_lengths = il.to(
-                        device=positions.device, dtype=torch.int32
-                    ).contiguous()
-                    max_seqlen_q = int(input_lengths.max().item())
-                pl = getattr(attn_inputs, "prefix_lengths", None)
-                if pl is not None and pl.numel() > 0:
-                    prefix_lengths = pl.to(
-                        device=positions.device, dtype=torch.int32
-                    ).contiguous()
+                    sp_per_req = (
+                        positions.index_select(0, starts).to(torch.int64).contiguous()
+                    )
+                    req_id_per_token = (
+                        torch.searchsorted(
+                            cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                            torch.arange(
+                                int(cu_seqlens[-1].item()),
+                                device=positions.device,
+                                dtype=torch.int64,
+                            ),
+                            right=True,
+                        )
+                        .sub_(1)
+                        .to(torch.int32)
+                        .contiguous()
+                    )
+                batch_size = 1
+                if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                    batch_size = int(cu_seqlens.numel() - 1)
+                input_lengths: Optional[torch.Tensor] = None
+                prefix_lengths: Optional[torch.Tensor] = None
+                max_seqlen_q = 0
+                if attn_inputs is not None:
+                    il = getattr(attn_inputs, "input_lengths", None)
+                    if il is not None and il.numel() > 0:
+                        # Host-source tensors: the max over the int32-converted
+                        # values is the same integer whether read before or after
+                        # the HtoD; computing it on the CPU source skips a
+                        # blocking readback of the device copy.
+                        max_seqlen_q = (
+                            int(il.to(torch.int32).max().item())
+                            if il.device.type == "cpu"
+                            else None
+                        )
+                        input_lengths = stage_host_to_device(
+                            il, positions.device, torch.int32
+                        ).contiguous()
+                        if max_seqlen_q is None:
+                            max_seqlen_q = int(input_lengths.max().item())
+                    pl = getattr(attn_inputs, "prefix_lengths", None)
+                    if pl is not None and pl.numel() > 0:
+                        prefix_lengths = stage_host_to_device(
+                            pl, positions.device, torch.int32
+                        ).contiguous()
             # Per-forward prefill workspace: one runtime buffer allocated at the
             # top of the forward, freed when ``forward_layers`` returns (so the
             # MTP draft forward, which runs right after on a near-full card, can
@@ -585,22 +648,27 @@ def forward_layers(
                 main_w=v4._prefill_ws_main_w,
                 idx_w=v4._prefill_ws_idx_w,
             )
-            build_and_propagate_prefill_meta_fp8(
-                v4,
-                h,
-                sp_int_for_meta,
-                kv_cache,
-                block_tables_by_type,
-                sp_per_req=sp_per_req,
-                cu_seqlens=cu_seqlens,
-                batch_size=batch_size,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                position_ids=positions,
-                req_id_per_token=req_id_per_token,
-                max_seqlen_q=max_seqlen_q,
-                workspace=ws,
-            )
+            if _async_head_bundle is not None and propagate_prebuilt_prefill_meta_fp8(
+                v4, _async_head_bundle, kv_cache, block_tables_by_type, ws
+            ):
+                pass  # Patched prebuilt metadata has been propagated.
+            else:
+                build_and_propagate_prefill_meta_fp8(
+                    v4,
+                    h,
+                    sp_int_for_meta,
+                    kv_cache,
+                    block_tables_by_type,
+                    sp_per_req=sp_per_req,
+                    cu_seqlens=cu_seqlens,
+                    batch_size=batch_size,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=positions,
+                    req_id_per_token=req_id_per_token,
+                    max_seqlen_q=max_seqlen_q,
+                    workspace=ws,
+                )
 
     if _fs_marks is not None:
         _fs_marks["meta"] = time.perf_counter()
@@ -730,6 +798,7 @@ def forward_layers(
                 mem_after=_fwd_stats_snap(),
                 ev0=_fs_ev0,
             )
+        _maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, input_ids)
         return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
@@ -826,6 +895,7 @@ def forward_layers(
             mem_after=_fwd_stats_snap(),
             ev0=_fs_ev0,
         )
+    _maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, input_ids)
     return h  # [T, dim]
 
 

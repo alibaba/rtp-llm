@@ -121,6 +121,22 @@ class V4Args:
     fp8_kv_cache: bool = True
 
 
+def _positions_from_start_pos(start_pos, S: int, device) -> torch.Tensor:
+    """``start_pos + arange(S)`` without a host readback for tensor start_pos.
+
+    A 0-dim integer tensor broadcasts into the arange with the same values and
+    the same int64 result dtype as ``int(start_pos...item()) + arange`` — the
+    scalar stays on device instead of draining the queue this forward just
+    filled.  Non-integer dtypes keep the legacy truncating ``int()`` path.
+    """
+    if isinstance(start_pos, int):
+        return start_pos + torch.arange(S, device=device, dtype=torch.int64)
+    scalar = start_pos.view(-1)[0]
+    if scalar.is_floating_point() or scalar.is_complex():
+        return int(scalar.item()) + torch.arange(S, device=device, dtype=torch.int64)
+    return scalar + torch.arange(S, device=device, dtype=torch.int64)
+
+
 def _block_kwargs(
     layer_id: int,
     args: V4Args,
@@ -668,14 +684,7 @@ class V4Transformer(nn.Module):
         )
         h_flat = h.squeeze(0)  # [S, hc, d]
         input_ids_flat = input_ids.squeeze(0)  # [S]
-        _start_pos_int = (
-            int(start_pos)
-            if isinstance(start_pos, int)
-            else int(start_pos.view(-1)[0].item())
-        )
-        positions = _start_pos_int + torch.arange(
-            S, device=input_ids.device, dtype=torch.int64
-        )  # [S]
+        positions = _positions_from_start_pos(start_pos, S, input_ids.device)  # [S]
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]

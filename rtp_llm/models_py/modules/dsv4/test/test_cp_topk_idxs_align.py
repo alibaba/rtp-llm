@@ -47,6 +47,7 @@ def _load_attention_helper():
     snippet = (
         "import torch\n"
         "import torch.nn.functional as F\n"
+        "from typing import Optional, Tuple\n"
         + src[flat_start:flat_end]
         + "\n"
         + src[start:end]

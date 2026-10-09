@@ -562,3 +562,105 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["manual"],
 )
+
+py_test(
+    name = "test_cp_context_plan_cache_cpu",
+    srcs = ["test_cp_context_plan_cache_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_cp_deferred_verify_cpu",
+    srcs = ["test_cp_deferred_verify_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_cp_host_staging_cpu",
+    srcs = ["test_cp_host_staging_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_head_host_mirror_scalars_cpu",
+    srcs = ["test_head_host_mirror_scalars_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_host_run_ahead_counts_cpu",
+    srcs = ["test_host_run_ahead_counts_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_prefill_async_head_cpu",
+    srcs = ["test_prefill_async_head_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_prefill_meta_shared_build_cpu",
+    srcs = ["test_prefill_meta_shared_build_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_suffix_gather_max_host_cpu",
+    srcs = ["test_suffix_gather_max_host_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+filegroup(
+    name = "cpu_test_support",
+    srcs = ["cpu_test_utils.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "test_cpu_test_utils",
+    srcs = ["test_cpu_test_utils.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [":cpu_test_support"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
