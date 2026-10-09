@@ -177,6 +177,7 @@ def assert_cleared(test, stage, shared):
     test.assertEqual(shared["global"], {})
     test.assertEqual(shared["topk"], {})
     test.assertTrue(all(l.attn._prefill_meta_shared is None for l in stage.layers))
+    test.assertTrue(all(l.ffn.gate._v41_cp_ctx is None for l in stage.layers))
 
 
 class NativeL20StageAdmissionTest(unittest.TestCase):

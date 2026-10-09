@@ -1,7 +1,7 @@
 """Forward-local source publication through the maintained L21 attention owner.
 
 The caller owns the native allocation lease and forward serialization. This
-adapter admits short eager CP1 maintained-stage controls; it does not admit
+adapter admits short eager CP1/CP4 maintained-stage controls; it does not admit
 production PP execution.
 """
 
@@ -24,12 +24,83 @@ IMPORT_KEY = "v41_imported_l20_prefill"
 
 
 @dataclass(frozen=True)
+class _CPDispatch:
+    group: Any
+    rank: int
+    chunks: tuple[int, ...]
+    positions: tuple[int, ...]
+    requests: tuple[int, ...]
+    valid_rows: tuple[bool, ...]
+
+
+def _cp_dispatch(cp, receiver, spans) -> _CPDispatch:
+    from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+    from rtp_llm.models_py.modules.dsv4.cp import CPContext
+
+    if (
+        not isinstance(cp, CPContext)
+        or cp.cp_size != 4
+        or cp.kv_cache_sharded
+        or cp.cp_rank != receiver.cp_rank
+        or not receiver.caches["hca_kv"].raw.is_cuda
+        or torch.cuda.get_device_capability(receiver.caches["hca_kv"].raw.device)
+        != (12, 0)
+        or not torch.distributed.is_initialized()
+    ):
+        raise NotImplementedError(
+            "Native L20 CP source requires its unsharded SM120 CP4 lane"
+        )
+    group = _get_group(Group.TP)
+    if (
+        torch.distributed.get_world_size(group) != 4
+        or torch.distributed.get_rank(group) != cp.cp_rank
+        or torch.distributed.get_backend(group) != "nccl"
+    ):
+        raise ValueError("Native L20 CP source disagrees with its registered group")
+    if (
+        cp.input_lengths_global is None
+        or tuple(cp.input_lengths_global.tolist()) != tuple(s.count for s in spans)
+        or cp.prefix_lengths is None
+        or tuple(cp.prefix_lengths.tolist()) != tuple(s.start for s in spans)
+        or cp.seq_len_full != sum(s.count for s in spans)
+        or cp.padded_seq_len != 4 * cp.chunk_length
+        or cp.chunk_lengths_per_req is None
+        or len(cp.chunk_lengths_per_req) != len(spans)
+        or sum(cp.chunk_lengths_per_req) != cp.chunk_length
+    ):
+        raise ValueError("Native L20 CP source disagrees with its global dispatch")
+    for name, dtype in (
+        ("global_positions", torch.int64),
+        ("req_id_per_token", torch.int32),
+        ("local_is_real", torch.bool),
+    ):
+        value = getattr(cp, name)
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.shape != (cp.chunk_length,)
+            or value.device != receiver.caches["hca_kv"].raw.device
+            or value.dtype != dtype
+            or not value.is_contiguous()
+        ):
+            raise ValueError(f"Invalid native L20 CP {name}")
+    return _CPDispatch(
+        group,
+        cp.cp_rank,
+        cp.chunk_lengths_per_req,
+        tuple(cp.global_positions.tolist()),
+        tuple(cp.req_id_per_token.tolist()),
+        tuple(cp.local_is_real.tolist()),
+    )
+
+
+@dataclass(frozen=True)
 class NativeL20PrefillSource:
     receiver: NativeL20ReplicaReceiver
     spans: tuple[V41L20Span, ...]
     rows: torch.Tensor
     topk: torch.Tensor
     globals_by_req: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+    cp: _CPDispatch | None = None
 
     def _ready(self) -> None:
         for span in self.spans:
@@ -84,6 +155,12 @@ class NativeL20PrefillSource:
             raise ValueError(
                 "Native L20 publication requires its current forward scope"
             )
+        current_cp = getattr(attention, "_cp_ctx", None)
+        if self.cp is not None:
+            if _cp_dispatch(current_cp, self.receiver, self.spans) != self.cp:
+                raise ValueError("Native L20 CP source requires its current dispatch")
+        elif current_cp is not None and current_cp.cp_size > 1:
+            raise NotImplementedError("Native L20 CP1 source cannot serve CP queries")
         current_tables = getattr(attention, "_block_tables_by_type", None)
         if not isinstance(current_tables, Mapping):
             raise ValueError("Native L20 publication requires bound tagged page tables")
@@ -110,9 +187,9 @@ class NativeL20PrefillSource:
             raise NotImplementedError("Native L20 sources publish only at L21")
         self.require_owner(attention)
         shared = attention._shared_attention
-        if common.cp_on:
+        if bool(common.cp_on) != (self.cp is not None):
             raise NotImplementedError(
-                "Native L20 publication requires eager CP1 L21 entry"
+                "Native L20 publication requires its prepared CP dispatch"
             )
         if (
             shared.get("global") != {}
@@ -121,10 +198,31 @@ class NativeL20PrefillSource:
         ):
             raise ValueError("Native L20 publication must follow the forward reset")
         for name, expected in (
-            ("input_lengths", [s.count for s in self.spans]),
+            (
+                "input_lengths",
+                (
+                    list(self.cp.chunks)
+                    if self.cp is not None
+                    else [s.count for s in self.spans]
+                ),
+            ),
             ("prefix_lengths", [s.start for s in self.spans]),
-            ("position_ids", self.rows[:, 1].tolist()),
-            ("req_id_per_token", self.rows[:, 0].tolist()),
+            (
+                "position_ids",
+                (
+                    list(self.cp.positions)
+                    if self.cp is not None
+                    else self.rows[:, 1].tolist()
+                ),
+            ),
+            (
+                "req_id_per_token",
+                (
+                    list(self.cp.requests)
+                    if self.cp is not None
+                    else self.rows[:, 0].tolist()
+                ),
+            ),
         ):
             value = getattr(common, name, None)
             if (
@@ -146,6 +244,8 @@ def prepare_native_l20_prefill_source(
     receiver: NativeL20ReplicaReceiver,
     spans: Sequence[V41L20Span],
     expected_rows: torch.Tensor,
+    *,
+    cp_ctx: Any = None,
 ) -> NativeL20PrefillSource:
     """Snapshot current native source bytes and cloned short-forward selections."""
     if not isinstance(receiver, NativeL20ReplicaReceiver):
@@ -156,20 +256,25 @@ def prepare_native_l20_prefill_source(
     if (
         not spans
         or not expected_rows.numel()
-        or bool((expected_rows[:, 2] != 1).any())
         or any(s.start + s.count > 256 for s in spans)
     ):
         raise NotImplementedError(
-            "Native L20 publication requires short unpadded CP1 rows"
+            "Native L20 publication requires short nonempty request spans"
         )
-    rows = torch.tensor(
+    cp = _cp_dispatch(cp_ctx, receiver, spans) if cp_ctx is not None else None
+    records = (
         [
+            (r, p, 1) if valid else (-1, -1, 0)
+            for r, p, valid in zip(cp.requests, cp.positions, cp.valid_rows)
+        ]
+        if cp is not None
+        else [
             [request, p, 1]
             for request, s in enumerate(spans)
             for p in range(s.start, s.start + s.count)
-        ],
-        dtype=torch.int64,
+        ]
     )
+    rows = torch.tensor(records, dtype=torch.int64)
     if not torch.equal(rows, expected_rows):
         raise ValueError("Native L20 frame rows disagree with request order")
     device = receiver.caches["hca_kv"].raw.device
@@ -205,7 +310,7 @@ def prepare_native_l20_prefill_source(
             values.append(value)
         globals_by_req.append(tuple(values))
     return NativeL20PrefillSource(
-        receiver, spans, rows, frame.topk.clone(), tuple(globals_by_req)
+        receiver, spans, rows, frame.topk.clone(), tuple(globals_by_req), cp
     )
 
 

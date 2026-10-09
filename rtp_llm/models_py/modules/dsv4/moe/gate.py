@@ -139,6 +139,7 @@ class Gate(nn.Module):
         self.hash = layer_id < n_hash_layers
         self.fp32_logits = fp32_logits
         self._dbg_prefix: Optional[str] = None
+        self._v41_cp_ctx = None
 
         from rtp_llm.utils.model_weight import W
 
@@ -175,6 +176,17 @@ class Gate(nn.Module):
         return cached
 
     def forward(
+        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self._v41_cp_ctx is not None:
+            from rtp_llm.models_py.modules.dsv4.v41_cp_router import (
+                canonical_v41_cp_routes,
+            )
+
+            return canonical_v41_cp_routes(self, x, self._v41_cp_ctx)
+        return self._forward_local(x, input_ids)
+
+    def _forward_local(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt

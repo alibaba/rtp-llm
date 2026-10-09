@@ -118,3 +118,5 @@ def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:
         if attn is None:
             continue
         attn._set_prefill_meta_shared(None)
+        if getattr(getattr(v4, "args", None), "v41_config", None) is not None:
+            layer.ffn.gate._v41_cp_ctx = None

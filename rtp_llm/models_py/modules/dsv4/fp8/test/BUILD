@@ -35,6 +35,14 @@ py_library(
 )
 
 py_library(
+    name = "v41_cp_owner_testlib",
+    srcs = ["test_v41_cp_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_attention_owner_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
     name = "v41_transformer_testlib",
     srcs = ["test_v41_transformer_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS + [":v41_attention_owner_testlib"],

@@ -558,6 +558,8 @@ class V4Transformer(nn.Module):
 
     def _propagate_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         for layer in self.layers:
+            if self.args.v41_config is not None:
+                layer.ffn.gate._v41_cp_ctx = cp_ctx
             attn = getattr(layer, "attn", None)
             if attn is None:
                 continue
