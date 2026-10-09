@@ -723,6 +723,13 @@ class ProcessManager:
                         f"after {self.POST_KILL_REAP_WINDOW}s reap window — "
                         "likely D-state; leaving for kernel reap"
                     )
+                else:
+                    logging.info(
+                        "Process %s (pid=%s) joined, exitcode=%s",
+                        proc.name,
+                        proc.pid,
+                        proc.exitcode,
+                    )
             except Exception as e:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")

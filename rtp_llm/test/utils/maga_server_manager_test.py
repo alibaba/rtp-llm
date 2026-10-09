@@ -1,7 +1,12 @@
 import signal
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -85,6 +90,7 @@ class MagaServerManagerTest(unittest.TestCase):
 
         parent = Mock()
         parent.children.return_value = []
+        self.manager._env_args = {"SHUTDOWN_TIMEOUT": "17"}
         with (
             patch("rtp_llm.utils.util.wait_sever_done", side_effect=health_check),
             patch(
@@ -95,6 +101,10 @@ class MagaServerManagerTest(unittest.TestCase):
                 "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
                 return_value=([], []),
             ),
+            patch(
+                "rtp_llm.utils.process_manager.ProcessManager.deferred_group_shutdown_timeout_seconds",
+                return_value=23,
+            ) as deferred_budget,
             self.assertLogs(level="WARNING") as logs,
             ThreadPoolExecutor(max_workers=2) as workers,
         ):
@@ -106,6 +116,8 @@ class MagaServerManagerTest(unittest.TestCase):
                 self.assertTrue(stop_result.result(timeout=5))
                 self.assertIsNone(self.manager.server_pid)
                 parent.terminate.assert_called_once_with()
+                deferred_budget.assert_called_once_with(17)
+                parent.wait.assert_called_once_with(timeout=45)
             finally:
                 release_health.set()
             self.assertFalse(wait_result.result(timeout=5))
@@ -115,6 +127,62 @@ class MagaServerManagerTest(unittest.TestCase):
         self.assertIn("pid=4242 killed by SIGTERM", "\n".join(logs.output))
         self.assertNotIn("still alive", "\n".join(logs.output))
         self.manager.print_process_log.assert_called_once_with()
+
+    def test_shutdown_coordinator_stops_children_before_parent_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "coordinator.py"
+            script.write_text(
+                """import signal, subprocess, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+def record(event):
+    with (root / 'events').open('a') as writer:
+        writer.write(event + '\\n')
+if len(sys.argv) > 2:
+    def stop_child(signum, frame):
+        record('child_stop')
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_child)
+    (root / 'child_ready').touch()
+else:
+    child = subprocess.Popen([sys.executable, __file__, str(root), 'child'])
+    def stop_parent(signum, frame):
+        record('parent_stop')
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+        record('parent_exit')
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_parent)
+    deadline = time.monotonic() + 10
+    while not (root / 'child_ready').exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('child readiness timeout')
+        time.sleep(0.01)
+    (root / 'ready').touch()
+while True:
+    signal.pause()
+"""
+            )
+            process = subprocess.Popen([sys.executable, str(script), directory])
+            self.manager._server_process = process
+            try:
+                deadline = time.monotonic() + 10
+                while not (root / "ready").exists() and process.poll() is None:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                self.assertTrue((root / "ready").exists())
+                self.assertTrue(self.manager.stop_server())
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertEqual(
+                    (root / "events").read_text().splitlines(),
+                    ["parent_stop", "child_stop", "parent_exit"],
+                )
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
 
 
 if __name__ == "__main__":
