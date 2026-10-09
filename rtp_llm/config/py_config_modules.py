@@ -606,12 +606,16 @@ class JITConfig:
         self.remote_jit_dir: str = ""
         self.jit_cache_setup_timeout_s: int = 180
         self.manage_jit_cache: bool = True
+        self.startup_real_warmup_timeout_s: Optional[float] = None
+        self.startup_real_warmup_max_len: Optional[int] = None
 
     def to_string(self):
         return (
             f"remote_jit_dir: {self.remote_jit_dir}\n"
             f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
-            f"manage_jit_cache: {self.manage_jit_cache}"
+            f"manage_jit_cache: {self.manage_jit_cache}\n"
+            f"startup_real_warmup_timeout_s: {self.startup_real_warmup_timeout_s}\n"
+            f"startup_real_warmup_max_len: {self.startup_real_warmup_max_len}"
         )
 
 

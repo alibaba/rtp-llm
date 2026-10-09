@@ -125,6 +125,10 @@ class BaseMultiModalMixin:
 
         self.mm_mixin_loader.force_clean_cuda_memory()
 
+    def warmup(self) -> None:
+        """Prepare model-owned kernels after weights are loaded, before serving."""
+        pass
+
     def get_mm_weight_loading_dtype(self) -> Optional[torch.dtype]:
         return None
 

@@ -3,8 +3,10 @@ import os
 import pickle
 import threading
 import time
+from types import SimpleNamespace
 from typing import List
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import PIL
 import pillow_avif
@@ -28,6 +30,10 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
 )
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine, MMWorkItem
+from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
+    BaseMultiModalMixin,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
@@ -40,6 +46,52 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+
+class MultimodalFactoryWarmupTest(TestCase):
+    def test_model_owned_warmup_runs_after_load_before_engine_creation(self):
+        events = []
+
+        class CustomMixin(BaseMultiModalMixin):
+            def __init__(self, *args):
+                self.mm_part = object()
+                events.append("weights_loaded")
+
+            def warmup(self):
+                events.append("warmup")
+
+        config = SimpleNamespace(
+            model_type="custom_multimodal",
+            mm_model_config=SimpleNamespace(is_multimodal=True),
+            compute_dtype=torch.bfloat16,
+            mm_related_params=object(),
+            ckpt_path="unused",
+        )
+        engine_config = SimpleNamespace(
+            load_config=SimpleNamespace(load_method=object()),
+            profiling_debug_logging_config=object(),
+        )
+        result = object()
+
+        def create_engine(*args, **kwargs):
+            events.append("engine_created")
+            return result
+
+        with (
+            patch(
+                "rtp_llm.multimodal.multimodal_mixin_factory.get_multimodal_mixin_cls",
+                return_value=CustomMixin,
+            ),
+            patch(
+                "rtp_llm.multimodal.multimodal_mixin_factory.MMProcessEngine",
+                side_effect=create_engine,
+            ),
+        ):
+            actual = MultimodalMixinFactory.create_multimodal_process_engine(
+                config, engine_config, VitConfig(), device="cpu"
+            )
+        self.assertIs(actual, result)
+        self.assertEqual(events, ["weights_loaded", "warmup", "engine_created"])
 
 
 class FakeMultiModalEmbeddingInterface(Qwen2_VLImageEmbedding):

@@ -428,7 +428,7 @@ def _serial_verify_kernel(
                 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["B"])
 def _finalize_kernel(
     Slot,
     Generation,
@@ -437,7 +437,7 @@ def _finalize_kernel(
     PoolEpoch,
     PoolCount,
     Error,
-    B: tl.constexpr,
+    B,
     NSLOT: tl.constexpr,
     T: tl.constexpr,
     BLOCK: tl.constexpr,

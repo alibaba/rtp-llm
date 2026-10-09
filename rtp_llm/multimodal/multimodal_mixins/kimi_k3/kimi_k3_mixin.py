@@ -30,6 +30,14 @@ class KimiK3VitWeight(BaseVitWeights):
 
 
 class KimiK3Mixin(BaseMultiModalMixin):
+
+    def warmup(self) -> None:
+        from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_rope_triton import (
+            warmup_kimi_k3_vit_rope,
+        )
+
+        warmup_kimi_k3_vit_rope(self.mm_part)
+
     def get_mm_weight_loading_dtype(self) -> torch.dtype:
         # K3's BF16 checkpoint must not pass through the loader's FP16 default.
         return self.compute_dtype

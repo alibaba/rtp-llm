@@ -61,6 +61,7 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    ready_callback=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
@@ -98,6 +99,8 @@ def local_rank_start(
 
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        if ready_callback:
+            ready_callback()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
@@ -286,6 +289,7 @@ def multi_rank_start(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     cleanup=None,
+    ready_callback=None,
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
@@ -304,6 +308,8 @@ def multi_rank_start(
 
         # Wait for all ranks to report startup status
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
+        if ready_callback:
+            ready_callback()
 
         manager = ProcessManager(
             shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
@@ -367,6 +373,7 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    jit_publish_event=None,
 ):
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
@@ -405,7 +412,9 @@ def start_backend_server(
         try:
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
-            manager = start_from_config(py_env_configs.jit_config)
+            manager = start_from_config(
+                py_env_configs.jit_config, publish_event=jit_publish_event
+            )
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
         if torch.cuda.device_count() > 1 and pc.world_size > 1:
@@ -414,9 +423,11 @@ def start_backend_server(
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
+                ready_callback=manager.request_publish if manager else None,
             )
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller, py_env_configs, pc.world_rank, pipe_writer,
+            ready_callback=manager.request_publish if manager else None,
         )
     finally:
         if manager:

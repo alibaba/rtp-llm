@@ -564,6 +564,9 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    supports_startup_real_warmup = True
+    startup_real_warmup_timeout_env = "DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S"
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -961,6 +964,8 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
+    supports_startup_real_warmup = False
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)

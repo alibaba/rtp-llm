@@ -1,5 +1,7 @@
 """Fused 2D RoPE for Kimi-K3 MoonViT."""
 
+import logging
+import time
 from typing import Optional, Tuple
 
 import torch
@@ -163,3 +165,40 @@ def maybe_fused_apply_rope(
         num_warps=4,
     )
     return q_out, k_out
+
+
+@torch.inference_mode()
+def warmup_kimi_k3_vit_rope(mm_part) -> None:
+    """Compile reachable MoonViT RoPE layouts in the GPU embedding process."""
+    from rtp_llm.utils.warmup import model_warm_up_enabled
+
+    if not model_warm_up_enabled():
+        return
+    tower = getattr(mm_part, "vision_tower", None)
+    if tower is None:
+        return
+    prepared = set()
+    for module in tower.modules():
+        projection = getattr(module, "wqkv", None)
+        if projection is None or not hasattr(module, "num_heads"):
+            continue
+        heads, dim = int(module.num_heads), int(module.head_dim)
+        weight = projection.weight
+        spec = (heads, dim, weight.dtype, weight.device)
+        if spec in prepared:
+            continue
+        prepared.add(spec)
+        if not weight.is_cuda or weight.dtype not in (torch.float16, torch.bfloat16):
+            continue
+        qkv = torch.zeros((1, 3, heads, dim), device=weight.device, dtype=weight.dtype)
+        q, k, _ = qkv.unbind(1)
+        freqs = torch.ones((1, dim // 2), device=weight.device, dtype=torch.complex64)
+        started = time.perf_counter()
+        if maybe_fused_apply_rope(q, k, freqs) is None:
+            logging.info("K3 ViT RoPE JIT skipped unsupported layout: %s", spec)
+            continue
+        torch.cuda.synchronize(weight.device)
+        logging.info(
+            "K3 ViT RoPE JIT prepared: heads=%d dim=%d dtype=%s cost=%.3fs",
+            heads, dim, weight.dtype, time.perf_counter() - started,
+        )

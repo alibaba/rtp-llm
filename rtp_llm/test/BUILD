@@ -223,9 +223,33 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_jit_warmup_test",
+    srcs = ["kimi_k3_jit_warmup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+)
+
+py_test(
     name = "kimi_k3_rope_test",
     srcs = ["kimi_k3_rope_test.py"],
     deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_rope_jit_cache_test",
+    size = "large",
+    srcs = ["kimi_k3_rope_jit_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300", "no-cache"],
+)
+
+py_binary(
+    name = "kimi_k3_gate_jit_microbenchmark",
+    srcs = ["kimi_k3_gate_jit_microbenchmark.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
 )
 
 py_test(

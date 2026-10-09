@@ -1,5 +1,6 @@
 import contextlib
 import json
+import multiprocessing
 import os
 import shutil
 import stat
@@ -15,10 +16,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from rtp_llm import kimi_k3_runtime as k3_runtime
 from rtp_llm import start_backend_server as backend
 from rtp_llm.model_loader.tipc import ffi as tipc_ffi
 from rtp_llm.test.utils import jit_sys_path_setup as wrapper_cache
 from rtp_llm.utils import jit_cache_env as cache_env
+from rtp_llm.utils import jit_cache_identity as identity
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
@@ -97,6 +100,9 @@ class JitCacheTestBase(unittest.TestCase):
         os.environ.pop(cache_env._AUTOMATIC_CACHE_ENVS, None)
         jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
         self.addCleanup(jit.setup_jit_cache_env.cache_clear)
+        providers = mock.patch.dict(identity._COMPONENT_IDENTITY_PROVIDERS, clear=True)
+        providers.start()
+        self.addCleanup(providers.stop)
         self._seq = 0
 
     def make_store(self, name="remote", mounted=""):
@@ -112,6 +118,193 @@ class JitCacheTestBase(unittest.TestCase):
             source.write_bytes(data)
             generation[rel] = source
         return snap_store.publish_snapshot(generation)
+
+
+class ProducerIdentityTest(JitCacheTestBase):
+
+    def test_runtime_provider_changes_only_selected_component_scope(self):
+        components = {item.name: item for item in jit.COMPONENTS}
+        scopes = {"accelerator": "sm100", "torch": "torch-abi"}
+        with mock.patch.object(jit.importlib.metadata, "version", return_value="wheel"):
+            default = jit._component_scope_parts(components["flashinfer"], scopes)
+            identity.register_component_identity(
+                "flashinfer", lambda abi: (abi["torch"], "custom-compiler-source")
+            )
+            self.assertEqual(default, ("torch-abi", "wheel"))
+            self.assertEqual(
+                jit._component_scope_parts(components["flashinfer"], scopes),
+                ("torch-abi", "custom-compiler-source"),
+            )
+            self.assertEqual(
+                jit._component_scope_parts(components["deep_gemm"], scopes),
+                ("sm100", "wheel"),
+            )
+            identity.register_component_identity("flashinfer", lambda _abi: None)
+            self.assertEqual(
+                jit._component_scope_parts(components["flashinfer"], scopes), default
+            )
+
+    def test_other_model_runtime_does_not_register_k3_producers(self):
+        with mock.patch.dict(os.environ, {"MODEL_TYPE": "qwen3_next"}):
+            k3_runtime.register_jit_cache_identities()
+        self.assertEqual(identity._COMPONENT_IDENTITY_PROVIDERS, {})
+
+    def test_companion_library_records_affect_selected_package_identity(self):
+        root = self.root / "cutlass"
+        package = Path("nvidia_cutlass_dsl/dsl_packages/cutlass")
+        selected = root / package
+        selected.mkdir(parents=True)
+        (selected / "__init__.py").write_text("VERSION = 1\n")
+        for name in (
+            "nvidia_cutlass_dsl-4.6.2",
+            "nvidia_cutlass_dsl_libs_base-4.6.2",
+            "nvidia_cutlass_dsl_libs_core-4.6.2",
+            "nvidia_cutlass_dsl_libs_cu13-4.6.2",
+        ):
+            record = root / f"{name}.dist-info" / "RECORD"
+            record.parent.mkdir()
+            record.write_text(name)
+        first = identity.isolated_package_identity(
+            str(root),
+            package,
+            "nvidia-cutlass-dsl",
+            companion_record_prefixes=("nvidia_cutlass_dsl_libs_",),
+        )
+        self.assertTrue(first)
+        (root / "nvidia_cutlass_dsl_libs_core-4.6.2.dist-info" / "RECORD").write_text(
+            "updated library content"
+        )
+        self.assertNotEqual(
+            first,
+            identity.isolated_package_identity(
+                str(root),
+                package,
+                "nvidia-cutlass-dsl",
+                companion_record_prefixes=("nvidia_cutlass_dsl_libs_",),
+            ),
+        )
+
+    def test_selected_wheel_identity_tracks_record_and_is_path_independent(self):
+        root = self.root / "selected"
+        (root / "flashinfer").mkdir(parents=True)
+        (root / "flashinfer" / "__init__.py").write_text("VERSION = 1\n")
+        record = root / "flashinfer_python-1.0.dist-info" / "RECORD"
+        record.parent.mkdir()
+        record.write_text("flashinfer/__init__.py,sha256=one,1\n")
+        first = identity.isolated_package_identity(
+            str(root), Path("flashinfer"), "flashinfer-python"
+        )
+        relocated = self.root / "relocated"
+        shutil.copytree(root, relocated)
+        self.assertEqual(
+            first,
+            identity.isolated_package_identity(
+                str(relocated), Path("flashinfer"), "flashinfer-python"
+            ),
+        )
+        record.write_text("flashinfer/__init__.py,sha256=two,1\n")
+        self.assertNotEqual(
+            first,
+            identity.isolated_package_identity(
+                str(root), Path("flashinfer"), "flashinfer-python"
+            ),
+        )
+        with self.assertRaises(ValueError):
+            identity.isolated_package_identity(
+                str(root), Path("missing"), "flashinfer-python"
+            )
+
+    def test_source_install_deep_gemm_identity_changes_with_jit_source(self):
+        package = self.root / "deep_gemm"
+        package.mkdir()
+        source = package / "jit.py"
+        source.write_text("KERNEL = 1\n")
+        (package / "__init__.py").write_text("")
+        spec = types.SimpleNamespace(origin=str(package / "__init__.py"))
+        with (
+            mock.patch.object(identity.importlib.util, "find_spec", return_value=spec),
+            mock.patch.object(
+                jit.importlib.metadata,
+                "version",
+                side_effect=jit.importlib.metadata.PackageNotFoundError,
+            ),
+        ):
+            first = k3_runtime._installed_deep_gemm_identity()
+            source.write_text("KERNEL = 2\n")
+            self.assertNotEqual(first, k3_runtime._installed_deep_gemm_identity())
+
+    def test_selected_tokenspeed_identity_tracks_imported_code_and_compiler(self):
+        root = self.root / "runtime"
+        package = root / "tokenspeed_triton"
+        compiler = package / "backends" / "nvidia" / "bin" / "ptxas"
+        compiler.parent.mkdir(parents=True)
+        (package / "__init__.py").write_text("VERSION = 1\n")
+        compiler.write_bytes(b"compiler-v1")
+        record = root / "tokenspeed_triton-3.8.dist-info" / "RECORD"
+        record.parent.mkdir()
+        record.write_text("wheel-v1\n")
+        spec = types.SimpleNamespace(origin=str(package / "__init__.py"))
+        with mock.patch.object(identity.importlib.util, "find_spec", return_value=spec):
+            first = identity.selected_package_identity(
+                "tokenspeed_triton", "tokenspeed-triton", include_compiler_binaries=True
+            )
+            compiler.write_bytes(b"compiler-v2")
+            second = identity.selected_package_identity(
+                "tokenspeed_triton", "tokenspeed-triton", include_compiler_binaries=True
+            )
+            self.assertNotEqual(first, second)
+            compiler.write_bytes(b"compiler-v1")
+            (package / "__init__.py").write_text("VERSION = 2\n")
+            self.assertNotEqual(
+                first,
+                identity.selected_package_identity(
+                    "tokenspeed_triton",
+                    "tokenspeed-triton",
+                    include_compiler_binaries=True,
+                ),
+            )
+
+    def test_k3_cutlass_scope_uses_selected_tokenspeed_producers(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+        scopes = {"accelerator": "sm103"}
+        with (
+            mock.patch.dict(
+                os.environ, {"MODEL_TYPE": "kimi_k3", "KIMI_K3_CUTLASS_DSL_ROOT": ""}
+            ),
+            mock.patch.object(jit.importlib.metadata, "version", return_value="4.7.1"),
+            mock.patch.object(
+                k3_runtime,
+                "selected_package_identity",
+                side_effect=["mla-source", "triton-source"],
+            ),
+        ):
+            k3_runtime.register_jit_cache_identities()
+            self.assertEqual(
+                jit._component_scope_parts(component, scopes),
+                ("sm103", "4.7.1", "mla-source", "triton-source"),
+            )
+
+    def test_native_only_k3_deep_gemm_keeps_managed_component(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "deep_gemm")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"MODEL_TYPE": "kimi_k3", "KIMI_K3_MOE_BACKEND": "vllm_native"},
+            ),
+            mock.patch.object(
+                k3_runtime,
+                "_installed_deep_gemm_identity",
+                side_effect=ValueError("not installed"),
+            ),
+            mock.patch.object(
+                k3_runtime, "_native_deep_gemm_identity", return_value="native-build"
+            ),
+        ):
+            k3_runtime.register_jit_cache_identities()
+            self.assertEqual(
+                jit._component_scope_parts(component, {"accelerator": "sm100"}),
+                ("sm100", "native:native-build"),
+            )
 
 
 class WrapperCacheSetupTest(JitCacheTestBase):
@@ -259,6 +452,31 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_snapshot_keeps_completed_file_when_a_compile_directory_disappears(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "triton"),
+            local_dir=self.root / "local" / "triton",
+        )
+        complete = component.local_dir / "hash" / "kernel.cubin"
+        complete.parent.mkdir(parents=True)
+        complete.write_bytes(b"compiled")
+        vanished = complete.parent / "vanished"
+        vanished.mkdir()
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if Path(path) == vanished:
+                vanished.rmdir()
+                raise FileNotFoundError(path)
+            return real_scandir(path)
+
+        with mock.patch.object(jit.os, "scandir", side_effect=scandir):
+            files = manager._snapshot_files()
+        self.assertEqual(files, {"triton/hash/kernel.cubin": complete})
+
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
@@ -1001,6 +1219,46 @@ class ManagerTest(JitCacheTestBase):
         self.assertTrue(consumer.bootstrap(timeout_s=30))
         self.assertEqual(artifact.read_bytes(), b"payload")
 
+    def test_cross_process_notification_publishes_without_file_events(self):
+        scope = self.make_scope()
+        context = multiprocessing.get_context("spawn")
+        publish_event = context.Event()
+        remote = self.root / "notified_remote"
+        remote.mkdir()
+        manager = jit.JitCacheManager(scope, str(remote), publish_event=publish_event)
+        self.managers.append(manager)
+        manager.store = store.RemoteSnapshotStore(remote)
+        self.write_artifact(scope, "triton/hash/kernel.cubin")
+        # No observer and no dirty flag: publication must come from the other
+        # process's signal, not a compiler event or the periodic rescan.
+        manager._seen = {
+            name: store.file_sig(path) for name, path in manager._snapshot_files().items()
+        }
+        published = threading.Event()
+        publish = manager.publish_pending_snapshot
+
+        def publish_and_notify():
+            publish()
+            published.set()
+
+        with mock.patch.object(jit, "SYNC_POLL_S", 60), mock.patch.object(
+            manager, "publish_pending_snapshot", side_effect=publish_and_notify
+        ):
+            manager._worker = threading.Thread(target=manager._sync_loop)
+            manager._worker.start()
+            sender = context.Process(target=publish_event.set)
+            sender.start()
+            try:
+                sender.join(15)
+                self.assertEqual(sender.exitcode, 0)
+                self.assertTrue(published.wait(15))
+                self.assertTrue(snapshots(manager.store))
+            finally:
+                if sender.is_alive():
+                    sender.terminate()
+                    sender.join(5)
+                manager.stop()
+
     def test_publish_defers_and_rearms_dirty_on_pack_race(self):
         scope = self.make_scope()
         producer = self.make_manager(scope)
@@ -1341,7 +1599,7 @@ class BackendTest(JitCacheTestBase):
         ), mock.patch.object(
             backend,
             "local_rank_start",
-            side_effect=lambda *_: events.append("rank") or "served",
+            side_effect=lambda *_, **__: events.append("rank") or "served",
         ), mock.patch.object(
             # A hard exit here would truncate the caller's own teardown.
             backend.os,
@@ -1400,7 +1658,7 @@ class BackendTest(JitCacheTestBase):
         handlers = {}
         configs = self.make_configs(remote="/r", world_size=2)
 
-        def start_jit(_config):
+        def start_jit(_config, publish_event=None):
             handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
 
         with self.patched_backend(

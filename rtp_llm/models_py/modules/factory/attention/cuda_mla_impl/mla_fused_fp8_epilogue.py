@@ -15,17 +15,20 @@ def _quant_fp8(x, inverse_scale, ASSUME_UNIT_SCALES: tl.constexpr):
                     tl.minimum(tl.maximum(value, -448.0), 448.0)).to(tl.float8e4nv)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=[
+    "T", "Q_T", "Q_H", "KN_T", "KN_H", "PE_T", "C_T",
+    "V_T", "V_H", "CACHE_B", "CACHE_T",
+])
 def _fused_mla_fp8_epilogue(
     Q, KN, PE, C, V, OQ, OK, OV, CACHE, SLOTS,
     QS, KS, VS, CS,
-    T: tl.constexpr, H: tl.constexpr, NOPE: tl.constexpr, ROPE: tl.constexpr,
+    T, H: tl.constexpr, NOPE: tl.constexpr, ROPE: tl.constexpr,
     VD: tl.constexpr, LATENT: tl.constexpr, CACHE_BLOCK: tl.constexpr,
-    Q_T: tl.constexpr, Q_H: tl.constexpr,
-    KN_T: tl.constexpr, KN_H: tl.constexpr,
-    PE_T: tl.constexpr, C_T: tl.constexpr,
-    V_T: tl.constexpr, V_H: tl.constexpr,
-    CACHE_B: tl.constexpr, CACHE_T: tl.constexpr,
+    Q_T, Q_H,
+    KN_T, KN_H,
+    PE_T, C_T,
+    V_T, V_H,
+    CACHE_B, CACHE_T,
     BLOCK_T: tl.constexpr, BLOCK_Q: tl.constexpr,
     BLOCK_V: tl.constexpr, BLOCK_C: tl.constexpr,
     ASSUME_UNIT_SCALES: tl.constexpr,
