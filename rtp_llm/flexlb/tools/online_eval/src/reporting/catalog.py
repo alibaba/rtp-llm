@@ -8,7 +8,6 @@ PALETTE = (
     "#722ed1", "#13c2c2", "#eb2f96", "#fa8c16",
     "#a0d911", "#2f54eb", "#fadb14", "#08979c",
 )
-WORKLOAD_COLORS = ("#2563eb", "#dc2626")
 VIEW_COLORS = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2")
 PERFORMANCE_COLORS = ("#1677ff", "#13c2c2", "#fa541c", "#722ed1",
                       "#52c41a", "#eb2f96", "#faad14", "#2f54eb")

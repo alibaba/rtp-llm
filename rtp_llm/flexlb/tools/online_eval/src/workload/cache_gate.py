@@ -585,12 +585,5 @@ def main():
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[result["verdict"]]
 
 
-def report_series(directory, anchor_epoch_s):
-    from monitoring.session import archived_series
-
-    series, sources, _, _ = archived_series(directory, anchor_epoch_s)
-    return series, sources
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

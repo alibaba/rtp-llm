@@ -155,21 +155,6 @@ def view(name):
     return data
 
 
-def select_presets(curves, definitions):
-    """Select existing analyzer curves by YAML names, groups or name fragments."""
-    result = {}
-    for title, selector in definitions.items():
-        kind, values = next(iter(selector.items()))
-        result[title] = [
-            curve["name"] for curve in curves
-            if (not curve.get("hidden", False) if kind == "visible" else
-                curve["name"] in values if kind == "names" else
-                curve.get("group") in values if kind == "groups" else
-                any(fragment in curve["name"] for fragment in values))
-        ]
-    return result
-
-
 def declaration(value, *, kind, path="reports"):
     if kind != "workload":
         _fail(path, "report views require test.kind=workload")

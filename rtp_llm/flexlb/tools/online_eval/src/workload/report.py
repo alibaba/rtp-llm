@@ -47,10 +47,6 @@ def build_spec(payload, directory, view_links=None):
         dict(label=Path(name).stem, href=os.path.relpath(Path(path).resolve(), target))
         for name, path in (view_links or {}).items() if name != DEFAULT_VIEW
     ]
-    for aggregate in payload["workload"].get("stress_aggregates", []):
-        if aggregate["status"] == "GENERATED":
-            items.append(dict(label="Environment " + aggregate["env_epoch"],
-                              href=os.path.relpath(aggregate["report"], target)))
     if items:
         sections.append(links("其他报告视角", items))
     return dict(

@@ -286,8 +286,6 @@ class WorkloadPolicy:
             # A valid execution is not proof that a calibrated performance band passed.
             performance_verdict="NOT_EVALUATED",
         )
-        # Log-derived legacy aggregates are no longer automatic, nor report curves.
-        result["workload"]["stress_aggregates"] = []
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"
         analysis = analyze_report(ctx.artifact_dir, result, payload)

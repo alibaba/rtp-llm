@@ -48,13 +48,6 @@ class StageOutput:
 
 
 @dataclass(frozen=True)
-class CheckHandler:
-    name: str
-    validate: Callable  # (params, plan) -> normalized params
-    evaluate: Callable  # (ctx, params, deadline) -> CheckResult
-
-
-@dataclass(frozen=True)
 class ResourceHandle:
     kind: str
     id: str

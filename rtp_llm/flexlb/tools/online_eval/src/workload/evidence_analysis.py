@@ -1,6 +1,5 @@
 """Audit evidence and derive workload statistics before report generation."""
 
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -192,47 +191,6 @@ def collection_gaps(directory, anchor, max_gap_s):
     return gaps
 
 
-def mature_series(aggregates, workload_epoch_s):
-    """Reuse the exact derived curves rendered by the mature stress report."""
-    series, sources, issues = {}, {}, []
-    for entry in aggregates:
-        if entry["status"] != "GENERATED":
-            continue
-        path = Path(entry["path"])
-        try:
-            aggregate = json.loads(path.read_text())
-            rows = [
-                json.loads(line)
-                for line in (path.parent / "client_events.jsonl")
-                .read_text()
-                .splitlines()
-                if line.strip()
-            ]
-            times = [
-                r["send_start_epoch_ms"] for r in rows if r.get("send_start_epoch_ms")
-            ]
-            if not times:
-                raise ValueError("mature statistics lack their request time origin")
-            offset = min(times) / 1000 - workload_epoch_s
-            for row in aggregate.get("per_second", []):
-                for metric, value in row.items():
-                    if metric == "t" or (
-                        value is not None and type(value) not in (int, float)
-                    ):
-                        continue
-                    key = f"statistics/{entry['env_epoch']}/per_second/{metric}"
-                    series.setdefault(key, []).append([offset + row["t"], value])
-                    sources[key] = dict(
-                        path=str(path),
-                        field="per_second." + metric,
-                        time_basis="request send second",
-                        window_statistic="mean of per-second derived values; not a pooled percentile",
-                    )
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            issues.append(dict(path=str(path), error=str(exc)))
-    return series, sources, issues
-
-
 def analyze_report(directory, result, evidence):
     directory = Path(directory)
     from monitoring.session import archived_series
@@ -320,18 +278,7 @@ def analyze_report(directory, result, evidence):
         phases=evidence["phases"],
         series=series,
         statistic_sources=statistic_sources,
-        request_sources=[
-            dict(
-                path=str(Path(a["path"]).parent / "client_events.jsonl"),
-                sha256=hashlib.sha256(
-                    (Path(a["path"]).parent / "client_events.jsonl").read_bytes()
-                ).hexdigest(),
-                env_epoch=a["env_epoch"],
-            )
-            for a in result["workload"].get("stress_aggregates", [])
-            if a["status"] == "GENERATED"
-            and (Path(a["path"]).parent / "client_events.jsonl").is_file()
-        ],
+        request_sources=[],
         configuration_sha256=result.get("implementation", {}).get(
             "configuration_sha256"
         ),
