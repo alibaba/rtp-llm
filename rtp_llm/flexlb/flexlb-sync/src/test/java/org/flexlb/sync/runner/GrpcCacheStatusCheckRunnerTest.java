@@ -45,6 +45,15 @@ class GrpcCacheStatusCheckRunnerTest {
         WorkerDirectory directory = directory(status);
         java.util.concurrent.CountDownLatch updating = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean cleanupHeldCacheLock =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean cleanupHeldStatusLock =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        Mockito.doAnswer(call -> {
+            cleanupHeldCacheLock.set(status.cacheMutationLock.isHeldByCurrentThread());
+            cleanupHeldStatusLock.set(status.lock.isHeldByCurrentThread());
+            return null;
+        }).when(localKvCacheAwareManager).removeEngineBlockCache(status.getIpPort());
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(
@@ -83,6 +92,10 @@ class GrpcCacheStatusCheckRunnerTest {
             update.get(2, java.util.concurrent.TimeUnit.SECONDS);
             retiring.get(2, java.util.concurrent.TimeUnit.SECONDS);
             verify(localKvCacheAwareManager).removeEngineBlockCache(status.getIpPort());
+            org.junit.jupiter.api.Assertions.assertTrue(cleanupHeldCacheLock.get(),
+                    "detached-key cleanup must serialize with the old cache writer");
+            org.junit.jupiter.api.Assertions.assertFalse(cleanupHeldStatusLock.get(),
+                    "index cleanup must not hold the health/lifecycle lock");
             org.junit.jupiter.api.Assertions.assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
             org.junit.jupiter.api.Assertions.assertEquals(-1L, status.getCacheIndexedVersion(),
                     "retiring callback cannot commit its index version");
