@@ -30,3 +30,24 @@ def mhc_fp32(enabled):
             yield
     finally:
         torch.set_float32_matmul_precision(previous)
+
+
+def reference_mhc_post(owner, x, residual, post, comb):
+    """Released explicit FP32 post equation, with native residual writeback."""
+    mixed = (comb.float().unsqueeze(-1) * residual.float().unsqueeze(-2)).sum(dim=-3)
+    result = post.float() * x.float().unsqueeze(-2) + mixed
+    residual.copy_(result.to(residual.dtype))
+    return residual
+
+
+@contextmanager
+def mhc_post_reference(enabled):
+    if not enabled:
+        yield
+        return
+    if torch.cuda.get_device_capability() != (12, 0):
+        raise ValueError("mHC post diagnostic is qualified only on SM120")
+    from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
+
+    with patch.object(DelayedHCUnit, "_post_impl", reference_mhc_post):
+        yield
