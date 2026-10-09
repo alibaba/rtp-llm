@@ -59,15 +59,6 @@ build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 build:cuda12 --config=cuda
 build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
 build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
-build:sm7x --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5"
-build:sm7x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5"
-build:sm8x --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
-build:sm8x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
-build:sm9x --action_env TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
-build:sm12x --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
-build:sm12x --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true
@@ -101,11 +92,9 @@ build:cuda12_9_base --copt="-DENABLE_FP4=1"
 build:cuda12_9 --config=cuda12_9_base
 build:cuda12_9 --define=using_cuda12_9_x86=true
 
-# cuda12_9_arm: kept from main — the internal CI's build-gpu_cuda12_arm job
-# still builds with this config (the DSv4 ARM path moved to cuda13_arm below,
-# but this merge keeps main's pipeline yaml and therefore main's config).
+# cuda12_9_arm: retained compatibility config; no CI job builds it
+# (cuda12_build uses cuda12_9 x86 only).
 build:cuda12_9_arm --config=cuda12_9_base
-build:cuda12_9_arm --config=sm10x
 build:cuda12_9_arm --copt=-Wno-tautological-compare
 build:cuda12_9_arm --copt=-Wno-array-bounds
 build:cuda12_9_arm --copt=-Wno-unused-result
@@ -138,7 +127,6 @@ build:cuda13_base --copt="-DENABLE_FP4=1"
 # GB200 (SM100_ARM_CU13, sm_100); the sm_103 code path is compiled ahead of
 # a matching GB300 pool.
 build:cuda13_arm --config=cuda13_base
-build:cuda13_arm --config=sm10x
 build:cuda13_arm --cpu=aarch64
 build:cuda13_arm --host_cpu=aarch64
 build:cuda13_arm --copt=-Wno-tautological-compare

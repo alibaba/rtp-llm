@@ -36,7 +36,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     # CPU-only logic, but normal_engine links libtorch_cuda, so the loader needs a
-    # CUDA host. Any generic CUDA worker suffices (default gpu=gpu_cuda12) — no H20.
+    # CUDA host. Any generic CUDA worker suffices (default gpu=L20D_DEV; pinned A10_CU13) — no H20.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
