@@ -99,6 +99,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
     compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
     compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
+    shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
     paired = (
         compare_tp8
         or compare_mhc
@@ -153,6 +154,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     post_trace_requests = {}
     post_request_prompts = {}
     try:
+        if shared_eos_trace and (
+            paired
+            or precision != "baseline"
+            or new_tokens < 4
+            or not os.environ.get("DSV41_TEST_TRACE_DIR")
+        ):
+            raise ValueError(
+                "Shared-EOS tracing requires baseline decode, a trace directory and no comparison profiles"
+            )
         if paired and precision != "baseline":
             raise ValueError("Paired comparison requires unpatched production math")
         if compare_sparse and not (compare_tp8 and compare_mhc and compare_recipe):
@@ -266,7 +276,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 prompt_index = 0
                 trace_step = trace_steps[profile]
                 post_metadata = {}
-                if post:
+                if post or shared_eos_trace:
                     tracing = False
                     if trace_directory and rank == 0 and request.input_ids.numel():
                         attn = next(iter(request.attention_inputs.values()))
@@ -286,12 +296,21 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         trace_request = post_trace_requests.setdefault(
                             (profile, prompt_index), request_id
                         )
-                        tracing = trace_step < 3 and request_id == trace_request
+                        limit = 4 if shared_eos_trace else 3
+                        tracing = trace_step < limit and request_id == trace_request
                         post_metadata = {
-                            "mhc_post_reference": True,
                             "prompt_index": prompt_index,
                             "prompt_token_ids": prompts[prompt_index],
                             "consumed_token_ids": consumed,
+                            **(
+                                {
+                                    "shared_eos_diagnostic": True,
+                                    "engram_token_windows": request.engram_token_windows.tolist(),
+                                    "sequence_lengths": attn.sequence_lengths.tolist(),
+                                }
+                                if shared_eos_trace
+                                else {"mhc_post_reference": True}
+                            ),
                         }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
@@ -354,7 +373,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             ),
                         },
                     )
-                    if post:
+                    if post or shared_eos_trace:
                         post_trace_steps[profile, prompt_index] = trace_step + 1
                     else:
                         trace_steps[profile] += 1
@@ -466,14 +485,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                     dist.barrier(group=control)
                 if (
-                    compare_post
+                    (compare_post or shared_eos_trace)
                     and rank == 0
                     and os.environ.get("DSV41_TEST_TRACE_DIR")
                 ):
                     expected_traces = {
-                        (profile, prompt): min(3, new_tokens)
+                        (profile, prompt): min(4 if shared_eos_trace else 3, new_tokens)
                         for profile in profiles
-                        if profile.endswith("_mhc_post_reference")
+                        if shared_eos_trace or profile.endswith("_mhc_post_reference")
                         for prompt in range(len(prompts))
                     }
                     assert post_trace_steps == expected_traces, post_trace_steps
