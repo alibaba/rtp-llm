@@ -22,6 +22,9 @@ public:
                      const std::string&             tree_decode_config,
                      kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
+    // Call after request workers stop, while the runtime libraries are still loaded.
+    static void shutdown();
+
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                            int32_t                        init_batch_size,

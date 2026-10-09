@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -514,6 +515,12 @@ void RtpLLMOp::stop() {
         if (http_server_) {
             http_server_->stop();
             http_server_.reset();
+        }
+        // The factory owns a process-wide compiler. Release it before Python
+        // finalization can unload the native runtime that its destructor uses.
+        {
+            pybind11::gil_scoped_release release;
+            LogitsProcessorFactory::shutdown();
         }
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #include <gtest/gtest.h>
@@ -17,6 +18,30 @@
 #include <xgrammar/tokenizer_info.h>
 
 namespace rtp_llm {
+
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesCompilerBeforeRuntimeExit) {
+    auto tokenizer = xgrammar::TokenizerInfo(
+        std::vector<std::string>{"a", "b", ""}, xgrammar::VocabType::RAW, 3, std::vector<int32_t>{2});
+    GrammarConfig config;
+    config.num_workers = 2;
+    for (int restart = 0; restart < 2; ++restart) {
+        auto backend = XGrammarBackend::create(tokenizer.SerializeJSON(), config);
+        ASSERT_TRUE(backend);
+        auto matcher = backend->createMatcherFromKey({"regex", "ab"});
+        ASSERT_TRUE(matcher.ok());
+        LogitsProcessorFactory::grammarBackend() = backend;
+        std::weak_ptr<XGrammarBackend> lifetime  = backend;
+        backend.reset();
+        ASSERT_FALSE(lifetime.expired());
+        LogitsProcessorFactory::shutdown();
+        EXPECT_TRUE(lifetime.expired());
+        // Request matchers own their compiled grammar independently of the factory.
+        auto accepted = matcher.value()->acceptToken(0);
+        ASSERT_TRUE(accepted.ok());
+        EXPECT_TRUE(accepted.value());
+        LogitsProcessorFactory::shutdown();
+    }
+}
 
 static_assert(std::is_base_of_v<BaseLogitsProcessor, GrammarLogitsProcessor>);
 namespace {
