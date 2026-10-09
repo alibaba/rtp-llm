@@ -483,31 +483,61 @@ def sparse_paged_gqa_attn(
             if splits > 1
             else output
         )
-        _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
-            q,
-            kv_cache,
-            block_table,
-            kv_lens,
-            selected,
-            partial,
-            *q.stride()[:3],
-            *kv_cache.stride()[:4],
-            *block_table.stride(),
-            *kv_lens.stride(),
-            *selected.stride()[:2],
-            selected_width,
-            int(block_table.shape[1]),
-            cache_blocks,
-            H_Q=q_heads,
-            H_KV=kv_heads,
-            QUERY_LEN=query_len,
-            PAGE_SIZE=page_size,
-            D=head_dim,
-            SCALE=1.0 / float(head_dim) ** 0.5,
-            BLOCK_K=block_k,
-            NUM_SPLITS=splits,
-            BLOCKS_PER_SPLIT=triton.cdiv(selected_width, block_k * splits),
-        )
+        grouped = False
+        if os.environ.get("RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE", "0") == "1":
+            from rtp_llm.models_py.modules.qwen4_exp.grouped_sparse_paged_fmha import (
+                grouped_sparse_paged_split,
+                is_supported,
+            )
+
+            grouped = is_supported(
+                q,
+                kv_cache,
+                block_table,
+                kv_lens,
+                selected,
+                partial,
+                page_size=page_size,
+                splits=splits,
+                block_k=block_k,
+            )
+            if grouped:
+                grouped_sparse_paged_split(
+                    q,
+                    kv_cache,
+                    block_table,
+                    kv_lens,
+                    selected,
+                    partial,
+                    page_size=page_size,
+                    splits=splits,
+                )
+        if not grouped:
+            _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
+                q,
+                kv_cache,
+                block_table,
+                kv_lens,
+                selected,
+                partial,
+                *q.stride()[:3],
+                *kv_cache.stride()[:4],
+                *block_table.stride(),
+                *kv_lens.stride(),
+                *selected.stride()[:2],
+                selected_width,
+                int(block_table.shape[1]),
+                cache_blocks,
+                H_Q=q_heads,
+                H_KV=kv_heads,
+                QUERY_LEN=query_len,
+                PAGE_SIZE=page_size,
+                D=head_dim,
+                SCALE=1.0 / float(head_dim) ** 0.5,
+                BLOCK_K=block_k,
+                NUM_SPLITS=splits,
+                BLOCKS_PER_SPLIT=triton.cdiv(selected_width, block_k * splits),
+            )
         if splits > 1:
             _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
                 partial, output, D=head_dim, NUM_SPLITS=splits
