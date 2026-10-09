@@ -248,8 +248,8 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void fetch_attach_timeout_defaults_to_three_seconds_and_can_be_overridden() {
-        assertEquals(3000, parse("QUEUE", "BATCH", "").getDispatcher().getFetchAttachTimeoutMs());
+    void fetch_attach_timeout_defaults_to_sixty_seconds_and_can_be_overridden() {
+        assertEquals(60000, parse("QUEUE", "BATCH", "").getDispatcher().getFetchAttachTimeoutMs());
         for (int timeoutMs : new int[]{1, 5000, Integer.MAX_VALUE}) {
             FlexlbConfig config = parse("QUEUE", "BATCH", ",\"fetchAttachTimeoutMs\":" + timeoutMs);
             assertEquals(timeoutMs, config.getDispatcher().getFetchAttachTimeoutMs());

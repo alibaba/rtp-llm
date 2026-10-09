@@ -47,4 +47,11 @@ class RequestTest {
 
         assertFalse(request.toString().contains("secret-api-key"));
     }
+
+    @Test
+    void should_use_default_timeout_when_payload_omits_generate_timeout() throws Exception {
+        Request request = objectMapper.readValue("{\"request_id\":123}", Request.class);
+
+        assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS, request.getGenerateTimeout());
+    }
 }

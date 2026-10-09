@@ -64,6 +64,8 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    // Select a ViT worker without enqueueing or consuming generation permits.
+    bool vit_only = 16;
 }
 
 message FlexlbServerStatusPB {

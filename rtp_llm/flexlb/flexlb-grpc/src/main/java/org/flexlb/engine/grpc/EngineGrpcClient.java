@@ -298,7 +298,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
                 // Maximum message size limit (8MB)
-                .maxInboundMessageSize(8 * 1024 * 1024)
+                .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // gRPC keepalive configuration: keeps connection active, prevents disconnection by intermediate devices
