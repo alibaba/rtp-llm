@@ -957,6 +957,7 @@ async def iter_real_model_stream_infer(
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
+    log_input_output = other.log_input_output
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,
@@ -1050,7 +1051,11 @@ async def iter_real_model_stream_infer(
             ),
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
-        logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
+        logging.debug(
+            "[DashScGrpc] [%s] generate_input: %s",
+            tag,
+            generate_input if log_input_output else None,
+        )
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         phase2_needed = False
@@ -1156,6 +1161,7 @@ async def iter_real_model_stream_infer(
                         # zero-valued alignment placeholders; reasoning
                         # probabilities are not exposed downstream.
                         echo_response = build_stream_response_from_generate_outputs(
+                            log_input_output=log_input_output,
                             dash_sc_request_id=request.id,
                             model_name=request.model_name,
                             go=go,
@@ -1192,6 +1198,7 @@ async def iter_real_model_stream_infer(
                         echoed = True
                         echo_was_split = True
                     response = build_stream_response_from_generate_outputs(
+                        log_input_output=log_input_output,
                         dash_sc_request_id=request.id,
                         model_name=request.model_name,
                         go=go,
@@ -1236,6 +1243,7 @@ async def iter_real_model_stream_infer(
                 # Yield </think> close tokens
                 if runtime.eos_tokens:
                     eos_response = build_stream_response_from_generate_outputs(
+                        log_input_output=log_input_output,
                         dash_sc_request_id=request.id,
                         model_name=request.model_name,
                         go=go,
@@ -1302,6 +1310,7 @@ async def iter_real_model_stream_infer(
                 and bool(getattr(generate_config, "return_logprobs", False))
             ):
                 echo_response = build_stream_response_from_generate_outputs(
+                    log_input_output=log_input_output,
                     dash_sc_request_id=request.id,
                     model_name=request.model_name,
                     go=go,
@@ -1359,6 +1368,7 @@ async def iter_real_model_stream_infer(
                     logprob_phase = "thinking"
                     logprob_pre_content_token_count = len(generated_ids)
             response = build_stream_response_from_generate_outputs(
+                log_input_output=log_input_output,
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
                 go=go,
@@ -1494,7 +1504,7 @@ async def iter_real_model_stream_infer(
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
                 phase2_tag,
-                phase2_generate_input,
+                phase2_generate_input if log_input_output else None,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
             phase2_cumulative_sent_ids: list[int] = []
@@ -1543,6 +1553,7 @@ async def iter_real_model_stream_infer(
                     # model_rpc_client copies the final submitted role_addrs here.
                     access_agg.record_role_addrs(aux_info.role_addrs, phase="phase2")
                 response = build_stream_response_from_generate_outputs(
+                    log_input_output=log_input_output,
                     dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                     model_name=request.model_name,
                     go=resp_go,
@@ -2000,7 +2011,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
                 try:
                     input_ids_list, sampling, other = parse_dash_sc_grpc_request(
-                        request
+                        request, invocation_metadata=invocation_metadata or ()
                     )
                 except DashScParameterError as e:
                     if first_request:
@@ -2041,6 +2052,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     )
                     yield resp
                     return
+                record.log_input_output = other.log_input_output
                 if first_request:
                     # Hand the record the payload we just parsed so it does not
                     # decode the same request proto again (the input_ids tensor

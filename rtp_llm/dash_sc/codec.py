@@ -13,9 +13,10 @@ import json
 import logging
 import os
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
+from itertools import chain
 from typing import Any, NamedTuple
 
 import torch
@@ -40,6 +41,22 @@ def _pack_eos_for_empty_generated_ids() -> bool:
         os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
         in _TRUE_ENV_VALUES
     )
+
+
+_LOGGING_CONSENT_HEADERS = {
+    "x-dashscope-loggingconsent",
+    "x-dashscope-inner-loggingconsent",
+}
+
+
+def is_logging_consent_allowed(headers: Iterable[tuple[object, object]]) -> bool:
+    """Allow absent consent or 'all', ignoring case without trimming values."""
+    for key, value in headers:
+        if value is None or str(key).lower() not in _LOGGING_CONSENT_HEADERS:
+            continue
+        if not isinstance(value, str) or value.lower() != "all":
+            return False
+    return True
 
 
 class LLMFinishReason(IntEnum):
@@ -862,6 +879,7 @@ class OtherParams:
     reasoning_effort: str | None = None
     debug: bool = False
     request_headers: dict[str, str] = field(default_factory=dict)
+    log_input_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -1118,7 +1136,12 @@ def parse_sampling_params(
     )
 
 
-def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> OtherParams:
+def parse_other_params(
+    request,
+    ds_attrs: dict[str, Any] | None = None,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
+) -> OtherParams:
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
@@ -1206,11 +1229,16 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         reasoning_effort=reasoning_effort,
         debug=bool(debug),
         request_headers=request_headers,
+        log_input_output=is_logging_consent_allowed(
+            chain(ds_attrs.items(), invocation_metadata)
+        ),
     )
 
 
 def parse_dash_sc_grpc_request(
     request,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
 ) -> tuple[list[int] | None, SamplingParams | None, OtherParams | None]:
     """Parse one ``ModelInferRequest``: ``input_ids``, sampling tensors, ``other`` params."""
     ids = parse_input_ids_from_request(request)
@@ -1220,7 +1248,7 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_other_params(request, ds_attrs),
+        parse_other_params(request, ds_attrs, invocation_metadata=invocation_metadata),
     )
 
 
@@ -2096,6 +2124,7 @@ def build_stream_response_from_generate_outputs(
     logprob_phase: str = "unspecified",
     logprob_pre_content_token_count: int | None = None,
     debug: bool = False,
+    log_input_output: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -2211,7 +2240,11 @@ def build_stream_response_from_generate_outputs(
         finished=bool(finished),
     )
 
-    logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
+    logging.debug(
+        "[DashScGrpc] [%s] generated_ids: %s",
+        request_log_tag,
+        generated_ids if log_input_output else None,
+    )
     logging.debug(
         "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
         request_log_tag,
