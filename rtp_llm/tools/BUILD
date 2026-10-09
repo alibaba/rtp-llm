@@ -51,6 +51,13 @@ py_library(
     deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
 )
 
+py_library(
+    name = "dsv41_ffn_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
+)
+
 py_binary(
     name = "checkpoint_inventory",
     srcs = ["checkpoint_inventory.py"],
