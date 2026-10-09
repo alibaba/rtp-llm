@@ -58,11 +58,11 @@ cc_library(
     name = "ppu_bindings_register",
     srcs = [
         "RegisterPpuOps.cc",
-        "//rtp_llm/models_py/bindings/core:exec_ops_srcs",
     ],
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
         "//rtp_llm/models_py/bindings/cuda:cuda_bindings_base",
         "//rtp_llm/models_py/bindings/cuda:cuda_attn_bindings_base",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
