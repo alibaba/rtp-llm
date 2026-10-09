@@ -98,9 +98,9 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
-        setup_cuda_device_and_accl_env(local_rank)
         prepare_expandable_coexistence()
         limit_init_segment_splitting()
+        setup_cuda_device_and_accl_env(local_rank)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
