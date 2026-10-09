@@ -1181,15 +1181,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"25°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"40%\",\n    \"wind\": \"西北风3级\",\n    \"air_quality\": \"良\",\n    \"updated_at\": \"2025-04-11 10:00:00\"\n  }\n}"
+                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\"}"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 98,
-                    "completion_tokens": 80
+                    "total_tokens": 56,
+                    "completion_tokens": 38
                 }
             },
             "compare_config": {
@@ -1202,16 +1202,14 @@
                     "weather": "晴",
                     "temperature": "15°C",
                     "humidity": "30%",
-                    "wind": "北风3级",
-                    "update_time": "2025-04-05 14:00"
+                    "wind": "北风3级"
                 },
                 "required_json_keys": [
                     "city",
                     "weather",
                     "temperature",
                     "humidity",
-                    "wind",
-                    "update_time"
+                    "wind"
                 ]
             }
         },
@@ -1254,15 +1252,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"25°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"40%\",\n    \"wind\": \"西北风3级\",\n    \"air_quality\": \"良\",\n    \"updated_at\": \"2025-04-08 14:00\"\n  }\n}"
+                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\", \"update_time\": \"2025-04-05 14:00\"}"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 99,
-                    "completion_tokens": 78
+                    "total_tokens": 75,
+                    "completion_tokens": 54
                 }
             },
             "compare_config": {
@@ -1271,18 +1269,20 @@
                 "json_content": true,
                 "json_object": true,
                 "expected_json": {
-                    "location": "北京",
-                    "weather": {
-                        "temperature": "15°C",
-                        "condition": "多云",
-                        "humidity": "45%",
-                        "wind": "北风 3级",
-                        "update_time": "2025-04-05 14:00"
-                    }
+                    "city": "北京",
+                    "weather": "晴",
+                    "temperature": "15°C",
+                    "humidity": "30%",
+                    "wind": "北风3级",
+                    "update_time": "2025-04-05 14:00"
                 },
                 "required_json_keys": [
-                    "location",
-                    "weather"
+                    "city",
+                    "weather",
+                    "temperature",
+                    "humidity",
+                    "wind",
+                    "update_time"
                 ]
             }
         },
@@ -1327,16 +1327,16 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "{\n  \"city\": \"北京\",\n  \"weather\": \"晴\",\n  \"temperature\": 25,\n  \"humidity\": 40,\n  \"wind\": \"西北风3级\",\n  \"updated\": \"2025-04-01 10:00\"\n}",
-                            "reasoning_content": "我们根据用户要求，查询北京天气并以JSON"
+                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"22°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\"\n  },\n  \"note\": \"此为模拟数据，实际天气请查询官方气象服务\"\n}",
+                            "reasoning_content": "我们被要求查询北京的天气，并以JSON格式"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 90,
-                    "completion_tokens": 69
+                    "total_tokens": 105,
+                    "completion_tokens": 84
                 }
             },
             "compare_config": {
@@ -1347,8 +1347,8 @@
                 "expected_json": {
                     "location": "北京",
                     "weather": {
-                        "temperature": "15°C",
-                        "condition": "多云",
+                        "temperature": "22°C",
+                        "condition": "晴",
                         "humidity": "45%",
                         "wind": "北风 3级"
                     },
@@ -1432,15 +1432,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"advice\": \"今天天气晴朗，适合户外活动，但紫外线较强，建议涂抹防晒霜。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-04-11\",\n  \"weather\": \"晴转多云，午后有短时阵雨，气温18~28℃，西南风3-4级，空气质量良。\"\n}"
+                            "content": "{\"advice\": \"天气较冷，建议穿着厚外套、毛衣等保暖衣物。\", \"city\": \"北京\", \"date\": \"2025-04-18\", \"weather\": \"多云转晴，气温10℃~20℃，北风3-4级\"}"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 97,
-                    "completion_tokens": 79
+                    "total_tokens": 78,
+                    "completion_tokens": 60
                 }
             },
             "compare_config": {
@@ -1455,10 +1455,10 @@
                     "weather"
                 ],
                 "expected_json": {
-                    "advice": "天气寒冷，建议穿羽绒服、毛衣、保暖裤等厚实衣物，注意防寒保暖。",
+                    "advice": "天气较冷，建议穿着厚外套、毛衣等保暖衣物。",
                     "city": "北京",
-                    "date": "2025-04-09",
-                    "weather": "晴转多云，气温-2℃~10℃，北风3-4级，空气质量良。"
+                    "date": "2025-04-18",
+                    "weather": "多云转晴，气温10℃~20℃，北风3-4级"
                 }
             }
         },
@@ -1533,15 +1533,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"advice\": \"天气寒冷，建议穿厚外套、毛衣等保暖衣物。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-01-18\",\n  \"weather\": \"晴转多云，微风，气温 -4℃ ~ 5℃。\"\n}"
+                            "content": "{\"advice\": \"北京当前天气晴朗，气温25°C，湿度40%，北风3级。\", \"city\": \"北京\", \"date\": \"2025-04-05\", \"weather\": \"晴\"}"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 86,
-                    "completion_tokens": 65
+                    "total_tokens": 70,
+                    "completion_tokens": 49
                 }
             },
             "compare_config": {
@@ -1556,10 +1556,10 @@
                     "weather"
                 ],
                 "expected_json": {
-                    "advice": "当前北京天气晴朗，气温适中，建议外出时注意防晒。",
+                    "advice": "北京当前天气晴朗，气温25°C，湿度40%，北风3级。",
                     "city": "北京",
-                    "date": "2025-04-09",
-                    "weather": "晴转多云，气温15°C~25°C，西南风2-3级，空气质量良（AQI 85）"
+                    "date": "2025-04-05",
+                    "weather": "晴"
                 }
             }
         },

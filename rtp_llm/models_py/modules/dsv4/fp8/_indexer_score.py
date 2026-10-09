@@ -25,21 +25,9 @@ Caller is responsible for FP8 quantizing Q via
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import torch
-
-# DeepGEMM JIT writes ``kernel.cu`` under ``$HOME/.deep_gemm/tmp/<id>/``
-# and shells out to NVCC; if ``HOME`` is unset (bazel test sandbox does
-# not propagate it by default) ``os.path.expanduser("~")`` returns ``~``
-# unchanged and DeepGEMM falls back to the relative path
-# ``.deep_gemm/tmp/<id>/``.  NVCC's child cc1plus then runs in a
-# different CWD and reports ``fatal error: .deep_gemm/tmp/.../kernel.cu:
-# No such file or directory``.  Pin a writable absolute fallback before
-# DeepGEMM is imported so the JIT cache lands at ``/tmp/.deep_gemm/``.
-# ``setdefault`` is a no-op in production (real user HOME is set).
-os.environ.setdefault("HOME", "/tmp")
 
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
@@ -49,22 +37,45 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 try:
     import deep_gemm as _deep_gemm
 
+    # DeepGEMM 2.8 renamed the group-128 MQA logits entry points to the
+    # fp8_fp4_* family and switched q to a (tensor, sf|None) tuple.
     _HAS_DEEP_GEMM = hasattr(_deep_gemm, "fp8_paged_mqa_logits") and hasattr(
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
     _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    # DeepGEMM 2.8.1 tightens the SM100 logits contracts: paged MQA requires
+    # varlen indices and non-paged MQA requires per-element MX q scale
+    # factors, so the group-128 legacy calls (q without SF) are rejected on
+    # SM100 there and must fall back to the Triton kernel. 2.8.0 still
+    # accepts them, and the legacy entry points exist in both versions.
+    import re as _re
+
+    _match = _re.match(r"(\d+)\.(\d+)\.(\d+)", getattr(_deep_gemm, "__version__", ""))
+    _DEEP_GEMM_SM100_LEGACY_OK = bool(_match) and tuple(
+        int(x) for x in _match.groups()
+    ) < (2, 8, 1)
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
+    _DEEP_GEMM_SM100_LEGACY_OK = False
+
+
+def _sm100_needs_triton_fallback(device) -> bool:
+    """Whether this wheel rejects the group-128 legacy logits calls on SM100."""
+    return (
+        torch.cuda.get_device_capability(device)[0] == 10
+        and not _DEEP_GEMM_SM100_LEGACY_OK
+    )
 
 
 def has_fp8_paged_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM
+    # Group-128 compatibility kernel is available independently of DeepGEMM MX APIs.
+    return True
 
 
 def has_fp8_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM_MQA
+    return True
 
 
 _sched_cache: Optional[torch.Tensor] = None
@@ -95,7 +106,6 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
-    assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
     assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
@@ -113,6 +123,14 @@ def fp8_paged_indexer_score(
     num_blocks = total_slots // block_size
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
+    if not _HAS_DEEP_GEMM or _sm100_needs_triton_fallback(q_fp8.device):
+        from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+            legacy_fp8_paged_mqa_logits,
+        )
+
+        return legacy_fp8_paged_mqa_logits(
+            q_fp8, kv_4d, w_fold, context_lens, block_table, max_ctx_len
+        )
     num_sms = _get_num_sms(q_fp8.device)
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms
@@ -166,7 +184,6 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    assert _HAS_DEEP_GEMM_MQA, "deep_gemm.fp8_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
     assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
@@ -179,6 +196,21 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ke.dtype == torch.int32 and cu_seqlen_ke.dim() == 1
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
+
+    if not _HAS_DEEP_GEMM_MQA or _sm100_needs_triton_fallback(q_fp8.device):
+        from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+            legacy_fp8_mqa_logits,
+        )
+
+        return legacy_fp8_mqa_logits(
+            q_fp8,
+            (k_quant, k_scale),
+            w_fold,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            clean_logits=clean_logits,
+            max_seqlen_k=max_seqlen_k,
+        )
 
     return _deep_gemm.fp8_mqa_logits(
         q_fp8.contiguous(),

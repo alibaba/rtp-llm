@@ -285,7 +285,9 @@ def get_or_build_sched_meta(
     inside the graph so it re-runs (with fresh ``topk_length`` values) on every
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+    from rtp_llm.models_py.utils.flash_mla_legacy import (
+        get_mla_metadata,  # type: ignore[import-not-found]
+    )
 
     capturing = False
     try:
@@ -366,9 +368,7 @@ def _resolve_paged_pool_tokens_per_block(
         raise ValueError("paged_pool_tokens_per_block is required for paged pools")
     for tag in entries_by_pool:
         if tag not in tokens_by_pool:
-            raise ValueError(
-                "paged_pool_tokens_per_block missing tag=%s" % (tag,)
-            )
+            raise ValueError("paged_pool_tokens_per_block missing tag=%s" % (tag,))
         tokens_per_block = int(tokens_by_pool[tag])
         if tokens_per_block <= 0:
             raise ValueError(
@@ -1121,10 +1121,10 @@ def update_decode_metadata_in_place_fp8(
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
     # at allocate time and stays stable.
     if paged_block_tables and paged_pool_entries_per_block:
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
         )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
 
         T = bs * q_len
         req_id_bs = (
@@ -1380,14 +1380,14 @@ def build_decode_metadata_fp8(
     swa_global_slots: Optional[torch.Tensor] = None
     hca_cmp_global_slots: Optional[torch.Tensor] = None
     if paged_block_tables and paged_pool_entries_per_block:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,
             SWA_KV,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-            compute_kv_pool_slot_mapping,
         )
 
         # Snapshot block tables (clone so downstream writes can't surprise
@@ -1454,11 +1454,11 @@ def build_decode_metadata_fp8(
         torch.full_like(candidate, -1),
     )
     if paged_block_tables and paged_pool_entries_per_block:
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             build_req_id_per_token,
             translate_local_to_global_slots,
         )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
 
         req_id_per_token = build_req_id_per_token(int(B), q_len, device)
         req_id_per_token_long = req_id_per_token.to(torch.long)
