@@ -78,5 +78,6 @@ py_test(
     name = "load_embedding_weight_test",
     srcs = ["load_embedding_weight_test.py"],
     deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
