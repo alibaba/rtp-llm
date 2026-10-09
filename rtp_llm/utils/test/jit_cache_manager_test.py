@@ -35,6 +35,11 @@ def _fake_probes(hip=None, arch="sm_90", pkg="1_0", toolkit="nvcc-test"):
     }
     for name, value in probes.items():
         stack.enter_context(mock.patch.object(jit, name, return_value=value))
+    stack.enter_context(
+        mock.patch.object(
+            jit, "deep_gemm_build_scope", return_value="deepjit-test-record"
+        )
+    )
     resolver = pkg if callable(pkg) else lambda _name: pkg
     stack.enter_context(
         mock.patch.object(jit.importlib.metadata, "version", side_effect=resolver)
