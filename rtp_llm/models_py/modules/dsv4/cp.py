@@ -122,6 +122,10 @@ class CPContext:
     # straight to the local pool. Plumbed from
     # ``parallelism_config.prefill_cp_config.kv_cache_sharded``.
     kv_cache_sharded: bool = False
+    # CPU mirrors carried from framework metadata. Buffer sizes and scalar
+    # gates should use these instead of synchronizing CUDA length tensors.
+    input_lengths_global_host: Optional[Tuple[int, ...]] = None
+    prefix_lengths_host: Optional[Tuple[int, ...]] = None
     # Set only by the validated per-forward builder under the default-off flag.
     compact_geometry_verified: bool = False
 
@@ -596,6 +600,10 @@ def build_cp_context(
         unpad_restore_is_prefix=unpad_restore_is_prefix,
         chunk_lengths_per_req=tuple(chunk_lengths),
         kv_cache_sharded=bool(kv_cache_sharded),
+        input_lengths_global_host=(
+            tuple(input_lengths_host) if input_lengths_host is not None else None
+        ),
+        prefix_lengths_host=tuple(int(p) for p in prefix_lengths_cpu.tolist()),
     )
     if os.environ.get("DSV4_CP_COMPACT_COMPRESSOR", "0") == "1":
         from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (

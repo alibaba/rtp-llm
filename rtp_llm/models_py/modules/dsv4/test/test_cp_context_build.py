@@ -180,6 +180,8 @@ def test_cp1_noop_collapses_to_local() -> None:
     assert torch.equal(ctx.relative_positions, torch.arange(seq_len, dtype=torch.long))
     assert torch.equal(ctx.global_positions, ctx.relative_positions)
     assert ctx.local_is_real.all()
+    assert ctx.input_lengths_global_host is None
+    assert ctx.prefix_lengths_host == (0,)
     assert torch.equal(ctx.unpad_restore, torch.arange(seq_len, dtype=torch.long))
 
 
@@ -270,14 +272,20 @@ def test_cp2_gather_last_by_request_handles_split_owners() -> None:
     cp_info = _CpInfo(
         padding_mask,
         restore_indice,
-        prefill_actual_input_lengths_cpu=torch.tensor(actual_lengths, dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor(
+            actual_lengths, dtype=torch.int32
+        ),
         prefill_cp_chunk_lengths=torch.tensor(chunk_lengths, dtype=torch.int32),
     )
 
     ctx0 = build_cp_context(cp_info, cp_size, 0, chunk_length, torch.device("cpu"))
     ctx1 = build_cp_context(cp_info, cp_size, 1, chunk_length, torch.device("cpu"))
-    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(chunk_length, 2)
-    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(chunk_length, 2)
+    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(
+        chunk_length, 2
+    )
+    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(
+        chunk_length, 2
+    )
 
     rank0_last = torch.zeros(2, 2)
     rank0_last[1] = local0[6]
@@ -530,6 +538,12 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
     )
     assert torch.equal(seq_start, torch.tensor([10, 100], dtype=torch.long))
     assert torch.equal(cu_seq, torch.tensor([0, 8, 22], dtype=torch.long))
+    assert ctx.input_lengths_global_host == (8, 14)
+    assert ctx.prefix_lengths_host == (10, 100)
+    actual.fill_(99)
+    prefixes.fill_(99)
+    assert ctx.input_lengths_global_host == (8, 14)
+    assert ctx.prefix_lengths_host == (10, 100)
 
 
 if __name__ == "__main__":

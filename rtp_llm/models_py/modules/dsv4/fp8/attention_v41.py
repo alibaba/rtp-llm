@@ -2373,10 +2373,8 @@ class AttentionV41FP8(AttentionFP8):
 
     def _require_qualified_prefill(self, input_lengths, prefix_lengths, *, cp_on):
         # Widen this admission only with owner-level cache and numerical tests.
-        if cp_on or self.tp_size != 1:
-            raise NotImplementedError(
-                "V4.1 CP/TP attention execution is not integrated"
-            )
+        if self.tp_size != 1:
+            raise NotImplementedError("V4.1 TP attention execution is not integrated")
         if torch.cuda.is_current_stream_capturing():
             raise NotImplementedError("V4.1 attention owner graphs are not integrated")
         if (
@@ -2394,7 +2392,12 @@ class AttentionV41FP8(AttentionFP8):
             raise ValueError(
                 "V4.1 prefill requires nonempty requests and valid prefixes"
             )
-        ends = prefix_lengths.long() + input_lengths.long()
+        lengths = (
+            self._require_qualified_cp_prefill(input_lengths, prefix_lengths)
+            if cp_on
+            else input_lengths
+        )
+        ends = prefix_lengths.long() + lengths.long()
         if bool((ends > min(512, self._rope_max_seq_len)).any()):
             raise NotImplementedError(
                 "V4.1 attention beyond the qualified two-page context is not integrated"
@@ -2451,6 +2454,75 @@ class AttentionV41FP8(AttentionFP8):
                     raise ValueError(f"Invalid V4.1 {region} block table page")
                 if pages.unique().numel() != pages.numel():
                     raise ValueError(f"Aliased V4.1 {region} block table pages")
+
+    def _require_qualified_cp_prefill(self, input_lengths, prefix_lengths):
+        """Admit short, bound SM120 CP4 against the current stage-local group."""
+        from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+        from rtp_llm.models_py.modules.dsv4.cp import CPContext
+
+        cp = self._cp_ctx
+        if (
+            not isinstance(cp, CPContext)
+            or cp.cp_size != 4
+            or not 0 <= cp.cp_rank < 4
+            or cp.kv_cache_sharded
+            or self._kv_cache is None
+            or not is_sm120(input_lengths.device)
+        ):
+            raise NotImplementedError(
+                "V4.1 CP prefill requires bound unsharded SM120 CP4"
+            )
+        dist = torch.distributed
+        if not dist.is_initialized():
+            raise NotImplementedError("V4.1 CP4 requires its registered TP group")
+        group = _get_group(Group.TP)
+        if (
+            group is None
+            or dist.get_world_size(group) != 4
+            or dist.get_rank(group) != cp.cp_rank
+            or dist.get_backend(group) != "nccl"
+        ):
+            raise NotImplementedError("V4.1 CP4 disagrees with its current TP group")
+        lengths = cp.input_lengths_global
+        if (
+            not isinstance(lengths, torch.Tensor)
+            or lengths.shape != input_lengths.shape
+            or lengths.dtype not in (torch.int32, torch.int64)
+            or lengths.device != input_lengths.device
+            or not lengths.is_contiguous()
+            or bool((lengths <= 0).any())
+            or int(lengths.sum()) != cp.seq_len_full
+            or cp.padded_seq_len != 4 * cp.chunk_length
+            or tuple(input_lengths.tolist()) != cp.chunk_lengths_per_req
+            or int(input_lengths.sum()) != cp.chunk_length
+            or not isinstance(cp.prefix_lengths, torch.Tensor)
+            or not torch.equal(cp.prefix_lengths, prefix_lengths)
+        ):
+            raise ValueError("V4.1 CP4 requires current per-request global metadata")
+        for name, dtype in (
+            ("global_positions", torch.int64),
+            ("relative_positions", torch.int64),
+            ("req_id_per_token", torch.int32),
+            ("local_is_real", torch.bool),
+        ):
+            value = getattr(cp, name)
+            if (
+                not isinstance(value, torch.Tensor)
+                or value.shape != (cp.chunk_length,)
+                or value.device != lengths.device
+                or value.dtype != dtype
+                or not value.is_contiguous()
+            ):
+                raise ValueError(f"Invalid V4.1 CP4 {name}")
+        if (
+            not isinstance(cp.unpad_restore, torch.Tensor)
+            or cp.unpad_restore.shape != (cp.seq_len_full,)
+            or cp.unpad_restore.device != lengths.device
+            or cp.unpad_restore.dtype != torch.int64
+            or not cp.unpad_restore.is_contiguous()
+        ):
+            raise ValueError("Invalid V4.1 CP4 restoration metadata")
+        return lengths
 
     def forward_decode(self, x, attn_metadata, kv_cache=None):
         from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
