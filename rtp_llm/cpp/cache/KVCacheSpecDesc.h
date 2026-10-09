@@ -58,6 +58,12 @@ struct KVCacheSpecDesc {
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
 
+    // Optional per-layer MHA KV geometry overrides for heterogeneous-layer models
+    // (e.g. Gemma4: sliding layers 8 kv-heads x 256, full layers 2 kv-heads x 512).
+    // nullopt falls back to the model-wide attn_config values in SpecBuildContext.
+    std::optional<uint32_t> kv_head_num;
+    std::optional<uint32_t> size_per_head;
+
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 

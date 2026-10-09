@@ -1,7 +1,16 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig, HWKernelConfig, RuntimeConfig
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    CacheGroupType,
+    CacheReusePolicyDesc,
+    GrammarConfig,
+    HWKernelConfig,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+    RuntimeConfig,
+)
 
 
 def _new_grammar_config():
@@ -10,6 +19,31 @@ def _new_grammar_config():
 
 def _new_hw_kernel_config():
     return HWKernelConfig.__new__(HWKernelConfig)
+
+
+def _new_kv_cache_spec_desc():
+    return KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+
+
+
+
+
+
+class _LegacyKVCacheSpecDesc:
+    def __reduce__(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "legacy"
+        desc.cache_type = KVCacheSpecType.MHA
+        desc.entry_elems = 17
+        desc.explicit_entry_count = 23
+        desc.block_stride_alignment_min_entries = 29
+        desc.group_type = CacheGroupType.FULL
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = True
+        desc.reuse = reuse
+        current_state = desc.__getstate__()
+        legacy_state = current_state[:4] + current_state[6:]
+        return _new_kv_cache_spec_desc, (), legacy_state
 
 
 class _LegacyGrammarConfig:
@@ -49,6 +83,57 @@ class _LegacyHWKernelConfig:
             True,
         )
         return _new_hw_kernel_config, (), legacy_state
+
+
+
+
+class KVCacheSpecDescPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "full"
+        desc.cache_type = KVCacheSpecType.MHA
+        desc.kv_head_num = 2
+        desc.size_per_head = 512
+        desc.entry_elems = 31
+        desc.explicit_entry_count = 37
+        desc.block_stride_alignment_min_entries = 41
+        desc.group_type = CacheGroupType.FULL
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = True
+        desc.reuse = reuse
+        capacity = CacheCapacityPolicyDesc()
+        desc.capacity = capacity
+
+        self.assertEqual(len(desc.__getstate__()), 22)
+        restored = pickle.loads(pickle.dumps(desc))
+
+        self.assertEqual(restored.tag, "full")
+        self.assertEqual(restored.cache_type, KVCacheSpecType.MHA)
+        self.assertEqual(restored.kv_head_num, 2)
+        self.assertEqual(restored.size_per_head, 512)
+        self.assertEqual(restored.entry_elems, 31)
+        self.assertEqual(restored.explicit_entry_count, 37)
+        self.assertEqual(restored.block_stride_alignment_min_entries, 41)
+        self.assertEqual(restored.group_type, CacheGroupType.FULL)
+        self.assertTrue(restored.reuse.enable_prefix_reuse)
+
+    def test_legacy_twenty_tuple_is_loaded(self):
+        restored = pickle.loads(pickle.dumps(_LegacyKVCacheSpecDesc()))
+
+        self.assertEqual(restored.tag, "legacy")
+        self.assertEqual(restored.cache_type, KVCacheSpecType.MHA)
+        self.assertIsNone(restored.kv_head_num)
+        self.assertIsNone(restored.size_per_head)
+        self.assertEqual(restored.entry_elems, 17)
+        self.assertEqual(restored.explicit_entry_count, 23)
+        self.assertEqual(restored.block_stride_alignment_min_entries, 29)
+        self.assertEqual(restored.group_type, CacheGroupType.FULL)
+        self.assertTrue(restored.reuse.enable_prefix_reuse)
+
+    def test_unsupported_tuple_size_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "Invalid KVCacheSpecDesc state"):
+            desc = _new_kv_cache_spec_desc()
+            desc.__setstate__(tuple(range(21)))
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
