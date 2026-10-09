@@ -182,6 +182,7 @@ class NativeIndexHostTest(unittest.TestCase):
         workspace.device = torch.device("cpu")
         workspace.pages, workspace.heads = 1, 4
         workspace.compact = False
+        workspace.immutable_tables = False
         workspace.plans = ({"max_k_tiles": 128},)
         workspace.native_score = torch.empty(4 * 128 * 2, dtype=torch.float32)
         workspace.staged = torch.zeros((2, 1, 128, 128), dtype=torch.uint8).view(
@@ -224,6 +225,69 @@ class NativeIndexHostTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 workspace.score(0, q8, offsets, output)
 
+    def test_immutable_compact_ids_reuse_but_layer_keys_refresh(self):
+        chunks = (chunk(rows=2, length=256), chunk(rows=2, length=128, start=2))
+        chunks[0].kv_indices.fill_(1)  # Repeated references share one staged page.
+        chunks[1].kv_indices.fill_(-1)  # Empty valid set maps to the zero sentinel.
+        workspace = op.NativeIndexWorkspace.__new__(op.NativeIndexWorkspace)
+        workspace.chunks = chunks
+        workspace._geometry = tuple(op._chunk_geometry(c) for c in chunks)
+        workspace.device = torch.device("cpu")
+        workspace.pages, workspace.heads, workspace.stage_pages = 2, 4, 2
+        workspace.compact, workspace.immutable_tables = True, True
+        workspace.plans = ({"max_k_tiles": 128},) * 2
+        workspace.native_score = torch.empty(4 * 128 * 2)
+        workspace.staged = torch.zeros((3, 1, 128, 128), dtype=torch.uint8).view(torch.float8_e4m3fn)
+        workspace.safe_tables = tuple(torch.empty_like(c.kv_indices) for c in chunks)
+        workspace.page_map = torch.empty(3, dtype=torch.int32)
+        workspace.page_lists = tuple(torch.empty(c.kv_indices.numel(), dtype=torch.int32) for c in chunks)
+        workspace.page_counts = tuple(torch.empty(1, dtype=torch.int32) for _ in chunks)
+        workspace._staged = True
+        seen_keys = []
+
+        def claim(table, mapping, listing, count, n, pages, b, **kwargs):
+            ids = table[(table >= 0) & (table < pages)].unique()
+            listing[:ids.numel()].copy_(ids)
+            count.fill_(ids.numel())
+            mapping[ids.long()] = torch.arange(ids.numel(), dtype=torch.int32)
+
+        def remap(table, mapping, safe, n, pages, cap, b, **kwargs):
+            safe.copy_(torch.where((table >= 0) & (table < pages), mapping[table.clamp(0, pages).long()], cap))
+
+        def stage(packed, scales, output, listing, count, *args, **kwargs):
+            seen_keys.append((packed[0].item(), listing[:count.item()].tolist()))
+
+        def score(*args, **kwargs):
+            self.assertTrue(torch.isneginf(kwargs["max_score"]).all())
+            return None, kwargs["max_score"]
+
+        workspace._score = score
+        with patch.object(op, "_claim_index_pages", LaunchMock(claim)), patch.object(
+            op, "_remap_index_pages", LaunchMock(remap)
+        ):
+            for index in range(2):
+                workspace._prepare_table(index)
+        tables = tuple(t.clone() for t in workspace.safe_tables)
+        self.assertEqual([t.tolist() for t in tables], [[0, 0], [2]])
+        with patch.object(op, "_stage_compact_index_pages", LaunchMock(stage)), patch.object(
+            op, "_copy_index_scores", LaunchMock(lambda *args, **kwargs: None)
+        ), patch.object(workspace, "_prepare_table", side_effect=AssertionError("cached IDs rebuilt")):
+            for layer in (17, 29):
+                workspace._packed = torch.tensor([layer], dtype=torch.uint8)
+                workspace._scales = torch.tensor([56], dtype=torch.uint8)
+                for index, c in enumerate(chunks):
+                    q = torch.zeros((2, 4, 128), dtype=torch.uint8).view(torch.float8_e4m3fn)
+                    offsets = torch.tensor([0, c.kv_indices.numel()], dtype=torch.int32)
+                    workspace.score(index, q, offsets, torch.empty(4, 2, c.kv_indices.numel()))
+        self.assertEqual(seen_keys, [(17, [1]), (17, []), (29, [1]), (29, [])])
+        self.assertTrue(all(torch.equal(a, b) for a, b in zip(tables, workspace.safe_tables)))
+
+    def test_immutable_compact_budget_counts_each_chunk_list_and_count(self):
+        chunks = (chunk(rows=2048, length=256), chunk(rows=2048, length=128, start=2048))
+        mutable = op.native_index_workspace_bytes(chunks, 31, 4, compact=True)
+        cached = op.native_index_workspace_bytes(chunks, 31, 4, compact=True, immutable_tables=True)
+        self.assertEqual(cached - mutable, (3 + 2 - 2 - 1) * 4)
+
     def test_dispatch_releases_old_epoch_before_allocating_native_workspace(self):
         c = chunk(length=128)
         q = torch.zeros((4096, 4, 128), dtype=torch.uint8).view(torch.float8_e4m3fn)
@@ -251,10 +315,14 @@ class NativeIndexHostTest(unittest.TestCase):
         plan["_native_q8_index_workspace"] = old
         del old
         created = []
+        chunk_tuple = (c,)
 
         def construct(*args, **kwargs):
             self.assertIsNone(old_ref(), "old epoch still retained during allocation")
             value = Workspace()
+            value.chunks = args[0]
+            value.compact = kwargs["compact"]
+            value.immutable_tables = kwargs["immutable_tables"]
             created.append(value)
             return value
 
@@ -267,7 +335,7 @@ class NativeIndexHostTest(unittest.TestCase):
         with patch.object(
             score_chunk,
             "prepare_fp4_prefill_score_chunks",
-            return_value=((c,), (offsets,)),
+            return_value=(chunk_tuple, (offsets,)),
         ), patch.object(
             op, "NativeIndexWorkspace", side_effect=construct
         ), patch.object(
@@ -290,7 +358,27 @@ class NativeIndexHostTest(unittest.TestCase):
                 index_score_plan=plan,
                 kv_indices=pages,
             )
-        self.assertIs(plan["_native_q8_index_workspace"], created[0])
+            self.assertFalse(created[0].immutable_tables)
+            epoch = object()
+            plan["_fp4_metadata_table"] = (epoch, pages)
+            plan["_fp4_prepared_chunks"] = (epoch, pages, None, (chunk_tuple, (offsets,)))
+            def forward():
+                wrapper.flash_prefill_topk_to_block_tables_fp4(
+                    q, packed, scales, c.cu_seqlens, c.seq_lens,
+                    c.prefix_lens, 4096, 128, 128, 16, 1,
+                    index_score_plan=plan, kv_indices=pages,
+                )
+            forward()
+            self.assertTrue(created[-1].immutable_tables)
+            self.assertEqual(len(created), 2)
+            forward()
+            self.assertEqual(len(created), 2)
+            epoch = object()
+            plan["_fp4_metadata_table"] = (epoch, pages)
+            plan["_fp4_prepared_chunks"] = (epoch, pages, None, (chunk_tuple, (offsets,)))
+            forward()
+            self.assertEqual(len(created), 3)
+        self.assertIs(plan["_native_q8_index_workspace"], created[-1])
         # Legacy chunk preparation can manufacture host metadata by a GPU
         # readback; that must not admit the new native planner without a producer.
         plan.pop("_fp4_host_metadata")

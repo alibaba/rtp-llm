@@ -42,7 +42,8 @@ class SameLayerCPWorkspace:
     """
 
     def __init__(self, device, backend, main_stream, side_stream,
-                 effective_cta_policy=0, *, torch_module=None, environ=None):
+                 effective_cta_policy=0, *, torch_module=None, environ=None,
+                 suffix_format="bf16"):
         if torch_module is None:
             import torch as torch_module
         self.torch = torch_module
@@ -50,6 +51,9 @@ class SameLayerCPWorkspace:
         self.backend = backend
         self.main_stream = main_stream
         self.side_stream = side_stream
+        if suffix_format not in ("bf16", "nvfp4_wire_v1"):
+            raise ValueError("unsupported CP suffix format")
+        self.suffix_format = suffix_format
         self.slots = {"prefix": _Slot(), "suffix": _Slot()}
         self.closed = False
         env = os.environ if environ is None else environ
@@ -60,9 +64,9 @@ class SameLayerCPWorkspace:
             raise ValueError("TP_SIDE effective CTA policy differs from selector")
         self.registered = self.cta_policy == 2
         logging.getLogger(__name__).info(
-            "M3.1 CP4 workspace allocator=%s cta_policy=%d symmetric=%s",
+            "M3.1 CP4 workspace allocator=%s cta_policy=%d symmetric=%s suffix_format=%s",
             "ncclMemAlloc" if self.registered else "torch",
-            self.cta_policy, self.registered,
+            self.cta_policy, self.registered, self.suffix_format,
         )
 
     def _check_context(self):
@@ -80,6 +84,8 @@ class SameLayerCPWorkspace:
         if kind == "prefix":
             return (("side", 17408, self.torch.uint8),
                     ("values", 65536, self.torch.uint8))
+        if self.suffix_format == "nvfp4_wire_v1":
+            return (("kv", 648, self.torch.uint8),)
         return (("kv", 1152, self.torch.bfloat16),)
 
     def _synchronize_registration(self):
@@ -232,7 +238,7 @@ def _effective_cta_policy(backend, environ=None):
     return selected if actual is None or int(actual) < 0 else int(actual)
 
 
-def get_workspace(device, main_stream, side_stream):
+def get_workspace(device, main_stream, side_stream, *, suffix_format="bf16"):
     from rtp_llm.models_py.distributed import collective_torch
     group = collective_torch._get_group(collective_torch.Group.TP_SIDE)
     key = (group, str(device))
@@ -242,9 +248,12 @@ def get_workspace(device, main_stream, side_stream):
         workspace = SameLayerCPWorkspace(
             device, backend, main_stream, side_stream,
             effective_cta_policy=_effective_cta_policy(backend),
+            suffix_format=suffix_format,
         )
         collective_torch._owned_cp_workspaces[key] = workspace
     if workspace.side_stream.cuda_stream != side_stream.cuda_stream:
         raise RuntimeError("same-layer workspace side stream changed")
+    if workspace.suffix_format != suffix_format:
+        raise RuntimeError("CP suffix wire format changed within a workspace lifetime")
     workspace._check_context()
     return workspace

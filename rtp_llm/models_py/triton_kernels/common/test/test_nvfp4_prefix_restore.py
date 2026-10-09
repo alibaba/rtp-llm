@@ -35,6 +35,11 @@ def _reference(values, side, restore, dst, planes):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestNVFP4PrefixRestore(unittest.TestCase):
+    active_tiles = False
+
+    def _restore(self, *args):
+        restore_prefix_planes(*args, active_tiles=self.active_tiles)
+
     def _case(self, heads=2, page=7, dim=32, index_dim=64, capacity=13):
         shapes = (
             (heads, page, dim // 2),
@@ -73,7 +78,7 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
     def test_multidimensional_restore_and_identity(self):
         for dtype in (torch.int32, torch.int64):
             for identity in (False, True):
-                for geometry in ((2, 7, 32, 64), (4, 128, 128, 128)):
+                for geometry in ((2, 7, 32, 64), (4, 128, 128, 128), (1, 17, 528, 96)):
                     with self.subTest(
                         dtype=dtype, identity=identity, geometry=geometry
                     ):
@@ -90,7 +95,7 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
                         )
                         expected = tuple(p.clone() for p in planes)
                         _reference(values, side, src, dst, expected)
-                        restore_prefix_planes(values, side, src, dst, planes)
+                        self._restore(values, side, src, dst, planes)
                         self._assert_bytes(planes, expected)
                         for base in backing:
                             self.assertTrue(torch.all(base[0] == 231).item())
@@ -100,7 +105,7 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
         values, side, planes, _ = self._case()
         ids = torch.empty(0, device="cuda", dtype=torch.int64)
         for src in (None, ids):
-            restore_prefix_planes(
+            self._restore(
                 values[:0], side[:0], src, ids, tuple(p[:0] for p in planes)
             )
 
@@ -117,7 +122,7 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
         )
         valid = (src >= 0) & (src < 16) & (dst >= 0) & (dst < 13)
         _reference(values, side, src[valid], dst[valid], full)
-        restore_prefix_planes(values, side, src, dst, planes)
+        self._restore(values, side, src, dst, planes)
         self._assert_bytes(planes, tuple(p[: a.shape[0]] for p, a in zip(full, planes)))
 
     def test_graph_replay_changes_indices_and_contents(self):
@@ -129,11 +134,11 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
                 else torch.tensor([0, 2, 3, 3, 8], device="cuda", dtype=torch.int32)
             )
             dst = torch.tensor([0, 4, 3, 6, 8], device="cuda", dtype=torch.int64)
-            restore_prefix_planes(values, side, src, dst, planes)
+            self._restore(values, side, src, dst, planes)
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                restore_prefix_planes(values, side, src, dst, planes)
+                self._restore(values, side, src, dst, planes)
             for turn in range(3):
                 if src is not None:
                     src.copy_(src.roll(1))
@@ -146,6 +151,56 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
                 _reference(values, side, src, dst, expected)
                 graph.replay()
                 self._assert_bytes(planes, expected)
+
+    def test_fi_page_pitch_scale_permutation_and_graph_replay(self):
+        values, side, mma, _ = self._case(4, 128, 128, 128)
+        capacity = 13
+        pool = torch.full((capacity + 3, 73728), 231, device="cuda", dtype=torch.uint8)
+        data_shape, data_stride = (capacity, 4, 128, 64), (73728, 8192, 64, 1)
+        scale_shape, scale_stride = (capacity, 4, 128, 8), (73728, 1024, 8, 1)
+        planes = (
+            torch.as_strided(pool, data_shape, data_stride, 0),
+            torch.as_strided(pool, data_shape, data_stride, 36864),
+            torch.as_strided(pool, scale_shape, scale_stride, 32768).view(torch.float8_e4m3fn),
+            torch.as_strided(pool, scale_shape, scale_stride, 69632).view(torch.float8_e4m3fn),
+            mma[4], mma[5],
+        )
+        src = torch.tensor([3, 1, 3, 9, 0, 7, 2], device="cuda", dtype=torch.int64)
+        dst = torch.tensor([8, 0, 9, 2, 7, 3, 6], device="cuda", dtype=torch.int32)
+        linear = torch.arange(1024, device="cuda")
+        token, group = linear // 8, linear % 8
+        mma_offset = (group // 4) * 512 + (token % 32) * 16 + (token // 32) * 4 + group % 4
+
+        def restore():
+            restore_prefix_planes(values, side, src, dst, planes,
+                                  active_tiles=self.active_tiles, fi_working_layout=True)
+
+        restore()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            restore()
+        for turn in range(3):
+            src.copy_(src.roll(1))
+            dst.copy_(dst.roll(2))
+            values.random_(256)
+            side.random_(256)
+            pool.fill_(231)
+            for plane in planes[4:]:
+                plane.view(torch.uint8).fill_(231)
+            expected = tuple(torch.full_like(p.view(torch.uint8), 231) for p in mma)
+            _reference(values, side, src, dst, expected)
+            # Independent tensor reshape oracle: first undo MMA, then group
+            # four V tokens together, rather than copying the kernel formula.
+            expected = list(expected)
+            for plane in (2, 3):
+                linear_scale = expected[plane].reshape(capacity, 4, 1024)[:, :, mma_offset]
+                if plane == 3:
+                    linear_scale = linear_scale.reshape(capacity, 4, 32, 4, 8).transpose(3, 4)
+                expected[plane] = linear_scale.contiguous().reshape_as(expected[plane])
+            graph.replay()
+            self._assert_bytes(planes, expected)
+            self.assertEqual(int(torch.count_nonzero(pool[capacity:] != 231)), 0)
 
     def test_metadata_validation(self):
         values, side, planes, _ = self._case()
@@ -163,7 +218,13 @@ class TestNVFP4PrefixRestore(unittest.TestCase):
         for args in bad_cases:
             with self.subTest(shapes=[tuple(x.shape) for x in args[:4]]):
                 with self.assertRaises(ValueError):
-                    restore_prefix_planes(*args)
+                    self._restore(*args)
+
+
+class TestNVFP4PrefixRestoreActiveTiles(TestNVFP4PrefixRestore):
+    # Run the full byte/invalid-index/graph/state-reuse contract for the
+    # experimental layout independently of the unchanged runtime default.
+    active_tiles = True
 
 
 if __name__ == "__main__":

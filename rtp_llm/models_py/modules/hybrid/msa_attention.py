@@ -37,6 +37,7 @@ import triton.language as tl
 logger = logging.getLogger(__name__)
 
 _CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
+_CP_SUFFIX_NVFP4_WIRE = os.environ.get("RTP_LLM_CP_SUFFIX_NVFP4_WIRE", "0") == "1"
 _CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"
 _CP_COMPACT_PREFILL = os.environ.get("M3_MSA_CP_COMPACT_PREFILL", "0") == "1"
 _NVFP4_PREFILL_BACKEND = os.environ.get("M3_NVFP4_PREFILL_BACKEND", "fmha").lower()
@@ -1733,6 +1734,7 @@ class _Nvfp4WorkingPages:
         self._main_scales: Optional[torch.Tensor] = None
         self._idx: Optional[torch.Tensor] = None
         self._idx_scales: Optional[torch.Tensor] = None
+        self._fi_layout = False
 
     def acquire(
         self,
@@ -1742,6 +1744,7 @@ class _Nvfp4WorkingPages:
         dim: int,
         index_dim: int,
         device: torch.device,
+        fi_layout: bool = False,
     ):
         groups = dim // NVFP4_GROUP_SIZE
         index_groups = index_dim // NVFP4_GROUP_SIZE
@@ -1758,23 +1761,38 @@ class _Nvfp4WorkingPages:
             or tuple(main.shape[2:]) != (heads, page_size, dim // 2)
             or tuple(idx.shape[1:]) != (1, page_size, index_dim // 2)
             or main.device != device
+            or self._fi_layout != fi_layout
         ):
-            main = torch.empty(
-                2,
-                page_count,
-                heads,
-                page_size,
-                dim // 2,
-                dtype=torch.uint8,
-                device=device,
-            )
-            main_scales = torch.empty(
-                2,
-                page_count,
-                heads * page_size * groups,
-                dtype=torch.float8_e4m3fn,
-                device=device,
-            )
+            if fi_layout:
+                if (heads, page_size, dim) != (4, 128, 128):
+                    raise ValueError("FI working pages require Hkv4/page128/D128")
+                # One allocation, four disjoint byte regions per page. Preserve
+                # stacked views for existing callers; these are page-strided.
+                pool = torch.empty((page_count, heads * 18432),
+                                   dtype=torch.uint8, device=device)
+                main = torch.as_strided(pool, (2, page_count, heads, 128, 64),
+                                        (heads * 9216, heads * 18432, 8192, 64, 1))
+                main_scales = torch.as_strided(
+                    pool, (2, page_count, heads * 1024),
+                    (heads * 9216, heads * 18432, 1), heads * 8192,
+                ).view(torch.float8_e4m3fn)
+            else:
+                main = torch.empty(
+                    2,
+                    page_count,
+                    heads,
+                    page_size,
+                    dim // 2,
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                main_scales = torch.empty(
+                    2,
+                    page_count,
+                    heads * page_size * groups,
+                    dtype=torch.float8_e4m3fn,
+                    device=device,
+                )
             idx = torch.empty(
                 page_count,
                 1,
@@ -1793,6 +1811,7 @@ class _Nvfp4WorkingPages:
             self._main_scales = main_scales
             self._idx = idx
             self._idx_scales = idx_scales
+            self._fi_layout = fi_layout
         return (
             main[:, :page_count],
             main_scales[:, :page_count],
@@ -2575,6 +2594,7 @@ class MSAAttention(nn.Module):
         *,
         contiguous_outputs=None,
         query_fp8_outputs=None,
+        prefill_outputs=None,
     ):
         """M3.1 raw-weight producer; callers must skip legacy norm and RoPE."""
         raw_weights = getattr(self, "_m31_raw_attention_norms", None)
@@ -2600,6 +2620,7 @@ class MSAAttention(nn.Module):
             eps=self.layernorm_eps,
             contiguous_outputs=contiguous_outputs,
             query_fp8_outputs=query_fp8_outputs,
+            prefill_outputs=prefill_outputs,
         )
         return True
 
@@ -2932,6 +2953,7 @@ class MSAAttention(nn.Module):
             self.head_dim,
             ni,
             packed.device,
+            fi_layout=self._flashinfer_nvfp4_prefill,
         )
 
         if prefix_cpu_list and any(prefix_cpu_list):
@@ -3029,9 +3051,10 @@ class MSAAttention(nn.Module):
                         idx_packed,
                         idx_scales,
                     ),
+                    fi_working_layout=self._flashinfer_nvfp4_prefill,
                 )
 
-        # Current-layer prefix restoration is complete before suffix quantization.
+        # Current-layer prefix restoration is complete before suffix page writes.
         # Wait for the gathered suffix before writing either working or
         # persistent planes.
         if packed_kv_event is not None:
@@ -3041,29 +3064,46 @@ class MSAAttention(nn.Module):
             else:
                 torch.cuda.current_stream(packed.device).wait_event(packed_kv_event)
 
-        # Quantize once into both independent destinations. The full persistent
+        # Write identical codes into both independent destinations. The full persistent
         # map contains -1 for non-owned rows; never substitute the compressed
         # owned-row map. Prefix restoration above cannot overlap suffix pages.
-        nvfp4_quantize_cp_main_index_rows_to_planes(
-            packed,
-            unpad_rows,
-            write_slots[:token_count].contiguous(),
-            main[0],
-            main_scales[0],
-            main[1],
-            main_scales[1],
-            idx_packed,
-            idx_scales,
-            persistent_slots=slot_mapping[:token_count],
-            persistent_planes=(
-                views.main_k_fp4,
-                views.main_k_scale,
-                views.main_v_fp4,
-                views.main_v_scale,
-                views.idx_k_fp4,
-                views.idx_k_scale,
-            ),
-        )
+        suffix_owner = getattr(self, "_same_layer_suffix", None)
+        if packed_kv_event is not None and self._cp_suffix_wire_enabled():
+            from rtp_llm.models_py.triton_kernels.common.nvfp4_cp_wire import scatter_cp_nvfp4_wire
+            if suffix_owner is None or suffix_owner[0].suffix_format != "nvfp4_wire_v1":
+                raise RuntimeError("M3.1 wire scatter requires the matching suffix lease")
+            scatter_cp_nvfp4_wire(
+                packed, unpad_rows, write_slots[:token_count].contiguous(),
+                slot_mapping[:token_count],
+                (main[0], main_scales[0], main[1], main_scales[1], idx_packed, idx_scales),
+                (views.main_k_fp4, views.main_k_scale, views.main_v_fp4,
+                 views.main_v_scale, views.idx_k_fp4, views.idx_k_scale),
+                rows_per_cta=16,
+                fi_working_layout=self._flashinfer_nvfp4_prefill,
+            )
+        else:
+            nvfp4_quantize_cp_main_index_rows_to_planes(
+                packed,
+                unpad_rows,
+                write_slots[:token_count].contiguous(),
+                main[0],
+                main_scales[0],
+                main[1],
+                main_scales[1],
+                idx_packed,
+                idx_scales,
+                persistent_slots=slot_mapping[:token_count],
+                persistent_planes=(
+                    views.main_k_fp4,
+                    views.main_k_scale,
+                    views.main_v_fp4,
+                    views.main_v_scale,
+                    views.idx_k_fp4,
+                    views.idx_k_scale,
+                ),
+                rows_per_cta=8,
+                fi_working_layout=self._flashinfer_nvfp4_prefill,
+            )
         clear_packed_working_tail_scales(
             main_scales[0],
             main_scales[1],
@@ -3073,6 +3113,7 @@ class MSAAttention(nn.Module):
             self.kv_head_num,
             self.head_dim,
             ni,
+            fi_working_layout=self._flashinfer_nvfp4_prefill,
         )
         suffix_owner = getattr(self, "_same_layer_suffix", None)
         if suffix_owner is not None:
@@ -3742,18 +3783,33 @@ class MSAAttention(nn.Module):
                 and self.idx_head_dim == 128 and self.page_size == 128
                 and not _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache))
 
-    def _cp_suffix_send(self, rows, device):
+    def _cp_suffix_wire_enabled(self):
+        return _CP_SUFFIX_NVFP4_WIRE and self._same_layer_overlap_enabled()
+
+    def _cp_suffix_format(self):
+        return "nvfp4_wire_v1" if self._cp_suffix_wire_enabled() else "bf16"
+
+    def _cp_suffix_lease(self, rows, device):
         main_stream = torch.cuda.current_stream(device)
         stream = MSAAttention._cp_side_stream.get(device)
         if stream is None:
             stream = torch.cuda.Stream(device=device)
             MSAAttention._cp_side_stream[device] = stream
             MSAAttention._cp_side_event[device] = torch.cuda.Event()
-        workspace = get_workspace(device, main_stream, stream)
+        workspace = get_workspace(device, main_stream, stream,
+                                  suffix_format=self._cp_suffix_format())
         lease = workspace.acquire_suffix(int(rows))
         self._same_layer_suffix = (workspace, lease)
+        return workspace, lease
+
+    def _cp_suffix_send(self, rows, device):
+        workspace, lease = self._cp_suffix_lease(rows, device)
+        if workspace.suffix_format == "nvfp4_wire_v1":
+            # Preserve the producer's BF16 rounding ABI. Only the wire lease
+            # is registered; this local carrier is consumed by quant-pack.
+            return torch.empty((rows, 1152), dtype=torch.bfloat16, device=device)
         # Prior lease retired on this fixed main stream after its final read.
-        # The next main-stream cat therefore cannot overwrite an in-flight send.
+        # The next main-stream producer cannot overwrite an in-flight send.
         return lease.tensors["kv_send"]
 
 
@@ -3768,12 +3824,14 @@ class MSAAttention(nn.Module):
             stream = torch.cuda.Stream(device=device)
             MSAAttention._cp_side_stream[device] = stream
             MSAAttention._cp_side_event[device] = torch.cuda.Event()
-        workspace = get_workspace(device, main_stream, stream)
+        workspace = get_workspace(device, main_stream, stream,
+                                  suffix_format=self._cp_suffix_format())
         lease = workspace.acquire_prefix(int(plan.packed_block_ids.numel()))
         buffers = lease.tensors
         main, scales, idx, idx_scales = _NVFP4_WORKING_PAGES.acquire(
             int(self._scratch_slots) // self.page_size, self.kv_head_num,
             self.page_size, self.head_dim, 128, device,
+            fi_layout=self._flashinfer_nvfp4_prefill,
         )
         planes = (main[0], main[1], scales[0], scales[1], idx, idx_scales)
         if plan.total_logical_blocks != prefix_dst_pages.numel():
@@ -3790,7 +3848,9 @@ class MSAAttention(nn.Module):
             all_gather(buffers["side_send"], Group.TP_SIDE, out=buffers["side_recv"])
             all_gather(buffers["values_send"], Group.TP_SIDE, out=buffers["values_recv"])
             restore_prefix_planes(buffers["values_recv"], buffers["side_recv"],
-                                  plan.restore_indices, prefix_dst_pages, planes)
+                                  plan.restore_indices, prefix_dst_pages, planes,
+                                  active_tiles=True,
+                                  fi_working_layout=self._flashinfer_nvfp4_prefill)
             ready = torch.cuda.Event()
             ready.record(stream)
         return PrefixGather(buffers["values_recv"], buffers["side_recv"], ready,
@@ -3810,15 +3870,19 @@ class MSAAttention(nn.Module):
         if self._same_layer_overlap_enabled():
             owner = getattr(self, "_same_layer_suffix", None)
             if owner is None:
-                send = self._cp_suffix_send(int(packed_kv.shape[0]), device)
-                owner = self._same_layer_suffix
+                owner = self._cp_suffix_lease(int(packed_kv.shape[0]), device)
             workspace, lease = owner
             send, recv = lease.tensors["kv_send"], lease.tensors["kv_recv"]
-            if send.data_ptr() != packed_kv.data_ptr() and owner is not None:
+            if self._cp_suffix_wire_enabled():
+                from rtp_llm.models_py.triton_kernels.common.nvfp4_cp_wire import pack_cp_nvfp4_wire
+                if workspace.suffix_format != "nvfp4_wire_v1":
+                    raise RuntimeError("M3.1 wire pack requires matching suffix format")
+                pack_cp_nvfp4_wire(packed_kv, send)
+            elif send.data_ptr() != packed_kv.data_ptr():
                 # Standalone helpers may pass their already-produced local input.
                 send.copy_(packed_kv)
             stream = workspace.side_stream
-            # This snapshot is AFTER cat/copy, unlike acquire's earlier fence.
+            # This snapshot follows the producer/copy, unlike acquire's fence.
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
                 all_gather(send, Group.TP_SIDE, out=recv)
@@ -4263,12 +4327,10 @@ class MSAAttention(nn.Module):
             common.apply_write_cache_store(write_impl, attn_inputs, kv_cache)
         pages = int(main.shape[1])
         groups = self.head_dim // NVFP4_GROUP_SIZE
-        k_scale = (
-            scales[0]
-            .view(torch.uint8)
-            .view(pages * self.kv_head_num * self.page_size, groups)
-        )
-        v_scale = scales[1].view(torch.uint8).view_as(k_scale)
+        if not self._flashinfer_nvfp4_prefill:
+            k_scale = scales[0].view(torch.uint8).view(
+                pages * self.kv_head_num * self.page_size, groups)
+            v_scale = scales[1].view(torch.uint8).view_as(k_scale)
         idx_scale_mma = idx_scales.view(
             pages, 1, (ni // NVFP4_GROUP_SIZE) // 4, 32, 4, 4
         )
@@ -4298,7 +4360,7 @@ class MSAAttention(nn.Module):
             output = flashinfer_sparse_prefill_from_topk_fp4(
                 q, main[0], main[1], scales[0], scales[1], topk,
                 req_to_token, cu_seqlens, seq_lens, positions, seq_lens,
-                self.head_dim**-0.5,
+                self.head_dim**-0.5, direct_layout=True,
             )
         else:
             output = sparse_prefill_from_topk_fp4(
@@ -4751,6 +4813,29 @@ class MSAAttention(nn.Module):
                 use_fp8_kvcache=self.idx_k_fp8_mode == 2,
             )
 
+        prefill_outputs = None
+        if (
+            self.nvfp4_kv_cache
+            and self._m31_raw_attention_norms is not None
+            and self._flashinfer_nvfp4_prefill
+        ):
+            prefill_outputs = (
+                torch.empty(
+                    (local_tokens, self.head_num, self.head_dim),
+                    dtype=qkv.dtype,
+                    device=device,
+                ),
+                torch.empty(
+                    (local_tokens, self.num_idx_heads, self.idx_head_dim),
+                    dtype=torch.float8_e4m3fn,
+                    device=device,
+                ),
+                self._cp_suffix_send(local_tokens, device)
+                if same_layer_overlap
+                else torch.empty(
+                    (local_tokens, 2 * nk + ni), dtype=qkv.dtype, device=device
+                ),
+            )
         query_fp8_outputs = None
         if (
             self.nvfp4_kv_cache
@@ -4766,9 +4851,12 @@ class MSAAttention(nn.Module):
                 for heads in (self.head_num, self.num_idx_heads)
             )
         m31_fused = self._fuse_m31_projected_norm_rope(
-            qkv, idx_q, idx_k, local_positions, query_fp8_outputs=query_fp8_outputs
+            qkv, idx_q, idx_k, local_positions,
+            query_fp8_outputs=query_fp8_outputs,
+            prefill_outputs=prefill_outputs,
         )
-        idx_k = idx_k.contiguous()
+        if prefill_outputs is None:
+            idx_k = idx_k.contiguous()
         if not m31_fused:
             dummy_idx = _ROPE_DUMMY_SCRATCH.acquire(
                 idx_k.shape[0],
@@ -4780,7 +4868,9 @@ class MSAAttention(nn.Module):
             self._apply_rope(idx_k, dummy_idx, local_positions)
 
         can_fuse = self.cos_sin_cache is not None and not self._rope_interleave
-        if m31_fused:
+        if prefill_outputs is not None:
+            packed_kv = prefill_outputs[2]
+        elif m31_fused:
             packed_kv = torch.cat(
                 (
                     qkv[:, self.q_size : self.q_size + nk],
@@ -4831,7 +4921,13 @@ class MSAAttention(nn.Module):
 
         all_packed, packed_kv_event = self._cp_all_gather_packed_kv(packed_kv)
 
-        if query_fp8_outputs is not None:
+        if prefill_outputs is not None:
+            q, idx_q = prefill_outputs[:2]
+            del prefill_outputs
+            # The producer has already emitted index K into the send buffer.
+            # Its old projection view would otherwise keep QKV storage alive.
+            del idx_k
+        elif query_fp8_outputs is not None:
             q, idx_q = query_fp8_outputs
             del query_fp8_outputs
         else:
@@ -4853,6 +4949,10 @@ class MSAAttention(nn.Module):
         del qkv
         if not can_fuse and not m31_fused:
             del k_fb, v_fb
+        if self._cp_suffix_wire_enabled():
+            # Quant-pack consumed the carrier on main, and no side operation
+            # reads it. Keep only gathered wire bytes through the receiver.
+            packed_kv = None
 
         if packed_kv_event is not None and not same_layer_overlap:
             torch.cuda.current_stream(all_packed.device).wait_event(packed_kv_event)
@@ -5012,12 +5112,10 @@ class MSAAttention(nn.Module):
             # Main sparse attention accepts scale bytes as uint8. IndexScore
             # receives the packed idxK and MMA-ordered scales directly through
             # RTP's Q8K4 page reader.
-            k_scale = (
-                main_scales[0]
-                .view(torch.uint8)
-                .view(page_count * self.kv_head_num * self.page_size, groups)
-            )
-            v_scale = main_scales[1].view(torch.uint8).view_as(k_scale)
+            if not self._flashinfer_nvfp4_prefill:
+                k_scale = main_scales[0].view(torch.uint8).view(
+                    page_count * self.kv_head_num * self.page_size, groups)
+                v_scale = main_scales[1].view(torch.uint8).view_as(k_scale)
             idx_k_scale_mma = idx_scales.view(
                 page_count,
                 1,
@@ -5056,7 +5154,7 @@ class MSAAttention(nn.Module):
                     topk_idx, req_to_token_segments, cu_seqlens,
                     prefix_i32 + segment_lengths_t, local_positions,
                     kv_lens_i32, self.head_dim**-0.5,
-                    segments_per_request=2,
+                    segments_per_request=2, direct_layout=True,
                 )
             else:
                 o = sparse_prefill_from_topk_fp4(

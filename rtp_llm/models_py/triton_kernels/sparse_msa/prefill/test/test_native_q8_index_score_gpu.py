@@ -1,6 +1,8 @@
 """Runtime-shape helper regressions against independent tensor references."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import triton
@@ -12,6 +14,139 @@ from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class NativeIndexRuntimeShapeTest(unittest.TestCase):
+    def test_real_onlyscore_immutable_matches_mutable_scores_and_topk(self):
+        """Actual fmha_sm100 planner/OnlyScore and production TopK, no mocks."""
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import topk_bt_fused as wrapper
+
+        device = torch.device("cuda:0")
+        pages, rows, blocks = 64, 4096, 64
+        vec = lambda values: torch.tensor(values, device=device, dtype=torch.int32)
+        chunks = []
+        for index, prefix in enumerate((4096, 2048)):
+            table = torch.arange(blocks, device=device, dtype=torch.int32)
+            table = (table * (index + 3)) % pages
+            table[1], table[2], table[-1] = table[0], -1, pages
+            chunks.append(SimpleNamespace(
+                q_start=index * rows, q_end=(index + 1) * rows,
+                host_metadata=SimpleNamespace(query_lens=(rows,), seq_lens=(8192,), prefix_lens=(prefix,)),
+                cu_seqlens=vec([0, rows]), seq_lens=vec([8192]), prefix_lens=vec([prefix]),
+                kv_indices=table, max_seqlen_q=rows, max_seqlen_k=8192,
+            ))
+        chunks = tuple(chunks)
+        cached = op.NativeIndexWorkspace(chunks, pages, 4, device, compact=True, immutable_tables=True)
+        mutable = op.NativeIndexWorkspace(chunks, pages, 4, device, compact=True)
+        table_values = tuple(t.clone() for t in cached.safe_tables)
+        table_ptrs = tuple(t.data_ptr() for t in cached.safe_tables)
+        torch.manual_seed(20261009)
+        packed = torch.randint(0, 256, (pages, 1, 128, 64), device=device, dtype=torch.uint8)
+        scales = torch.full((pages, 1, 2, 32, 4, 4), 40, device=device, dtype=torch.uint8)
+        q = (torch.randn(rows, 4, 128, device=device) * 0.1).to(torch.float8_e4m3fn)
+        offsets = vec([0, blocks])
+
+        def topk(score, chunk):
+            bt, lengths, indices = wrapper._allocate_topk_outputs(rows, 4, 16, device, False, overwrite_topk=True)
+            wrapper._launch_topk_to_block_table(
+                rows, 1, 4, blocks, score, bt, lengths, indices, 1, 128,
+                chunk.cu_seqlens, chunk.cu_seqlens, chunk.prefix_lens,
+                16, 0, 0, pages, *score.stride(), *bt.stride(), *indices.stride(),
+                NKV=4, MASK_INIT=False, MASK_LOCAL=False,
+                EMIT_BLOCK_TABLE=False, EMIT_TOPK_IDX=True,
+            )
+            return indices
+
+        previous = None
+        for layer in range(2):
+            if layer:
+                packed.bitwise_xor_(255)
+                scales.fill_(48)
+            cached.stage(packed, scales)
+            mutable.stage(packed, scales)
+            layer_scores = []
+            for index, chunk in enumerate(chunks):
+                outputs = []
+                for workspace in (cached, mutable):
+                    output = torch.empty((4, rows, blocks), device=device)
+                    outputs.append(workspace.score(index, q, offsets, output))
+                self.assertTrue(torch.equal(outputs[0].view(torch.int32), outputs[1].view(torch.int32)))
+                self.assertTrue(torch.isfinite(outputs[0]).any())
+                self.assertTrue(torch.equal(topk(outputs[0], chunk), topk(outputs[1], chunk)))
+                self.assertTrue(torch.isneginf(outputs[0][:, :, 2]).all())
+                self.assertTrue(torch.isneginf(outputs[0][:, :, -1]).all())
+                layer_scores.append(outputs[0])
+            if previous is not None:
+                self.assertTrue(any(not torch.equal(a, b) for a, b in zip(previous, layer_scores)))
+            previous = layer_scores
+            self.assertEqual(table_ptrs, tuple(t.data_ptr() for t in cached.safe_tables))
+            self.assertTrue(all(torch.equal(a, b) for a, b in zip(table_values, cached.safe_tables)))
+
+    def test_immutable_workspace_staging_matches_mutable_across_layers(self):
+        """Real constructor/ID/staging kernels; OnlyScore itself is mocked."""
+        device = torch.device("cuda:0")
+        pages, rows = 7, 2048
+        vec = lambda values: torch.tensor(values, device=device, dtype=torch.int32)
+        chunks = tuple(
+            SimpleNamespace(
+                q_start=index * rows, q_end=(index + 1) * rows,
+                host_metadata=SimpleNamespace(
+                    query_lens=(rows,), seq_lens=(len(ids) * 128,), prefix_lens=(0,),
+                ),
+                cu_seqlens=vec([0, rows]), seq_lens=vec([len(ids) * 128]),
+                prefix_lens=vec([0]), kv_indices=vec(ids),
+                max_seqlen_q=rows, max_seqlen_k=len(ids) * 128,
+            )
+            for index, ids in enumerate(([1, 1, -1, pages], [6, 0, 6]))
+        )
+
+        def planner(*args, **kwargs):
+            return {"max_k_tiles": 128, "orig_num_qo_heads": 4,
+                    "MM-SA-Nv": False, "num_kv_splits": 1}
+
+        def score(*args, **kwargs):
+            return None, kwargs["max_score"]
+
+        with patch.object(op, "_native_api", return_value=(planner, score)):
+            cached = op.NativeIndexWorkspace(chunks, pages, 4, device, compact=True, immutable_tables=True)
+            mutable = op.NativeIndexWorkspace(chunks, pages, 4, device, compact=True)
+        table_ptrs = tuple(t.data_ptr() for t in cached.safe_tables)
+        table_values = tuple(t.clone() for t in cached.safe_tables)
+        packed_storage = torch.randint(0, 256, (pages, 8448), device=device, dtype=torch.uint8)
+        scale_storage = torch.full((pages, 1280), 56, device=device, dtype=torch.uint8)
+        packed = torch.as_strided(packed_storage, (pages, 1, 128, 64), (8448, 8192, 64, 1))
+        scales = torch.as_strided(scale_storage, (pages, 1, 2, 32, 4, 4), (1280, 1024, 512, 16, 4, 1))
+        q = torch.zeros((rows, 4, 128), device=device, dtype=torch.float8_e4m3fn)
+        full = torch.zeros((pages + 1, 1, 128, 128), device=device, dtype=torch.float8_e4m3fn)
+        previous = None
+        with patch.object(cached, "_prepare_table", side_effect=AssertionError("immutable IDs rebuilt")):
+            for layer in range(2):
+                if layer:
+                    packed_storage.bitwise_xor_(255)
+                    scale_storage.fill_(64)
+                op._stage_index_pages[(pages,)](
+                    packed, scales, full, pages, packed.stride(0), scales.stride(0), num_warps=4,
+                )
+                cached.stage(packed, scales)
+                mutable.stage(packed, scales)
+                layer_readouts = []
+                for index, chunk in enumerate(chunks):
+                    output = torch.empty((4, rows, chunk.kv_indices.numel()), device=device)
+                    offsets = vec([0, chunk.kv_indices.numel()])
+                    readouts = []
+                    for workspace in (cached, mutable):
+                        workspace.score(index, q, offsets, output)
+                        readouts.append(workspace.staged[workspace.safe_tables[index].long()].view(torch.uint8))
+                    table = chunk.kv_indices
+                    ids = torch.where((table >= 0) & (table < pages), table, pages)
+                    expected = full[ids.long()].view(torch.uint8)
+                    self.assertTrue(torch.equal(readouts[0], expected))
+                    self.assertTrue(torch.equal(readouts[1], expected))
+                    self.assertTrue(torch.equal(cached.staged[cached.stage_pages].view(torch.uint8), torch.zeros_like(full[pages].view(torch.uint8))))
+                    layer_readouts.append(readouts[0])
+                if previous is not None:
+                    self.assertTrue(any(not torch.equal(a, b) for a, b in zip(previous, layer_readouts)))
+                previous = layer_readouts
+                self.assertEqual(table_ptrs, tuple(t.data_ptr() for t in cached.safe_tables))
+                self.assertTrue(all(torch.equal(a, b) for a, b in zip(table_values, cached.safe_tables)))
+
     def test_compact_map_rebuild_and_graph_replay(self):
         device = torch.device("cuda:0")
         pages, entries = 31, 263

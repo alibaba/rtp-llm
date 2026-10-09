@@ -58,7 +58,7 @@ class Event:
         self.trace.append(("sync", self))
 
 
-def setup(ce=True):
+def setup(ce=True, suffix_format="bf16"):
     trace = []
     main, side = Stream(1, trace), Stream(2, trace)
     backend = types.SimpleNamespace(
@@ -81,6 +81,7 @@ def setup(ce=True):
     workspace = SameLayerCPWorkspace(
         "cuda:0", backend, main, side, 2 if ce else 0, torch_module=torch,
         environ={"RTP_LLM_CP_PACKED_KV_OVERLAP": "1", "NCCL_CTA_POLICY": "2" if ce else "0"},
+        suffix_format=suffix_format,
     )
     return workspace, trace
 
@@ -91,6 +92,59 @@ def finish(workspace, lease):
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_wire_suffix_allocator_shapes_payload_and_retirement(self):
+        w, trace = setup(suffix_format="nvfp4_wire_v1")
+        lease = w.acquire_suffix(7)
+        self.assertEqual([x[1:] for x in trace if x[0] == "allocate"],
+                         [(7 * 648 + 1024, "u8"), (28 * 648 + 1024, "u8")])
+        self.assertEqual(lease.tensors["kv_recv"].shape, (28, 648))
+        self.assertEqual(w.payload_bytes(), 5 * 7 * 648 + 2048)
+        finish(w, lease)
+        done = w.slots["suffix"].done
+        trace.clear()
+        smaller = w.acquire_suffix(3)
+        self.assertEqual(smaller.tensors["kv_recv"].shape, (12, 648))
+        self.assertEqual(trace[0], ("wait_event", 2, done))
+        self.assertFalse(any(x[0] in ("allocate", "register", "sync", "side_sync") for x in trace))
+        finish(w, smaller)
+        w.close()
+
+    def test_wire_preserves_prefix_layout_and_cross_slot_growth_fence(self):
+        w, trace = setup(suffix_format="nvfp4_wire_v1")
+        prefix = w.acquire_prefix(2)
+        finish(w, prefix)
+        self.assertEqual(prefix.kind, "prefix")
+        done = w.slots["prefix"].done
+        trace.clear()
+        suffix = w.acquire_suffix(3)
+        self.assertEqual(trace[0], ("side_sync", 2))
+        self.assertLess(trace.index(("sync", done)),
+                        next(i for i, x in enumerate(trace) if x[0] == "register"))
+        finish(w, suffix)
+        w.close()
+
+    def test_unknown_suffix_format_fails(self):
+        with self.assertRaisesRegex(ValueError, "suffix format"):
+            setup(suffix_format="future_format")
+
+    def test_factory_rejects_live_format_change(self):
+        from unittest.mock import patch
+        w, _ = setup(suffix_format="nvfp4_wire_v1")
+        group = object()
+        collective = types.SimpleNamespace(
+            Group=types.SimpleNamespace(TP_SIDE="side"),
+            _get_group=lambda _: group,
+            _owned_cp_workspaces={(group, "cuda:0"): w},
+        )
+        package = types.ModuleType("rtp_llm.models_py.distributed")
+        package.collective_torch = collective
+        with patch.dict(sys.modules, {package.__name__: package}):
+            self.assertIs(module.get_workspace(
+                "cuda:0", w.main_stream, w.side_stream,
+                suffix_format="nvfp4_wire_v1"), w)
+            with self.assertRaisesRegex(RuntimeError, "format changed"):
+                module.get_workspace("cuda:0", w.main_stream, w.side_stream)
+
     def test_prefix_allocation_order_and_shapes(self):
         w, trace = setup()
         lease = w.acquire_prefix(3)

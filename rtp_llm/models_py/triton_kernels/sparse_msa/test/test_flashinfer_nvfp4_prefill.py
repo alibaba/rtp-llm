@@ -96,6 +96,42 @@ class FlashInferNVFP4PrefillTest(unittest.TestCase):
             k_global_scale=1.0, v_global_scale=1.0,
         )
         self.assertTrue(torch.equal(actual, legacy))
+
+        # Produce FI pages directly, then compare against the legacy conversion
+        # and the FP32 reference above. Keep the retained-capacity page pitch.
+        from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+            quantize_cp_main_index_rows_to_planes,
+        )
+        direct_pool = torch.zeros((pages + 3, layout["page_bytes"]),
+                                  device=device, dtype=torch.uint8)
+        dk = torch.as_strided(direct_pool, data_shape, data_stride, 0)
+        dv = torch.as_strided(direct_pool, data_shape, data_stride, layout["v_data_byte_offset"])
+        dks = torch.as_strided(direct_pool, (pages, 4096),
+                              (layout["page_bytes"], 1), layout["k_scale_byte_offset"])
+        dvs = torch.as_strided(direct_pool, (pages, 4096),
+                              (layout["page_bytes"], 1), layout["v_scale_byte_offset"])
+        packed = torch.cat((k_rows.flatten(1), v_rows.flatten(1), idx_rows.flatten(1)), dim=1)
+        ids = torch.arange(rows, device=device, dtype=torch.int64)
+        for cta in (1, 8):
+            with self.subTest(direct_layout=True, rows_per_cta=cta):
+                direct_pool.zero_()
+                quantize_cp_main_index_rows_to_planes(
+                    packed, ids, ids, dk, dks.view(torch.float8_e4m3fn),
+                    dv, dvs.view(torch.float8_e4m3fn), idx, idx_scale,
+                    rows_per_cta=cta, fi_working_layout=True,
+                )
+                direct = adapter.flashinfer_sparse_prefill_from_topk_fp4(
+                    q, dk, dv, dks, dvs, topk, slots, cu_q, seqused,
+                    positions, seqused, 128**-0.5, direct_layout=True,
+                )
+                self.assertTrue(torch.equal(direct_pool[:pages], pool))
+                self.assertTrue(torch.equal(direct, actual))
+                self.assertEqual(int(torch.count_nonzero(direct_pool[pages:])), 0)
+        with self.assertRaisesRegex(ValueError, "exact planar page ABI"):
+            adapter.flashinfer_sparse_prefill_from_topk_fp4(
+                q, dk, dv.clone(), dks, dvs, topk, slots, cu_q,
+                seqused, positions, seqused, 128**-0.5, direct_layout=True,
+            )
         self.assertGreater(int(torch.unique(ks.view(torch.uint8)).numel()), 8)
 
         physical = torch.arange(rows, device=device, dtype=torch.int64)

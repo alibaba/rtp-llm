@@ -1406,6 +1406,16 @@ def flash_prefill_topk_to_block_tables_fp4(
     )
 
     native_workspace = None
+    marker = index_score_plan.get("_fp4_metadata_table")
+    prepared = index_score_plan.get("_fp4_prepared_chunks")
+    # Only the producer's immutable epoch authorizes cross-layer ID reuse.
+    # Unmarked/direct callers may mutate their tables before every score.
+    immutable_tables = (
+        marker is not None and prepared is not None
+        and marker[1] is kv_indices
+        and prepared[0] is marker[0] and prepared[1] is kv_indices
+        and prepared[3][0] is chunks
+    )
     native_arguments = (
         chunks,
         idx_k_fp4.shape[0],
@@ -1417,11 +1427,15 @@ def flash_prefill_topk_to_block_tables_fp4(
     compact = False
     eligible = False
     if isinstance(host_metadata, PrefillScoreHostMetadata):
-        eligible = supported_native_index_workspace(*native_arguments)
+        eligible = supported_native_index_workspace(
+            *native_arguments, immutable_tables=immutable_tables
+        )
         # Keep the cheaper all-pool path whenever it fits. Compact staging is
         # an admission rescue, not a blanket replacement or a new user flag.
         if not eligible:
-            compact = supported_native_index_workspace(*native_arguments, compact=True)
+            compact = supported_native_index_workspace(
+                *native_arguments, compact=True, immutable_tables=immutable_tables
+            )
             eligible = compact
     if eligible:
         previous = index_score_plan.get("_native_q8_index_workspace")
@@ -1432,6 +1446,8 @@ def flash_prefill_topk_to_block_tables_fp4(
             or previous.device != idx_q.device
             or previous.heads != num_heads
             or getattr(previous, "compact", False) != compact
+            or getattr(previous, "immutable_tables", False) != immutable_tables
+            or (immutable_tables and getattr(previous, "table_epoch", None) is not marker[0])
             or len(previous.chunks) != len(chunks)
             or any(a is not b for a, b in zip(previous.chunks, chunks))
         ):
@@ -1440,8 +1456,10 @@ def flash_prefill_topk_to_block_tables_fp4(
             index_score_plan.pop("_native_q8_index_workspace", None)
             previous = None
             previous = NativeIndexWorkspace(
-                chunks, idx_k_fp4.shape[0], num_heads, idx_q.device, compact=compact
+                chunks, idx_k_fp4.shape[0], num_heads, idx_q.device,
+                compact=compact, immutable_tables=immutable_tables,
             )
+            previous.table_epoch = marker[0] if immutable_tables else None
             index_score_plan["_native_q8_index_workspace"] = previous
         native_workspace = previous
         # The current layer's writer precedes this on the current stream.

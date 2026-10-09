@@ -197,7 +197,7 @@ class ContiguousNormRopeTest(unittest.TestCase):
         torch.manual_seed(20261004)
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
-            for rows in (0, 1, 2, 3, 16, 64, 65, 79, 80, 81, 127, 128):
+            for rows in (0, 1, 2, 3, 16, 64, 65, 79, 80, 81, 127, 128, 129, 143, 159, 160):
                 with self.subTest(rows=rows):
                     source = torch.randn(
                         rows, 9856, device="cuda", dtype=torch.bfloat16

@@ -1,4 +1,4 @@
-"""RTP packed working pages to FlashInfer NVFP4 sparse prefill."""
+"""FlashInfer NVFP4 sparse prefill over direct working pages or legacy planes."""
 
 import torch
 import triton
@@ -115,9 +115,13 @@ _PLANAR_PAGES = _PlanarPages()
 def flashinfer_sparse_prefill_from_topk_fp4(
     q, main_k, main_v, k_scale, v_scale, topk, req_to_token,
     cu_seqlens_q, seqused_k, positions, full_kv_lengths, sm_scale,
-    segments_per_request=1,
+    segments_per_request=1, *, direct_layout=False,
 ):
-    """Run FI over RTP's request-local packed working pages, preserving KV ABI."""
+    """Run FI over request-local pages; direct mode shares producer storage.
+
+    Legacy conversion remains an explicit oracle/compatibility boundary. Model
+    FI callers pass ``direct_layout=True`` and allocate no converted main pool.
+    """
     if q.dtype != torch.bfloat16 or not q.is_contiguous() or q.shape[1:] != (64, 128):
         raise ValueError("FlashInfer MSA prefill requires contiguous BF16 Q [N,64,128]")
     pages, heads, page_size, packed_dim = main_k.shape
@@ -136,16 +140,34 @@ def flashinfer_sparse_prefill_from_topk_fp4(
             or full_kv_lengths.numel() * segments_per_request != req_to_token.shape[0]):
         raise ValueError("full KV lengths must cover each request's working pages")
     msa_prefill_nvfp4_specialized_warmup(q.device)
-    pool, layout = _PLANAR_PAGES.acquire(pages, heads, q.device)
-    _convert_page_head[(pages, heads)](
-        main_k, main_v, k_scale.view(torch.uint8), v_scale.view(torch.uint8),
-        pool, main_k.stride(0), main_v.stride(0),
-        k_scale.stride(0), v_scale.stride(0),
-        PAGE_BYTES=layout["page_bytes"],
-        K_SCALE_OFFSET=layout["k_scale_byte_offset"],
-        V_DATA_OFFSET=layout["v_data_byte_offset"],
-        V_SCALE_OFFSET=layout["v_scale_byte_offset"], num_warps=8,
-    )
+    if direct_layout:
+        layout = page_layout(heads)
+        # Require the exact common-base ABI; never silently materialize a pool.
+        planes = (main_k, k_scale, main_v, v_scale)
+        offsets = (0, layout["k_scale_byte_offset"],
+                   layout["v_data_byte_offset"], layout["v_scale_byte_offset"])
+        base = main_k.untyped_storage().data_ptr()
+        if (main_k.storage_offset() != 0
+                or main_k.stride() != (layout["page_bytes"], 8192, 64, 1)
+                or main_v.stride() != main_k.stride()
+                or k_scale.stride() != (layout["page_bytes"], 1)
+                or v_scale.stride() != k_scale.stride()
+                or any(p.untyped_storage().data_ptr() != base
+                       or p.storage_offset() != offset for p, offset in zip(planes, offsets))):
+            raise ValueError("direct FI working pages must share the exact planar page ABI")
+        pool = torch.as_strided(main_k, (pages, layout["page_bytes"]),
+                                (layout["page_bytes"], 1), 0)
+    else:
+        pool, layout = _PLANAR_PAGES.acquire(pages, heads, q.device)
+        _convert_page_head[(pages, heads)](
+            main_k, main_v, k_scale.view(torch.uint8), v_scale.view(torch.uint8),
+            pool, main_k.stride(0), main_v.stride(0),
+            k_scale.stride(0), v_scale.stride(0),
+            PAGE_BYTES=layout["page_bytes"],
+            K_SCALE_OFFSET=layout["k_scale_byte_offset"],
+            V_DATA_OFFSET=layout["v_data_byte_offset"],
+            V_SCALE_OFFSET=layout["v_scale_byte_offset"], num_warps=8,
+        )
     _clear_unwritten_page_tail[(full_kv_lengths.numel(), heads)](
         req_to_token, full_kv_lengths, pool, req_to_token.stride(0),
         segments_per_request, layout["page_bytes"],

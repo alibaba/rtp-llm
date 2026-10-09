@@ -39,6 +39,10 @@ def _gemma_norm_rope(
     Q8=None,
     IQ8=None,
     WRITE_Q8: tl.constexpr = False,
+    PREFILL_Q=None,
+    PREFILL_IQ=None,
+    PREFILL_KV=None,
+    WRITE_PREFILL: tl.constexpr = False,
 ):
     head = tl.program_id(1)
     d = tl.arange(0, 128)
@@ -92,7 +96,32 @@ def _gemma_norm_rope(
             tl.fma(n, c, -other * s),
             tl.where(d < 64, tl.fma(n, c, other * s), n),
         )
-        tl.store(ptr, out, mask=valid)
+        if WRITE_PREFILL:
+            # Independent producer outputs replace every legacy input store.
+            # Preserve the original BF16 rounding boundary for index Q8.
+            bf16 = out.to(tl.bfloat16)
+            packed_stride = (2 * HK + 1) * 128
+            if head < HQ:
+                tl.store(PREFILL_Q + row * (HQ * 128) + head * 128 + d,
+                         bf16, mask=valid)
+            elif head < HQ + HK:
+                kv_head = head - HQ
+                tl.store(PREFILL_KV + row * packed_stride + kv_head * 128 + d,
+                         bf16, mask=valid)
+                # V is not normalized/rotated. Its K CTA copies the original
+                # BF16 values into the adjacent communication plane.
+                v = tl.load(QKV + row * QS + (HQ + HK + kv_head) * 128 + d,
+                            mask=valid, other=0)
+                tl.store(PREFILL_KV + row * packed_stride + (HK + kv_head) * 128 + d,
+                         v, mask=valid)
+            elif head < HQ + HK + HI:
+                tl.store(PREFILL_IQ + row * (HI * 128) + (head - HQ - HK) * 128 + d,
+                         bf16.to(tl.float8e4nv), mask=valid)
+            else:
+                tl.store(PREFILL_KV + row * packed_stride + 2 * HK * 128 + d,
+                         bf16, mask=valid)
+        else:
+            tl.store(ptr, out, mask=valid)
         if WRITE_Q8:
             # Match the existing BF16 store followed by scale-one E4M3 cast.
             # Casting FP32 directly would skip a rounding boundary.
@@ -131,6 +160,7 @@ def minimax_m31_gemma_norm_rope_(
     eps=1e-6,
     contiguous_outputs=None,
     query_fp8_outputs=None,
+    prefill_outputs=None,
 ):
     """Normalize/rotate projected BF16 rows; leave V untouched.
 
@@ -143,7 +173,15 @@ def minimax_m31_gemma_norm_rope_(
     before capture and rewrites projections before every replay.
     Optional independent E4M3 Q/index-Q outputs fuse the existing scale-one
     cast after BF16 rounding; K/index-K/V and in-place projections are unchanged.
+    ``prefill_outputs=(Q_bf16, index_Q_e4m3, packed_KV_bf16)`` instead
+    writes independent final Prefill producers without changing any projection
+    input. Packed rows are [K_rope | V | index_K_rope]. This mode is exclusive
+    with legacy outputs and preserves BF16 rounding before index-Q FP8 cast.
     """
+    if prefill_outputs is not None and (
+        contiguous_outputs is not None or query_fp8_outputs is not None
+    ):
+        raise ValueError("prefill producer outputs cannot be combined with legacy outputs")
     heads = (num_q_heads, num_kv_heads, num_index_heads)
     if any(not isinstance(h, int) or h <= 0 for h in heads) or eps <= 0:
         raise ValueError("positive integer head counts and positive eps required")
@@ -177,6 +215,22 @@ def minimax_m31_gemma_norm_rope_(
     tensors = (qkv, index_q, index_k, *raw_weights, positions, cos_sin_cache)
     if not qkv.is_cuda or any(x.device != qkv.device for x in tensors):
         raise ValueError("all tensors must share a CUDA device")
+    if prefill_outputs is not None:
+        specifications = (
+            ((rows, num_q_heads, 128), torch.bfloat16),
+            ((rows, num_index_heads, 128), torch.float8_e4m3fn),
+            ((rows, (2 * num_kv_heads + 1) * 128), torch.bfloat16),
+        )
+        if len(prefill_outputs) != 3 or any(
+            x.shape != shape or x.dtype != dtype or x.device != qkv.device
+            or not x.is_contiguous()
+            for x, (shape, dtype) in zip(prefill_outputs, specifications)
+        ):
+            raise ValueError("prefill outputs require contiguous BF16 Q, E4M3 index Q and BF16 packed KV")
+        inputs = {x.untyped_storage().data_ptr() for x in tensors}
+        outputs = [x.untyped_storage().data_ptr() for x in prefill_outputs]
+        if rows and (len(set(outputs)) != 3 or inputs.intersection(outputs)):
+            raise ValueError("prefill outputs must have independent non-input storage")
     if query_fp8_outputs is not None:
         if contiguous_outputs is not None:
             raise ValueError("choose contiguous BF16 outputs or Q8 outputs, not both")
@@ -253,6 +307,10 @@ def minimax_m31_gemma_norm_rope_(
             Q8=query_fp8_outputs[0] if query_fp8_outputs is not None else None,
             IQ8=query_fp8_outputs[1] if query_fp8_outputs is not None else None,
             WRITE_Q8=query_fp8_outputs is not None,
+            PREFILL_Q=prefill_outputs[0] if prefill_outputs is not None else None,
+            PREFILL_IQ=prefill_outputs[1] if prefill_outputs is not None else None,
+            PREFILL_KV=prefill_outputs[2] if prefill_outputs is not None else None,
+            WRITE_PREFILL=prefill_outputs is not None,
             num_warps=num_warps,
             enable_fp_fusion=False,
         )

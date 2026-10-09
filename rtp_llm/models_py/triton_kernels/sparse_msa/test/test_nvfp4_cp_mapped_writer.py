@@ -161,6 +161,8 @@ class CPWriterSourceTest(unittest.TestCase):
 
 
 class CPWriterGPURegressionTest(unittest.TestCase):
+    rows_per_cta = 1
+
     @classmethod
     def setUpClass(cls):
         import torch
@@ -296,6 +298,7 @@ class CPWriterGPURegressionTest(unittest.TestCase):
                 *wp,
                 persistent_slots=persistent_slots,
                 persistent_planes=pp,
+                rows_per_cta=self.rows_per_cta,
             )
         else:
             selected = packed.index_select(0, unpad).contiguous()
@@ -324,7 +327,7 @@ class CPWriterGPURegressionTest(unittest.TestCase):
 
     def test_production_wrapper_small_exact_and_changed_graph(self):
         torch = self.torch
-        for rows in (0, 1, 3, 127, 128, 129, 1934):
+        for rows in (0, 1, 3, 4, 7, 8, 9, 127, 128, 129, 1934):
             for padded_stride in (False, True):
                 case = self.case(rows, padded_stride=padded_stride)
                 self.compare(
@@ -481,6 +484,14 @@ class CPWriterGPURegressionTest(unittest.TestCase):
             lambda: self.run_chain(case, False),
             lambda: self.run_chain(case, True),
         )
+
+
+class CPWriterMultirow4GPURegressionTest(CPWriterGPURegressionTest):
+    rows_per_cta = 4
+
+
+class CPWriterMultirow8GPURegressionTest(CPWriterGPURegressionTest):
+    rows_per_cta = 8
 
 
 if __name__ == "__main__":

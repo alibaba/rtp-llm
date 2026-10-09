@@ -639,6 +639,7 @@ def _quantize_main_index_rows_d128_kernel(
     PERSIST_IDX_SCALE_S0: tl.constexpr = 0,
     PERSIST_NUM_BLOCKS=0,
     WRITE_PERSISTENT: tl.constexpr = False,
+    FI_WORKING_LAYOUT: tl.constexpr = False,
 ):
     """One row/plane CTA, eight independent groups by eight nibble pairs.
 
@@ -725,6 +726,16 @@ def _quantize_main_index_rows_d128_kernel(
         main_scale_offset = (
             block * MAIN_SCALE_S0 + (head * PAGE_SIZE + page_offset) * 8 + groups
         )
+    if FI_WORKING_LAYOUT:
+        # K scales are token-major; V scales use FI's 4-token permutation.
+        # Only working stores change. Quantized codes and persistent MMA stores
+        # are shared with the original writer.
+        main_scale_offset = block * MAIN_SCALE_S0 + head * 1024 + page_offset * 8 + groups
+        v_scale_offset = (block * MAIN_SCALE_S0 + head * 1024
+                          + ((page_offset // 4) * 4 + groups // 2) * 8
+                          + (groups % 2) * 4 + page_offset % 4)
+    else:
+        v_scale_offset = main_scale_offset
     idx_packed_offset = block * IDX_PACKED_S0 + page_offset * 64 + group * 8 + pair
     if MMA_SCALE_LAYOUT:
         idx_scale_offset = block * IDX_SCALE_S0 + _scale_128x4_offset(
@@ -749,7 +760,7 @@ def _quantize_main_index_rows_d128_kernel(
         mask=valid_slot & is_v,
     )
     tl.store(
-        v_scales_ptr + main_scale_offset,
+        v_scales_ptr + v_scale_offset,
         stored_scale,
         mask=valid_slot & is_v,
     )
@@ -812,6 +823,247 @@ def _quantize_main_index_rows_d128_kernel(
             persist_idx_packed_ptr + persist_idx_packed_offset,
             packed_codes,
             mask=persist_valid & is_idx,
+        )
+        tl.store(
+            persist_idx_scales_ptr + persist_idx_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_idx,
+        )
+
+
+# Counts/capacities only bound accesses; reuse the binary across Prefill shapes.
+@triton.jit(do_not_specialize=["N", "NUM_BLOCKS", "PERSIST_NUM_BLOCKS"])
+def _quantize_main_index_rows_d128_multirow_kernel(
+    k_ptr,
+    v_ptr,
+    idx_ptr,
+    slots_ptr,
+    unpad_ptr,
+    owned_rows_ptr,
+    k_packed_ptr,
+    k_scales_ptr,
+    v_packed_ptr,
+    v_scales_ptr,
+    idx_packed_ptr,
+    idx_scales_ptr,
+    N,
+    K_S0: tl.constexpr,
+    K_S1: tl.constexpr,
+    K_S2: tl.constexpr,
+    V_S0: tl.constexpr,
+    V_S1: tl.constexpr,
+    V_S2: tl.constexpr,
+    IDX_S0: tl.constexpr,
+    IDX_S2: tl.constexpr,
+    MAIN_PACKED_S0: tl.constexpr,
+    MAIN_SCALE_S0: tl.constexpr,
+    IDX_PACKED_S0: tl.constexpr,
+    IDX_SCALE_S0: tl.constexpr,
+    NUM_BLOCKS,
+    NUM_HEADS: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    MMA_SCALE_LAYOUT: tl.constexpr,
+    MAP_SOURCE_ROWS: tl.constexpr = False,
+    MAP_OWNED_ROWS: tl.constexpr = False,
+    persist_slots_ptr=None,
+    persist_k_packed_ptr=None,
+    persist_k_scales_ptr=None,
+    persist_v_packed_ptr=None,
+    persist_v_scales_ptr=None,
+    persist_idx_packed_ptr=None,
+    persist_idx_scales_ptr=None,
+    PERSIST_MAIN_PACKED_S0: tl.constexpr = 0,
+    PERSIST_MAIN_SCALE_S0: tl.constexpr = 0,
+    PERSIST_IDX_PACKED_S0: tl.constexpr = 0,
+    PERSIST_IDX_SCALE_S0: tl.constexpr = 0,
+    PERSIST_NUM_BLOCKS=0,
+    WRITE_PERSISTENT: tl.constexpr = False,
+    FI_WORKING_LAYOUT: tl.constexpr = False,
+    ROWS_PER_CTA: tl.constexpr = 4,
+):
+    """Experimental row-group CTA with the original eight-pair reduction.
+
+    Each of ROWS_PER_CTA rows retains eight independent groups of sixteen.
+    Reduction axis 1 and FP8/E2M1 rounding match the one-row writer exactly.
+    """
+    row_group = tl.arange(0, ROWS_PER_CTA * 8)
+    row = tl.program_id(0).to(tl.int64) * ROWS_PER_CTA + row_group // 8
+    plane = tl.program_id(1)
+    is_k = plane < NUM_HEADS
+    is_v = (plane >= NUM_HEADS) & (plane < 2 * NUM_HEADS)
+    is_idx = plane == 2 * NUM_HEADS
+    head = tl.where(is_k, plane, tl.where(is_v, plane - NUM_HEADS, 0))
+
+    valid_row = row < N
+    source_row = row
+    if MAP_SOURCE_ROWS:
+        logical_row = row
+        if MAP_OWNED_ROWS:
+            logical_row = tl.load(owned_rows_ptr + row, mask=valid_row, other=0).to(
+                tl.int64
+            )
+        source_row = tl.load(unpad_ptr + logical_row, mask=valid_row, other=0).to(
+            tl.int64
+        )
+    slot = tl.load(slots_ptr + row, mask=valid_row, other=-1).to(tl.int64)
+    valid_slot = valid_row & (slot >= 0) & (slot < NUM_BLOCKS * PAGE_SIZE)
+    input_valid = valid_slot
+    if WRITE_PERSISTENT:
+        persist_slot = tl.load(persist_slots_ptr + row, mask=valid_row, other=-1).to(
+            tl.int64
+        )
+        persist_valid = (
+            valid_row
+            & (persist_slot >= 0)
+            & (persist_slot < PERSIST_NUM_BLOCKS * PAGE_SIZE)
+        )
+        input_valid = valid_slot | persist_valid
+    block = slot // PAGE_SIZE
+    page_offset = slot - block * PAGE_SIZE
+    pair = tl.arange(0, 8)[None, :]
+    groups = row_group % 8
+    group = groups[:, None]
+    element = group * 16 + 2 * pair
+    main_even_offset = source_row[:, None] * K_S0 + head * K_S1 + element * K_S2
+    main_odd_offset = main_even_offset + K_S2
+    v_even_offset = source_row[:, None] * V_S0 + head * V_S1 + element * V_S2
+    v_odd_offset = v_even_offset + V_S2
+    idx_even_offset = source_row[:, None] * IDX_S0 + element * IDX_S2
+    idx_odd_offset = idx_even_offset + IDX_S2
+
+    k_even = tl.load(k_ptr + main_even_offset, mask=input_valid[:, None] & is_k, other=0.0)
+    k_odd = tl.load(k_ptr + main_odd_offset, mask=input_valid[:, None] & is_k, other=0.0)
+    v_even = tl.load(v_ptr + v_even_offset, mask=input_valid[:, None] & is_v, other=0.0)
+    v_odd = tl.load(v_ptr + v_odd_offset, mask=input_valid[:, None] & is_v, other=0.0)
+    idx_even = tl.load(idx_ptr + idx_even_offset, mask=input_valid[:, None] & is_idx, other=0.0)
+    idx_odd = tl.load(idx_ptr + idx_odd_offset, mask=input_valid[:, None] & is_idx, other=0.0)
+    even_values = tl.where(is_k, k_even, tl.where(is_v, v_even, idx_even)).to(
+        tl.float32
+    )
+    odd_values = tl.where(is_k, k_odd, tl.where(is_v, v_odd, idx_odd)).to(tl.float32)
+    amax = tl.max(tl.maximum(tl.abs(even_values), tl.abs(odd_values)), axis=1)
+    raw_scale = tl.minimum(
+        tl.maximum(amax / _TL_E2M1_MAX, _TL_SCALE_MIN), _TL_SCALE_MAX
+    )
+    stored_scale = raw_scale.to(tl.float8e4nv)
+    scale = stored_scale.to(tl.float32)[:, None]
+    packed_codes = _e2m1_encode(even_values, scale) | (
+        _e2m1_encode(odd_values, scale) << 4
+    )
+
+    main_packed_offset = (
+        block[:, None] * MAIN_PACKED_S0
+        + (head * PAGE_SIZE + page_offset[:, None]) * 64
+        + group * 8
+        + pair
+    )
+    if MMA_SCALE_LAYOUT:
+        main_scale_offset = (
+            block * MAIN_SCALE_S0
+            + head * PAGE_SIZE * 8
+            + _scale_128x4_offset(page_offset, groups)
+        )
+    else:
+        main_scale_offset = (
+            block * MAIN_SCALE_S0 + (head * PAGE_SIZE + page_offset) * 8 + groups
+        )
+    if FI_WORKING_LAYOUT:
+        # K scales are token-major; V scales use FI's 4-token permutation.
+        # Only working stores change. Quantized codes and persistent MMA stores
+        # are shared with the original writer.
+        main_scale_offset = block * MAIN_SCALE_S0 + head * 1024 + page_offset * 8 + groups
+        v_scale_offset = (block * MAIN_SCALE_S0 + head * 1024
+                          + ((page_offset // 4) * 4 + groups // 2) * 8
+                          + (groups % 2) * 4 + page_offset % 4)
+    else:
+        v_scale_offset = main_scale_offset
+    idx_packed_offset = block[:, None] * IDX_PACKED_S0 + page_offset[:, None] * 64 + group * 8 + pair
+    if MMA_SCALE_LAYOUT:
+        idx_scale_offset = block * IDX_SCALE_S0 + _scale_128x4_offset(
+            page_offset, groups
+        )
+    else:
+        idx_scale_offset = block * IDX_SCALE_S0 + page_offset * 8 + groups
+
+    tl.store(
+        k_packed_ptr + main_packed_offset,
+        packed_codes,
+        mask=valid_slot[:, None] & is_k,
+    )
+    tl.store(
+        k_scales_ptr + main_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_k,
+    )
+    tl.store(
+        v_packed_ptr + main_packed_offset,
+        packed_codes,
+        mask=valid_slot[:, None] & is_v,
+    )
+    tl.store(
+        v_scales_ptr + v_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_v,
+    )
+    tl.store(
+        idx_packed_ptr + idx_packed_offset,
+        packed_codes,
+        mask=valid_slot[:, None] & is_idx,
+    )
+    tl.store(
+        idx_scales_ptr + idx_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_idx,
+    )
+
+    if WRITE_PERSISTENT:
+        persist_block = persist_slot // PAGE_SIZE
+        persist_page_offset = persist_slot - persist_block * PAGE_SIZE
+        persist_main_packed_offset = (
+            persist_block[:, None] * PERSIST_MAIN_PACKED_S0
+            + (head * PAGE_SIZE + persist_page_offset[:, None]) * 64
+            + group * 8
+            + pair
+        )
+        persist_main_scale_offset = (
+            persist_block * PERSIST_MAIN_SCALE_S0
+            + head * PAGE_SIZE * 8
+            + _scale_128x4_offset(persist_page_offset, groups)
+        )
+        persist_idx_packed_offset = (
+            persist_block[:, None] * PERSIST_IDX_PACKED_S0
+            + persist_page_offset[:, None] * 64
+            + group * 8
+            + pair
+        )
+        persist_idx_scale_offset = (
+            persist_block * PERSIST_IDX_SCALE_S0
+            + _scale_128x4_offset(persist_page_offset, groups)
+        )
+        tl.store(
+            persist_k_packed_ptr + persist_main_packed_offset,
+            packed_codes,
+            mask=persist_valid[:, None] & is_k,
+        )
+        tl.store(
+            persist_k_scales_ptr + persist_main_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_k,
+        )
+        tl.store(
+            persist_v_packed_ptr + persist_main_packed_offset,
+            packed_codes,
+            mask=persist_valid[:, None] & is_v,
+        )
+        tl.store(
+            persist_v_scales_ptr + persist_main_scale_offset,
+            stored_scale,
+            mask=persist_valid & is_v,
+        )
+        tl.store(
+            persist_idx_packed_ptr + persist_idx_packed_offset,
+            packed_codes,
+            mask=persist_valid[:, None] & is_idx,
         )
         tl.store(
             persist_idx_scales_ptr + persist_idx_scale_offset,
@@ -1642,6 +1894,34 @@ def quantize_main_index_rows(
     )
 
 
+def _validate_disjoint_cp_planes(planes, pages):
+    """Reject overlapping destinations using host metadata only.
+
+    FI working and persistent ABI planes can occupy disjoint regions of the
+    same allocation. Their common page pitch lets us compare regions modulo
+    that pitch without iterating over pages or reading device values.
+    """
+    if not pages:
+        return
+    regions = {}
+    for tensor in planes:
+        storage = tensor.untyped_storage().data_ptr()
+        pitch = int(tensor.stride(0))
+        start = int(tensor.storage_offset())  # uint8/E4M3 both use one-byte elements.
+        width = tensor.numel() // pages
+        end = start + (pages - 1) * pitch + width
+        siblings = regions.setdefault(storage, [])
+        for other_start, other_end, other_pitch, other_width in siblings:
+            if end <= other_start or other_end <= start:
+                continue
+            if pitch != other_pitch:
+                raise ValueError("shared CP plane storage requires a common page stride")
+            distance = (start - other_start) % pitch
+            if distance < other_width or distance + width > pitch:
+                raise ValueError("CP writer destination planes must not overlap")
+        siblings.append((start, end, pitch, width))
+
+
 def _validate_cp_writer_planes(planes):
     if len(planes) != 6 or planes[0].ndim < 2:
         raise ValueError("M3.1 CP writer requires six paged planes")
@@ -1666,6 +1946,7 @@ def _validate_cp_writer_planes(planes):
         3
     ].stride(0):
         raise ValueError("M3.1 CP writer K/V plane row strides must match")
+    _validate_disjoint_cp_planes(planes, pages)
     return pages
 
 
@@ -1683,6 +1964,8 @@ def quantize_cp_main_index_rows_to_planes(
     owned_rows: Optional[torch.Tensor] = None,
     persistent_slots: Optional[torch.Tensor] = None,
     persistent_planes: Optional[tuple[torch.Tensor, ...]] = None,
+    rows_per_cta: int = 1,
+    fi_working_layout: bool = False,
 ) -> None:
     """M3.1 CP suffix writer reading the padded packed projection directly.
 
@@ -1693,7 +1976,13 @@ def quantize_cp_main_index_rows_to_planes(
     of the persistent value/side ABI. No tensor or device metadata is allocated.
     Optional persistent planes reuse the quantized values with a full logical
     slot map, never a compressed owned-row map, and independent storage.
+    ``rows_per_cta=4/8`` explicitly opts into the experimental multirow writer;
+    the default retains the original one-row launch. ``fi_working_layout``
+    selects linear K/FI-swizzled V scales for working stores only; persistent
+    and index stores retain the original MMA byte layout.
     """
+    if type(rows_per_cta) is not int or rows_per_cta not in (1, 4, 8):
+        raise ValueError("rows_per_cta must be 1 (original), 4, or 8")
     if (
         packed.ndim != 2
         or int(packed.shape[1]) != 1152
@@ -1746,7 +2035,10 @@ def quantize_cp_main_index_rows_to_planes(
     k = packed[:, :512].view(packed.shape[0], 4, 128)
     v = packed[:, 512:1024].view(packed.shape[0], 4, 128)
     index_k = packed[:, 1024:].view(packed.shape[0], 1, 128)
-    _quantize_main_index_rows_d128_kernel[(rows, 9)](
+    kernel = (_quantize_main_index_rows_d128_kernel if rows_per_cta == 1
+              else _quantize_main_index_rows_d128_multirow_kernel)
+    launch_options = {} if rows_per_cta == 1 else {"ROWS_PER_CTA": rows_per_cta}
+    kernel[(triton.cdiv(rows, rows_per_cta), 9)](
         k,
         v,
         index_k,
@@ -1786,7 +2078,9 @@ def quantize_cp_main_index_rows_to_planes(
         PERSIST_IDX_SCALE_S0=int(persistent[5].stride(0)) if dual else 0,
         PERSIST_NUM_BLOCKS=persistent_pages if dual else 0,
         WRITE_PERSISTENT=dual,
-        num_warps=1,
+        FI_WORKING_LAYOUT=fi_working_layout,
+        num_warps=1 if rows_per_cta == 1 else 4,
+        **launch_options,
     )
 
 
@@ -2017,6 +2311,7 @@ def _clear_packed_working_tail_scales_kernel(
     GROUPS: tl.constexpr,
     IDX_GROUPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    FI_WORKING_LAYOUT: tl.constexpr = False,
 ):
     batch, head = tl.program_id(0), tl.program_id(1)
     length = tl.load(lengths + batch).to(tl.int64)
@@ -2026,8 +2321,13 @@ def _clear_packed_working_tail_scales_kernel(
     row, group = offsets // GROUPS, offsets % GROUPS
     valid = (tail_start != 0) & (row < 128) & (row >= tail_start)
     swizzle = group // 4 * 512 + row % 32 * 16 + row // 32 * 4 + group % 4
-    tl.store(k_scale + page * K_PAGE_STRIDE + head * 128 * GROUPS + swizzle, 0.0, valid)
-    tl.store(v_scale + page * V_PAGE_STRIDE + head * 128 * GROUPS + swizzle, 0.0, valid)
+    k_offset = swizzle
+    v_offset = swizzle
+    if FI_WORKING_LAYOUT:
+        k_offset = row * GROUPS + group
+        v_offset = ((row // 4) * 4 + group // 2) * 8 + (group % 2) * 4 + row % 4
+    tl.store(k_scale + page * K_PAGE_STRIDE + head * 128 * GROUPS + k_offset, 0.0, valid)
+    tl.store(v_scale + page * V_PAGE_STRIDE + head * 128 * GROUPS + v_offset, 0.0, valid)
     idx_row, idx_group = offsets // IDX_GROUPS, offsets % IDX_GROUPS
     idx_valid = (
         (head == 0) & (tail_start != 0) & (idx_row < 128) & (idx_row >= tail_start)
@@ -2047,13 +2347,16 @@ def clear_packed_working_tail_scales(
     heads: int,
     head_dim: int,
     index_dim: int,
+    *,
+    fi_working_layout: bool = False,
 ) -> None:
     """Make only the unread last-page rows finite for whole-page FP8 MMA.
 
     Native prefill masks QK but reads full-page V. Zero probability multiplied
     by an uninitialized E4M3 NaN still poisons PV. Zero scales make the finite
     E2M1 payload decode to zero, without touching any live row or clearing the
-    full historical working set. Scales use the writer's 128x4 MMA swizzle.
+    full historical working set. Main scales follow the selected working
+    layout; index scales always use the writer's 128x4 MMA swizzle.
     """
     if scratch_seq_len % 128 or head_dim % 64 or index_dim % 64:
         raise ValueError("packed tail scales require page128 and MMA group4 alignment")
@@ -2071,6 +2374,7 @@ def clear_packed_working_tail_scales(
         GROUPS=groups,
         IDX_GROUPS=idx_groups,
         BLOCK=triton.next_power_of_2(128 * max(groups, idx_groups)),
+        FI_WORKING_LAYOUT=fi_working_layout,
         num_warps=4,
     )
 

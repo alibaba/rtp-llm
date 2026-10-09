@@ -12,6 +12,8 @@ OnlyScore entrypoint: 128-aligned max_k_tiles, original-head score layout
 Different dependency versions require validation; API errors propagate.
 Scratch belongs to one forward/producer epoch and runs serially on the current
 stream. Rebuild on epoch/geometry changes; stage after every layer's K writer.
+An explicitly immutable producer epoch may retain page IDs across layers;
+unmarked callers rebuild IDs for every score, including during graph replay.
 The 512 MiB admission budget covers this module's stage, score and safe tables;
 it excludes caller Q/TopK buffers and the dependency's own planner workspace.
 """
@@ -80,7 +82,7 @@ def _check_int_vector(tensor, size, name):
         raise ValueError(f"{name} must be contiguous int32 [{size}]")
 
 
-def native_index_workspace_bytes(chunks, pages, heads, compact=False):
+def native_index_workspace_bytes(chunks, pages, heads, compact=False, immutable_tables=False):
     """Exact local scratch bytes for the supported private planner geometry."""
     if not chunks or pages <= 0 or heads != 4:
         raise ValueError("native score requires positive physical pages and H4 chunks")
@@ -97,12 +99,21 @@ def native_index_workspace_bytes(chunks, pages, heads, compact=False):
     stage_pages = (
         min(pages, max(_chunk_geometry(c)[3] for c in chunks)) if compact else pages
     )
-    extra = (pages + 1 + stage_pages + 1) * 4 if compact else 0
+    if compact:
+        list_entries = (
+            sum(min(pages, _chunk_geometry(c)[3]) for c in chunks)
+            if immutable_tables else stage_pages
+        )
+        counts = len(chunks) if immutable_tables else 1
+        extra = (pages + 1 + list_entries + counts) * 4
+    else:
+        extra = 0
     return (stage_pages + 1) * 16384 + capacity * 4 + table_entries * 4 + extra
 
 
 def supported_native_index_workspace(
-    chunks, pages, heads, total_q, max_chunk_q, max_pages, compact=False
+    chunks, pages, heads, total_q, max_chunk_q, max_pages, compact=False,
+    immutable_tables=False,
 ):
     """Host-only admission; rejection selects the existing Q8K4 score reader.
 
@@ -119,7 +130,7 @@ def supported_native_index_workspace(
     ):
         return False
     try:
-        nbytes = native_index_workspace_bytes(chunks, pages, heads, compact)
+        nbytes = native_index_workspace_bytes(chunks, pages, heads, compact, immutable_tables)
         geometry = [_chunk_geometry(c) for c in chunks]
     except ValueError:
         return False
@@ -307,7 +318,7 @@ def _build_native_plan(chunk, heads, device, planner):
 class NativeIndexWorkspace:
     """One forward's immutable plans and sequential layer/chunk scratch."""
 
-    def __init__(self, chunks, pages, heads, device, compact=False):
+    def __init__(self, chunks, pages, heads, device, compact=False, immutable_tables=False):
         self.chunks = tuple(chunks)
         geometry = [_chunk_geometry(c) for c in self.chunks]
         total_q = self.chunks[-1].q_end if self.chunks else 0
@@ -319,6 +330,7 @@ class NativeIndexWorkspace:
             max((g[0] for g in geometry), default=0),
             max((g[1] for g in geometry), default=0),
             compact,
+            immutable_tables,
         ):
             raise ValueError("native score geometry exceeds admission limits")
         self.device = torch.device(device)
@@ -326,6 +338,7 @@ class NativeIndexWorkspace:
             raise ValueError("native score requires an explicit CUDA device ordinal")
         self.pages, self.heads = pages, heads
         self.compact = compact
+        self.immutable_tables = immutable_tables
         self.stage_pages = min(pages, max(g[3] for g in geometry)) if compact else pages
         self._geometry = tuple(geometry)
         planner, self._score = _native_api()
@@ -336,7 +349,7 @@ class NativeIndexWorkspace:
             heads * p["max_k_tiles"] * g[0] for p, g in zip(self.plans, geometry)
         )
         self.workspace_bytes = native_index_workspace_bytes(
-            self.chunks, pages, heads, compact
+            self.chunks, pages, heads, compact, immutable_tables
         )
         if self.workspace_bytes > _WORKSPACE_LIMIT:
             raise RuntimeError("native plan scratch exceeds 512 MiB")
@@ -354,15 +367,52 @@ class NativeIndexWorkspace:
             self.page_map = torch.empty(
                 pages + 1, device=self.device, dtype=torch.int32
             )
-            self.page_list = torch.empty(
-                self.stage_pages, device=self.device, dtype=torch.int32
-            )
-            self.page_count = torch.empty(1, device=self.device, dtype=torch.int32)
+            if immutable_tables:
+                self.page_lists = tuple(
+                    torch.empty(min(pages, g[3]), device=self.device, dtype=torch.int32)
+                    for g in geometry
+                )
+                self.page_counts = tuple(
+                    torch.empty(1, device=self.device, dtype=torch.int32)
+                    for _ in self.chunks
+                )
+            else:
+                self.page_list = torch.empty(
+                    self.stage_pages, device=self.device, dtype=torch.int32
+                )
+                self.page_count = torch.empty(1, device=self.device, dtype=torch.int32)
         self.native_score = torch.empty(
             capacity, device=self.device, dtype=torch.float32
         )
         self.safe_tables = tuple(torch.empty_like(c.kv_indices) for c in self.chunks)
+        if immutable_tables:
+            for index in range(len(self.chunks)):
+                self._prepare_table(index)
         self._staged = False
+
+    def _prepare_table(self, index):
+        """Prepare IDs, never K values; caller owns table-epoch immutability."""
+        table, safe = self.chunks[index].kv_indices, self.safe_tables[index]
+        grid = (triton.cdiv(table.numel(), 256),)
+        if self.compact:
+            page_list, page_count = (
+                (self.page_lists[index], self.page_counts[index])
+                if self.immutable_tables else (self.page_list, self.page_count)
+            )
+            self.page_map.fill_(-1)
+            page_count.zero_()
+            _claim_index_pages[grid](
+                table, self.page_map, page_list, page_count,
+                table.numel(), self.pages, 256, num_warps=4,
+            )
+            _remap_index_pages[grid](
+                table, self.page_map, safe, table.numel(),
+                self.pages, self.stage_pages, 256, num_warps=4,
+            )
+        else:
+            _safe_index_pages[grid](
+                table, safe, table.numel(), self.pages, 256, num_warps=4
+            )
 
     def _check_device(self, *tensors):
         if any(t.device != self.device for t in tensors):
@@ -375,8 +425,8 @@ class NativeIndexWorkspace:
         validate_native_index_cache(packed, scales, self.pages)
         self._check_device(packed, scales)
         if self.compact:
-            # Only hold this layer's inputs. Each chunk rebuilds its map on the
-            # current stream; no IDs or decoded K survive a layer/forward.
+            # Only hold this layer's inputs. Cached IDs belong to the producer
+            # epoch; decoded K is refreshed for every layer and chunk.
             self._packed, self._scales = packed, scales
             self._staged = True
             return
@@ -393,7 +443,7 @@ class NativeIndexWorkspace:
 
     @torch.no_grad()
     def score(self, index, q8, page_offsets, output):
-        """Overwrite caller-owned [H,Q,logical-page] scores; refresh IDs each call."""
+        """Overwrite scores; refresh mutable IDs and always refresh layer K."""
         if not self._staged:
             raise RuntimeError("stage current layer's index K before score")
         chunk = self.chunks[index]
@@ -428,44 +478,23 @@ class NativeIndexWorkspace:
             == self.native_score.untyped_storage().data_ptr()
         ):
             raise ValueError("caller output must not alias native scratch")
+        if not self.immutable_tables:
+            self._prepare_table(index)
         if self.compact:
-            self.page_map.fill_(-1)
-            self.page_count.zero_()
-            grid = (triton.cdiv(table.numel(), 256),)
-            _claim_index_pages[grid](
-                table,
-                self.page_map,
-                self.page_list,
-                self.page_count,
-                table.numel(),
-                self.pages,
-                256,
-                num_warps=4,
+            page_list, page_count = (
+                (self.page_lists[index], self.page_counts[index])
+                if self.immutable_tables else (self.page_list, self.page_count)
             )
-            _stage_compact_index_pages[(self.stage_pages,)](
+            _stage_compact_index_pages[(page_list.numel(),)](
                 self._packed,
                 self._scales.view(torch.uint8),
                 self.staged,
-                self.page_list,
-                self.page_count,
+                page_list,
+                page_count,
                 self._packed.stride(0),
                 self._scales.stride(0),
                 self.pages,
                 num_warps=4,
-            )
-            _remap_index_pages[grid](
-                table,
-                self.page_map,
-                safe,
-                table.numel(),
-                self.pages,
-                self.stage_pages,
-                256,
-                num_warps=4,
-            )
-        else:
-            _safe_index_pages[(triton.cdiv(table.numel(), 256),)](
-                table, safe, table.numel(), self.pages, 256, num_warps=4
             )
         plan = self.plans[index]
         shape = (self.heads, plan["max_k_tiles"], rows)
