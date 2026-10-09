@@ -408,6 +408,29 @@ program: default
             result = runner._read_results(path, group)
             self.assertEqual(expected, result[0]["status"])
 
+    def test_warning_checks_remain_visible_without_failing_aggregate(self):
+        group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
+        path = self.root / "warning.json"
+        check = {"id": "known_error", "status": "WARNING", "actual": 2}
+        base = {
+            **group[0].metadata,
+            "status": "PASS",
+            "stages": [{"id": "handover", "status": "PASS", "checks": [check]}],
+            "cleanup": [],
+        }
+        for execution_error, expected in ((None, "PASS"), ("query failed", "ERROR")):
+            payload = copy.deepcopy(base)
+            payload["stages"][0]["checks"][0]["error"] = execution_error
+            path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+            rows = runner._read_results(path, group)
+            self.assertEqual(expected, rows[0]["status"])
+            self.assertEqual("WARNING", rows[0]["stages"][0]["checks"][0]["status"])
+            aggregate = runner._aggregate(
+                [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
+                group, self.args(), 1,
+            )
+            self.assertEqual(int(expected == "ERROR"), aggregate["summary"]["exit_code"])
+
     def test_nested_execution_errors_cannot_be_hidden_by_green_rows(self):
         group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
         path = self.root / "nested.json"

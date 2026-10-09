@@ -245,7 +245,7 @@ def _execution_issues(row):
         for check in checks:
             if (
                 not isinstance(check, dict)
-                or check.get("status") not in {"PASS", "FAIL", "SKIP"}
+                or check.get("status") not in {"PASS", "FAIL", "SKIP", "WARNING"}
                 or check.get("error")
             ):
                 issues.append("check has an execution error or unknown status")
@@ -325,7 +325,7 @@ def _read_results(path, group):
                     and stage.get("status") in {"PASS", "FAIL"}
                     for check in stage.get("checks", [])
                     if isinstance(check, dict)
-                    and check.get("status") in {"PASS", "FAIL"}
+                    and check.get("status") in {"PASS", "FAIL", "WARNING"}
                 ]
                 if not executed_checks:
                     row["original_status"] = row["status"]
