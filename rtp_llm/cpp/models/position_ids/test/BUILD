@@ -7,7 +7,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-
 cc_test(
     name = "position_ids_generator_test",
     srcs = glob([
@@ -16,15 +15,16 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = torch_deps() + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/stream",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "//rtp_llm/cpp/models:position_ids_generator",
-        "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/engine_base/stream:stream",
-        "//rtp_llm/cpp/config:config_modules",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

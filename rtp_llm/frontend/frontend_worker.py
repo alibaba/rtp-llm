@@ -27,7 +27,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
-from rtp_llm.utils.base_model_datatypes import GenerateResponse
+from rtp_llm.utils.base_model_datatypes import CustomOutput, GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -44,12 +44,14 @@ class PipelineResponse(BaseModel):
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
     prompt_logprobs: Optional[Dict[str, Any]] = None
+    custom_output: Optional[CustomOutput] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
     response: List[str]
     finished: bool
     aux_info: List[Dict[str, Any]] = {}
+    custom_output: Optional[List[Optional[CustomOutput]]] = None
 
 
 class BatchPipelineResponse(BaseModel):
@@ -193,6 +195,11 @@ class FrontendWorker:
                         else None
                     ),
                     prompt_logprobs=prompt_logits_dict,
+                    custom_output=(
+                        out.custom_output.tolist()
+                        if out.custom_output is not None
+                        else None
+                    ),
                 )
             )
         return BatchPipelineResponse(response_batch=pipeline_responses)
@@ -285,6 +292,7 @@ class FrontendWorker:
             if generate_config.return_prompt_logits
             else None
         )
+        custom_output = gen_responses.generate_outputs.generate_outputs[0].custom_output
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -316,6 +324,9 @@ class FrontendWorker:
                 else None
             ),
             prompt_logprobs=prompt_logits_dict,
+            custom_output=(
+                custom_output.tolist() if custom_output is not None else None
+            ),
         )
 
         return response
@@ -327,6 +338,17 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            outputs = gen_responses.generate_outputs.generate_outputs
+            custom_outputs = None
+            if any(seq.custom_output is not None for seq in outputs):
+                custom_outputs = [
+                    (
+                        seq.custom_output.tolist()
+                        if seq.custom_output is not None
+                        else None
+                    )
+                    for seq in outputs
+                ]
             aux_info = []
             if generate_config.aux_info:
                 aux_info = []
@@ -342,6 +364,7 @@ class FrontendWorker:
                     ]
                 ),
                 aux_info=aux_info,
+                custom_output=custom_outputs,
             )
             return sequences_pipeline_response
         else:
@@ -475,11 +498,14 @@ class FrontendWorker:
             complete_multi_seq_response = None
             complete_multi_seq_finished = None
             complete_multi_seq_aux_info = None
+            complete_multi_seq_custom_output = None
             async for response in all_responses:
                 if not complete_multi_seq_response:
                     complete_multi_seq_response = [_ for _ in response.response]
                     complete_multi_seq_aux_info = [_ for _ in response.aux_info]
                     complete_multi_seq_finished = response.finished
+                if response.custom_output is not None:
+                    complete_multi_seq_custom_output = response.custom_output
                 for seq_idx, seq_reponse in enumerate(response.response):
                     complete_multi_seq_response[seq_idx] = (
                         complete_multi_seq_response[seq_idx] + seq_reponse
@@ -494,6 +520,7 @@ class FrontendWorker:
                 response=complete_multi_seq_response,
                 aux_info=complete_multi_seq_aux_info,
                 finished=complete_multi_seq_finished,
+                custom_output=complete_multi_seq_custom_output,
             )
         complete_response = ""
         finished = False
@@ -501,6 +528,7 @@ class FrontendWorker:
         output_ids = None
         input_ids = None
         logits = None
+        custom_output = None
         async for response in all_responses:
             complete_response = complete_response + response.response
             if response.finished:
@@ -513,6 +541,8 @@ class FrontendWorker:
                 input_ids = response.input_ids
             if response.logits:
                 logits = response.logits
+            if response.custom_output is not None:
+                custom_output = response.custom_output
         return PipelineResponse(
             response=complete_response,
             finished=finished,
@@ -520,4 +550,5 @@ class FrontendWorker:
             output_ids=output_ids,
             input_ids=input_ids,
             logits=logits,
+            custom_output=custom_output,
         )

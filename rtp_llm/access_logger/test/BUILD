@@ -5,3 +5,10 @@ py_test(
         "//rtp_llm/access_logger:access_logger",
     ],
 )
+
+py_test(
+    name = "access_logger_test",
+    srcs = ["access_logger_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm/access_logger:access_logger", "//rtp_llm:ops", "//rtp_llm:structure"],
+)

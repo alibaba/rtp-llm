@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,12 +54,17 @@ def init_logger(
     async_mode: bool = True,
 ) -> None:
     access_logger = logging.getLogger(logger_name)
+    access_logger.disabled = os.environ.get("DISABLE_ACCESS_LOG", "0") == "1"
+    for old_handler in access_logger.handlers[:]:
+        access_logger.removeHandler(old_handler)
+        old_handler.close()
+    access_logger.parent = None
+    if access_logger.disabled:
+        return
     handler = get_handler(
         filename, log_path, backup_count, rank_id, server_id, async_mode
     )
     formatter = logging.Formatter("%(message)s")
-    access_logger.handlers.clear()
-    access_logger.parent = None
     if handler is not None:
         handler.setFormatter(formatter)
         access_logger.addHandler(handler)

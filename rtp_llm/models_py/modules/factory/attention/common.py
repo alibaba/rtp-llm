@@ -119,7 +119,8 @@ def update_attention_params(
 ) -> None:
     """Update attention and RoPE parameters for CUDA graph replay.
 
-    Updates FMHA and RoPE parameters based on new input parameters, maintaining KV Cache offset consistency.
+    Updates FMHA metadata, KV-cache offsets, and the decode RoPE sequence-length
+    buffer. CUDA graph callers retain the original buffer identity.
     Args:
         fmha_impl: FMHA implementation object
         rope_kvcache_impl: RoPE KV Cache implementation object
@@ -132,7 +133,8 @@ def update_attention_params(
     old_offset = fmha_params.kv_cache_offset
     copy_kv_cache_offset(old_offset, new_offset)
 
-    new_rope_params = rope_kvcache_impl.prepare(attn_inputs)
+    new_rope_params = rope_kvcache_impl.prepare(attn_inputs, forbid_reallocation=True)
     new_offset = new_rope_params.kv_cache_offset
     old_offset = rope_params.kv_cache_offset
     copy_kv_cache_offset(old_offset, new_offset)
+    rope_params.sequence_lengths = new_rope_params.sequence_lengths

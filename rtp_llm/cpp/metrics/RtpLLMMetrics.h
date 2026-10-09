@@ -463,6 +463,15 @@ public:
         }
     }
 
+    // Raw TPS numerators, using the same timing validation and reporting-window reset.
+    int64_t contextTokens() const {
+        return context_token_num_;
+    }
+
+    int64_t contextTokensWithCache() const {
+        return context_token_num_with_cache_;
+    }
+
     double contextTPS() const {
         return calcTps(context_token_num_, context_time_us_);
     }
@@ -548,14 +557,14 @@ private:
     }
 
 private:
-    int64_t                                          context_token_num_            = 0;
-    int64_t                                          context_time_us_              = 0;
-    int64_t                                          context_token_num_with_cache_ = 0;
-    int64_t                                          context_time_us_with_cache_   = 0;
-    int64_t                                          generate_token_num_           = 0;
-    int64_t                                          total_token_num_              = 0;
-    int64_t                                          report_window_us_             = 0;
-    bool                                             report_zero_tps_              = false;
+    int64_t                                       context_token_num_            = 0;
+    int64_t                                       context_time_us_              = 0;
+    int64_t                                       context_token_num_with_cache_ = 0;
+    int64_t                                       context_time_us_with_cache_   = 0;
+    int64_t                                       generate_token_num_           = 0;
+    int64_t                                       total_token_num_              = 0;
+    int64_t                                       report_window_us_             = 0;
+    bool                                          report_zero_tps_              = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -565,10 +574,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_tps_metric            = nullptr;
-    kmonitor::MutableMetric* context_tps_with_cache_metric = nullptr;
-    kmonitor::MutableMetric* generate_tps_metric           = nullptr;
-    kmonitor::MutableMetric* total_tps_metric              = nullptr;
+    kmonitor::MutableMetric* context_tokens_metric            = nullptr;
+    kmonitor::MutableMetric* context_tokens_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* context_tps_metric               = nullptr;
+    kmonitor::MutableMetric* context_tps_with_cache_metric    = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric              = nullptr;
+    kmonitor::MutableMetric* total_tps_metric                 = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

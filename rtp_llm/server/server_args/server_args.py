@@ -539,7 +539,8 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     init_all_group_args(parser, py_env_configs)
 
     # 解析参数（会自动应用所有配置绑定）
-    parser.parse_args(args)
+    parsed_args = parser.parse_args(args)
+    py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.

@@ -76,15 +76,19 @@ public final class PriorityNormalizer {
      *         otherwise a valid level in 1-100
      */
     public static int normalize(int protoPriority, String headerValue, int defaultPriority) {
-        boolean headerPresent = headerValue != null && !headerValue.isBlank();
-        if (protoPriority == 0 && !headerPresent) {
-            // Not carried at all: use default priority instead of opting out.
-            return isValid(defaultPriority) ? defaultPriority : DEFAULT_PRIORITY;
-        }
         if (isValid(protoPriority)) {
             return protoPriority;
         }
-        if (headerPresent) {
+        int headerPriority = parseHeader(headerValue);
+        if (isValid(headerPriority)) {
+            return headerPriority;
+        }
+        return isValid(defaultPriority) ? defaultPriority : DEFAULT_PRIORITY;
+    }
+
+    /** Parse caller QoS without assigning a default scheduling priority. */
+    public static int parseHeader(String headerValue) {
+        if (headerValue != null) {
             try {
                 int headerPriority = Integer.parseInt(headerValue.trim());
                 if (isValid(headerPriority)) {
@@ -93,6 +97,6 @@ public final class PriorityNormalizer {
             } catch (NumberFormatException ignored) {
             }
         }
-        return isValid(defaultPriority) ? defaultPriority : DEFAULT_PRIORITY;
+        return NO_PRIORITY;
     }
 }

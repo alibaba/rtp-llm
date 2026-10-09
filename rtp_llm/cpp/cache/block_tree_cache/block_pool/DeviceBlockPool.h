@@ -46,6 +46,24 @@ public:
     void decRef(BlockIdxType block);
     void decRef(const BlockIdList& blocks);
 
+    struct RequestReferenceUpdate {
+        BlockIdxType block;
+        int          old_count;
+        int          new_count;
+    };
+    // Atomically replace caller-owned references and allocate replacements.
+    // Each entry describes old_count > 0 references to a block and their new
+    // multiplicity (>= 0). Duplicate blocks are coalesced; unchanged references
+    // may be omitted. Reclaimable blocks are selected in first-occurrence order.
+    // The caller must serialize access/sharing of its resource through publication.
+    // On capacity failure ownership is unchanged, replacements is empty, and
+    // required_free_blocks reports the total free capacity needed after transfers.
+    bool tryReplaceRequestReferences(const std::vector<RequestReferenceUpdate>& reference_updates,
+                                     int                                        replacement_count,
+                                     BlockIndicesType&                          replacements,
+                                     int&                                       required_free_blocks);
+    bool isExclusiveRequestBlock(BlockIdxType block) const;
+
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum() const;

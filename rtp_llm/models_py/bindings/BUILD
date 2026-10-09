@@ -13,10 +13,10 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
-        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/model_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
@@ -32,7 +32,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_library(
@@ -65,7 +66,6 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
-
 
 cc_library(
     name = "dummy_register",

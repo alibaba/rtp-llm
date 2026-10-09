@@ -645,27 +645,22 @@ class LoadClient:
         decode_domain = data.get("decode_domain", "")
         env = data.get("env", {})
 
-        prefill_key = f"DOMAIN_ADDRESS:{prefill_domain}"
-        decode_key = f"DOMAIN_ADDRESS:{decode_domain}"
-        if prefill_key in env:
-            self._fallback_prefill_addrs = []
-            for a in env[prefill_key].split(","):
-                a = a.strip()
-                if not a:
+        model_service = json.loads(env.get("MODEL_SERVICE_CONFIG", "{}"))
+        hosts = model_service.get("hosts", {})
+
+        def grpc_addresses(domain: str) -> List[str]:
+            addresses = []
+            for address in hosts.get(domain, []):
+                address = address.strip()
+                if not address:
                     continue
-                # DOMAIN_ADDRESS contains HTTP port; convert to gRPC port
-                # (gRPC port = HTTP port + 1, per CommonConstants.GRPC_PORT_OFFSET)
-                host, port = a.rsplit(":", 1)
-                self._fallback_prefill_addrs.append(f"{host}:{int(port) + 1}")
-        if decode_key in env:
-            self._fallback_decode_addrs = []
-            for a in env[decode_key].split(","):
-                a = a.strip()
-                if not a:
-                    continue
-                # DOMAIN_ADDRESS contains HTTP port; convert to gRPC port
-                host, port = a.rsplit(":", 1)
-                self._fallback_decode_addrs.append(f"{host}:{int(port) + 1}")
+                # Discovery hosts use HTTP ports; gRPC is HTTP + 1.
+                host, port = address.rsplit(":", 1)
+                addresses.append(f"{host}:{int(port) + 1}")
+            return addresses
+
+        self._fallback_prefill_addrs = grpc_addresses(prefill_domain)
+        self._fallback_decode_addrs = grpc_addresses(decode_domain)
 
         if not self._fallback_prefill_addrs:
             self._fallback_prefill_addrs = [

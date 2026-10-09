@@ -411,13 +411,13 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
                                         const std::vector<int64_t>& cache_keys,
                                         const std::vector<int32_t>& block_ids,
-                                        size_t                      group_id) {
+                                        const std::string&          tag) {
             std::shared_ptr<KVCacheResource> publication_lease;
             if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
                 KVCacheResource lease_resource;
                 lease_resource.initGroups(cache_config->topologyPtr());
                 lease_resource.setCacheKeys(cache_keys);
-                lease_resource.mutableBlockIds(group_id).assign(block_ids);
+                lease_resource.mutableBlockIds(tag).assign(block_ids);
                 publication_lease = cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
                 RTP_LLM_CHECK_WITH_INFO(
                     publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());

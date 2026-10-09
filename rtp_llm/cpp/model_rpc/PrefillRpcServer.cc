@@ -1,6 +1,8 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include <exception>
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -638,7 +640,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
     auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
+    const size_t      group_num                = cache_manager ? cache_manager->cacheConfig().groupNums() : 0;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -676,7 +678,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
                                 prefill_disk_reuse_len,
-                                use_independent_block_pools);
+                                group_num);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -698,7 +700,7 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
                                            int        prefill_disk_reuse_len,
-                                           bool       use_independent_block_pools) {
+                                           size_t     group_num) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
@@ -717,10 +719,9 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
     aux_info.set_decode_disk_reuse_len(decode_disk_reuse_len);
 
-    // Legacy shared-pool models expose the prefill phase through the top-level
-    // fields. Independent pools may complete additional reuse during the
-    // direct handoff, so expose the longer proven phase for those models only.
-    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
+    // Preserve single-group prefill attribution. Multi-group handoff may
+    // complete additional reuse, so expose the longer proven phase.
+    if (group_num > 1 && decode_total_reuse_len > prefill_total_reuse_len) {
         aux_info.set_total_reuse_len(decode_total_reuse_len);
         aux_info.set_local_reuse_len(decode_local_reuse_len);
         aux_info.set_remote_reuse_len(decode_remote_reuse_len);
@@ -845,6 +846,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = &onflight_requests_;
     prefill_context.loading_cache_requests = &loading_cache_requests_;
+    const int         uncaught_exceptions  = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&prefill_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            prefill_context.markRpcHandlingCompleted();
+        }
+    });
 
     // Prefill SERVER span is created only on the PD path, AFTER the fallback
     // check above, so Local/Prefill each own exactly one SERVER span. RAII

@@ -17,7 +17,7 @@ class ServerScheduleLatencyRecorderTest {
     void recordsServerTotalStagesAndRates() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(org.flexlb.mock.TestFlexlbConfigs.create());
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(20));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(18));
         context.setRouteSubmittedNanos(end - TimeUnit.MILLISECONDS.toNanos(15));
@@ -37,6 +37,47 @@ class ServerScheduleLatencyRecorderTest {
         assertLatency(snapshot, "batch_wait_ms", 5L);
         assertLatency(snapshot, "dispatch_ack_ms", 8L);
         assertLatency(snapshot, "ack_response_ms", 2L);
+    }
+
+    @Test
+    void terminalBeforeAckKeepsEndToEndCoverageAndUsesOnlyActualAckSamples() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = System.nanoTime();
+        BalanceContext terminalFirst = contextWithBatchWait(end, 20L, null);
+        terminalFirst.setAckAtNanos(0L);
+
+        recorder.recordCompletion(terminalFirst, end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5L, null), end);
+
+        Map<String, Object> snapshot = recorder.snapshot();
+        assertEquals(2L, snapshot.get("completion_count"));
+        for (String stage : new String[]{"server_total_ms", "grpc_queue_ms", "route_submit_ms", "batch_wait_ms"}) {
+            assertEquals(2L, ((Map<?, ?>) snapshot.get(stage)).get("count"), stage);
+        }
+        assertEquals(30L, ((Map<?, ?>) snapshot.get("server_total_ms")).get("max"),
+                "the slower terminal-first response must remain in the full latency distribution");
+        assertLatency(snapshot, "dispatch_ack_ms", 3L);
+        assertLatency(snapshot, "ack_response_ms", 2L);
+    }
+
+    @Test
+    void routePublicationRecordsEndToEndLatencyWithoutInventingBatchOrAckStages() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = System.nanoTime();
+        BalanceContext route = contextWithBatchWait(end, 5L, null);
+        route.setBatchDispatchedNanos(0L);
+        route.setAckAtNanos(0L);
+
+        recorder.recordCompletion(route, end);
+
+        Map<String, Object> snapshot = recorder.snapshot();
+        assertEquals(1L, snapshot.get("completion_count"));
+        assertLatency(snapshot, "server_total_ms", 15L);
+        assertLatency(snapshot, "grpc_queue_ms", 2L);
+        assertLatency(snapshot, "route_submit_ms", 3L);
+        for (String stage : new String[]{"batch_wait_ms", "dispatch_ack_ms", "ack_response_ms"}) {
+            assertEquals(0L, ((Map<?, ?>) snapshot.get(stage)).get("count"), stage);
+        }
     }
 
     @Test
@@ -123,7 +164,7 @@ class ServerScheduleLatencyRecorderTest {
             long end,
             long batchWaitMs,
             SchedulingMetadata metadata) {
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(org.flexlb.mock.TestFlexlbConfigs.create());
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 10));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 8));
         context.setRouteSubmittedNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 5));

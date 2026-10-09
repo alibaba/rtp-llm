@@ -18,6 +18,7 @@ import io.opentelemetry.context.Context;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -65,7 +66,7 @@ public class FlexlbGrpcForwarder {
                 request.getRequestId(), request.getForwardHop(),
                 ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
-            return CompletableFuture.completedFuture(MasterForwardResult.failed(
+            return CompletableFuture.completedFuture(MasterForwardResult.blocked(
                     guard.blockReason().failureCode(),
                     nullToEmpty(guard.masterHostIpPort())));
         }
@@ -279,9 +280,9 @@ public class FlexlbGrpcForwarder {
             long requestId,
             ForwardGuard guard,
             Throwable error) {
-        return MasterForwardResult.failed(
+        return new MasterForwardResult(null, true,
                 recordForwardFailure(requestId, guard, error),
-                nullToEmpty(guard.masterHostIpPort()));
+                nullToEmpty(guard.masterHostIpPort()), error);
     }
 
     private CancelForwardResult cancelForwardFailure(
@@ -317,8 +318,6 @@ public class FlexlbGrpcForwarder {
                     requestId, masterHost, error);
             reportForwardResult(ipOfOrLocal(masterHost), "CONNECT_FAILED");
         }
-        // The RPC may already have reached the Master. Keep this terminal for
-        // the caller and let the ManagedChannel reconnect itself.
         return failure;
     }
 
@@ -336,20 +335,31 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             boolean masterFound,
             String failure,
-            String masterHost) {
+            String masterHost,
+            Throwable error) {
 
         static MasterForwardResult forwarded(
-                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-                String masterHost) {
-            return new MasterForwardResult(response, true, "", masterHost);
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, String masterHost) {
+            return new MasterForwardResult(response, true, "", masterHost, null);
         }
 
         static MasterForwardResult noMaster() {
-            return new MasterForwardResult(null, false, "MASTER_NULL", "");
+            return new MasterForwardResult(null, false, "MASTER_NULL", "", null);
+        }
+
+        static MasterForwardResult blocked(String reason, String masterHost) {
+            var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                    .setCode(StrategyErrorType.NOT_MASTER.getErrorCode()).setErrorMessage(reason).build();
+            return new MasterForwardResult(response, true, reason, masterHost, null);
         }
 
         static MasterForwardResult failed(String failure, String masterHost) {
-            return new MasterForwardResult(null, true, failure, masterHost);
+            return new MasterForwardResult(null, true, failure, masterHost, null);
+        }
+
+        static MasterForwardResult failed(Throwable error, String masterHost) {
+            Status.Code code = Status.fromThrowable(error).getCode();
+            return new MasterForwardResult(null, true, code.name(), masterHost, error);
         }
     }
 

@@ -20,6 +20,7 @@ import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -35,9 +36,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -57,8 +58,8 @@ class DefaultBatchDispatcherTest {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
         configService = mock(ConfigService.class);
         grpcClient = mock(EngineGrpcClient.class);
-        config = new FlexlbConfig();
-        SchedulingTestConfig.useBatchDispatcher(config).setEnqueueRpcTimeoutMs(5000);
+        config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.useBatchDispatcher(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
@@ -110,7 +111,7 @@ class DefaultBatchDispatcherTest {
         }
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(inv -> {
                     sent.add(inv.getArgument(2));
                     return CompletableFuture.completedFuture(ackResponse(92L, List.of(501L, 502L)));
@@ -258,7 +259,7 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -266,6 +267,26 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         assertEquals(1, callback.successCount.get());
         assertEquals(0, callback.failureCount.get());
+        ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
+                ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
+        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        assertEquals(3000, request.getValue().getFetchAttachTimeoutMs());
+    }
+
+    @Test
+    void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
+        config.getDispatcher().setFetchAttachTimeoutMs(1500);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
+
+        submit(List.of(item), 1L, 100, "test_reason", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
+        ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
+                ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
+        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        assertEquals(1500, request.getValue().getFetchAttachTimeoutMs());
     }
 
     @Test
@@ -279,7 +300,7 @@ class DefaultBatchDispatcherTest {
         when(secondSpan.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         first.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(firstSpan));
         second.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(secondSpan));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(93L, List.of(601L, 602L))));
         CompletableFuture<Void> verified = new CompletableFuture<>();
         AtomicInteger remaining = new AtomicInteger(2);
@@ -308,7 +329,7 @@ class DefaultBatchDispatcherTest {
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(span));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(94L, List.of(999L))));
         submit(List.of(item), 94L, 100, "malformed", callback);
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
@@ -321,7 +342,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -338,7 +359,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -351,7 +372,7 @@ class DefaultBatchDispatcherTest {
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(null);
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -365,7 +386,7 @@ class DefaultBatchDispatcherTest {
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(8L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(
                 CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(87L)
                         .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
@@ -434,7 +455,7 @@ class DefaultBatchDispatcherTest {
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                 ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.FAILED) {
+                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                     failures.incrementAndGet();
                     attempted.countDown();
                     if (item.requestId() == 1L) {
@@ -451,7 +472,7 @@ class DefaultBatchDispatcherTest {
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         assertEquals(2, failures.get());
         assertEquals(0, uncertain.get());
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
     @Test
@@ -459,7 +480,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest first = createScheduledRequest(1L, 500, 200, prefillEp);
         ScheduledRequest second = createScheduledRequest(2L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
@@ -467,7 +488,7 @@ class DefaultBatchDispatcherTest {
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                 ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.FAILED) {
+                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                     failures.incrementAndGet();
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
                     uncertain.incrementAndGet();
@@ -494,7 +515,7 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> {
                     invoked.countDown();
                     return rpcFuture;
@@ -540,10 +561,13 @@ class DefaultBatchDispatcherTest {
                                         .build())
                                 .build())
                         .build();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        submit(List.of(item), 1L, 100, "test", callback);
+        submit(List.of(item), 1L, 100, "test", (exact, result) -> {
+            assertEquals(DeliveryResult.Status.PREFILL_REJECTED, result.status());
+            callback.accept(exact, result);
+        });
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -559,7 +583,7 @@ class DefaultBatchDispatcherTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(1L)
                         .build(); // no success, no error
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -587,7 +611,7 @@ class DefaultBatchDispatcherTest {
                                         .build())
                                 .build())
                         .build();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         CountDownLatch callbacksAttempted = new CountDownLatch(2);
@@ -599,7 +623,7 @@ class DefaultBatchDispatcherTest {
                 if (completion.status() == DeliveryResult.Status.DELIVERED) {
                     successes.incrementAndGet();
                     callbacksAttempted.countDown();
-                } else if (completion.status() == DeliveryResult.Status.FAILED) {
+                } else if (completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
                     failures.incrementAndGet();
                     callbacksAttempted.countDown();
                     throw new IllegalStateException(
@@ -623,7 +647,7 @@ class DefaultBatchDispatcherTest {
     void permitReservedBeforeShutdownCanStillBeSubmitted() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(invocation -> {
                     rpcInvoked.countDown();
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
@@ -720,23 +744,34 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void preparedSubmissionRejectsInvalidTaskWithoutConsumingPermit() {
-        PrefillEndpoint endpoint = createPrefillEndpoint();
-        ScheduledRequest item = createScheduledRequest(
-                1L, 500, 200, endpoint);
+    void preparedSubmissionRejectsMissingDeliveryWithoutConsumingPermit() {
         PreparedSubmission submission = reservePermit();
-
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(), 1L, 100, "empty", callback));
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(item), 0L, 100, "id", callback));
-        assertThrows(IllegalArgumentException.class,
-                () -> submit(submission, List.of(item), 1L, -1, "prediction", callback));
-        assertThrows(NullPointerException.class,
-                () -> submit(submission, List.of(item), 1L, 100, null, callback));
-
+        assertThrows(NullPointerException.class, () -> submission.submit(null));
         submission.close();
         reservePermit().close();
+    }
+
+    @Test
+    void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        CompletableFuture<Void> checked = new CompletableFuture<>();
+        reservePermit().submit(sender -> {
+            try {
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(), 1L, 100, "empty", callback));
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(item), 0L, 100, "id", callback));
+                assertThrows(IllegalArgumentException.class,
+                        () -> sender.sendBatch(List.of(item), 1L, -1, "prediction", callback));
+                assertThrows(NullPointerException.class,
+                        () -> sender.sendBatch(List.of(item), 1L, 100, null, callback));
+                checked.complete(null);
+            } catch (Throwable failure) {
+                checked.completeExceptionally(failure);
+            }
+        });
+        checked.get(5, TimeUnit.SECONDS);
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
     @Test
@@ -749,7 +784,7 @@ class DefaultBatchDispatcherTest {
                 new CompletableFuture<>();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
         CountDownLatch allowHandoff = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> {
                     rpcInvoked.countDown();
                     assertTrue(allowHandoff.await(5, TimeUnit.SECONDS));
@@ -801,7 +836,7 @@ class DefaultBatchDispatcherTest {
         item.ctx().getRequest().setPriority(60);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(inv -> {
                     sent.add(inv.getArgument(2));
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
@@ -820,7 +855,7 @@ class DefaultBatchDispatcherTest {
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(inv -> {
                     sent.add(inv.getArgument(2));
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
@@ -838,7 +873,7 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(inv -> {
                     sent.add(inv.getArgument(2));
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
@@ -881,8 +916,8 @@ class DefaultBatchDispatcherTest {
                         String reason,
                         BiConsumer<ScheduledRequest,
                                 DeliveryResult> observer) {
-        reservePermit().submitBatch(
-                items, batchId, predictedMs, reason, observer);
+        reservePermit().submit(sender -> sender.sendBatch(
+                items, batchId, predictedMs, reason, observer));
     }
 
     private static void submit(
@@ -892,8 +927,8 @@ class DefaultBatchDispatcherTest {
             long predictedMs,
             String reason,
             BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        submission.submitBatch(
-                items, batchId, predictedMs, reason, observer);
+        submission.submit(sender -> sender.sendBatch(
+                items, batchId, predictedMs, reason, observer));
     }
 
     private static void awaitAvailable(
@@ -924,8 +959,7 @@ class DefaultBatchDispatcherTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setConfig(config);
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
@@ -980,7 +1014,8 @@ class DefaultBatchDispatcherTest {
             if (completion.status() == DeliveryResult.Status.DELIVERED) {
                 successCount.incrementAndGet();
                 successLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.FAILED) {
+            } else if (completion.status() == DeliveryResult.Status.NOT_SENT
+                    || completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
                 lastError = completion.cause();
                 failureCount.incrementAndGet();
                 failureLatch.countDown();

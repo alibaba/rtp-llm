@@ -170,6 +170,13 @@ public final class WorkSnapshot {
                 : OptionalLong.of(knownRemainingWorkMs());
     }
 
+    /** Complete preceding work at a later clock; only observed running work consumes time. */
+    public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
+        return hasUnknownWork()
+                ? OptionalLong.empty()
+                : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
+    }
+
     /**
      * Sum of work units whose duration is known. Callers that require a complete
      * endpoint total must use {@link #totalRemainingWorkMs()}.

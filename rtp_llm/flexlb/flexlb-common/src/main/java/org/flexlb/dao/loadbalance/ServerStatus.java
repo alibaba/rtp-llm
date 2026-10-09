@@ -44,11 +44,25 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-    public static ServerStatus code(StrategyErrorType code) {
-        ServerStatus result = new ServerStatus();
-        result.setSuccess(false);
-        result.setCode(code.getErrorCode());
-        result.setMessage(code.getErrorMsg());
-        return result;
+
+    /** Return an independent copy, or null when the source is null. */
+    public static ServerStatus copyOf(ServerStatus source) {
+        if (source == null) {
+            return null;
+        }
+        ServerStatus copy = new ServerStatus();
+        copy.role = source.role;
+        copy.serverIp = source.serverIp;
+        copy.httpPort = source.httpPort;
+        copy.grpcPort = source.grpcPort;
+        copy.dpRank = source.dpRank;
+        copy.prefillTime = source.prefillTime;
+        copy.group = source.group;
+        copy.debugInfo = DebugInfo.copyOf(source.debugInfo);
+        copy.requestId = source.requestId;
+        copy.success = source.success;
+        copy.code = source.code;
+        copy.message = source.message;
+        return copy;
     }
 }

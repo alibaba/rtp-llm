@@ -176,12 +176,12 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     return resident_prefix_length;
 }
 
-int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
+int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
-    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
+    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_tag);
     if (location == nullptr) {
         return 0;
     }
@@ -207,17 +207,18 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
                                             /*force_drop=*/true,
                                             num_blocks,
                                             std::min(reclaimed, num_blocks));
-    RTP_LLM_LOG_DEBUG("group_id=%zu group_set[%zu] reclaimed %zu/%zu device blocks",
-                      group_id,
+    RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
+                      static_cast<int>(group_tag.size()),
+                      group_tag.data(),
                       location->group_set_id,
                       reclaimed,
                       num_blocks);
     return static_cast<int>(reclaimed);
 }
 
-BlockIndicesType BlockTreeCache::matchedBlocksForGroup(size_t                                group_id,
+BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
-    return loader_.matchedBlocksForGroup(group_id, matched_resources);
+    return loader_.matchedBlocksForGroup(group_tag, matched_resources);
 }
 
 CacheStats BlockTreeCache::getStats() const {
@@ -247,9 +248,10 @@ void BlockTreeCache::reportMetrics() const {
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
-void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids) {
+void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,
+                                       const std::vector<std::string>& required_group_tags) {
     std::lock_guard<std::mutex> lock(mutex_);
-    tree_->setEventPublisher(std::move(publisher), required_group_ids);
+    tree_->setEventPublisher(std::move(publisher), required_group_tags);
 }
 
 KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {

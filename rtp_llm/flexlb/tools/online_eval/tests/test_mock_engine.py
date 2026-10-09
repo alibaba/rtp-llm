@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
 if str(TOOL_DIR) not in sys.path:
@@ -12,6 +15,7 @@ if str(TOOL_DIR) not in sys.path:
 from online_eval.mock_engine import (
     LruBlockCache,
     MockEngineCluster,
+    MockEngineState,
     TaskRuntime,
     encode_unique_key,
     generate_aggregated_prometheus_metrics,
@@ -33,6 +37,96 @@ class LruBlockCacheTest(unittest.TestCase):
         self.assertEqual([2, 3], cache.keys)
         self.assertEqual(1, cache.evictions)
         self.assertEqual(0, cache.prefix_hit_blocks([1, 2, 3]))
+
+
+class MockEngineDiscoveryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cluster = MockEngineCluster(None, None, PerformanceModel({}))
+
+    def test_service_discovery_embeds_http_hosts_by_role_domain(self) -> None:
+        for role, http_port in [("prefill", 8100), ("decode", 8200), ("prefill", 8300)]:
+            self.cluster.states.append(
+                MockEngineState(
+                    pb2=None,
+                    name=f"{role}-{http_port}",
+                    role=role,
+                    host="127.0.0.1",
+                    grpc_port=http_port + 1,
+                    http_port=http_port,
+                    performance=self.cluster.performance,
+                    cache_capacity_blocks=4,
+                    total_kv_tokens=4096,
+                    block_size=1024,
+                    cluster=self.cluster,
+                )
+            )
+
+        env = self.cluster.service_discovery_env("mock.prefill", "mock.decode")
+
+        self.assertEqual({"MODEL_SERVICE_CONFIG"}, set(env))
+        config = json.loads(env["MODEL_SERVICE_CONFIG"])
+        self.assertEqual(
+            {
+                "mock.prefill": ["127.0.0.1:8100", "127.0.0.1:8300"],
+                "mock.decode": ["127.0.0.1:8200"],
+            },
+            config["hosts"],
+        )
+        group = config["role_endpoints"][0]
+        self.assertEqual("mock", group["group"])
+        for role in ["prefill", "decode"]:
+            endpoint = group[f"{role}_endpoint"]
+            self.assertEqual(f"mock.{role}", endpoint["address"])
+            self.assertEqual("http", endpoint["protocol"])
+            self.assertIn(endpoint["address"], config["hosts"])
+        self.assertNotIn("discovery_file", config)
+
+    def test_service_discovery_keeps_empty_roles_as_host_arrays(self) -> None:
+        env = self.cluster.service_discovery_env("mock.prefill", "mock.decode")
+        config = json.loads(env["MODEL_SERVICE_CONFIG"])
+
+        self.assertEqual({"mock.prefill": [], "mock.decode": []}, config["hosts"])
+
+    def test_shard_discovery_merges_http_hosts_into_model_service_config(self) -> None:
+        from mock_engine_shard_launcher import merge_endpoints
+
+        partials = [
+            {
+                "http_port": 9100,
+                "engines": [
+                    {"name": "prefill-0", "role": "prefill", "ip": "127.0.0.1", "http_port": 8100},
+                    {"name": "decode-0", "role": "decode", "ip": "127.0.0.1", "http_port": 8200},
+                ],
+            },
+            {
+                "http_port": 9200,
+                "engines": [
+                    {"name": "prefill-1", "role": "prefill", "ip": "127.0.0.1", "http_port": 8300},
+                ],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                host="127.0.0.1",
+                prefill_domain="mock.prefill",
+                decode_domain="mock.decode",
+                endpoint_file=str(Path(directory) / "endpoints.json"),
+                env_file=str(Path(directory) / "flexlb_env.txt"),
+            )
+            routes = merge_endpoints(args, partials)
+            payload = json.loads(Path(args.endpoint_file).read_text())
+            env_text = Path(args.env_file).read_text()
+
+        self.assertEqual({"MODEL_SERVICE_CONFIG"}, set(payload["env"]))
+        config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
+        self.assertEqual(
+            {"mock.prefill": ["127.0.0.1:8100", "127.0.0.1:8300"], "mock.decode": ["127.0.0.1:8200"]},
+            config["hosts"],
+        )
+        self.assertEqual("http://127.0.0.1:9100", routes["decode-0"])
+        self.assertEqual("http://127.0.0.1:9200", routes["prefill-1"])
+        self.assertIn("MODEL_SERVICE_CONFIG=", env_text)
+        self.assertNotIn("DOMAIN_ADDRESS", env_text)
 
 
 class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):

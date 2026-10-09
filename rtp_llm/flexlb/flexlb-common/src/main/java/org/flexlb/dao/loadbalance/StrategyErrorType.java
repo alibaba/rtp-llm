@@ -18,12 +18,11 @@ public enum StrategyErrorType {
     INVALID_REQUEST(8406, false),
 
     // queue error
-    QUEUE_FULL(8502, false, "TooManyRequests"),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 
-    // batch dispatch error
-    BATCH_DISPATCH_FAILED(8510, true),
+    // routing and dispatch error
+    DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms
@@ -36,6 +35,8 @@ public enum StrategyErrorType {
     // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
     // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
     SCHEDULER_PLAN_CONFLICT(8515, false),
+    // Returned only before scheduler admission; the same request may run on another node.
+    NOT_MASTER(8517, false),
     // Auto-TPM victim terminal: an already-admitted request was cancelled by
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),
@@ -88,6 +89,15 @@ public enum StrategyErrorType {
         String escaped = safeDetail.replace("\\", "\\\\").replace("\"", "\\\"");
         return "{\"status_name\":\"" + statusName
                 + "\",\"detail\":\"" + escaped + "\"}";
+    }
+
+    public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
+        return switch (this) {
+            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
+            default -> reason == AdmissionRejectReason.UNSPECIFIED;
+        };
     }
 
     @Override

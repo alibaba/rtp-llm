@@ -25,14 +25,28 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class RouteAdmissionPolicyTest {
 
     @Test
+    void deliveryOnlyWaitPreservesTheQueueForecast() {
+        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+        RouteProjection.Candidate result = project(
+                blockedQueue(false, head, null),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, 20L, 0L),
+                ROUTE);
+
+        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
+        assertEquals(RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
+                result.initialHeadDisposition());
+    }
+
+    @Test
     void fifoObservedHeadBlocksProbeWithoutInventingMilliseconds() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         RouteProjection.Candidate result = project(
                 blockedQueue(false, head, semantics(
                         RouteProjection.AfterProbeAdmission.BLOCKED)),
                 noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 100, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 100, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
@@ -45,13 +59,12 @@ class RouteAdmissionPolicyTest {
     void prioritySameOrLowerProbeRemainsBehindObservedHead() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         QueueSnapshot blocked = blockedQueue(true, head, semantics(
-                RouteProjection.AfterProbeAdmission.TTFT_KNOWN_DRAIN_UNKNOWN));
+                RouteProjection.AfterProbeAdmission.BLOCKED));
 
         for (int probePriority : List.of(50, 49)) {
             RouteProjection.Candidate result = project(
                     blocked, noCommittedWork(), TOKEN_EVALUATOR,
-                    probe(99L, probePriority, 20L, 0L,
-                            RouteProjection.Demand.TTFT_AND_DRAIN),
+                    probe(99L, probePriority, 20L, 0L),
                     ROUTE);
             assertEquals(RouteProjection.Candidate.State.BLOCKED,
                     result.state());
@@ -62,34 +75,13 @@ class RouteAdmissionPolicyTest {
     }
 
     @Test
-    void higherPriorityProbeKeepsKnownTtftButNeverInventsDrainRelease() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        RouteProjection.Candidate result = project(
-                blockedQueue(true, head, semantics(
-                        RouteProjection.AfterProbeAdmission
-                                .TTFT_KNOWN_DRAIN_UNKNOWN)),
-                noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 90, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
-                ROUTE);
-
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
-        assertEquals(OptionalLong.empty(), result.projectedDrainMs());
-        assertEquals(RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
-                result.initialHeadDisposition());
-        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
-    }
-
-    @Test
     void higherPriorityProbeCanRemainHardBlockedByCapturedSemantics() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         RouteProjection.Candidate result = project(
                 blockedQueue(true, head, semantics(
                         RouteProjection.AfterProbeAdmission.BLOCKED)),
                 noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 90, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 90, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
@@ -104,8 +96,7 @@ class RouteAdmissionPolicyTest {
                         RouteProjection.AfterProbeAdmission.UNAVAILABLE,
                         RoleType.DECODE)),
                 noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 90, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 90, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
@@ -122,8 +113,7 @@ class RouteAdmissionPolicyTest {
                         RouteProjection.AfterProbeAdmission.UNAVAILABLE,
                         RoleType.DECODE)),
                 noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 40, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 40, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
@@ -140,10 +130,9 @@ class RouteAdmissionPolicyTest {
         RouteProjection.Candidate result = project(
                 blockedQueue(true, head, semantics(
                         RouteProjection.AfterProbeAdmission
-                                .TTFT_KNOWN_DRAIN_UNKNOWN)),
+                                .BLOCKED)),
                 unknownWork, TOKEN_EVALUATOR,
-                probe(99L, 90, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 90, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
@@ -159,8 +148,7 @@ class RouteAdmissionPolicyTest {
                 blockedQueue(false, expired, semantics(
                         RouteProjection.AfterProbeAdmission.BLOCKED)),
                 noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 50, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 50, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
@@ -183,8 +171,7 @@ class RouteAdmissionPolicyTest {
 
         RouteProjection.Candidate result = project(
                 queue, noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 50, 20L, 0L,
-                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(99L, 50, 20L, 0L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());

@@ -39,6 +39,8 @@ struct GptModelInputs {
     torch::Tensor         input_lengths;      // [batch_size]
     torch::Tensor         sequence_lengths;   // [decoder_batch_size]
     torch::Tensor         lm_output_indexes;  // selected output rows
+    // Compact int64 token rows for context scoring; cached/unselected rows are omitted.
+    torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
     torch::Tensor lm_output_lengths;        // [total_batch_size]
@@ -58,8 +60,9 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
-    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
+    torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -73,11 +76,12 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
+    // Bytes/physical block/layer for a single group; zero for multiple groups.
+    // Per-group addressing must use the corresponding cache layout, not these scalars.
     size_t kv_block_stride_bytes     = 0;
     size_t kv_scale_stride_bytes     = 0;
-    size_t seq_size_per_block        = 0;
-    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    size_t seq_size_per_block        = 0;  // tokens/base cache-key block
+    size_t kernel_seq_size_per_block = 0;  // tokens/kernel page for single group; 0 for multi-group topology
     bool   pd_separation             = false;
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
@@ -124,6 +128,10 @@ struct GptModelOutputs {
     // the readable fallback reason returned through AuxInfo.
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    // Selected context rows; undefined when no handler ran on this step.
+    torch::Tensor custom_output;
+    // The dispatcher turns handler failures into per-stream execution errors.
+    std::string custom_output_error;
 };
 
 struct CopyParams {

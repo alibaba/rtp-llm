@@ -195,6 +195,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
+    res.custom_output                                 = torch::tensor({{2147483647, -16777217}}, torch::kInt32);
     res.output_ids                                    = output_token_ids;
     res.finished                                      = true;
     res.aux_info.cost_time_us                         = 1000;
@@ -240,6 +241,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 3; ++i) {
         ASSERT_EQ(output_ids_vector[i], i);
     }
+    ASSERT_TRUE(output_pb.has_custom_output());
+    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(output_pb.custom_output()), res.custom_output->unsqueeze(0)));
     ASSERT_TRUE(output_pb.has_hidden_states());
     auto hidden_states_pb = output_pb.hidden_states();
     ASSERT_EQ(hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);

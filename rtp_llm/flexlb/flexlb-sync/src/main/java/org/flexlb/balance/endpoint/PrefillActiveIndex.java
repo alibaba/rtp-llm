@@ -1,12 +1,19 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.util.PriorityNormalizer;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Objects;
-import java.util.PriorityQueue;
+import java.util.TreeSet;
 
 /**
  * Active request identities for one Prefill generation.
@@ -40,7 +47,84 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
 
     int size();
 
+    int size(int priority);
+
     void clear();
+
+    /** Caller holds the owning PrefillState lock. Reused until membership changes. */
+    Capture capture();
+
+    /** Immutable membership; prediction objects are materialized outside the owner lock. */
+    final class Capture {
+        private static final Capture EMPTY = new Capture(List.of());
+        private final List<Entry> entries;
+        private volatile List<ScheduledRequest> items;
+        private volatile List<GroupPlanner.Item> projectedItems;
+
+        private Capture(Collection<Entry> entries) {
+            this.entries = List.copyOf(entries);
+        }
+
+        public List<ScheduledRequest> items() {
+            List<ScheduledRequest> result = items;
+            if (result != null) { return result; }
+            synchronized (this) {
+                if (items == null) {
+                    List<ScheduledRequest> requests = new ArrayList<>(entries.size());
+                    for (Entry entry : entries) {
+                        requests.add(entry.request);
+                    }
+                    items = List.copyOf(requests);
+                }
+                return items;
+            }
+        }
+
+        public List<GroupPlanner.Item> projectedItems() {
+            List<GroupPlanner.Item> result = projectedItems;
+            if (result != null) {
+                return result;
+            }
+            synchronized (this) {
+                if (projectedItems == null) {
+                    List<GroupPlanner.Item> resultItems = new ArrayList<>(entries.size());
+                    for (Entry entry : entries) {
+                        resultItems.add(entry.projectedItem());
+                    }
+                    projectedItems = List.copyOf(resultItems);
+                }
+                return projectedItems;
+            }
+        }
+    }
+
+    /** One identity in the active index; survives membership snapshot rebuilds. */
+    final class Entry {
+        private final ScheduledRequest request;
+        private final long sequence;
+        private volatile GroupPlanner.Item projectedItem;
+
+        private Entry(ScheduledRequest request, long sequence) {
+            this.request = request;
+            this.sequence = sequence;
+        }
+
+        private GroupPlanner.Item projectedItem() {
+            GroupPlanner.Item result = projectedItem;
+            if (result != null) {
+                return result;
+            }
+            synchronized (this) {
+                if (projectedItem == null) {
+                    projectedItem = new GroupPlanner.Item(
+                            request.requestId(), request.priority(), request.enqueueSeq(),
+                            request.enqueuedAtMs(), request.expiresAtMs(), request.seqLen(),
+                            request.hitCache());
+                }
+                return projectedItem;
+            }
+        }
+    }
 
     final class Disabled implements PrefillActiveIndex {
         private static final Disabled INSTANCE = new Disabled();
@@ -80,7 +164,15 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
+        public int size(int priority) { return 0; }
+
+        @Override
         public void clear() {
+        }
+
+        @Override
+        public Capture capture() {
+            return Capture.EMPTY;
         }
 
         @Override
@@ -90,34 +182,58 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     }
 
     final class Ordered implements PrefillActiveIndex {
-        private final PriorityQueue<ScheduledRequest> queue;
+        private final TreeSet<Entry> queue;
+        // Identity lookup is part of this index, not a second ownership ledger.
+        private final IdentityHashMap<ScheduledRequest, Entry> identities;
+        private final int[] priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
+        private long nextSequence;
+        private Capture capture;
 
-        private Ordered(
-                int initialCapacity,
-                Comparator<ScheduledRequest> ordering) {
-            queue = new PriorityQueue<>(
-                    initialCapacity,
-                    Objects.requireNonNull(ordering, "ordering"));
+        private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
+            Objects.requireNonNull(ordering, "ordering");
+            identities = new IdentityHashMap<>(initialCapacity);
+            queue = new TreeSet<>((left, right) -> {
+                int compared = ordering.compare(left.request, right.request);
+                // Preserve distinct identities even with an equal scheduling key.
+                return compared != 0 ? compared : Long.compare(left.sequence, right.sequence);
+            });
         }
 
         @Override
         public boolean add(ScheduledRequest item) {
-            return queue.add(item);
+            Objects.requireNonNull(item, "item");
+            if (identities.containsKey(item)) {
+                return false;
+            }
+            Entry entry = new Entry(item, nextSequence++);
+            queue.add(entry);
+            identities.put(item, entry);
+            priorityCounts[item.priority()]++;
+            capture = null;
+            return true;
         }
 
         @Override
         public boolean remove(ScheduledRequest item) {
-            return queue.remove(item);
+            Entry entry = identities.get(item);
+            if (entry == null) {
+                return false;
+            }
+            queue.remove(entry);
+            identities.remove(item);
+            priorityCounts[item.priority()]--;
+            capture = null;
+            return true;
         }
 
         @Override
         public boolean contains(ScheduledRequest item) {
-            return queue.contains(item);
+            return identities.containsKey(item);
         }
 
         @Override
         public ScheduledRequest peek() {
-            return queue.peek();
+            return queue.isEmpty() ? null : queue.first().request;
         }
 
         @Override
@@ -131,13 +247,38 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
+        public int size(int priority) { return priorityCounts[priority]; }
+
+        @Override
         public void clear() {
+            Arrays.fill(priorityCounts, 0);
             queue.clear();
+            identities.clear();
+            capture = null;
+        }
+
+        @Override
+        public Capture capture() {
+            if (capture == null) {
+                capture = queue.isEmpty() ? Capture.EMPTY : new Capture(queue);
+            }
+            return capture;
         }
 
         @Override
         public Iterator<ScheduledRequest> iterator() {
-            return queue.iterator();
+            Iterator<Entry> ordered = queue.iterator();
+            return new Iterator<>() {
+                @Override
+                public boolean hasNext() {
+                    return ordered.hasNext();
+                }
+
+                @Override
+                public ScheduledRequest next() {
+                    return ordered.next().request;
+                }
+            };
         }
     }
 }

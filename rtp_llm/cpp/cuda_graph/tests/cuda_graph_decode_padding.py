@@ -60,14 +60,14 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             hidden_size > 0
         ), "hidden_size must be set for CudaGraphRunner decode (from model_config in engine build path)"
         self.hidden_size = hidden_size
+        self.kernel_block_table_width = 1
 
         self.op = CudaGraphRunner()
         self.op.init_decode(
             model,
             hidden_size,
             self.max_seq_len,
-            self.tokens_per_block,
-            self.kernel_tokens_per_block,
+            self.kernel_block_table_width,
             self.decode_capture_batch_sizes,
         )
         print(f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}")

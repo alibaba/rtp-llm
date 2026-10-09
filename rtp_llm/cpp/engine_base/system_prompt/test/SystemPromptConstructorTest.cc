@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -69,7 +70,8 @@ private:
 };
 
 template<typename EngineType>
-std::shared_ptr<EngineType> createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_tokens = 4096) {
+std::shared_ptr<EngineType>
+createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_tokens = 4096, bool multi_group = false) {
     CustomConfig  config;
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
@@ -78,6 +80,14 @@ std::shared_ptr<EngineType> createFocusedEngine(int64_t max_context_batch_size =
     auto params        = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.runtime_config.fifo_scheduler_config.max_context_batch_size = max_context_batch_size;
     params.runtime_config.fifo_scheduler_config.max_batch_tokens_size  = max_batch_tokens;
+    if (multi_group) {
+        params.model_config_.kv_cache_spec_descs[0][0].tag = "first";
+        auto& second                                       = params.model_config_.kv_cache_spec_descs[1][0];
+        second.tag                                         = "second";
+        second.group_type                                  = CacheGroupType::SWA;
+        second.reuse                                       = CacheReusePolicyDesc{true};
+        params.model_config_.attn_config.sliding_window    = 4;
+    }
 
     NormalExecutor::test_model_factory = [vocab_size = model_config.vocab_size](const GptModelInitParams&) {
         return std::unique_ptr<ModelBase>(new MockModel(vocab_size));
@@ -118,13 +128,40 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);
-    ASSERT_TRUE(!item1.block_ids.empty());
+    ASSERT_FALSE(item1.group_block_ids.at("full").empty());
     ASSERT_EQ(item1.prompt_tokens, prompt_1);
 
     const auto& item2 = result["2"];
     ASSERT_EQ(item2.prompt_tokens.size(), 4);
-    ASSERT_TRUE(!item2.block_ids.empty());
+    ASSERT_FALSE(item2.group_block_ids.at("full").empty());
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
+}
+
+TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow) {
+    auto engine  = createFocusedEngine<NormalEngine>(128, 4096, /*multi_group=*/true);
+    auto manager = engine->resourceContext().cache_manager;
+    ASSERT_EQ(manager->cacheConfig().group("first").policy.group_type, CacheGroupType::FULL);
+    ASSERT_EQ(manager->cacheConfig().group("second").policy.group_type, CacheGroupType::SWA);
+    ASSERT_TRUE(manager->cacheConfig().group("second").policy.enable_prefix_reuse);
+    KVCacheConfig config;
+    config.multi_task_prompt_tokens = {{"both", {1, 2, 3}}};
+    SystemPromptConstructor constructor;
+    auto                    result = constructor.construct(config, engine.get(), manager.get(), true);
+    ASSERT_TRUE(result.ok()) << result.status();
+    const auto& prompt = result->at("both");
+    EXPECT_EQ(prompt.prompt_tokens, (std::vector<int>{1, 2, 3}));
+    ASSERT_EQ(prompt.group_block_ids.size(), 2u);
+    for (const auto& group : manager->cacheConfig().topology().groups()) {
+        const auto& blocks = prompt.group_block_ids.at(group.tag);
+        ASSERT_FALSE(blocks.empty()) << group.tag;
+        const auto& pools = manager->coordinator_manager_->cacheGroups();
+        auto        owner = std::find_if(
+            pools.begin(), pools.end(), [&](const auto& candidate) { return candidate->tag() == group.tag; });
+        ASSERT_NE(owner, pools.end());
+        for (auto block : blocks) {
+            EXPECT_GT((*owner)->blockPool()->refCount(block), 0u) << group.tag;
+        }
+    }
 }
 
 TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndReleasesRequestOwnership) {
@@ -133,8 +170,8 @@ TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndRelea
     const DeviceBlockPoolPtr pool = engine_manager->blockTreeCache()->groupSets().front()->devicePools().front();
     const size_t             request_blocks_before = pool->referencedBlocksNum();
     auto                     insert_manager = std::make_shared<KVCacheManager>(engine_manager->cacheConfig(), true);
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(insert_manager->cacheConfig());
-    insert_manager->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(insert_manager->cacheConfig());
+    insert_manager->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
         .WillOnce(testing::Invoke([](const InsertInfo& info, size_t& resident_prefix_length) {
             EXPECT_TRUE(info.is_resident);
@@ -205,12 +242,12 @@ TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWit
     info.enable_cache_lookup = false;
 
     ASSERT_TRUE(manager->malloc(info).success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 95);
+    EXPECT_EQ(resource->blocksNum(0, "full"), 95);
     EXPECT_EQ(manager->freeBlocksNum(), 4u);
 
     tokens->setSeqLength(198);
     ASSERT_TRUE(manager->malloc(info).success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 99);
+    EXPECT_EQ(resource->blocksNum(0, "full"), 99);
     EXPECT_EQ(manager->freeBlocksNum(), 0u);
     manager->free(FreeInfo{resource, tokens});
     EXPECT_EQ(manager->freeBlocksNum(), 99u);
@@ -219,9 +256,9 @@ TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWit
 TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBeforeSystemPromptExecution) {
     auto engine         = createFocusedEngine<NormalEngine>();
     auto manager        = engine->resourceContext().cache_manager;
-    auto real_allocator = manager->allocator_;
+    auto real_allocator = manager->coordinator_manager_;
     auto context        = CountingReadyContext::create();
-    auto mock_allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(manager->config_);
+    auto mock_allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(manager->config_);
 
     ON_CALL(*mock_allocator, initMallocForCommonLen(testing::_))
         .WillByDefault(testing::Return(MallocResult{true, 0, 0, context}));
@@ -252,14 +289,14 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
             return real_allocator->singleBatchNeedBlocks(resource, seq_len, reserve_step);
         }));
 
-    manager->allocator_ = mock_allocator;
-    auto stream_status  = engine->preRun(makeSystemPromptInput(), preRunMode::build_system_prompt);
+    manager->coordinator_manager_ = mock_allocator;
+    auto stream_status            = engine->preRun(makeSystemPromptInput(), preRunMode::build_system_prompt);
     ASSERT_TRUE(stream_status.ok()) << stream_status.status();
     EXPECT_EQ(context->waitCalls(), 1u);
     EXPECT_EQ(stream_status.value()->streamCacheResource().allocator_load_context_, nullptr);
 
     stream_status.value().reset();
-    manager->allocator_ = real_allocator;
+    manager->coordinator_manager_ = real_allocator;
 }
 
 }  // namespace rtp_llm

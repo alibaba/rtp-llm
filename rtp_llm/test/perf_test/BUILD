@@ -252,9 +252,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # V4-Flash CP=4 + EP=4 prefill profile sweep with CP page-RR KV sharding.
@@ -492,9 +492,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # V4-Flash DP=4 + EP=4 captured-graph decode at fixed bs=128 / input_len=64K.
@@ -579,9 +579,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # No-graph sibling for diagnosing cuda-graph capture failures.

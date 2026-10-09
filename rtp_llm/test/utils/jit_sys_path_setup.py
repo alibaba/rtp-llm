@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 from filelock import FileLock
 
+from rtp_llm.utils import jit_cache_env as cache_env
+
 
 def get_package_info(package_name):
     """Get package version and installation path"""
@@ -262,11 +264,40 @@ def bootstrap_remote_jit_dir():
         logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
 
-def setup_jit_cache():
+def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
+    cache_env.configure_writable_cache_env(
+        "FLASHINFER_WORKSPACE_BASE",
+        Path.home(),
+        "flashinfer",
+        cache_subpath=(".cache", "flashinfer"),
+    )
+    cache_env.configure_writable_cache_env(
+        "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
+    )
 
-    cache_dir = Path.home().as_posix() + "/.cache"
-    packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+    requested_cache_dir = cache_dir or Path.home() / ".cache"
+    cache_dir = cache_env.ensure_writable_directory(requested_cache_dir)
+    if cache_dir is None:
+        cache_dir = cache_env.ensure_writable_directory(
+            cache_env.local_jit_fallback("python_packages")
+        )
+    if cache_dir is None:
+        raise OSError("no writable Python package cache directory")
+
+    # DeepGEMM's NVCC compiler changes into the JIT tmp directory before
+    # compiling. A relative cache path would then be resolved a second time
+    # and make the generated kernel.cu unreachable. Normalize both the default
+    # and caller-provided path before launching the actual test process.
+    cache_env.configure_writable_cache_env(
+        "DG_JIT_CACHE_DIR", Path.home() / ".deep_gemm", "deep_gemm"
+    )
+    logging.info(
+        f"[Package Setup] Set DG_JIT_CACHE_DIR: {os.environ['DG_JIT_CACHE_DIR']}"
+    )
+
+    if packages is None:
+        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []

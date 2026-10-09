@@ -56,7 +56,9 @@ public class ReuseSpringContextIntegrationTest {
                         }
                 """
         );
-        environmentVariables.set("HIPPO_ROLE", "TEST_HIPPO_ROLE");
-        environmentVariables.set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://search-uniagent-trace-na61.vip.tbsite.net:4317");
+        environmentVariables.set("FLEXLB_CONFIG", """
+                {"schemaVersion":3,
+                 "requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2}}}
+                """);
     }
 }

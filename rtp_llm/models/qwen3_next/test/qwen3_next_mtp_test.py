@@ -32,7 +32,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
             DataType.TYPE_FP32,
         )
 
-    def test_auto_ssm_state_dtype_keeps_remote_cache_on_shared_bf16_pool(self):
+    def test_auto_ssm_state_dtype_resolves_to_bf16_for_remote_cache(self):
         self.assertEqual(
             resolve_ssm_state_dtype("auto", DataType.TYPE_FP32, True),
             DataType.TYPE_BF16,
@@ -53,14 +53,17 @@ class Qwen35DenseMTPTest(unittest.TestCase):
 
         # The model keeps MHA pages and recurrent GDN states in their native
         # per-group physical layouts.
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+        self.assertEqual(
+            list(config.hybrid_attention_config.hybrid_attention_types),
+            ([HybridAttentionType.LINEAR] * 3 + [HybridAttentionType.NONE]) * 16,
         )
+        self.assertEqual(len(config.kv_cache_spec_descs), config.num_layers)
         self.assertEqual(
             config.linear_attention_config.ssm_state_dtype, DataType.TYPE_FP32
         )
 
-    def test_remote_cache_uses_shared_hybrid_pool_for_bf16_ssm_state(self):
+    def test_remote_cache_preserves_hybrid_layout_for_bf16_ssm_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             Path(temp_dir, "config.json").write_text(json.dumps(self._config()))
             config = Qwen35Dense.create_config(temp_dir)
@@ -70,10 +73,22 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         kv_cache_config.reuse_cache = True
         kv_cache_config.enable_remote_cache = True
 
+        expected_types = list(config.hybrid_attention_config.hybrid_attention_types)
+        expected_specs = [
+            [(spec.tag, spec.cache_type) for spec in layer]
+            for layer in config.kv_cache_spec_descs
+        ]
         Qwen35Dense._apply_kv_cache_config(config, kv_cache_config)
 
-        self.assertFalse(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        self.assertEqual(
+            list(config.hybrid_attention_config.hybrid_attention_types), expected_types
+        )
+        self.assertEqual(
+            [
+                [(spec.tag, spec.cache_type) for spec in layer]
+                for layer in config.kv_cache_spec_descs
+            ],
+            expected_specs,
         )
 
     def test_remote_cache_rejects_explicit_fp32_ssm_state(self):
@@ -144,9 +159,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         )
 
     def test_dense_mtp_uses_qwen35_multimodal_mixin(self):
-        self.assertIs(
-            get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin
-        )
+        self.assertIs(get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin)
 
     @staticmethod
     def _config():

@@ -3,10 +3,13 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Delivery mode and its transport-owned limits. */
+/** Per-Prefill concurrency: batches for BATCH, requests for NON_BATCH. */
 @Getter
 @Setter
 public final class DispatcherConfig {
+
+    public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
+    public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 3_000;
 
     public enum Type {
         BATCH,
@@ -14,9 +17,9 @@ public final class DispatcherConfig {
     }
 
     private Type type = Type.BATCH;
-    private Integer maxInflightBatchesPerPrefillWorker;
-    private Integer maxInflightRequestsPerPrefillWorker;
-    private long enqueueRpcTimeoutMs = 5000;
+    private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
+    /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
+    private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
     public static DispatcherConfig nonBatch() {
         DispatcherConfig config = new DispatcherConfig();
@@ -32,48 +35,20 @@ public final class DispatcherConfig {
         return type == Type.BATCH;
     }
 
-    public Integer maxInflightDeliveriesPerPrefillWorker() {
-        return type == Type.BATCH
-                ? maxInflightBatchesPerPrefillWorker
-                : maxInflightRequestsPerPrefillWorker;
-    }
-
     void validateFor(SchedulerConfig scheduler) {
-        if (type == Type.BATCH) {
-            if (scheduler.getType() == SchedulerConfig.Type.DIRECT) {
-                throw new ConfigValidationException(
-                        "dispatcher.type", "DIRECT requires NON_BATCH");
-            }
-            if (enqueueRpcTimeoutMs <= 0L) {
-                throw new ConfigValidationException(
-                        "dispatcher.enqueueRpcTimeoutMs",
-                        "must be greater than zero");
-            }
-            if (maxInflightBatchesPerPrefillWorker != null
-                    && maxInflightBatchesPerPrefillWorker <= 0) {
-                throw new ConfigValidationException(
-                        "dispatcher.maxInflightBatchesPerPrefillWorker",
-                        "must be greater than zero");
-            }
-            if (maxInflightRequestsPerPrefillWorker != null) {
-                throw new ConfigValidationException(
-                        "dispatcher.maxInflightRequestsPerPrefillWorker",
-                        "is supported only with NON_BATCH");
-            }
-            return;
+        if (type == null) {
+            throw new ConfigValidationException("dispatcher.type", "is required");
         }
-
-        if (maxInflightBatchesPerPrefillWorker != null) {
-            throw new ConfigValidationException(
-                    "dispatcher.maxInflightBatchesPerPrefillWorker",
-                    "is supported only with BATCH");
+        if (type == Type.BATCH && scheduler.getType() == SchedulerConfig.Type.DIRECT) {
+            throw new ConfigValidationException("dispatcher.type", "DIRECT requires NON_BATCH");
         }
-        if (maxInflightRequestsPerPrefillWorker != null) {
-            if (maxInflightRequestsPerPrefillWorker <= 0) {
-                throw new ConfigValidationException(
-                        "dispatcher.maxInflightRequestsPerPrefillWorker",
-                        "must be greater than zero");
-            }
+        if (maxInflightPerPrefillWorker <= 0) {
+            throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
+                    "must be greater than zero");
+        }
+        if (fetchAttachTimeoutMs <= 0) {
+            throw new ConfigValidationException("dispatcher.fetchAttachTimeoutMs",
+                    "must be greater than zero");
         }
     }
 }

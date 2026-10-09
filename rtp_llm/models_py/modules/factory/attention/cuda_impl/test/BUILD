@@ -14,14 +14,24 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+CUDA13_X86_ONLY = select({
+    "@//:using_cuda13_x86": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+CUDA13_ARM_ONLY = select({
+    "@//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 # Library for attention reference implementation
 py_library(
     name = "atten_test_util",
     srcs = ["atten_test_util.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
-    ]
+        "//rtp_llm/models_py:modules",
+    ],
 )
 
 py_test (
@@ -32,20 +42,35 @@ py_test (
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
+    tags = [
+        "SM100_ARM_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "SM100_ARM_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = CUDA13_ARM_ONLY,
 )
 
 flashinfer_test_deps = py_test_deps + select({
-    "@//:using_cuda12_9_x86": flashinfer_deps,
-    "@//:cuda_pre_12_9": flashinfer_deps,
+    "@//:using_cuda13_x86": flashinfer_deps,
     "//conditions:default": [],
 })
 
 flashinfer_platforms = [
-    {"sm": "sm90", "gpu": "H20"},
-    {"sm": "sm8x", "gpu": "L20"},
-    {"sm": "sm12x", "gpu": "RTX_5000_PRO"},
+    {
+        "sm": "sm90",
+        "gpu": "H20_CU13",
+    },
+    {
+        "sm": "sm8x",
+        "gpu": "L20_CU13",
+    },
+    {
+        "sm": "sm12x",
+        "gpu": "RTX_5000_PRO_CU13",
+    },
 ]
 
 flashinfer_attention_tests = [
@@ -87,13 +112,14 @@ flashinfer_attention_tests = [
 [
     py_test(
         name = test["name"] + "_" + platform["sm"],
-        main = test["main"],
         srcs = [test["main"]] + test["extra_srcs"],
-        deps = flashinfer_test_deps,
-        tags = [platform["gpu"]],
         exec_properties = {
             "gpu": platform["gpu"],
         },
+        main = test["main"],
+        tags = [platform["gpu"]],
+        target_compatible_with = CUDA13_X86_ONLY,
+        deps = flashinfer_test_deps,
     )
     for test in flashinfer_attention_tests
     for platform in flashinfer_platforms
@@ -102,14 +128,23 @@ flashinfer_attention_tests = [
 py_test(
     name = "test_xqa",
     srcs = [
-        "test_xqa.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
+        "test_xqa.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda13_x86": ["//rtp_llm:rtp-kernel"],
+        "//conditions:default": [],
+    }),
+    tags = [
+        "H20_CU13",
+        "cuda13",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
     exec_properties = {
-        'gpu': 'H20',
+        "gpu": "H20_CU13",
     },
 )
 
@@ -118,10 +153,11 @@ py_test(
     srcs = ["test_flash_attn_3.py"],
     main = "test_flash_attn_3.py",
     deps = py_test_deps,
-    tags = ["H20"],
+    tags = ["H20_CU13"],
     exec_properties = {
-        "gpu": "H20",
+        "gpu": "H20_CU13",
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 # FlashInfer TRT-LLM FMHA v2 tests
@@ -129,88 +165,98 @@ py_test(
     name = "test_trtllm_fmha_v2_paged_prefill_sm90",
     main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
+        "attention_ref.py",
+        "base_attention_test.py",
         "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
-        "attention_ref.py",
-        "base_attention_test.py",
     ],
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "//conditions:default": []
+        "@//:using_cuda13_x86": flashinfer_deps,
+        "//conditions:default": [],
     }),
-    tags = ["H20", "cuda12_9"],
+    tags = [
+        "H20_CU13",
+        "cuda13",
+    ],
     exec_properties = {
-        'gpu': 'H20',
+        "gpu": "H20_CU13",
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 py_test(
     name = "test_trtllm_fmha_v2_paged_prefill_sm12x",
     main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
+        "attention_ref.py",
+        "base_attention_test.py",
         "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
-        "attention_ref.py",
-        "base_attention_test.py",
     ],
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "//conditions:default": []
+        "@//:using_cuda13_x86": flashinfer_deps,
+        "//conditions:default": [],
     }),
-    tags = ["RTX_5000_PRO"],
+    tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {
-        'gpu': 'RTX_5000_PRO',
+        'gpu': 'RTX_5000_PRO_CU13',
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 py_test(
     name = "test_trtllm_fmha_v2_prefill_sm90",
     main = "test_trtllm_fmha_v2_prefill.py",
     srcs = [
+        "attention_ref.py",
+        "base_attention_test.py",
         "test_trtllm_fmha_v2_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
-        "attention_ref.py",
-        "base_attention_test.py",
     ],
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "//conditions:default": []
+        "@//:using_cuda13_x86": flashinfer_deps,
+        "//conditions:default": [],
     }),
-    tags = ["H20", "cuda12_9"],
+    tags = [
+        "H20_CU13",
+        "cuda13",
+    ],
     exec_properties = {
-        'gpu': 'H20',
+        "gpu": "H20_CU13",
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 py_test(
     name = "test_trtllm_fmha_v2_prefill_sm12x",
     main = "test_trtllm_fmha_v2_prefill.py",
     srcs = [
+        "attention_ref.py",
+        "base_attention_test.py",
         "test_trtllm_fmha_v2_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
-        "attention_ref.py",
-        "base_attention_test.py",
     ],
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "//conditions:default": []
+        "@//:using_cuda13_x86": flashinfer_deps,
+        "//conditions:default": [],
     }),
-    tags = ["RTX_5000_PRO"],
+    tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {
-        'gpu': 'RTX_5000_PRO',
+        'gpu': 'RTX_5000_PRO_CU13',
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 # Benchmark for FlashInfer tensor cores performance comparison
@@ -221,10 +267,14 @@ py_test(
         "bench_utils.py",
     ],
     deps = py_test_deps,
-    tags = ["manual", "H20"],  # manual tag for benchmark tests
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],  # manual tag for benchmark tests
     exec_properties = {
-        'gpu': 'H20',
+        "gpu": "H20_CU13",
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 # Test for PyFlashinferPrefillPagedAttnOp CUDA graph path vs normal path
@@ -235,14 +285,15 @@ py_test(
 py_test(
     name = "test_py_flashinfer_paged_prefill_cuda_graph",
     srcs = [
+        "base_attention_test.py",
         "test_flashinfer_prefill/test_py_flashinfer_paged_prefill_cuda_graph.py",
-        "base_attention_test.py"
     ],
     deps = flashinfer_test_deps,
-    tags = ["H20"],
+    tags = ["H20_CU13"],
     exec_properties = {
-        'gpu': 'H20',
+        "gpu": "H20_CU13",
     },
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
@@ -253,8 +304,10 @@ py_test(
     srcs = [
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
-    deps = py_test_deps,
-    exec_properties = {'gpu':'A10'},
+    deps = flashinfer_test_deps,
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    target_compatible_with = CUDA13_X86_ONLY,
 )
 
 # PrefillImpl BenchTest
@@ -285,16 +338,17 @@ py_test(
         ":filelock",
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps + ["//rtp_llm:rtp-kernel"],
+        "@//:using_cuda13_x86": flashinfer_deps + ["//rtp_llm:rtp-kernel"],
         "//conditions:default": [],
     }),
-    tags = ["manual", "H20", "cuda12_9"],
-    target_compatible_with = select({
-        "@//:using_cuda12_9_x86": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    tags = [
+        "H20_CU13",
+        "cuda13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
     exec_properties = {
-        'gpu': 'H20',
-        'gpu_count': '1',
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
     },
 )

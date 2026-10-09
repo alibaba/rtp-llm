@@ -57,6 +57,7 @@ class BackendManager(object):
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+                disable_custom_all_reduce=self.py_env_configs.ft_disable_custom_ar_override,
             )
         world_info = get_world_info(
             self.py_env_configs.server_config,
@@ -113,8 +114,23 @@ class BackendManager(object):
             deepep_init_success = False
             moriep_init_success = False
 
+            # MegaMoE runs on DeepGEMM symmetric buffers and never uses the
+            # DeepEP/NVSHMEM wrapper. Initializing it anyway poisons the CUDA
+            # context when unused NVSHMEM device state cannot start, so the
+            # wrapper is skipped for those strategies.
+            skip_deepep = engine_config.moe_config.moe_strategy in (
+                "mega_moe",
+                "mega_moe_se",
+            )
+            if skip_deepep and engine_config.moe_config.use_deepep_moe:
+                logging.info(
+                    "moe_strategy=%s does not use DeepEP; skipping DeepEP wrapper "
+                    "initialization",
+                    engine_config.moe_config.moe_strategy,
+                )
+
             # Initialize DeepEP if enabled
-            if engine_config.moe_config.use_deepep_moe:
+            if engine_config.moe_config.use_deepep_moe and not skip_deepep:
                 try:
                     from rtp_llm.models_py.distributed.deepep_wrapper import (
                         init_deepep_wrapper,
@@ -139,7 +155,11 @@ class BackendManager(object):
                     logging.error(f"Failed to initialize MoriEP wrapper: {e}")
 
             # Raise if a requested EP backend failed to initialize
-            if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
+            if (
+                engine_config.moe_config.use_deepep_moe
+                and not skip_deepep
+                and not deepep_init_success
+            ):
                 raise RuntimeError("DeepEP was requested but failed to initialize")
             if engine_config.moe_config.use_mori_ep and not moriep_init_success:
                 raise RuntimeError(

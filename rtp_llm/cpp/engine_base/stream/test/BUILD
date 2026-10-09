@@ -43,7 +43,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -57,7 +58,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -77,7 +79,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -91,7 +94,7 @@ cc_test(
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/models_py/bindings/common",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
@@ -99,5 +102,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

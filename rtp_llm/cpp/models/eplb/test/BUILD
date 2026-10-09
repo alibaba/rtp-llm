@@ -10,8 +10,8 @@ cc_library(
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/models:eplb",
-        "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
+        "//rtp_llm/cpp/pybind:th_utils",
     ],
     copts = cuda_copts(),
     alwayslink = True,
@@ -27,13 +27,14 @@ cc_binary(
 py_test(
     name = "eplb_py_wrapper_test",
     srcs = [
-        "eplb_py_wrapper_test.py"
+        "eplb_py_wrapper_test.py",
     ],
     data = [
-        ":th_eplb_py_wrapper_test"
+        ":th_eplb_py_wrapper_test",
     ],
     deps = [
-        "//rtp_llm:torch"
+        "//rtp_llm:torch",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )

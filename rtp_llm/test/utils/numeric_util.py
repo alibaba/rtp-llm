@@ -2,7 +2,6 @@
 COPIED FROM DeepGEMM
 """
 
-import os
 from typing import Tuple
 
 import torch
@@ -33,9 +32,14 @@ def per_token_cast_to_fp8(
     return (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), sf
 
 
-def per_token_cast_back(
-    x_fp8: torch.Tensor, x_scales: torch.Tensor, pertoken_quant: bool = False
-):
+def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    """Dequantize a per-block (128) fp8 tensor.
+
+    Supported scale formats: float scales, or int32 carrying four packed
+    uint8 ue8m0 exponents per block (the DeepGEMM layout). True int32
+    per-token scales are intentionally unsupported — the ACCL-EP cast levels
+    that used them were removed with the official-DeepEP migration.
+    """
     if x_fp8.numel() == 0:
         return x_fp8.to(torch.bfloat16)
 
@@ -46,30 +50,14 @@ def per_token_cast_back(
         x_fp8, (0, aligned_n - n), mode="constant", value=0
     )
     if x_scales.dtype == torch.int:
-        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant:
-            x_scales = x_scales << 23
-        else:
-            x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
-
+        # int32 holding 4 packed uint8 ue8m0 exponents per 128-block.
+        x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
         x_scales = x_scales.view(dtype=torch.float)
 
-    # L2 / pertoken: dequant from unpadded x_fp8 (element count m*n). When n % 128 != 0,
-    # aligned_n > n; reshaping to x_fp8_padded.shape would require m*aligned_n elements
-    # and raises RuntimeError — must fold back to x_fp8.shape (or reshape to x_fp8.shape).
-    use_unpadded_dequant = (
-        os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant
-    )
-    if use_unpadded_dequant:
-        x_fp32_groups = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
-    else:
-        x_fp32_groups = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
-
+    x_fp32_groups = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
     dequant = x_fp32_groups * x_scales
-    if use_unpadded_dequant:
-        out_bf16 = dequant.reshape(x_fp8.shape).to(torch.bfloat16)
-    else:
-        out_bf16 = dequant.view(x_fp8_padded.shape).to(torch.bfloat16)[:, :n]
+    out_bf16 = dequant.view(x_fp8_padded.shape).to(torch.bfloat16)[:, :n]
     return out_bf16.contiguous()
 
 

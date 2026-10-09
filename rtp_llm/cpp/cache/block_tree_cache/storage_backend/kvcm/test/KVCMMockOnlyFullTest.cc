@@ -14,40 +14,42 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     parallelism_config.tp_rank    = 1;
     parallelism_config.local_rank = 0;
 
-    EXPECT_CALL(*client_wrapper, init(_, _))
-        .WillOnce(Invoke(
-            [&](const kvcm::ClientWrapper::ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
-                EXPECT_EQ(init_params.role_type, kv_cache_manager::RoleType::WORKER);
-                EXPECT_EQ(init_params.self_location_spec_name, "tp1_Fdefault");
-                EXPECT_EQ(config_map.size(), 1u);
-                EXPECT_NE(init_params.regist_span, nullptr);
-                if (init_params.regist_span != nullptr) {
-                    EXPECT_EQ(init_params.regist_span->base, environment.device_pool->getBaseAddress());
-                    EXPECT_EQ(init_params.regist_span->size, environment.device_pool->getTotalSizeBytes());
-                }
-                const auto config = config_map.find("");
-                EXPECT_NE(config, config_map.end());
-                if (config != config_map.end()) {
-                    const std::string json = autil::legacy::ToJsonString(config->second, /*isCompact=*/true);
-                    EXPECT_NE(json.find("tp0_Fdefault"), std::string::npos);
-                    EXPECT_NE(json.find("tp1_Fdefault"), std::string::npos);
-                    EXPECT_NE(json.find("\"tp_size\":2"), std::string::npos);
-                }
-                return true;
-            }));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
+        .WillOnce(Invoke([&](const kvcm::ClientWrapper::ConfigMap&                     config_map,
+                             kv_cache_manager::RoleType                                role,
+                             const std::vector<kvcm::ClientWrapper::PoolRegistration>& registrations,
+                             const std::vector<std::string>&                           tags) {
+            EXPECT_EQ(role, kv_cache_manager::RoleType::WORKER);
+            EXPECT_EQ(tags, (std::vector<std::string>{"default"}));
+            EXPECT_EQ(registrations.size(), 1u);
+            EXPECT_EQ(registrations.front().location_spec_name, "tp1_Fdefault");
+            EXPECT_EQ(registrations.front().span.base, environment.device_pool->getBaseAddress());
+            EXPECT_EQ(registrations.front().span.size, environment.device_pool->getTotalSizeBytes());
+            EXPECT_EQ(config_map.size(), 1u);
+            const auto config = config_map.find("");
+            EXPECT_NE(config, config_map.end());
+            if (config != config_map.end()) {
+                const std::string json = autil::legacy::ToJsonString(config->second, /*isCompact=*/true);
+                EXPECT_NE(json.find("tp0_Fdefault"), std::string::npos);
+                EXPECT_NE(json.find("tp1_Fdefault"), std::string::npos);
+                EXPECT_NE(json.find("\"tp_size\":2"), std::string::npos);
+            }
+            return true;
+        }));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
 
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                              {environment.device_pool},
-                              [&](int layer_id, int group_id, int block_id) {
-                                  EXPECT_EQ(group_id, 0);
+                              environment.pools_by_tag,
+                              [&](int layer_id, const std::string& tag, int block_id) {
+                                  EXPECT_EQ(tag, "default");
                                   return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
                               }));
 
     const kv_cache_manager::UriStrVec expected_read_uris{"read_uri"};
-    EXPECT_CALL(*client_wrapper, loadKvCaches(expected_read_uris, _, _))
-        .WillOnce(Invoke([](const kv_cache_manager::UriStrVec&,
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", expected_read_uris, _, _))
+        .WillOnce(Invoke([](const std::string&,
+                            const kv_cache_manager::UriStrVec&,
                             kv_cache_manager::BlockBuffers& buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
             EXPECT_EQ(buffers.size(), 1u);
@@ -65,7 +67,7 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     EXPECT_TRUE(backend->execute(read_request, read_response));
 
     const kv_cache_manager::UriStrVec expected_write_uris{"write_uri"};
-    EXPECT_CALL(*client_wrapper, saveKvCaches(expected_write_uris, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", expected_write_uris, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"actual_write_uri"})));
     RemoteOperationRequestPB write_request;
     write_request.set_op(REMOTE_OPERATION_WRITE);
@@ -87,12 +89,13 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorRejectsMissingBroadcastManager) {
     parallelism_config.tp_rank    = 0;
     parallelism_config.local_rank = 0;
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
-    EXPECT_FALSE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    EXPECT_FALSE(backend->init(environment.cache_config.topologyPtr(),
+                               environment.pools_by_tag,
+                               [&](int layer_id, const std::string&, int block_id) {
+                                   return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                               }));
 }
 
 TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloads) {
@@ -117,13 +120,14 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     parallelism_config.tp_size    = 2;
     parallelism_config.tp_rank    = 0;
     parallelism_config.local_rank = 0;
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              environment.pools_by_tag,
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     const kv_cache_manager::Locations read_locations{kv_cache_manager::Location{
         kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "read_rank_1"},
@@ -211,13 +215,14 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
     parallelism_config.tp_size    = 2;
     parallelism_config.tp_rank    = 0;
     parallelism_config.local_rank = 0;
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              environment.pools_by_tag,
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -265,15 +270,16 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
     parallelism_config.tp_rank    = 0;
     parallelism_config.local_rank = 0;
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, loadKvCaches(_, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, parallelism_config, client_wrapper);
-    ASSERT_TRUE(backend->init(
-        environment.cache_config.topologyPtr(), {environment.device_pool}, [&](int layer_id, int, int block_id) {
-            return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-        }));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              environment.pools_by_tag,
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
 
     RemoteOperationRequestPB request;
     request.set_op(REMOTE_OPERATION_READ);
@@ -298,14 +304,15 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_sdk_check");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     const std::vector<std::string> expected_block_ids{std::to_string(environment.block_id)};
-    EXPECT_CALL(*client_wrapper, loadKvCaches(kv_cache_manager::UriStrVec{"read_uri"}, _, _))
-        .WillOnce(Invoke([&](const kv_cache_manager::UriStrVec&,
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+        .WillOnce(Invoke([&](const std::string&,
+                             const kv_cache_manager::UriStrVec&,
                              kv_cache_manager::BlockBuffers&,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
             if (trace_info == nullptr) {
@@ -325,8 +332,9 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
     RemoteOperationResponsePB read_response;
     EXPECT_TRUE(backend->execute(read_request, read_response));
 
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
-        .WillOnce(Invoke([&](const kv_cache_manager::UriStrVec&,
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+        .WillOnce(Invoke([&](const std::string&,
+                             const kv_cache_manager::UriStrVec&,
                              const kv_cache_manager::BlockBuffers&,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
             if (trace_info == nullptr) {
@@ -358,7 +366,7 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -370,7 +378,7 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, std::vector<int64_t>{}, _, 600))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"actual_uri"})));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "write_session", _, _))
         .WillOnce(Invoke([](const std::string&,
@@ -394,7 +402,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_offset_mask");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -415,8 +423,10 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
     EXPECT_CALL(*client_wrapper,
                 getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, _, 600))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec({"write_uri_102", "write_uri_103"}), _, _))
+    EXPECT_CALL(*client_wrapper,
+                saveKvCachesForTag("default", kv_cache_manager::UriStrVec({"write_uri_102", "write_uri_103"}), _, _))
         .WillOnce(Invoke([second_base = second_block_info.front().addr, third_base = third_block_info.front().addr](
+                             const std::string&,
                              const kv_cache_manager::UriStrVec&,
                              const kv_cache_manager::BlockBuffers& buffers,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
@@ -453,7 +463,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsSparseBlockMask) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_sparse_mask");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -473,8 +483,10 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsSparseBlockMask) {
     };
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec({"write_uri_102", "write_uri_104"}), _, _))
+    EXPECT_CALL(*client_wrapper,
+                saveKvCachesForTag("default", kv_cache_manager::UriStrVec({"write_uri_102", "write_uri_104"}), _, _))
         .WillOnce(Invoke([second_base = second_block_info.front().addr, fourth_base = fourth_block_info.front().addr](
+                             const std::string&,
                              const kv_cache_manager::UriStrVec&,
                              const kv_cache_manager::BlockBuffers& buffers,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
@@ -511,7 +523,7 @@ TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_empty_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -521,7 +533,7 @@ TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
     write_location.block_mask       = kv_cache_manager::BlockMaskOffset{3};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
 
     auto request = makeStorageRequest(environment, /*keys=*/{101, 102, 103});
@@ -533,7 +545,7 @@ TEST(KVCMMockOnlyFullTest, UnchangedActualUrisAreNotRepublished) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_unchanged_uri");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -545,7 +557,7 @@ TEST(KVCMMockOnlyFullTest, UnchangedActualUrisAreNotRepublished) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"write_uri"})));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "unchanged_session", _, _))
         .WillOnce(Invoke([](const std::string&,
@@ -565,7 +577,7 @@ TEST(KVCMMockOnlyFullTest, MismatchedActualUriCountAbortsWriteSession) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_actual_uri_shape");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -577,7 +589,7 @@ TEST(KVCMMockOnlyFullTest, MismatchedActualUriCountAbortsWriteSession) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec({"actual_uri", "unexpected_extra_uri"}))));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "shape_session", _, _))
         .WillOnce(Invoke([](const std::string&,
@@ -602,14 +614,14 @@ TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_start_write_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::WriteLocation{})));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
@@ -619,7 +631,7 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_abort_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -631,7 +643,7 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::UriStrVec{})));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "abort_session", _, _))
         .WillOnce(Invoke([](const std::string&,
@@ -655,7 +667,7 @@ TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_finish_write_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
-    EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -667,7 +679,7 @@ TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "write_uri"}}};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, saveKvCaches(kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{})));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "finish_session", _, _))
         .WillOnce(Invoke([](const std::string&,

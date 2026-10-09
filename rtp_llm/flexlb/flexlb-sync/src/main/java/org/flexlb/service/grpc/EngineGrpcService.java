@@ -39,8 +39,7 @@ public class EngineGrpcService {
     public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
             String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion,
             long requestTimeoutMs, RoleType roleType) {
-        boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL
-                || workerStatus.getRole() == RoleType.PDFUSION;
+        boolean needCacheKeys = workerStatus.getRole().requiresCacheKeys();
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)

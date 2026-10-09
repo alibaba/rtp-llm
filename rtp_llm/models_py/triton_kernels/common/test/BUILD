@@ -11,10 +11,13 @@ py_test (
     # Not sm90-bound: the only hard constraint is Triton's fp8e4nv storage type,
     # which needs compute capability >= 89. A10 (sm86) would hard-fail with
     # "type fp8e4nv not supported in this architecture", so this runs on L20
-    # (sm89) instead of H20. The H20 latency assertion in this file is inert in
-    # CI (guarded by RUN_KERNEL_BENCHMARK and an "H20" device-name skip).
-    tags = ["L20"],
-    exec_properties = {'gpu':'L20', 'gpu_count':'1'},
+    # (sm89) instead of H20. The H20 latency benchmark in this file is not
+    # collected as a unit test.
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
 )
 
 py_test(
@@ -32,7 +35,11 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
+    exec_properties = {
+        "gpu": "A10_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -42,5 +49,9 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
+    exec_properties = {
+        "gpu": "A10_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["A10_CU13"],
 )

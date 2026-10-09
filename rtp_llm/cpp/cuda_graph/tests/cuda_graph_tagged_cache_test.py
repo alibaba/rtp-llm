@@ -25,6 +25,7 @@ from rtp_llm.ops.compute_ops import (
 GROUP_TAGS = ["full", "aux"]
 HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
+KERNEL_BLOCK_TABLE_WIDTH = 8
 
 
 class TaggedBlockTableModel:
@@ -109,8 +110,7 @@ class StaticTokenMetadataTailModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         tail_signature = torch.stack(
             (
-                inputs.input_ids[-1]
-                + inputs.input_hiddens[-1].sum().to(torch.int32),
+                inputs.input_ids[-1] + inputs.input_hiddens[-1].sum().to(torch.int32),
                 inputs.combo_position_ids[-3],
                 inputs.combo_position_ids[-2],
                 inputs.combo_position_ids[-1],
@@ -283,6 +283,35 @@ class InjectableCaptureBodyFailureModel(TextOnlyMultimodalCapableModel):
         if self.forward_calls == 4:
             raise RuntimeError("injected capture-body failure")
         return super().forward(inputs, fmha_impl)
+
+
+class TaggedBlockRowModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full = inputs.attention_inputs["full"].kv_cache_kernel_block_id_device
+        aux = inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device
+        signature = (full.sum(dim=1) + 16 * aux.sum(dim=1)).to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
+
+
+class DraftBlockTableModel:
+    """Only draft owns layers; compatibility tags must not become consumers."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention = inputs.attention_inputs
+        if isinstance(attention, dict):
+            attention = attention["draft"]
+        signature = attention.kv_cache_kernel_block_id_device[:, 0].to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
 
 
 def _tag_attention_inputs(
@@ -476,6 +505,118 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_draft_placeholder_map_preserves_eager_graph_contract(self):
+        tags = ["unused", "draft", "other"]
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            tags,
+        )
+        for value, order in ((2, tags), (5, list(reversed(tags)))):
+            inputs = _build_decode_inputs(
+                order, {"unused": 31, "draft": value, "other": 47}
+            )
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+            torch.testing.assert_close(
+                output.hidden_states, torch.full_like(output.hidden_states, value)
+            )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(["draft", "other"], {"draft": 2, "other": 47})
+            )
+        )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(
+                    tags + ["extra"],
+                    {"unused": 31, "draft": 2, "other": 47, "extra": 99},
+                )
+            )
+        )
+
+    def test_single_draft_group_uses_direct_graph_inputs(self):
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            ["draft"],
+        )
+        for value in (2, 5):
+            inputs = _build_decode_inputs(["draft"], {"draft": value})
+            inputs.attention_inputs = inputs.attention_inputs["draft"]
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+
+    def test_decode_heterogeneous_block_width_replay(self) -> None:
+        for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
+            for bpk in (4, 128):
+                with self.subTest(tags=tags, bpk=bpk):
+                    runner = CudaGraphRunner()
+                    runner.init_decode(
+                        TaggedBlockRowModel(),
+                        HIDDEN_SIZE,
+                        TOKENS_PER_BLOCK,
+                        bpk,
+                        [2],
+                        tags,
+                    )
+                    for value in (1, 2):
+                        inputs = _build_decode_inputs(tags, {"full": 0, "aux": value})
+                        tagged = inputs.attention_inputs
+                        rows = torch.stack(
+                            (
+                                torch.full((bpk,), value, dtype=torch.int32),
+                                torch.full((bpk,), value + 1, dtype=torch.int32),
+                            )
+                        ).pin_memory()
+                        tagged["full"].kv_cache_kernel_block_id = rows
+                        tagged["full"].kv_cache_kernel_block_id_device = rows.cuda()
+                        inputs.attention_inputs = tagged
+                        self.assertTrue(runner.canRun(inputs))
+                        output = runner.forward(inputs)
+                        torch.cuda.synchronize()
+                        expected = (
+                            torch.tensor(
+                                [
+                                    bpk * value + 16 * value,
+                                    bpk * (value + 1) + 16 * value,
+                                ],
+                                dtype=output.hidden_states.dtype,
+                                device="cuda",
+                            )
+                            .unsqueeze(1)
+                            .expand_as(output.hidden_states)
+                        )
+                        torch.testing.assert_close(output.hidden_states, expected)
+
+                    oversized = _build_decode_inputs(tags, {"full": 0, "aux": 1})
+                    tagged = oversized.attention_inputs
+                    rows = torch.ones((2, bpk + 1), dtype=torch.int32).pin_memory()
+                    tagged["full"].kv_cache_kernel_block_id = rows
+                    tagged["full"].kv_cache_kernel_block_id_device = rows.cuda()
+                    oversized.attention_inputs = tagged
+                    self.assertTrue(runner.canRun(oversized))
+                    output = runner.forward(oversized)
+                    torch.cuda.synchronize()
+                    expected = torch.full_like(output.hidden_states, bpk + 16)
+                    torch.testing.assert_close(output.hidden_states, expected)
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -500,8 +641,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     TaggedBlockTableModel(),
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
                     [2],
                     GROUP_TAGS,
                     role == "target_verify",
@@ -524,8 +664,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         TextOnlyMultimodalCapableModel(),
                         2,
                         TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
+                        KERNEL_BLOCK_TABLE_WIDTH,
                         [4],
                         HIDDEN_SIZE,
                         GROUP_TAGS,
@@ -536,8 +675,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         TaggedBlockTableModel(),
                         2,
                         TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
+                        KERNEL_BLOCK_TABLE_WIDTH,
                         [4],
                         HIDDEN_SIZE,
                         GROUP_TAGS,
@@ -573,8 +711,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [2],
             GROUP_TAGS,
         )
@@ -586,7 +723,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            _build_decode_inputs(list(reversed(GROUP_TAGS)), {"full": 5, "aux": 3}),
             53,
         )
 
@@ -612,8 +749,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [2],
             GROUP_TAGS,
         )
@@ -640,8 +776,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedBlockTableModel(),
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -654,7 +789,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
+            _build_prefill_inputs(list(reversed(GROUP_TAGS)), {"full": 4, "aux": 3}),
             52,
         )
 
@@ -664,8 +799,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedSequenceLengthModel(),
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -709,8 +843,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             CapturedHostLengthModel(),
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -743,8 +876,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -785,8 +917,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     model,
                     1,
                     TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
                     [TOKENS_PER_BLOCK],
                     HIDDEN_SIZE,
                     GROUP_TAGS,
@@ -810,8 +941,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             1,
             16,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [16],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -837,8 +967,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4, TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -985,8 +1114,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             1,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -1035,8 +1163,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TextOnlyMultimodalCapableModel(),
             1,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -1069,8 +1196,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     model,
                     2,
                     TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
                     [4],
                     HIDDEN_SIZE,
                     GROUP_TAGS,
@@ -1105,8 +1231,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             BertWeightAwareModel(),
             1,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -1148,8 +1273,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             1,
             4 * TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [TOKENS_PER_BLOCK],
             HIDDEN_SIZE,
             GROUP_TAGS,
@@ -1209,8 +1333,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 TaggedBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
-                TOKENS_PER_BLOCK,
-                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
                 [1],
                 ["full", "full"],
             )
@@ -1221,8 +1344,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [2],
             GROUP_TAGS,
             True,
@@ -1274,8 +1396,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 TaggedSequenceLengthModel(),
                 HIDDEN_SIZE,
                 64,
-                TOKENS_PER_BLOCK,
-                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
                 [graph_size],
                 GROUP_TAGS,
                 True,
@@ -1302,21 +1423,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     expected_signature = torch.tensor(
                         [
                             graph_size * query_len,
-                            total_kv_length
-                            + (graph_size - batch_size) * query_len,
+                            total_kv_length + (graph_size - batch_size) * query_len,
                             graph_size * query_len,
-                            prefix_len + 1
-                            if batch_size == graph_size
-                            else query_len,
+                            prefix_len + 1 if batch_size == graph_size else query_len,
                         ],
                         dtype=output.hidden_states.dtype,
                         device=output.hidden_states.device,
                     )
                     torch.testing.assert_close(
                         output.hidden_states,
-                        expected_signature.unsqueeze(0).expand_as(
-                            output.hidden_states
-                        ),
+                        expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                     )
 
     def test_target_verify_clears_static_token_metadata_after_shrink(self) -> None:
@@ -1326,8 +1442,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             StaticTokenMetadataTailModel(),
             HIDDEN_SIZE,
             64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [8],
             GROUP_TAGS,
             True,
@@ -1373,29 +1488,106 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(output.hidden_states, shrunk_inputs.input_hiddens)
 
-    def test_block_table_copy_clips_wider_hybrid_staging_rows(self) -> None:
+    def test_hybrid_wider_staging_row_replays_bounded_intersection(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
             TaggedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             GROUP_TAGS,
         )
 
-        # Hybrid cache assembly may expose a common staging row wider than a
-        # model-local graph table. Only the representable intersection is part
-        # of this graph; copying the complete staging stride would overwrite the
-        # next captured buffer.
+        # The shared staging row is wider than the model-local capture row.
+        # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS,
-            {"full": 5, "aux": 3},
-            batch_size=3,
-            block_count=4,
+            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
         )
+        self.assertTrue(runner.canRun(inputs))
+        self.assertTrue(runner.canPrepare(inputs))
+        runner.updateBlockTables(inputs)
         self._assert_replay_signature(runner, inputs, 53)
+
+    def test_topology_real_and_fake_allocator_bounds(self) -> None:
+        # Enum values: LINEAR=0, FULL=1, SWA=2. Only FULL expands physical IDs.
+        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4])
+        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4])
+        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8])
+        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1])
+        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1])
+        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1])
+        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40])
+        self.assertEqual(CudaGraphRunner.topologyWidths([8], [8], [1], 1, 0, 0), [1, 1])
+        for sequence, reserve, fake in ((0, 0, 1), (2**63 - 1, 1, 1), (1, 0, 2**63)):
+            with self.subTest(sequence=sequence, reserve=reserve, fake=fake):
+                with self.assertRaises(RuntimeError):
+                    CudaGraphRunner.topologyWidths([8], [2], [1], sequence, reserve, fake)
+
+    def test_topology_width_end_to_end_preserves_last_column(self) -> None:
+        for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
+            for reserve, fake_count, width in ((0, 1, 8), (1, 1, 12), (0, 5, 20)):
+                with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
+                    spans = {"full": 8, "aux": 32}
+                    real_width, fake_width = CudaGraphRunner.topologyWidths(
+                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                    )
+                    self.assertEqual(max(real_width, fake_width), width)
+                    runner = CudaGraphRunner()
+                    runner.init_decode(
+                        TaggedBlockRowModel(), HIDDEN_SIZE, 64, width, [4], tags
+                    )
+                    inputs = _build_decode_inputs(
+                        tags, {"full": 2, "aux": 3}, batch_size=3, block_count=width
+                    )
+                    self._assert_replay_signature(runner, inputs, width * 50)
+
+                    shorter = _build_decode_inputs(
+                        tags, {"full": 1, "aux": 1}, batch_size=3, block_count=1
+                    )
+                    self._assert_replay_signature(runner, shorter, 17)
+
+    def test_cacheless_runner_uses_explicit_width(self) -> None:
+        for width in (1, KERNEL_BLOCK_TABLE_WIDTH):
+            with self.subTest(width=width):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    TaggedBlockTableModel(), HIDDEN_SIZE, 64, width, [4], GROUP_TAGS
+                )
+                inputs = _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width)
+                self._assert_replay_signature(runner, inputs, 53)
+
+        with self.assertRaisesRegex(RuntimeError, "positive kernel block table width"):
+            runner = CudaGraphRunner()
+            runner.init_decode(TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS)
+
+    def test_generation_prefill_keeps_host_width_gate(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_generation_prefill(
+            TextOnlyMultimodalCapableModel(),
+            1,
+            TOKENS_PER_BLOCK,
+            1,
+            [TOKENS_PER_BLOCK],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            0,
+        )
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        self.assertTrue(runner.canRun(inputs))
+
+        wide = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        wide_tags = {}
+        for tag, attention in inputs.attention_inputs.items():
+            attention = copy.copy(attention)
+            host = torch.full((1, 2), 7, dtype=torch.int32).pin_memory()
+            attention.kv_cache_kernel_block_id = host
+            attention.kv_cache_kernel_block_id_device = host.cuda()
+            wide_tags[tag] = attention
+        wide.attention_inputs = wide_tags
+        self.assertFalse(runner.canRun(wide))
+        self.assertEqual(runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch")
+        self.assertFalse(runner.canPrepare(wide))
 
     def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:
         runner = CudaGraphRunner()
@@ -1403,8 +1595,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedDecodePaddingModel(),
             HIDDEN_SIZE,
             64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             GROUP_TAGS,
         )
@@ -1416,9 +1607,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         self.assertEqual(runner.getCurrentRealGraphSize(), 4)
 
@@ -1440,8 +1629,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             StaticInputTailModel(),
             HIDDEN_SIZE,
             64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             GROUP_TAGS,
         )
@@ -1454,9 +1642,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         output = runner.forward(inputs)
         torch.cuda.synchronize()
@@ -1471,8 +1657,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             AuxiliaryOutputModel(),
             HIDDEN_SIZE,
             64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [1, 4],
             GROUP_TAGS,
         )
@@ -1500,9 +1685,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     (batch_size, HIDDEN_SIZE * 2),
                     tuple(output.mtp_target_hidden_states.shape),
                 )
-                torch.testing.assert_close(
-                    output.mtp_target_hidden_states, expected
-                )
+                torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
 
 if __name__ == "__main__":

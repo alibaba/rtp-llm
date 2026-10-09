@@ -784,6 +784,8 @@ class FrontendApp(object):
             request: Request, req: Union[str, Dict[Any, Any]] = Body(default={})
         ):
             check_not_draining(request)
+            if self.frontend_server.is_embedding:
+                return await self.frontend_server._embedding_endpoint.start_profile(req)
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 
