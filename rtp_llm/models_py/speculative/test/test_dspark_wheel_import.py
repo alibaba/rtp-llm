@@ -11,7 +11,7 @@ import unittest
 
 class DSparkWheelImportTest(unittest.TestCase):
     def test_root_triton_kernel_is_packaged(self):
-        for module in ("dspark_swa", "dspark_gemma_rope"):
+        for module in ("dspark_swa", "dspark_swa_fa4", "dspark_gemma_rope"):
             with self.subTest(module=module):
                 spec = importlib.util.find_spec(
                     f"rtp_llm.models_py.triton_kernels.{module}"

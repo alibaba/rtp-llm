@@ -28,11 +28,12 @@ def _fused_query_cast(
         tl.store(IQ8 + x, value.to(tl.float8e4nv), x < NI)
 
 
-def fused_query_cast(q, idx_q, q8, idx_q8):
+def fused_query_cast(q, idx_q, q8, idx_q8, *, cast_main_query=True):
     """One launch, no tensor allocations; all captured rows including padding.
 
     Inputs remain unmodified, unlike the baseline's BF16 round trip. Integration
     is restricted to callers with no other rounded-carrier consumer.
+    BF16-native attention can disable main-Q conversion; index-Q is still cast.
     """
     for value, out in ((q, q8), (idx_q, idx_q8)):
         if (
@@ -50,7 +51,7 @@ def fused_query_cast(q, idx_q, q8, idx_q8):
             )
     if q.device != idx_q.device or q.shape[0] != idx_q.shape[0]:
         raise ValueError("Q/index-Q must share device and row count")
-    nq, ni = q.numel(), idx_q.numel()
+    nq, ni = q.numel() if cast_main_query else 0, idx_q.numel()
     if nq + ni:
         block = 256
         qb = triton.cdiv(nq, block)

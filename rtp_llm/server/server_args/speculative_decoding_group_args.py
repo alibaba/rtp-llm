@@ -122,7 +122,7 @@ def init_speculative_decoding_group_args(parser, sp_config):
         bind_to=(sp_config, "sp_dspark_verify_mode"),
         type=_dspark_verify_mode,
         default="",
-        help="DSpARK verification: static verifies all gamma draft tokens plus anchor; adaptive uses confidence and the verify-token budget. Empty preserves legacy bool/budget settings.",
+        help="DSpARK verification: static disables confidence and verifies a fixed draft-token prefix plus anchor; adaptive uses confidence and the verify-token budget. Empty preserves legacy bool/budget settings.",
     )
     speculative_decoding_group.add_argument(
         "--sp_dspark_verify_tokens",
@@ -130,7 +130,7 @@ def init_speculative_decoding_group_args(parser, sp_config):
         bind_to=(sp_config, "sp_dspark_verify_tokens"),
         type=_dspark_verify_tokens,
         default=0,
-        help="DSpARK verify draft-token budget: 0 uses gen_num_per_cycle; otherwise 1..gamma. Draft width is unchanged.",
+        help="DSpARK verification: 0 uses gen_num_per_cycle; otherwise 1..gamma. Static uses a fixed prefix length; adaptive uses an average extra-row budget. Draft width is unchanged.",
     )
     speculative_decoding_group.add_argument(
         "--sp_dspark_adaptive_verify",

@@ -120,9 +120,16 @@ class CPWriterSourceTest(unittest.TestCase):
             and n.func.attr == helper.name
         ]
         self.assertEqual(len(calls), 2)  # Ordinary and CP native FP4 prefill.
+        required = len(helper.args.args) - len(helper.args.defaults) - 1
+        optional = {arg.arg for arg in helper.args.args[-len(helper.args.defaults):]}
+        self.assertEqual(optional, {"same_layer_prefix", "packed_kv_event"})
+        self.assertTrue(all(isinstance(value, ast.Constant) and value.value is None
+                            for value in helper.args.defaults))
         for call in calls:
-            self.assertEqual(len(call.args), len(helper.args.args) - 1)
-            self.assertFalse(call.keywords)
+            self.assertEqual(len(call.args), required)
+            self.assertTrue({kw.arg for kw in call.keywords} <= optional)
+        # Ordinary prefill keeps the original positional/default contract.
+        self.assertEqual(sum(not call.keywords for call in calls), 1)
 
     def test_cp_wrapper_allocates_no_device_metadata_and_reads_maps_on_device(self):
         wrapper = ast.unparse(

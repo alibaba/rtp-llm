@@ -349,10 +349,11 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path                 = "";
     int64_t         sp_dspark_mask_token_id         = -1;
     bool            sp_dspark_sample_from_anchor    = true;
-    // Zero preserves gamma; otherwise verify only this many DSpARK draft tokens.
+    // Zero uses gamma. Static verifies this fixed prefix; adaptive uses it as
+    // the average extra-row budget allocated by confidence across requests.
     int64_t sp_dspark_verify_tokens   = 0;
     bool    sp_dspark_adaptive_verify = false;
-    // Empty retains the legacy bool/budget behavior.
+    // Static disables confidence; adaptive enables it. Empty retains legacy bool/budget behavior.
     std::string sp_dspark_verify_mode = "";
     bool        isAdaptiveVerify() const;
     int64_t     verifySteps() const;

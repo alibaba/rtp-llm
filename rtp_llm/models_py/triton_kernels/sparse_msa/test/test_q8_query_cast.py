@@ -123,6 +123,32 @@ class QueryCastTest(unittest.TestCase):
             check()
             assert pointers == (q8.data_ptr(), iq8.data_ptr())
 
+    def test_index_only_cast_preserves_main_buffer(self):
+        q = torch.randn(20, 64, 128, device="cuda", dtype=torch.bfloat16)
+        iq = torch.randn(20, 4, 128, device="cuda", dtype=torch.bfloat16)
+        q8 = torch.full_like(q, 2.0, dtype=torch.float8_e4m3fn)
+        iq8 = torch.empty_like(iq, dtype=torch.float8_e4m3fn)
+        original_q8 = q8.clone()
+
+        def run():
+            fused_query_cast(q, iq, q8, iq8, cast_main_query=False)
+
+        def check():
+            expected = iq.clone()
+            round_to_e4m3_compute_grid_(expected)
+            exact(iq8, expected.to(torch.float8_e4m3fn))
+            exact(q8, original_q8)
+
+        run()
+        check()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for value in (0.0, 500.0, -500.0):
+            iq.fill_(value)
+            graph.replay()
+            check()
+
     def test_helper_rejects_incompatible_buffers(self):
         q = torch.ones(2, 64, 128, device="cuda", dtype=torch.bfloat16)
         iq = torch.ones(2, 4, 128, device="cuda", dtype=torch.bfloat16)

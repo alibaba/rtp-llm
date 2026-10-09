@@ -92,6 +92,8 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput  execSampleGreedy(const GreedyParams& params);
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities);
+// Workspace is private to one DSpark proposal invocation, including graph capture.
+torch::Tensor execDSparkSoftmax(const torch::Tensor& logits, torch::Tensor& workspace);
 torch::Tensor
 execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
 torch::Tensor                           execDSparkConfidence(const torch::Tensor& hidden,

@@ -78,6 +78,16 @@ py_test(
 )
 
 py_test(
+    name = "test_dspark_swa_fa4",
+    srcs = ["test_dspark_swa_fa4.py"],
+    main = "test_dspark_swa_fa4.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_dspark_runtime_layout",
     srcs = ["test_dspark_runtime_layout.py"],
     main = "test_dspark_runtime_layout.py",

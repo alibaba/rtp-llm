@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
 _CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"
 _CP_COMPACT_PREFILL = os.environ.get("M3_MSA_CP_COMPACT_PREFILL", "0") == "1"
+_NVFP4_PREFILL_BACKEND = os.environ.get("M3_NVFP4_PREFILL_BACKEND", "fmha").lower()
 _MAX_LIVE_PREFETCH = 2
 _BF16_BYTES = 2
 _FP8_SCALE_BYTES = 4
@@ -55,6 +56,7 @@ import torch.nn.functional as F
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.modules.hybrid.cp_same_layer_workspace import PrefixGather, get_workspace
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     build_cp_sharded_prefix_gather_plan,
@@ -2164,8 +2166,16 @@ class MSAAttention(nn.Module):
         self.page_size = attn_config.kernel_tokens_per_block
         self.physical_page_size = attn_config.tokens_per_block
         self.nvfp4_kv_cache = bool(getattr(attn_config, "nvfp4_kv_cache", False))
+        if self.nvfp4_kv_cache and _NVFP4_PREFILL_BACKEND not in ("fmha", "flashinfer"):
+            raise ValueError("M3_NVFP4_PREFILL_BACKEND must be fmha or flashinfer")
+        self._flashinfer_nvfp4_prefill = (
+            self.nvfp4_kv_cache and _NVFP4_PREFILL_BACKEND == "flashinfer"
+        )
         if self.nvfp4_kv_cache and self.layer_idx == 0:
-            logger.info("MiniMax-M3.1 NVFP4 uses native packed-FP4 prefill/decode")
+            logger.info(
+                "MiniMax-M3.1 NVFP4 prefill=%s, native packed-FP4 decode",
+                _NVFP4_PREFILL_BACKEND,
+            )
 
         # --- main GQA branch (identical construction to CausalAttention) ---
         self.qkv_proj = LinearFactory.create_linear_from_weights(
@@ -2875,6 +2885,8 @@ class MSAAttention(nn.Module):
         prefix_gather_plan,
         attn_inputs: PyAttentionInputs,
         kv_lens: torch.Tensor,
+        same_layer_prefix=None,
+        packed_kv_event: Optional[torch.cuda.Event] = None,
     ):
         """Persist rank-owned rows and build a packed FP4 CP working set.
 
@@ -2933,7 +2945,12 @@ class MSAAttention(nn.Module):
                 if _CP_PREFIX_PREFETCH and self._kv_sharded
                 else None
             )
-            if prefetched is not None:
+            if same_layer_prefix is not None:
+                prefix_values, prefix_side = same_layer_prefix.values, same_layer_prefix.side
+                same_layer_prefix.workspace.wait_for_consumer(
+                    same_layer_prefix.lease, same_layer_prefix.ready
+                )
+            elif prefetched is not None:
                 prefix_values, prefix_side, _ = prefetched
             elif self._kv_sharded:
                 from rtp_llm.models_py.triton_kernels.common.nvfp4_prefix_pack import (
@@ -2991,20 +3008,38 @@ class MSAAttention(nn.Module):
                 )
             # Restore directly from rank-major opaque blocks. Six independent
             # views preserve larger-capacity working-pool plane offsets.
-            restore_prefix_planes(
-                prefix_values,
-                prefix_side,
-                restore,
-                prefix_dst_pages,
-                (
-                    main[0],
-                    main[1],
-                    main_scales[0],
-                    main_scales[1],
-                    idx_packed,
-                    idx_scales,
-                ),
-            )
+            if same_layer_prefix is not None:
+                expected = (main[0], main[1], main_scales[0], main_scales[1],
+                            idx_packed, idx_scales)
+                if any(a.data_ptr() != b.data_ptr() or a.shape != b.shape
+                       for a, b in zip(expected, same_layer_prefix.working_planes)):
+                    raise RuntimeError("M3.1 early prefix working pool changed before consumption")
+                same_layer_prefix.workspace.retire(same_layer_prefix.lease)
+            else:
+                restore_prefix_planes(
+                    prefix_values,
+                    prefix_side,
+                    restore,
+                    prefix_dst_pages,
+                    (
+                        main[0],
+                        main[1],
+                        main_scales[0],
+                        main_scales[1],
+                        idx_packed,
+                        idx_scales,
+                    ),
+                )
+
+        # Current-layer prefix restoration is complete before suffix quantization.
+        # Wait for the gathered suffix before writing either working or
+        # persistent planes.
+        if packed_kv_event is not None:
+            suffix_owner = getattr(self, "_same_layer_suffix", None)
+            if suffix_owner is not None:
+                suffix_owner[0].wait_for_consumer(suffix_owner[1], packed_kv_event)
+            else:
+                torch.cuda.current_stream(packed.device).wait_event(packed_kv_event)
 
         # Quantize once into both independent destinations. The full persistent
         # map contains -1 for non-owned rows; never substitute the compressed
@@ -3039,7 +3074,12 @@ class MSAAttention(nn.Module):
             self.head_dim,
             ni,
         )
+        suffix_owner = getattr(self, "_same_layer_suffix", None)
+        if suffix_owner is not None:
+            suffix_owner[0].retire(suffix_owner[1])
+            self._same_layer_suffix = None
         return main, main_scales, idx_packed, idx_scales
+
 
     # ------------------------------------------------------------------
     # Task-2: source idx_K from the main paged pool's scale region.
@@ -3676,6 +3716,89 @@ class MSAAttention(nn.Module):
                 pages.record_stream(current_stream)
         return entry["main"], entry["idx"], entry["idx_scale"]
 
+    def _cp_prefix_gather_plan(self, attn_inputs, prefix_cpu_list, plans):
+        """Layer-local cache mapping; payload readiness is ordered separately."""
+        block_table = self._physical_block_table(attn_inputs)
+        key = (block_table.device, int(block_table.data_ptr()), tuple(block_table.shape))
+        plan = plans.get(key)
+        if plan is None:
+            plan = build_cp_sharded_prefix_gather_plan(
+                block_table,
+                torch.tensor(prefix_cpu_list, dtype=torch.int64),
+                page_size=self.page_size,
+                cp_size=self._cp_size,
+                cp_rank=self._cp_rank,
+            )
+            plans[key] = plan
+        if (plan.cp_size != self._cp_size or plan.batch_size != len(prefix_cpu_list)
+                or plan.block_table_data_ptr != block_table.data_ptr()):
+            raise ValueError("M3.1 same-layer prefix gather plan mismatch")
+        return plan
+
+    def _same_layer_overlap_enabled(self):
+        return (_CP_PACKED_KV_OVERLAP and not _CP_PREFIX_PREFETCH
+                and self.nvfp4_kv_cache and self._kv_sharded and self._cp_size == 4
+                and self.kv_head_num == 4 and self.head_dim == 128
+                and self.idx_head_dim == 128 and self.page_size == 128
+                and not _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache))
+
+    def _cp_suffix_send(self, rows, device):
+        main_stream = torch.cuda.current_stream(device)
+        stream = MSAAttention._cp_side_stream.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            MSAAttention._cp_side_stream[device] = stream
+            MSAAttention._cp_side_event[device] = torch.cuda.Event()
+        workspace = get_workspace(device, main_stream, stream)
+        lease = workspace.acquire_suffix(int(rows))
+        self._same_layer_suffix = (workspace, lease)
+        # Prior lease retired on this fixed main stream after its final read.
+        # The next main-stream cat therefore cannot overwrite an in-flight send.
+        return lease.tensors["kv_send"]
+
+
+
+    def _cp_gather_same_layer_prefix(self, kv_cache, plan, prefix_dst_pages):
+        """Current-layer prefix AG/restore ordered after previous main consumers."""
+        from rtp_llm.models_py.triton_kernels.common.nvfp4_prefix_pack import pack_prefix_pools
+        device = kv_cache.kv_cache_base.device
+        main_stream = torch.cuda.current_stream(device)
+        stream = MSAAttention._cp_side_stream.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            MSAAttention._cp_side_stream[device] = stream
+            MSAAttention._cp_side_event[device] = torch.cuda.Event()
+        workspace = get_workspace(device, main_stream, stream)
+        lease = workspace.acquire_prefix(int(plan.packed_block_ids.numel()))
+        buffers = lease.tensors
+        main, scales, idx, idx_scales = _NVFP4_WORKING_PAGES.acquire(
+            int(self._scratch_slots) // self.page_size, self.kv_head_num,
+            self.page_size, self.head_dim, 128, device,
+        )
+        planes = (main[0], main[1], scales[0], scales[1], idx, idx_scales)
+        if plan.total_logical_blocks != prefix_dst_pages.numel():
+            raise ValueError("M3.1 early prefix destination count mismatch")
+        # Include shared working storage allocation and all preceding main reads.
+        stream.wait_stream(main_stream)
+        for tensor in (kv_cache.kv_cache_base, kv_cache.kv_scale_base,
+                       plan.packed_block_ids, prefix_dst_pages, plan.restore_indices, *planes):
+            tensor.record_stream(stream)
+        with torch.cuda.stream(stream):
+            pack_prefix_pools(kv_cache.kv_cache_base, kv_cache.kv_scale_base,
+                              plan.packed_block_ids,
+                              out=(buffers["values_send"], buffers["side_send"]))
+            all_gather(buffers["side_send"], Group.TP_SIDE, out=buffers["side_recv"])
+            all_gather(buffers["values_send"], Group.TP_SIDE, out=buffers["values_recv"])
+            restore_prefix_planes(buffers["values_recv"], buffers["side_recv"],
+                                  plan.restore_indices, prefix_dst_pages, planes)
+            ready = torch.cuda.Event()
+            ready.record(stream)
+        return PrefixGather(buffers["values_recv"], buffers["side_recv"], ready,
+                            planes, workspace, lease)
+
+
+
+
     def _cp_all_gather_packed_kv(
         self, packed_kv: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.cuda.Event]]:
@@ -3684,6 +3807,24 @@ class MSAAttention(nn.Module):
             return all_gather(packed_kv, group=Group.TP), None
 
         device = packed_kv.device
+        if self._same_layer_overlap_enabled():
+            owner = getattr(self, "_same_layer_suffix", None)
+            if owner is None:
+                send = self._cp_suffix_send(int(packed_kv.shape[0]), device)
+                owner = self._same_layer_suffix
+            workspace, lease = owner
+            send, recv = lease.tensors["kv_send"], lease.tensors["kv_recv"]
+            if send.data_ptr() != packed_kv.data_ptr() and owner is not None:
+                # Standalone helpers may pass their already-produced local input.
+                send.copy_(packed_kv)
+            stream = workspace.side_stream
+            # This snapshot is AFTER cat/copy, unlike acquire's earlier fence.
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                all_gather(send, Group.TP_SIDE, out=recv)
+                ready = torch.cuda.Event()
+                ready.record(stream)
+            return recv, ready
         stream = MSAAttention._cp_side_stream.get(device)
         if stream is None:
             stream = torch.cuda.Stream(device=device)
@@ -4025,16 +4166,18 @@ class MSAAttention(nn.Module):
             inlens.to(device=device, dtype=torch.int32), dim=0
         )
         kv_indices = build_kv_page_indices(req_to_token, seq_lens, self.block_size)
-        sparse_plan = build_sparse_attn_plan(
-            cu_seqlens,
-            seq_lens,
-            prefix_i32,
-            self.head_num,
-            self.kv_head_num,
-            self.block_size,
-            self.topk_blocks,
-            use_fp8_kvcache=False,
-        )
+        sparse_plan = None
+        if not self._flashinfer_nvfp4_prefill:
+            sparse_plan = build_sparse_attn_plan(
+                cu_seqlens,
+                seq_lens,
+                prefix_i32,
+                self.head_num,
+                self.kv_head_num,
+                self.block_size,
+                self.topk_blocks,
+                use_fp8_kvcache=False,
+            )
         host = PrefillScoreHostMetadata(
             tuple(inlen_cpu), tuple(kv_cpu), tuple(prefix_cpu), tuple(range(bsz))
         )
@@ -4044,7 +4187,7 @@ class MSAAttention(nn.Module):
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
         query_fp8_outputs = None
-        if self._m31_raw_attention_norms is not None:
+        if self._m31_raw_attention_norms is not None and not self._flashinfer_nvfp4_prefill:
             query_fp8_outputs = tuple(
                 torch.empty(
                     (total_tokens, heads, self.head_dim),
@@ -4147,19 +4290,22 @@ class MSAAttention(nn.Module):
             kv_indices=kv_indices,
             emit_block_table=False,
         )
-        output = sparse_prefill_from_topk_fp4(
-            q,
-            main[0],
-            main[1],
-            k_scale,
-            v_scale,
-            topk,
-            kv_indices,
-            sparse_plan,
-            self.topk_blocks,
-            self.block_size,
-            self.head_dim**-0.5,
-        )
+        if self._flashinfer_nvfp4_prefill:
+            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.flashinfer_nvfp4_prefill import (
+                flashinfer_sparse_prefill_from_topk_fp4,
+            )
+
+            output = flashinfer_sparse_prefill_from_topk_fp4(
+                q, main[0], main[1], scales[0], scales[1], topk,
+                req_to_token, cu_seqlens, seq_lens, positions, seq_lens,
+                self.head_dim**-0.5,
+            )
+        else:
+            output = sparse_prefill_from_topk_fp4(
+                q, main[0], main[1], k_scale, v_scale, topk, kv_indices,
+                sparse_plan, self.topk_blocks, self.block_size,
+                self.head_dim**-0.5,
+            )
         return self.o_proj(output.reshape(total_tokens, -1).contiguous())
 
     def _forward_cp_prefill(
@@ -4268,6 +4414,24 @@ class MSAAttention(nn.Module):
             metadata_ready = torch.cuda.Event()
             metadata_ready.record(torch.cuda.current_stream(device))
             need_build_new_meta = True
+
+        same_layer_overlap = self._same_layer_overlap_enabled()
+        same_layer_prefix = None
+        # Later sparse layers already have this forward's immutable metadata.
+        # Start only this layer's history reads before its projection. The first
+        # sparse layer retains metadata-D2H/projection overlap and starts below.
+        if same_layer_overlap and not need_build_new_meta and prefix_sum > 0:
+            addr = cache.get("addr")
+            if addr is not None:
+                plan = self._cp_prefix_gather_plan(
+                    attn_inputs, prefix_cpu_list, addr["prefix_gather_plans"]
+                )
+                self._ensure_scratch_addressing_capacity(
+                    bsz=bsz, max_kv=max_kv, exact_cp_shape=True,
+                )
+                same_layer_prefix = self._cp_gather_same_layer_prefix(
+                    kv_cache, plan, addr["prefix_dst_pages"]
+                )
 
         qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
         if self.qk_fuse_norm is not None and self._m31_raw_attention_norms is None:
@@ -4410,16 +4574,18 @@ class MSAAttention(nn.Module):
                 )
             # step3 sparse-attention plan (fmha): GQA num_q_heads/num_kv_heads,
             # kv_block_num=topk. Same per-forward reuse as index_score_plan.
-            sparse_attn_plan = build_sparse_attn_plan(
-                cu_seqlens,
-                seq_lens_i32,
-                prefix_i32,
-                self.head_num,
-                self.kv_head_num,
-                self.block_size,
-                self.topk_blocks,
-                use_fp8_kvcache=False,
-            )
+            sparse_attn_plan = None
+            if not self._flashinfer_nvfp4_prefill:
+                sparse_attn_plan = build_sparse_attn_plan(
+                    cu_seqlens,
+                    seq_lens_i32,
+                    prefix_i32,
+                    self.head_num,
+                    self.kv_head_num,
+                    self.block_size,
+                    self.topk_blocks,
+                    use_fp8_kvcache=False,
+                )
 
             MSAAttention._cp_shared_meta = {
                 "owner": attn_inputs,
@@ -4535,22 +4701,13 @@ class MSAAttention(nn.Module):
                 }
 
         if self._kv_sharded and prefix_sum > 0:
-            prefix_block_table = self._physical_block_table(attn_inputs)
-            prefix_plan_key = (
-                prefix_block_table.device,
-                int(prefix_block_table.data_ptr()),
-                tuple(prefix_block_table.shape),
+            prefix_gather_plan = self._cp_prefix_gather_plan(
+                attn_inputs, prefix_cpu_list, prefix_gather_plans
             )
-            prefix_gather_plan = prefix_gather_plans.get(prefix_plan_key)
-            if prefix_gather_plan is None:
-                prefix_gather_plan = build_cp_sharded_prefix_gather_plan(
-                    prefix_block_table,
-                    torch.tensor(prefix_cpu_list, dtype=torch.int64),
-                    page_size=self.page_size,
-                    cp_size=self._cp_size,
-                    cp_rank=self._cp_rank,
+            if same_layer_overlap and same_layer_prefix is None:
+                same_layer_prefix = self._cp_gather_same_layer_prefix(
+                    kv_cache, prefix_gather_plan, prefix_dst_pages
                 )
-                prefix_gather_plans[prefix_plan_key] = prefix_gather_plan
         else:
             prefix_gather_plan = None
 
@@ -4595,7 +4752,11 @@ class MSAAttention(nn.Module):
             )
 
         query_fp8_outputs = None
-        if self.nvfp4_kv_cache and self._m31_raw_attention_norms is not None:
+        if (
+            self.nvfp4_kv_cache
+            and self._m31_raw_attention_norms is not None
+            and not self._flashinfer_nvfp4_prefill
+        ):
             query_fp8_outputs = tuple(
                 torch.empty(
                     (local_tokens, heads, self.head_dim),
@@ -4627,6 +4788,8 @@ class MSAAttention(nn.Module):
                     idx_k.reshape(local_tokens, ni),
                 ),
                 dim=-1,
+                out=(self._cp_suffix_send(local_tokens, device)
+                     if same_layer_overlap else None),
             )
         elif can_fuse:
             packed_kv = torch.empty(
@@ -4691,7 +4854,7 @@ class MSAAttention(nn.Module):
         if not can_fuse and not m31_fused:
             del k_fb, v_fb
 
-        if packed_kv_event is not None:
+        if packed_kv_event is not None and not same_layer_overlap:
             torch.cuda.current_stream(all_packed.device).wait_event(packed_kv_event)
 
         if _should_use_cp_compact_prefill(_CP_COMPACT_PREFILL, self.nvfp4_kv_cache):
@@ -4826,8 +4989,13 @@ class MSAAttention(nn.Module):
                     prefix_gather_plan,
                     attn_inputs,
                     kv_lens_i32,
+                    same_layer_prefix=same_layer_prefix,
+                    packed_kv_event=packed_kv_event if same_layer_overlap else None,
                 )
             )
+            # Release prefix send/recv lifetimes after their main-stream reads
+            # have been queued; no per-layer resident prefix buffers accumulate.
+            same_layer_prefix = None
             del all_packed, packed_kv
             if attn_inputs.cache_store_inputs:
                 from rtp_llm.models_py.modules.factory.attention import (
@@ -4878,19 +5046,24 @@ class MSAAttention(nn.Module):
                 kv_indices=kv_page_indices,
                 emit_block_table=False,
             )
-            o = sparse_prefill_from_topk_fp4(
-                q,
-                k_fp4,
-                v_fp4,
-                k_scale,
-                v_scale,
-                topk_idx,
-                kv_page_indices,
-                sparse_attn_plan,
-                self.topk_blocks,
-                self.block_size,
-                self.head_dim**-0.5,
-            )
+            if self._flashinfer_nvfp4_prefill:
+                from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.flashinfer_nvfp4_prefill import (
+                    flashinfer_sparse_prefill_from_topk_fp4,
+                )
+
+                o = flashinfer_sparse_prefill_from_topk_fp4(
+                    q, k_fp4, v_fp4, main_scales[0], main_scales[1],
+                    topk_idx, req_to_token_segments, cu_seqlens,
+                    prefix_i32 + segment_lengths_t, local_positions,
+                    kv_lens_i32, self.head_dim**-0.5,
+                    segments_per_request=2,
+                )
+            else:
+                o = sparse_prefill_from_topk_fp4(
+                    q, k_fp4, v_fp4, k_scale, v_scale, topk_idx,
+                    kv_page_indices, sparse_attn_plan, self.topk_blocks,
+                    self.block_size, self.head_dim**-0.5,
+                )
             del q, idx_q, topk_idx
             return self.o_proj(o.reshape(local_tokens, -1).contiguous())
 
@@ -5081,6 +5254,7 @@ class MSAAttention(nn.Module):
                     score_type=self.score_type,
                     mma_scale_layout=True,
                     fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+                    bf16_main_query=True,
                     max_seq_len=self._cuda_graph_max_seq_len,
                 )
                 output = self._project_q8kv4_output(q8kv4, input_shape)
@@ -5317,6 +5491,7 @@ class MSAAttention(nn.Module):
                     score_type=self.score_type,
                     mma_scale_layout=True,
                     fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+                    bf16_main_query=True,
                     # Addressing expands one shared page table per request
                     # into contiguous query rows with individual causal lengths.
                     query_width=(

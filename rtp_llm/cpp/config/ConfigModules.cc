@@ -328,9 +328,6 @@ bool SpeculativeExecutionConfig::isAdaptiveVerify() const {
         if (sp_dspark_adaptive_verify) {
             throw std::invalid_argument("static DSpARK verification conflicts with sp_dspark_adaptive_verify=true");
         }
-        if (sp_dspark_verify_tokens != 0 && sp_dspark_verify_tokens != gen_num_per_cycle) {
-            throw std::invalid_argument("static DSpARK verification requires sp_dspark_verify_tokens=0 or gamma");
-        }
         return false;
     }
     return sp_dspark_verify_mode == "adaptive" || sp_dspark_adaptive_verify;

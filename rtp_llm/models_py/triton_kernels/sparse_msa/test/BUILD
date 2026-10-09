@@ -1,4 +1,40 @@
 py_test(
+    name = "test_cake_attention",
+    srcs = ["test_cake_attention.py"],
+    deps = [
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm/models_py/triton_kernels:sparse_msa",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_flashinfer_nvfp4_prefill",
+    srcs = ["test_flashinfer_nvfp4_prefill.py"],
+    deps = [
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm/models_py/triton_kernels:sparse_msa",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_bf16_attention_mxfp8",
+    srcs = ["test_bf16_attention_mxfp8.py"],
+    data = ["fixtures/original_combine_mxfp8.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_q8kv4_combine_mxfp8",
     srcs = ["test_q8kv4_combine_mxfp8.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

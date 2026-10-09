@@ -84,11 +84,14 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
 
+    // Private per invocation: no cross-stream scratch or capture-bucket cache.
+    // Cached Blackwell softmax needs no workspace; fallback reuses this buffer.
+    torch::Tensor softmax_workspace;
     for (int64_t step = 0; step < static_cast<int64_t>(sampling_steps); ++step) {
         auto markov_embedding = markov_w1.index_select(0, previous_tokens);
         auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
         auto logits           = execDSparkCombineLogits(proposal_logits.select(1, step), markov_bias, temperature);
-        auto sampling_probabilities = torch::softmax(logits, -1);
+        auto sampling_probabilities = execDSparkSoftmax(logits, softmax_workspace);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         auto sampled_target_tokens  = sampled_draft_tokens;
         if (d2t_map_.defined()) {

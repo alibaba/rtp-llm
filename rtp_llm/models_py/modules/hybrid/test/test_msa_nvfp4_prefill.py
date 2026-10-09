@@ -16,6 +16,18 @@ SOURCE = Path(__file__).resolve().parents[1] / "msa_attention.py"
 
 
 class SourceContractTest(unittest.TestCase):
+    def test_fmha_fp4_calls_bind_all_required_arguments(self):
+        for name in ("_forward_nvfp4_prefill", "_forward_cp_prefill"):
+            calls = [node for node in ast.walk(self.methods[name])
+                     if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name)
+                     and node.func.id == "sparse_prefill_from_topk_fp4"]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls[0].args), 11)
+            self.assertEqual(ast.unparse(calls[0].args[-2]), "self.block_size")
+            self.assertEqual(ast.dump(calls[0].args[-1]),
+                             ast.dump(ast.parse("self.head_dim ** -0.5", mode="eval").body))
+
     def setUp(self):
         self.text = SOURCE.read_text()
         self.tree = ast.parse(self.text)
@@ -155,7 +167,7 @@ class NativeWrapperTest(unittest.TestCase):
         cls.torch = torch
         cls.module = msa_attention
 
-    def model(self):
+    def model(self, flashinfer=False):
         torch = self.torch
         cls = self.module.MSAAttention
         model = cls.__new__(cls)
@@ -165,13 +177,17 @@ class NativeWrapperTest(unittest.TestCase):
         model.cp_enabled = False
         model._kv_sharded = False
         model.nvfp4_kv_cache = True
+        model._flashinfer_nvfp4_prefill = flashinfer
+        model._m31_raw_attention_norms = None
         model.page_size = model.block_size = model.physical_page_size = 128
         model.disable_index_value = True
         model.head_num, model.kv_head_num, model.num_idx_heads = 64, 4, 4
         model.head_dim = model.idx_head_dim = 128
         model.q_size, model.kv_size = 64 * 128, 4 * 128
         model.layer_idx = 0
-        model.topk_blocks, model.init_blocks, model.local_blocks = 4, 1, 1
+        model.topk_blocks, model.init_blocks, model.local_blocks = (
+            16 if flashinfer else 4, 1, 1
+        )
         model.layernorm_eps = 1e-6
         model.idx_q_norm_w = torch.ones(128, device="cuda", dtype=torch.bfloat16)
         model.idx_k_norm_w = torch.ones_like(model.idx_q_norm_w)
@@ -215,10 +231,10 @@ class NativeWrapperTest(unittest.TestCase):
             cache_store_inputs=store,
         )
 
-    def run_case(self, totals, prefixes):
+    def run_case(self, totals, prefixes, flashinfer=False):
         torch = self.torch
         torch.manual_seed(73)
-        model = self.model()
+        model = self.model(flashinfer=flashinfer)
         pages_per_request = (max(totals) + 127) // 128
         self.assertLessEqual(len(totals) * pages_per_request, 63)
         table = (
@@ -329,6 +345,9 @@ class NativeWrapperTest(unittest.TestCase):
 
     def test_ragged_requests_permuted_physical_pages(self):
         self.run_case([129, 259, 131], [128, 256, 0])
+
+    def test_flashinfer_ragged_prefix_reuse(self):
+        self.run_case([129, 259, 131], [128, 256, 0], flashinfer=True)
 
     def test_unwritten_tail_scale_nan_does_not_poison_native_prefill(self):
         acquire = self.module._NVFP4_WORKING_PAGES.acquire

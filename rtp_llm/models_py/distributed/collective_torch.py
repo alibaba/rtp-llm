@@ -34,6 +34,7 @@ class Group(Enum):
 # Key can be Group enum or string (for multiple DP/TP groups)
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
+_owned_cp_workspaces: Dict[tuple, object] = {}
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
@@ -344,10 +345,18 @@ def _create_tp_side_groups(
         logging.info(
             f"[rank: {world_rank}] Creating side group {group_key} with ranks: {ranks}"
         )
+        side_pg_options = None
+        is_tp_side = (group_key == Group.TP_SIDE or
+                      (isinstance(group_key, str) and group_key.startswith(Group.TP_SIDE.name)))
+        if (is_tp_side and tp_size == 4 and backend == "nccl"
+                and os.environ.get("NCCL_CTA_POLICY", "0") == "2"):
+            side_pg_options = torch.distributed.ProcessGroupNCCL.Options()
+            side_pg_options.config.cta_policy = 2
         side_group = torch.distributed.new_group(
             ranks=ranks,
             backend=backend,
             timeout=timedelta(days=36500),
+            pg_options=side_pg_options,
         )
         if world_rank in ranks:
             _group_map[group_key] = side_group
@@ -652,6 +661,13 @@ def destroy_distributed_environment():
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
+
+    # Close only workspaces actually owned by this group lifecycle.
+    for workspace in list(_owned_cp_workspaces.values()):
+        if not workspace.closed:
+            with torch.cuda.device(workspace.device), torch.cuda.stream(workspace.main_stream):
+                workspace.close()
+    _owned_cp_workspaces.clear()
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

@@ -285,6 +285,14 @@ cc_library(
 )
 
 cc_library(
+    name = "dspark_blackwell_softmax_cached",
+    srcs = ["blackwell_softmax_vendor/cake_blackwell_softmax_cached_cluster.cu"],
+    deps = cuda_deps,
+    copts = sm100_cuda_copts,
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
     name = "kernels_speculative_sampling",
     srcs = glob(["speculative_sampling/*.cu"]),
     hdrs = glob([
@@ -294,8 +302,17 @@ cc_library(
     deps = cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/cuda:launch_utils",
-    ],
-    copts = any_cuda_copts(),
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ] + select({
+        "@//:using_cuda13_arm": [":dspark_blackwell_softmax_cached"],
+        "@//:using_cuda13_x86": [":dspark_blackwell_softmax_cached"],
+        "//conditions:default": [],
+    }),
+    copts = any_cuda_copts() + select({
+        "@//:using_cuda13_arm": ["-DRTP_LLM_DSPARK_BLACKWELL_SOFTMAX=1"],
+        "@//:using_cuda13_x86": ["-DRTP_LLM_DSPARK_BLACKWELL_SOFTMAX=1"],
+        "//conditions:default": [],
+    }),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )

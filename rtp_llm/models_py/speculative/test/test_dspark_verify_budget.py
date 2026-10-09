@@ -37,12 +37,12 @@ class DSparkVerifyBudgetTest(unittest.TestCase):
         self.assertIn("sp_dspark_adaptive_verify: 1", config.to_string())
 
     def test_explicit_modes_and_conflicts(self):
-        for budget in (0, 7):
+        for budget in range(8):
             config = self.config(budget=budget)
             config.sp_dspark_verify_mode = "static"
             self.assertFalse(config.isAdaptiveVerify())
-            self.assertEqual(config.verifySteps(), 7)
-            self.assertEqual(config.verifyBudgetPerRequest(), 7)
+            self.assertEqual(config.verifySteps(), budget or 7)
+            self.assertEqual(config.verifyBudgetPerRequest(), budget or 7)
         for budget in (0, 1, 3, 7):
             config = self.config(budget=budget)
             config.sp_dspark_verify_mode = "adaptive"
@@ -50,7 +50,8 @@ class DSparkVerifyBudgetTest(unittest.TestCase):
             self.assertEqual(config.verifySteps(), 7)
             self.assertEqual(config.verifyBudgetPerRequest(), budget or 7)
         for mode, budget, legacy in (
-            ("static", 3, False),
+            ("static", -1, False),
+            ("static", 8, False),
             ("static", 0, True),
             ("bad", 0, False),
         ):
@@ -125,12 +126,13 @@ class DSparkVerifyBudgetTest(unittest.TestCase):
             self.assertEqual(restored.sp_dspark_verify_mode, "")
             self.assertEqual(restored.verifySteps(), 3)
         for mode in ("static", "adaptive"):
-            config = self.config()
+            config = self.config(budget=3)
             config.sp_dspark_verify_mode = mode
             restored = pickle.loads(pickle.dumps(config))
             self.assertEqual(restored.sp_dspark_verify_mode, mode)
             self.assertEqual(restored.isAdaptiveVerify(), mode == "adaptive")
-            self.assertEqual(restored.verifySteps(), 7)
+            self.assertEqual(restored.verifySteps(), 7 if mode == "adaptive" else 3)
+            self.assertEqual(restored.verifyBudgetPerRequest(), 3)
         config = self.config(budget=3)
         config.sp_dspark_adaptive_verify = True
         restored = self.restore(config.__getstate__()[:16])

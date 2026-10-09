@@ -1,5 +1,14 @@
 test_envs = {}
 
+# CPU-only registered-buffer lifecycle tests, including cross-slot CE fences.
+py_test(
+    name = "test_cp_same_layer_workspace_cpu",
+    srcs = ["test_cp_same_layer_workspace.py"],
+    main = "test_cp_same_layer_workspace.py",
+    data = ["//rtp_llm/models_py:modules"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
 # Separate CPU source contracts from explicitly enabled native GPU tests.
 py_test(
     name = "test_msa_nvfp4_prefill_cpu",

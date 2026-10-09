@@ -419,6 +419,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkVerifyBudgetKeepsProposalWidthSeve
     sp_config.gen_num_per_cycle            = 7;
     sp_config.sp_dspark_mask_token_id      = 31;
     sp_config.sp_dspark_sample_from_anchor = true;
+    sp_config.sp_dspark_verify_mode        = "static";
     const auto cuda_i32                    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     for (int budget : {0, 1, 3, 4, 5, 7}) {

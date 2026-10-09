@@ -379,7 +379,7 @@ TEST(DSparkSamplerTest, FusedLogitsGraphReplaysUpdatedInputsOnNonDefaultStream) 
     }
 }
 
-TEST(DSparkSamplerTest, FusedLogitsPreserveLegacyRecurrentSamplesAndRng) {
+TEST(DSparkSamplerTest, FusedLogitsPreserveRecurrentSamplesAndRngWithSelectedSoftmax) {
     if (!torch::cuda::is_available())
         GTEST_SKIP();
     CudaGeneratorStateGuard rng;
@@ -403,13 +403,17 @@ TEST(DSparkSamplerTest, FusedLogitsPreserveLegacyRecurrentSamplesAndRng) {
                         auto                       before   = rng.state();
                         auto                       previous = anchors.to(torch::kInt64);
                         std::vector<torch::Tensor> ids, probabilities;
-                        // Independent legacy expression; do not call the new helper.
+                        torch::Tensor softmax_workspace;
+                        // Independent legacy Markov/temperature expression; do
+                        // not call the fused logits helper. Softmax intentionally
+                        // has a different reduction, tested against Torch below.
                         auto view = base.narrow(1, 0, vocab).view({batch, gamma, vocab});
                         for (int64_t step = 0; step < k; ++step) {
                             auto bias = torch::mm(w1.index_select(0, previous), w2.transpose(0, 1)).to(torch::kFloat32);
                             auto logits = view.select(1, step) + bias;
                             logits.div_(temperature.unsqueeze(1));
-                            auto q     = logits.softmax(-1);
+                            auto q     = execDSparkSoftmax(logits, softmax_workspace);
+                            EXPECT_TRUE(torch::allclose(q, logits.softmax(-1), 2.e-5, 2.e-6));
                             auto token = execSampleFromProbs(q).to(torch::kInt32);
                             if (mapped)
                                 token = map.index_select(0, token.to(torch::kInt64)).to(torch::kInt32);

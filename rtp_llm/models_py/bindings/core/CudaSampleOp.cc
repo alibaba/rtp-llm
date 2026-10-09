@@ -15,6 +15,7 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "pybind11/pybind11.h"
 #include <cstddef>
+#include <limits>
 #include <random>
 #include <memory>
 #endif
@@ -427,6 +428,35 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                params.output_emitted_token_num_d,
                                true,
                                int64_t(stream));
+}
+
+torch::Tensor dsparkSoftmax(const torch::Tensor& logits, torch::Tensor& workspace) {
+    TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2,
+                "DSpark softmax expects CUDA FP32 [batch,vocab]");
+    TORCH_CHECK(logits.size(0) <= std::numeric_limits<uint32_t>::max()
+                    && logits.size(1) <= std::numeric_limits<uint32_t>::max(),
+                "DSpark softmax dimensions exceed FlashInfer uint32 ABI");
+    c10::cuda::CUDAGuard device_guard(logits.device());
+    auto input = logits.contiguous();
+    // OnlineSoftmax uses up to 16-byte vector loads; contiguous offset views
+    // need aligned storage before entering its compatibility route.
+    if (reinterpret_cast<uintptr_t>(input.data_ptr<float>()) % 16 != 0) input = input.clone();
+    auto output = torch::empty_like(input);
+    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+    const size_t bytes = dsparkSoftmaxWorkspaceBytes(input.data_ptr<float>(), output.data_ptr<float>(),
+                                                     input.size(0), input.size(1), properties->major, properties->minor);
+    if (bytes > 0 && (!workspace.defined() || workspace.device() != logits.device()
+                     || workspace.scalar_type() != torch::kUInt8 || !workspace.is_contiguous()
+                     || workspace.numel() < static_cast<int64_t>(bytes))) {
+        workspace = torch::empty({static_cast<int64_t>(bytes)}, logits.options().dtype(torch::kUInt8));
+    }
+    const auto status = invokeDSparkSoftmax(input.data_ptr<float>(), output.data_ptr<float>(),
+                                           input.size(0), input.size(1), properties->major, properties->minor,
+                                           properties->multiProcessorCount,
+                                           bytes > 0 ? workspace.data_ptr() : nullptr, bytes,
+                                           at::cuda::getCurrentCUDAStream().stream());
+    TORCH_CHECK(status == cudaSuccess, "DSpark softmax kernel: ", cudaGetErrorString(status));
+    return output;
 }
 
 torch::Tensor

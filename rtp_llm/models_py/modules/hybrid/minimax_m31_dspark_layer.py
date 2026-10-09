@@ -20,6 +20,7 @@ from rtp_llm.models_py.triton_kernels.dspark_swa import (
     commit_paged_gqa_kv,
     paged_gqa_swa,
 )
+from rtp_llm.models_py.triton_kernels.dspark_swa_fa4 import paged_gqa_swa_fa4
 from rtp_llm.utils.model_weight import W
 
 
@@ -32,6 +33,12 @@ class MiniMaxM31DSparkLayer(nn.Module):
         attn = config.getAttentionConfigs(self.tp_size)
         self.heads, self.kv_heads = attn.head_num, attn.kv_head_num
         self.dim = attn.size_per_head
+        # Model-local choice; other draft families retain their original path.
+        self.query_attention = (
+            paged_gqa_swa_fa4
+            if torch.cuda.get_device_capability(weights[W.q_ln_gamma].device)[0] == 10
+            else paged_gqa_swa
+        )
         self.q_size, self.kv_size = self.heads * self.dim, self.kv_heads * self.dim
         self.rope_dim = config.attn_config.rope_config.dim
         self.rope_theta = config.attn_config.rope_config.base
@@ -133,7 +140,11 @@ class MiniMaxM31DSparkLayer(nn.Module):
         causal: bool,
         window_left: int,
     ):
-        """Run real query-block math; query K/V never overwrite context KV."""
+        """Run query-block math; transient tail KV never overwrites history.
+
+        Feature commit replaces tail rows before they become accepted history.
+        Temporary proposal KV is not published to the PD cache store.
+        """
         batch, width, hidden_dim = hidden.shape
         if batch == 0:
             return hidden
@@ -153,10 +164,16 @@ class MiniMaxM31DSparkLayer(nn.Module):
             rotary_dim=self.rope_dim,
             inv_freq=self.rope_inv_freq,
         )
-        output = paged_gqa_swa(
+        # FA4's validated native-cache ABI uses page128. Preserve the old
+        # reader for other configured page sizes rather than failing at runtime.
+        attention = self.query_attention if cache.shape[3] == 128 else paged_gqa_swa
+        query_v = v.reshape(batch, width, self.kv_heads, self.dim)
+        if attention is paged_gqa_swa:
+            query_v = query_v.contiguous()
+        output = attention(
             q.view(batch, width, self.heads, self.dim),
             k.view(batch, width, self.kv_heads, self.dim),
-            v.reshape(batch, width, self.kv_heads, self.dim).contiguous(),
+            query_v,
             cache,
             block_table,
             context_lens,

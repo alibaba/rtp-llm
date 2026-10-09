@@ -1,3 +1,8 @@
+# Frozen RTP-LLM test oracle, distributed under the repository Apache-2.0 license.
+# Snapshot of decode/nvfp4_q8_combine_mxfp8.py immediately before shared
+# epilogue extraction on 2026-10-08. Original SHA256:
+# 1bf16e9258cdb5bd10cc14ef0ecac06f69bad1c9b76c1edf60a0cb446ceb1d07
+# Keep the reference independent of the production quantization helper.
 """Fuse Q8KV4 partial reduction and MXFP8 output for the SM103 O-projection.
 
 Preserve the original BF16 rounding and quantization arithmetic without
@@ -156,13 +161,6 @@ def _combine_mxfp8(
         )
     # Rounded BF16 is exactly the intermediate consumed by FlashInfer.
     rounded = accumulator.to(tl.bfloat16)
-    _store_mxfp8(rounded, fp8_ptr, packed_ptr, batch, kv_head, ALIGNED_M)
-
-
-@triton.jit
-def _store_mxfp8(rounded, fp8_ptr, packed_ptr, batch, kv_head, ALIGNED_M: tl.constexpr):
-    group = tl.arange(0, 16)
-    dim = tl.arange(0, 128)
     pair_bits = tl.reshape(
         rounded.to(tl.uint16, bitcast=True).to(tl.uint32), [16, 4, 4, 4, 2]
     )
@@ -200,23 +198,3 @@ def _store_mxfp8(rounded, fp8_ptr, packed_ptr, batch, kv_head, ALIGNED_M: tl.con
     shift = tl.arange(0, 4)[None, :] * 8
     words = tl.sum(scales << shift, axis=1).to(tl.int32)
     tl.store(packed_ptr + batch + (kv_head * 16 + group) * ALIGNED_M, words)
-
-
-@triton.jit
-def _quantize_bf16_attention_mxfp8(
-    bf16_ptr, fp8_ptr, packed_ptr, ALIGNED_M: tl.constexpr,
-):
-    """Quantize contiguous [rows,64,128] BF16 into caller-owned MXFP8 buffers.
-
-    Launch grid is (rows,4). FP8 output is contiguous [rows,64,128]; packed
-    int32 scales have shape [rows,64], strides (1,ALIGNED_M), ALIGNED_M>=rows.
-    Each KV head owns sixteen query heads. There are no allocations or masks;
-    callers must clear padded query rows before launching this conversion.
-    """
-    batch = tl.program_id(0)
-    kv_head = tl.program_id(1)
-    group = tl.arange(0, 16)
-    dim = tl.arange(0, 128)
-    feature = (kv_head * 16 + group)[:, None] * 128 + dim[None, :]
-    rounded = tl.load(bf16_ptr + batch * 8192 + feature)
-    _store_mxfp8(rounded, fp8_ptr, packed_ptr, batch, kv_head, ALIGNED_M)

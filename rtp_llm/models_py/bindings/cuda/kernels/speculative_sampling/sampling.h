@@ -13,6 +13,14 @@
 
 namespace rtp_llm {
 
+#if USING_CUDA
+size_t dsparkSoftmaxWorkspaceBytes(const float* logits, const float* output, int64_t rows, int64_t vocab,
+                                  int major, int minor);
+cudaError_t invokeDSparkSoftmax(float* logits, float* output, int64_t rows, int64_t vocab,
+                               int major, int minor, int sm_count, void* workspace, size_t workspace_bytes,
+                               cudaStream_t stream);
+#endif
+
 constexpr int kRejectionValidationTileSize = 8192;
 // Two probability planes, each with one partial mass and invalid flag.
 inline int64_t rejectionValidationWorkspaceElements(int batch, int steps, int vocab) {

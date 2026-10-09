@@ -3,7 +3,8 @@
 This module deliberately adapts the SGLang demo's *numeric data flow* rather
 than its slot-major pointer arithmetic:
 
-* Q and index-Q are cast to scale-1 E4M3 (Q8);
+* index-Q is cast to scale-1 E4M3 (Q8); the native Cake main-attention
+  specialization consumes original BF16 Q, while legacy readers use Q8;
 * persistent main K/V and index-K remain packed E2M1 with E4M3 block-16
   scales (KV4);
 * index scoring and sparse main attention consume RTP's two opaque cache
@@ -170,6 +171,58 @@ def _scale1_e4m3(values: torch.Tensor, name: str, out: torch.Tensor) -> torch.Te
     return out
 
 
+# Scratch belongs to a device stream, not a layer or a capture bucket. Layers
+# and buckets execute serially on that stream. Separate streams cannot share
+# mutable scale staging and addressing buffers.
+_CAKE_SCALES: dict[tuple, object] = {}
+_CAKE_WORKSPACES: dict[tuple, object] = {}
+
+
+def _cake_supported(q, layout, topk, mma_scale_layout, max_blocks):
+    return (
+        q.is_cuda
+        and q.dtype == torch.bfloat16
+        and q.is_contiguous()
+        # W5 B1/B2 can regress on short histories even with a long reserved
+        # table; do not read lengths back from GPU to select a graph backend.
+        # Retain the old reader below the measured B4/W5 (20-row) boundary.
+        and q.shape[0] >= 20
+        and max_blocks > 4
+        and tuple(q.shape[1:]) == (64, 128)
+        and layout.num_heads == 4
+        and layout.page_size == 128
+        and layout.head_dim == 128
+        and topk == 16
+        and mma_scale_layout
+        and torch.cuda.get_device_capability(q.device) == (10, 3)
+    )
+
+
+def _cake_attention(q, layout, block_table, topk_indices, seq_lens, **options):
+    from .cake_attention import (
+        CakeAttentionWorkspace,
+        CakeScaleWorkspace,
+        cake_paged_sparse_decode,
+    )
+
+    pages = int(layout.packed_main.shape[0])
+    owner = (str(q.device), torch.cuda.current_stream(q.device).cuda_stream, pages)
+    scales = _CAKE_SCALES.get(owner)
+    if scales is None:
+        scales = CakeScaleWorkspace.create(q.device, pages)
+        _CAKE_SCALES[owner] = scales
+    key = owner + (tuple(q.shape), tuple(block_table.shape), tuple(topk_indices.shape))
+    workspace = _CAKE_WORKSPACES.get(key)
+    if workspace is None:
+        workspace = CakeAttentionWorkspace.create(
+            q, layout, block_table, topk_indices, seq_lens, scale_workspace=scales
+        )
+        _CAKE_WORKSPACES[key] = workspace
+    return cake_paged_sparse_decode(
+        q, layout, block_table, topk_indices, seq_lens, workspace=workspace, **options
+    )
+
+
 def _logical_decode_block_table(
     block_table: torch.Tensor, block_size: int, max_seq_len: int | None
 ) -> torch.Tensor:
@@ -207,6 +260,7 @@ def q8kv4_paged_sparse_decode(
     query_cu_seqlens: torch.Tensor | None = None,
     max_query_width: int = 1,
     fuse_bf16_query_rounding: bool = False,
+    bf16_main_query: bool = False,
     valid_token_mask: torch.Tensor | None = None,
     max_seq_len: int | None = None,
 ) -> Q8KV4DecodeResult:
@@ -230,6 +284,7 @@ def q8kv4_paged_sparse_decode(
         query_cu_seqlens=query_cu_seqlens,
         max_query_width=max_query_width,
         fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+        bf16_main_query=bf16_main_query,
         valid_token_mask=valid_token_mask,
         max_seq_len=max_seq_len,
     )
@@ -262,6 +317,7 @@ def _q8kv4_paged_sparse_decode(
     query_cu_seqlens: torch.Tensor | None = None,
     max_query_width: int = 1,
     fuse_bf16_query_rounding: bool = False,
+    bf16_main_query: bool = False,
     valid_token_mask: torch.Tensor | None = None,
     max_seq_len: int | None = None,
     _output_format: str = "bf16",
@@ -326,13 +382,18 @@ def _q8kv4_paged_sparse_decode(
     workspace = _Q8KV4DecodeWorkspace.acquire(
         q, idx_q, max_blocks, topk, num_topk_chunks, _output_format
     )
+    use_cake = bf16_main_query and _cake_supported(
+        q, layout, topk, mma_scale_layout, max_blocks
+    )
     if fuse_bf16_query_rounding:
         from .nvfp4_q8_query_cast import fused_query_cast
 
-        fused_query_cast(q, idx_q, workspace.q8, workspace.idx_q8)
+        fused_query_cast(
+            q, idx_q, workspace.q8, workspace.idx_q8, cast_main_query=not use_cake
+        )
         q8, idx_q8 = workspace.q8, workspace.idx_q8
     else:
-        q8 = _scale1_e4m3(q, "q", workspace.q8)
+        q8 = workspace.q8 if use_cake else _scale1_e4m3(q, "q", workspace.q8)
         idx_q8 = _scale1_e4m3(idx_q, "idx_q", workspace.idx_q8)
     logical = layout.logical_views(indexer_dim)
     score_fn = q8kv4_index_score
@@ -377,6 +438,35 @@ def _q8kv4_paged_sparse_decode(
         int(topk),
     )
     topk_indices = workspace.topk_i32
+    if use_cake:
+        # Index-Q/idxK4 scoring and production TopK are unchanged. Cake reads
+        # original BF16 main Q and packed cache. Preserve the existing packed
+        # MXFP8 O-projection interface with the same RTP quantization epilogue.
+        output = _cake_attention(
+            q,
+            layout,
+            block_table,
+            topk_indices,
+            seq_lens,
+            sm_scale=layout.head_dim**-0.5 if sm_scale is None else sm_scale,
+            mma_scale_layout=mma_scale_layout,
+            valid_token_mask=valid_token_mask,
+        )
+        if _output_format == "mxfp8":
+            from .nvfp4_q8_combine_mxfp8 import _quantize_bf16_attention_mxfp8
+
+            _quantize_bf16_attention_mxfp8[(q.shape[0], 4)](
+                output,
+                workspace.output_fp8.view(torch.uint8),
+                workspace.output_scales_packed,
+                ALIGNED_M=workspace.output_scales_packed.stride(1),
+                num_warps=4,
+            )
+            return Q8KV4Mxfp8DecodeResult(
+                workspace.output_fp8, workspace.output_scales_packed,
+                topk_indices, index_scores,
+            )
+        return Q8KV4DecodeResult(output, topk_indices, index_scores)
     attention_fn = q8kv4_sparse_decode_attention
     attention_out = workspace.output
     output_options = {}

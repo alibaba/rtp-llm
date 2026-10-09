@@ -44,6 +44,7 @@ namespace rtp_llm {
 GreedyOutput  sampleGreedy(const GreedyParams& params);
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities);
 #if USING_CUDA
+torch::Tensor dsparkSoftmax(const torch::Tensor& logits, torch::Tensor& workspace);
 torch::Tensor
 combineDSparkLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
 torch::Tensor                           dsparkConfidence(const torch::Tensor& hidden,
@@ -803,6 +804,14 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
+}
+
+torch::Tensor execDSparkSoftmax(const torch::Tensor& logits, torch::Tensor& workspace) {
+#if USING_CUDA
+    return dsparkSoftmax(logits, workspace);
+#else
+    return torch::softmax(logits, -1);
+#endif
 }
 
 torch::Tensor

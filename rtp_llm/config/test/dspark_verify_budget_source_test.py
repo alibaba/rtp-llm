@@ -88,6 +88,17 @@ class VerifyBudgetSourceTest(unittest.TestCase):
                 self.parse({}, ["--sp_dspark_verify_mode", mode]).sp_dspark_verify_mode,
                 mode,
             )
+        for budget in range(8):
+            config = self.parse(
+                {
+                    "SP_DSPARK_VERIFY_MODE": "static",
+                    "SP_DSPARK_VERIFY_TOKENS": str(budget),
+                },
+                ["--gen_num_per_cycle", "7"],
+            )
+            self.assertEqual(config.sp_dspark_verify_mode, "static")
+            self.assertEqual(config.sp_dspark_verify_tokens, budget)
+            self.assertFalse(config.sp_dspark_adaptive_verify)
         self.assertEqual(
             self.parse(
                 {"SP_DSPARK_VERIFY_MODE": "static"},
@@ -214,8 +225,8 @@ int main() {
         c.validateVerifyBatchSize(2147483647);
     }
     for (int type = 0; type <= 6; ++type) {
-        for (int gamma : {-1, 0, 1, 7}) {
-            for (int budget : {-1, 0, 1, 3, 7, 8}) {
+        for (int gamma : {-1, 0, 1, 4, 7}) {
+            for (int budget : {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8}) {
                 for (std::string mode : {"", "static", "adaptive", "invalid"}) {
                     for (bool legacy : {false, true}) {
                         SpeculativeExecutionConfig c;
@@ -228,7 +239,7 @@ int main() {
                         if (type != 6) valid &= budget == 0 && !legacy && mode.empty();
                         else {
                             valid &= gamma > 0 && budget >= 0 && budget <= gamma;
-                            if (mode == "static") valid &= !legacy && (budget == 0 || budget == gamma);
+                            if (mode == "static") valid &= !legacy;
                         }
                         bool adaptive = type == 6 && (mode == "adaptive" || (mode.empty() && legacy));
                         int expected_budget = budget == 0 ? gamma : budget;
