@@ -5,7 +5,6 @@ from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     GenerateConfig,
@@ -700,6 +699,7 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            rendered_prompt=rendered_input.rendered_prompt,
             headers=request_headers,
         )
 
@@ -709,7 +709,6 @@ class OpenaiEndpoint(object):
 
     def _prepare_chat_input(self, request_id: int, chat_request):
         import torch
-
         from rtp_llm.utils.base_model_datatypes import GenerateInput
 
         renderer = (
@@ -738,6 +737,11 @@ class OpenaiEndpoint(object):
             mm_inputs=rendered_input.multimodal_inputs,
             generate_config=generate_config,
             tokenizer=self.tokenizer,
+            rendered_prompt=(
+                rendered_input.rendered_prompt
+                if renderer.model_type == "gemma4" and rendered_input.multimodal_inputs
+                else ""
+            ),
         )
         return gen_input, generate_config
 

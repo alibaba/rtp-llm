@@ -39,7 +39,6 @@ from unittest import TestCase, main
 import grpc
 import torch
 from grpc import StatusCode
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     GenerateConfig,
@@ -215,6 +214,7 @@ class ModelRpcClientTest(TestCase):
             token_ids=torch.tensor([1, 2]),
             mm_inputs=[],
             generate_config=GenerateConfig(),
+            rendered_prompt="<bos>hello<|video|>",
             headers={"x-trace-id": "header-trace"},
             request_info=RequestInfo(
                 frontend_ip="frontend-ip",
@@ -225,8 +225,10 @@ class ModelRpcClientTest(TestCase):
             ),
         )
 
-        request_info_pb = trans_input(input_py).request_info
+        input_pb = trans_input(input_py)
+        request_info_pb = input_pb.request_info
 
+        self.assertEqual(input_pb.rendered_prompt, "<bos>hello<|video|>")
         self.assertEqual(request_info_pb.frontend_ip, "frontend-ip")
         self.assertEqual(request_info_pb.dash_ip, "dash-ip")
         self.assertEqual(request_info_pb.trace_id, "request-trace")

@@ -9,7 +9,6 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union
 import grpc
 from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.config.response_format_compiler import validate_engine_ready
@@ -441,6 +440,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
+    input_pb.rendered_prompt = getattr(input_py, "rendered_prompt", "")
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
         input_pb.group_id.value = input_py.group_id
 

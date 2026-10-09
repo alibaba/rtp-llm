@@ -224,6 +224,15 @@ message MMRdmaSlotPB {
     repeated Role roles = 2;
 }
 
+message MultimodalExpansionMetadataPB {
+    bool is_video = 1;
+    double fps = 2;
+    repeated int32 frame_indices = 3;
+    int32 soft_tokens_per_frame = 4;
+    int32 frame_number = 5;
+    int32 frame_count = 6;
+}
+
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
@@ -231,6 +240,8 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
+    repeated MultimodalExpansionMetadataPB expansion_metadata = 6;
+    repeated int32 expanded_token_ids = 7;
 }
 
 message ReleaseLeasePB {
@@ -265,6 +276,7 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    string rendered_prompt = 11;
 }
 
 message AuxInfoPB {

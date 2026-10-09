@@ -10,7 +10,6 @@ from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 import torch.profiler
-
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import ModelConfig
@@ -322,14 +321,29 @@ class MMEmbeddingRes:
         embeddings: List[torch.Tensor],
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
+        expansion_metadata: Optional[List[Any]] = None,
+        rendered_prompt: str = "",
+        expanded_token_ids: Optional[List[int]] = None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
-        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
+        self.expansion_metadata = (
+            expansion_metadata if expansion_metadata is not None else []
+        )
+        self.rendered_prompt = rendered_prompt
+        self.expanded_token_ids = expanded_token_ids
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
+        return (
+            f"MMEmbeddingRes(length={len(self.embeddings)}, "
+            f"embeddings_shape={[e.shape for e in self.embeddings]}, "
+            f"position_ids_shape={[p.shape for p in self.position_ids]}, "
+            f"extra_input_shape={[d.shape for d in self.extra_input]}, "
+            f"expansion_metadata={len(self.expansion_metadata)}, "
+            f"rendered_prompt_length={len(self.rendered_prompt)}, "
+            f"expanded_token_count={len(self.expanded_token_ids or [])})"
+        )
 
 
 class MMWorkItem:
@@ -511,6 +525,7 @@ class MMProcessEngine:
         types: List[int],
         tensors: List[torch.Tensor],
         mm_preprocess_configs: List[Any],
+        rendered_prompt: str = "",
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         mm_inputs = [
@@ -521,11 +536,13 @@ class MMProcessEngine:
                 urls, types, tensors, mm_preprocess_configs
             )
         ]
-        res = self.mm_embedding_impl(mm_inputs)
+        res = self.mm_embedding_impl(mm_inputs, rendered_prompt)
         res.position_ids = [pos.cpu() for pos in res.position_ids]
         return res
 
-    def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
+    def mm_embedding_impl(
+        self, mm_inputs: List[MultimodalInput], rendered_prompt: str = ""
+    ) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
         logging.debug(f"{self.server_id} request received")
         try:
@@ -549,12 +566,26 @@ class MMProcessEngine:
                 # don't span threads, so it must be armed on that thread). This
                 # calling-thread marker only covers the submit/wait wall time.
                 with torch.profiler.record_function("compute_embeddings"):
-                    emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items
+                    emb_res, pos_res, extra_input_res, expansion_metadata = (
+                        self._compute_embeddings(work_items)
                     )
 
                 with torch.profiler.record_function("postprocess"):
-                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
+                    expanded_token_ids = None
+                    if rendered_prompt and hasattr(
+                        self.mm_part, "expand_rendered_prompt"
+                    ):
+                        expanded_token_ids = self.mm_part.expand_rendered_prompt(
+                            rendered_prompt, expansion_metadata
+                        )
+                    result = MMEmbeddingRes(
+                        emb_res,
+                        pos_res,
+                        extra_input_res,
+                        expansion_metadata,
+                        rendered_prompt,
+                        expanded_token_ids,
+                    )
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(mm_inputs, str(result))
@@ -623,25 +654,30 @@ class MMProcessEngine:
 
     def _compute_embeddings(
         self, work_items: List[MMWorkItem]
-    ) -> Tuple[List[Any], List[Any], List[Any]]:
+    ) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
         pending_items = [wi for wi in work_items if wi.embedding_result is None]
 
         if pending_items:
             self._scheduler.submit_and_wait(pending_items)
 
-        emb_res, pos_res, tensor_res = [], [], []
+        emb_res, pos_res, tensor_res, expansion_metadata = [], [], [], []
         for wi in work_items:
             result = wi.embedding_result
-            # Scheduler invariant: submit_and_wait either fills embedding_result
-            # for every pending item or raises, so it is never None here.
             if result is None:
                 raise RuntimeError(f"embedding_result not set for work item {wi}")
             emb_res.extend(self._maybe_tensor_to_list(result[0], dim=2))
             pos_res.extend(self._maybe_tensor_to_list(result[1], dim=2))
             if len(result) > 2:
                 tensor_res.extend(self._maybe_tensor_to_list(result[2], dim=1))
-        return emb_res, pos_res, tensor_res
+            metadata = result[3] if len(result) > 3 else None
+            if isinstance(metadata, list):
+                expansion_metadata.extend(metadata)
+            else:
+                expansion_metadata.append(metadata)
+        if not any(metadata is not None for metadata in expansion_metadata):
+            expansion_metadata = []
+        return emb_res, pos_res, tensor_res, expansion_metadata
 
     def stop(self) -> None:
         """Shutdown the embedding scheduler and preprocessing executor."""

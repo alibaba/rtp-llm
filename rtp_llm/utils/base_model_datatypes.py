@@ -3,7 +3,6 @@ from enum import IntEnum
 from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
@@ -84,6 +83,7 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    rendered_prompt: str = ""
 
     class Config:
         arbitrary_types_allowed = True

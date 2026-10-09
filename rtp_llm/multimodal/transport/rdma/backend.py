@@ -2,17 +2,13 @@ import logging
 from typing import TYPE_CHECKING, Dict, List
 
 import torch
-
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-from rtp_llm.multimodal.transport.base import (
-    MMOutputResult,
-    MMTransportBackend,
-)
+from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
 
 if TYPE_CHECKING:
     from rtp_llm.ops import MMRdmaExporter
@@ -42,7 +38,9 @@ class RdmaOutputBackend(MMTransportBackend):
         self, request: MultimodalInputsPB, res: MMEmbeddingRes
     ) -> MMOutputResult:
         if not request.support_rdma:
-            raise RuntimeError("RDMA transport was selected but the client did not advertise RDMA support")
+            raise RuntimeError(
+                "RDMA transport was selected but the client did not advertise RDMA support"
+            )
         if not res.embeddings:
             raise RuntimeError("RDMA transport received no multimodal embeddings")
         if not res.embeddings[0].is_cuda:
@@ -75,15 +73,32 @@ class RdmaOutputBackend(MMTransportBackend):
                 if not slot.rdma_descriptor.lease_id:
                     raise ValueError("RDMA descriptor has no release handle")
                 slots.append(slot)
-            except Exception as error:  # noqa: BLE001 - parse remaining release handles first
+            except (
+                Exception
+            ) as error:  # noqa: BLE001 - parse remaining release handles first
                 if parse_error is None:
                     parse_error = error
 
         if parse_error is not None:
             self._roll_back(slots)
-            raise RuntimeError(f"invalid RDMA descriptor: {parse_error}") from parse_error
+            raise RuntimeError(
+                f"invalid RDMA descriptor: {parse_error}"
+            ) from parse_error
 
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        for metadata in res.expansion_metadata:
+            entry = receipt.expansion_metadata.add()
+            if metadata is None:
+                continue
+            entry.is_video = metadata["kind"] == "video"
+            entry.fps = metadata.get("fps", 0.0)
+            if entry.is_video:
+                entry.frame_indices.append(metadata["frame_index"])
+            entry.soft_tokens_per_frame = metadata["soft_tokens"]
+            entry.frame_number = metadata["frame_number"]
+            entry.frame_count = metadata["frame_count"]
+        if res.expanded_token_ids is not None:
+            receipt.expanded_token_ids.extend(res.expanded_token_ids)
         role_bytes: Dict[int, int] = {}
         for slot in slots:
             receipt.output_rdma_slots.add().CopyFrom(slot)

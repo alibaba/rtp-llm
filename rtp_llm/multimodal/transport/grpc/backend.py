@@ -1,14 +1,10 @@
 import torch
-
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.transport.base import (
-    MMOutputResult,
-    MMTerminalBackend,
-)
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.transport.base import MMOutputResult, MMTerminalBackend
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 TRANSPORT_BYTES = "bytes"
@@ -61,4 +57,17 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
         if contain_extra_input:
             for extra in res.extra_input:
                 receipt.multimodal_extra_input.append(trans_from_tensor(extra))
+        for metadata in res.expansion_metadata:
+            entry = receipt.expansion_metadata.add()
+            if metadata is None:
+                continue
+            entry.is_video = metadata["kind"] == "video"
+            entry.fps = metadata.get("fps", 0.0)
+            if entry.is_video:
+                entry.frame_indices.append(metadata["frame_index"])
+            entry.soft_tokens_per_frame = metadata["soft_tokens"]
+            entry.frame_number = metadata["frame_number"]
+            entry.frame_count = metadata["frame_count"]
+        if res.expanded_token_ids is not None:
+            receipt.expanded_token_ids.extend(res.expanded_token_ids)
         return receipt

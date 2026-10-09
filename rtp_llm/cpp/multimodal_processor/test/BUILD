@@ -66,6 +66,7 @@ cc_test(
     copts = test_copts,
     deps = torch_deps() + cuda13_torch_link_deps + [
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",

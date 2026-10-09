@@ -122,6 +122,19 @@ protected:
     std::vector<int>                                     data_;
 };
 
+TEST_F(ChatServiceTest, FillGenerateInputPreservesRenderedPrompt) {
+    EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric(_)).Times(1);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric(_)).Times(1);
+    auto generate_config = std::make_shared<GenerateConfig>();
+    EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config(_)).WillOnce(Return(generate_config));
+
+    ChatCompletionRequest request;
+    RenderedInputs        rendered_input{{1, 2, 3}, {}, "system secret user prompt"};
+    auto                  input = chat_service_->fillGenerateInput(123, request, rendered_input);
+
+    EXPECT_EQ(input->rendered_prompt, rendered_input.rendered_prompt);
+}
+
 TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     http_server::HttpRequest request;
     const std::string        body = R"del({

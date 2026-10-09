@@ -2,8 +2,6 @@ import logging
 import time
 from typing import Dict, Optional
 
-from typing_extensions import override
-
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
@@ -14,6 +12,7 @@ from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 from rtp_llm.ops import RoleType, TaskType, VitSeparation
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.time_util import timer_wrapper
+from typing_extensions import override
 
 
 class LanguageCppEngine(BaseEngine):
@@ -42,30 +41,40 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
-        if (
+        self.mm_prompt_expander = None
+        owns_multimodal_ingress = (
             self.model.is_multimodal()
-            and self.model.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_LOCAL
             and engine_config.parallelism_config.tp_rank == 0
             and (
                 engine_config.pd_sep_config.role_type == RoleType.PREFILL
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
             )
-        ):
-            self.mm_process_engine = (
-                MultimodalMixinFactory.create_multimodal_process_engine(
-                    model_config=self.model.model_config,
-                    engine_config=engine_config,
-                    vit_config=self.model.vit_config,
-                    device=f"cuda:{engine_config.parallelism_config.local_rank}",
+        )
+        if owns_multimodal_ingress:
+            self.mm_prompt_expander = (
+                MultimodalMixinFactory.create_multimodal_prompt_expander(
+                    self.model.model_config
                 )
             )
+            if (
+                self.model.vit_config.vit_separation
+                == VitSeparation.VIT_SEPARATION_LOCAL
+            ):
+                self.mm_process_engine = (
+                    MultimodalMixinFactory.create_multimodal_process_engine(
+                        model_config=self.model.model_config,
+                        engine_config=engine_config,
+                        vit_config=self.model.vit_config,
+                        device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    )
+                )
+        mm_processor_bridge = self.mm_process_engine or self.mm_prompt_expander
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config,
             model,
             propose_model,
             self.token_processor,
-            self.mm_process_engine,
+            mm_processor_bridge,
         )
 
     @timer_wrapper(description="start async engine")

@@ -11,7 +11,6 @@ from typing import Any, List, Optional
 from unittest import TestCase, main, mock
 
 import torch
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
@@ -242,6 +241,35 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
+    def test_video_frames_count_against_image_budget(self):
+        fake = _FakeMMPart()
+        sched = MMScheduler(fake, max_batch_images=5)
+        frame_metadata = [
+            {
+                "kind": "video",
+                "frame_number": index,
+                "frame_count": 6,
+            }
+            for index in range(6)
+        ]
+        try:
+            with self.assertRaisesRegex(ValueError, "exceeds gpu_max_batch_images"):
+                sched.submit_and_wait(
+                    [
+                        _FakeWorkItem(
+                            images=1,
+                            preprocess_result=(
+                                torch.zeros(1),
+                                torch.zeros(1),
+                                frame_metadata,
+                            ),
+                        )
+                    ]
+                )
+        finally:
+            sched.close()
+        self.assertEqual(fake.calls, [])
+
     def test_timeout_cancel(self):
         """A request that outlasts its mm_timeout_ms raises TimeoutError."""
         fake = _FakeMMPart(delay=1.0)
@@ -327,10 +355,7 @@ class MMSchedulerTest(TestCase):
             all(isinstance(e, MMSchedulerExecutionError) for e in errors), errors
         )
         self.assertTrue(
-            all(
-                e.source_type == torch.cuda.OutOfMemoryError.__name__
-                for e in errors
-            ),
+            all(e.source_type == torch.cuda.OutOfMemoryError.__name__ for e in errors),
             errors,
         )
         self.assertTrue(all(e.is_oom for e in errors), errors)

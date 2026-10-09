@@ -11,7 +11,8 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port = "",
+                                                      const std::string& rendered_prompt = "") override {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -45,7 +46,8 @@ private:
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("mm_embedding_cpp")(
+                    urls, types, tensors, mm_preprocess_configs, rendered_prompt);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
@@ -70,6 +72,38 @@ private:
                         extra_input.emplace_back(convertPyObjectToTensor(extra_input_item));
                     }
                     mm_embedding_res.mm_extra_input = extra_input;
+                }
+                if (py::hasattr(res, "expansion_metadata")) {
+                    auto metadata_obj = res.attr("expansion_metadata");
+                    if (!metadata_obj.is_none()) {
+                        std::vector<MultimodalExpansionMetadata> metadata;
+                        auto                                     metadata_list = metadata_obj.cast<py::list>();
+                        for (const auto& item : metadata_list) {
+                            MultimodalExpansionMetadata entry;
+                            if (!item.is_none()) {
+                                auto value     = py::reinterpret_borrow<py::dict>(item);
+                                entry.is_video = value["kind"].cast<std::string>() == "video";
+                                if (entry.is_video) {
+                                    entry.fps           = value["fps"].cast<double>();
+                                    entry.frame_indices = {value["frame_index"].cast<int32_t>()};
+                                }
+                                entry.soft_tokens_per_frame = value["soft_tokens"].cast<int32_t>();
+                                entry.frame_number          = value["frame_number"].cast<int32_t>();
+                                entry.frame_count           = value["frame_count"].cast<int32_t>();
+                            }
+                            metadata.emplace_back(std::move(entry));
+                        }
+                        if (!metadata.empty()) {
+                            mm_embedding_res.mm_expansion_metadata = std::move(metadata);
+                        }
+                    }
+                }
+                if (py::hasattr(res, "expanded_token_ids")) {
+                    auto expanded_ids = res.attr("expanded_token_ids");
+                    if (!expanded_ids.is_none()) {
+                        mm_embedding_res.expanded_token_ids =
+                            torch::tensor(expanded_ids.cast<std::vector<int32_t>>(), torch::kInt32);
+                    }
                 }
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {

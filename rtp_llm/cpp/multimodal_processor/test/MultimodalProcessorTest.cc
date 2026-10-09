@@ -78,6 +78,35 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
     EXPECT_EQ(input->multimodal_features.value().size(), 2);
 }
 
+TEST_F(MultimodalProcessorTest, expandsOneVideoIntoPerFrameFeatures) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{10, 11}}, false, 20);
+    auto                    input     = std::make_shared<GenerateInput>();
+    input->input_ids                  = torch::tensor({0, 2, 3}, torch::kInt32);
+    input->rendered_prompt            = "video";
+    input->multimodal_inputs          = std::vector<MultimodalInput>{MultimodalInput("1", 2)};
+
+    auto status = processor.updateMultimodalFeatures(input);
+
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    input->updatePrefix({42});
+    EXPECT_EQ(input->input_ids.numel(), 9);
+    ASSERT_TRUE(input->multimodal_features.has_value());
+    EXPECT_EQ(input->multimodal_features->size(), 2u);
+    ASSERT_TRUE(input->multimodal_inputs.has_value());
+    EXPECT_EQ(input->multimodal_inputs->size(), 2u);
+    ASSERT_TRUE(input->mm_locs.has_value());
+    EXPECT_EQ(input->mm_locs->data_ptr<int32_t>()[0], 3);
+    EXPECT_EQ(input->mm_locs->data_ptr<int32_t>()[1], 6);
+    ASSERT_TRUE(input->text_tokens_mask.has_value());
+    EXPECT_EQ(input->text_tokens_mask->data_ptr<int32_t>()[3], 0);
+    EXPECT_EQ(input->text_tokens_mask->data_ptr<int32_t>()[6], 0);
+    EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[0], 42);
+    EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[2], 10);
+    EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[4], 11);
+    EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[5], 10);
+    EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[7], 11);
+}
+
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {
     FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{2, 3, 4}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();

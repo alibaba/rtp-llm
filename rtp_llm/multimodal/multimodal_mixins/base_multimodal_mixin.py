@@ -5,7 +5,6 @@ from abc import ABC
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
@@ -147,6 +146,10 @@ class BaseMultiModalMixin:
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
         raise NotImplementedError
+
+    @classmethod
+    def create_prompt_expander(cls, mm_related_params: VitParameters):
+        return None
 
     @classmethod
     def eval_mm_model_size(

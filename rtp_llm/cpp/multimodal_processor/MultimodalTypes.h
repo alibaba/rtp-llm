@@ -8,10 +8,21 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 
 namespace rtp_llm {
+struct MultimodalExpansionMetadata {
+    bool                 is_video              = false;
+    double               fps                   = 0.0;
+    std::vector<int32_t> frame_indices         = {};
+    int32_t              frame_number          = 0;
+    int32_t              frame_count           = 1;
+    int32_t              soft_tokens_per_frame = 0;
+};
+
 struct MultimodalOutput {
-    std::vector<torch::Tensor>                mm_features     = {};
-    std::optional<std::vector<torch::Tensor>> mm_position_ids = std::nullopt;
-    std::optional<std::vector<torch::Tensor>> mm_extra_input  = std::nullopt;
+    std::vector<torch::Tensor>                              mm_features           = {};
+    std::optional<std::vector<torch::Tensor>>               mm_position_ids       = std::nullopt;
+    std::optional<std::vector<torch::Tensor>>               mm_extra_input        = std::nullopt;
+    std::optional<std::vector<MultimodalExpansionMetadata>> mm_expansion_metadata = std::nullopt;
+    std::optional<torch::Tensor>                            expanded_token_ids    = std::nullopt;
 };
 
 class MultimodalFeature {

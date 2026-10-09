@@ -30,6 +30,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     input.mutable_request_info()->set_source_role("frontend");
     input.add_token_ids(0);
     input.add_token_ids(1);
+    input.set_rendered_prompt("<bos>hello<|video|>");
 
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
@@ -61,6 +62,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto& input_ids      = generate_input->input_ids;
     ASSERT_EQ(input_ids.numel(), 2);
     ASSERT_EQ(input_ids.data_ptr<int32_t>()[0], 0);
+    ASSERT_EQ(generate_input->rendered_prompt, "<bos>hello<|video|>");
     ASSERT_EQ(generate_input->request_info.frontend_ip, "10.0.0.1");
     ASSERT_EQ(generate_input->request_info.dash_ip, "10.0.0.2");
     ASSERT_EQ(generate_input->request_info.trace_id, "trace-123");

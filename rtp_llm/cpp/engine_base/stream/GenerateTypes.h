@@ -87,6 +87,7 @@ public:
     RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
+    std::string                     rendered_prompt;
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
@@ -96,6 +97,7 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+    std::optional<std::vector<MultimodalExpansionMetadata>> mm_expansion_metadata;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -231,8 +233,8 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
-                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ =
+            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
     }
 
 private:

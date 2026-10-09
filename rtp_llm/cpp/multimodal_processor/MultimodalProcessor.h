@@ -33,8 +33,10 @@ public:
     MultimodalProcessor(py::object                   mm_process_engine,
                         const MMModelConfig&         mm_model_config,
                         int64_t                      max_seq_len,
-                        kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
+                        kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
+                        py::object                   prompt_expander  = py::none()):
         mm_process_engine_(mm_process_engine),
+        prompt_expander_(prompt_expander),
         metrics_reporter_(metrics_reporter),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
@@ -42,6 +44,7 @@ public:
 
 protected:
     py::object                   mm_process_engine_;
+    py::object                   prompt_expander_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
 private:
@@ -49,10 +52,13 @@ private:
     bool                              include_sep_tokens_;
     int64_t                           max_seq_len_;
 
-    ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
+    ErrorInfo                  getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
+    ErrorResult<torch::Tensor> expandRenderedPrompt(const std::string&                              rendered_prompt,
+                                                    const std::vector<MultimodalExpansionMetadata>& metadata);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                              std::string ip_port = "") = 0;
+                                                              std::string                                 ip_port = "",
+                                                              const std::string& rendered_prompt = "") = 0;
 
     ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
                                                const torch::Tensor&                        token_ids,

@@ -81,7 +81,7 @@ public:
         Slot slot;
         slot.lease_id = "lease-" + std::to_string(slots.size());
         slot.backing  = torch::zeros({static_cast<int64_t>(std::max<uint64_t>(offset, 1))}, torch::kUInt8);
-        auto* base = slot.backing.data_ptr<uint8_t>();
+        auto* base    = slot.backing.data_ptr<uint8_t>();
         for (size_t i = 0; i < tensors.size(); ++i) {
             const auto contiguous = tensors[i].contiguous();
             std::memcpy(base + descriptor.tensors[i].offset, contiguous.data_ptr(), tensorBytes(tensors[i]));
@@ -100,9 +100,8 @@ public:
     }
 
     bool read(const ::RdmaDescriptorPB& descriptor, std::vector<torch::Tensor>* tensors) const {
-        const auto it = std::find_if(slots.begin(), slots.end(), [&](const Slot& slot) {
-            return slot.lease_id == descriptor.lease_id();
-        });
+        const auto it = std::find_if(
+            slots.begin(), slots.end(), [&](const Slot& slot) { return slot.lease_id == descriptor.lease_id(); });
         if (it == slots.end()) {
             return false;
         }
@@ -124,8 +123,8 @@ public:
                     break;
             }
             std::vector<int64_t> shape(meta.shape().begin(), meta.shape().end());
-            auto view = torch::from_blob(const_cast<uint8_t*>(base) + meta.offset(), shape,
-                                         torch::TensorOptions().dtype(torchTypeOf(dtype)));
+            auto                 view = torch::from_blob(
+                const_cast<uint8_t*>(base) + meta.offset(), shape, torch::TensorOptions().dtype(torchTypeOf(dtype)));
             if (tensorBytes(view) != meta.nbytes() || meta.offset() + meta.nbytes() > descriptor.payload_bytes()) {
                 return false;
             }
@@ -153,10 +152,10 @@ protected:
 };
 
 TEST_F(MMRdmaTransportTest, packsRolesIntoOneSlotInOrder) {
-    auto adapter = makeAdapter(1 << 20);
-    std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(4, 8);
-    const auto pos_id = torch::zeros({4, 3}, torch::kInt32);
+    auto                       adapter = makeAdapter(1 << 20);
+    std::vector<MMRdmaSlotPB>  slots;
+    const auto                 embedding = rowMarkedTensor(4, 8);
+    const auto                 pos_id    = torch::zeros({4, 3}, torch::kInt32);
     std::vector<torch::Tensor> extras{torch::zeros({5}, torch::kInt32), torch::zeros({6}, torch::kInt32)};
 
     ASSERT_TRUE(adapter.exportSlots(embedding, pos_id, extras, &slots));
@@ -172,9 +171,9 @@ TEST_F(MMRdmaTransportTest, packsRolesIntoOneSlotInOrder) {
 }
 
 TEST_F(MMRdmaTransportTest, rowSplitsAndRoundTripsInOrder) {
-    auto adapter = makeAdapter(300);
+    auto                      adapter = makeAdapter(300);
     std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(6, 25);
+    const auto                embedding = rowMarkedTensor(6, 25);
 
     ASSERT_TRUE(adapter.exportSlots(embedding, std::nullopt, {}, &slots));
     ASSERT_EQ(slots.size(), 3u);
@@ -189,15 +188,15 @@ TEST_F(MMRdmaTransportTest, rowSplitsAndRoundTripsInOrder) {
 }
 
 TEST_F(MMRdmaTransportTest, rejectsEmbeddingRowLargerThanSlot) {
-    auto adapter = makeAdapter(256);
+    auto                      adapter = makeAdapter(256);
     std::vector<MMRdmaSlotPB> slots;
     EXPECT_FALSE(adapter.exportSlots(rowMarkedTensor(2, 128), std::nullopt, {}, &slots));
     EXPECT_TRUE(slots.empty());
 }
 
 TEST_F(MMRdmaTransportTest, rollsBackEarlierLeasesOnCreateFailure) {
-    exporter->fail_at = 2;
-    auto adapter = makeAdapter(512);
+    exporter->fail_at                 = 2;
+    auto                      adapter = makeAdapter(512);
     std::vector<MMRdmaSlotPB> slots;
     EXPECT_FALSE(adapter.exportSlots(rowMarkedTensor(8, 64), std::nullopt, {}, &slots));
     EXPECT_TRUE(slots.empty());
@@ -205,13 +204,13 @@ TEST_F(MMRdmaTransportTest, rollsBackEarlierLeasesOnCreateFailure) {
 }
 
 TEST_F(MMRdmaTransportTest, reassemblesChunkedMultimodalOutput) {
-    auto adapter = makeAdapter(512);
+    auto                      adapter = makeAdapter(512);
     std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(7, 64);
-    const auto pos_id = torch::zeros({7, 3}, torch::kInt32);
+    const auto                embedding = rowMarkedTensor(7, 64);
+    const auto                pos_id    = torch::zeros({7, 3}, torch::kInt32);
     ASSERT_TRUE(adapter.exportSlots(embedding, pos_id, {}, &slots));
 
-    std::vector<torch::Tensor> tensors;
+    std::vector<torch::Tensor>      tensors;
     std::vector<MMRdmaSlotPB::Role> roles;
     for (const auto& slot : slots) {
         ASSERT_TRUE(exporter->read(slot.rdma_descriptor(), &tensors));
@@ -222,21 +221,39 @@ TEST_F(MMRdmaTransportTest, reassemblesChunkedMultimodalOutput) {
     MultimodalOutputPB output_pb;
     output_pb.add_split_size(3);
     output_pb.add_split_size(4);
+    auto* image_metadata = output_pb.add_expansion_metadata();
+    image_metadata->set_frame_count(1);
+    image_metadata->set_soft_tokens_per_frame(2);
+    auto* metadata = output_pb.add_expansion_metadata();
+    metadata->set_is_video(true);
+    metadata->set_fps(24.0);
+    metadata->add_frame_indices(12);
+    metadata->set_soft_tokens_per_frame(70);
+    metadata->set_frame_number(0);
+    metadata->set_frame_count(1);
+    output_pb.add_expanded_token_ids(101);
+    output_pb.add_expanded_token_ids(102);
     MultimodalOutput output;
     ASSERT_TRUE(assembleMMRdmaOutput(tensors, roles, &output_pb, &output));
     EXPECT_TRUE(torch::equal(torch::cat(output.mm_features, 0), embedding));
     ASSERT_TRUE(output.mm_position_ids.has_value());
+    ASSERT_TRUE(output.mm_expansion_metadata.has_value());
+    ASSERT_EQ(output.mm_expansion_metadata->size(), 2u);
+    EXPECT_FALSE(output.mm_expansion_metadata->at(0).is_video);
+    EXPECT_TRUE(output.mm_expansion_metadata->at(1).is_video);
+    EXPECT_EQ(output.mm_expansion_metadata->at(1).frame_indices, (std::vector<int32_t>{12}));
+    ASSERT_TRUE(output.expanded_token_ids.has_value());
+    EXPECT_EQ(output.expanded_token_ids->data_ptr<int32_t>()[0], 101);
+    EXPECT_EQ(output.expanded_token_ids->data_ptr<int32_t>()[1], 102);
 }
 
 TEST_F(MMRdmaTransportTest, rejectsUnsetRoleAndInconsistentSplit) {
-    const auto embedding = rowMarkedTensor(4, 4);
-    MultimodalOutput output;
+    const auto         embedding = rowMarkedTensor(4, 4);
+    MultimodalOutput   output;
     MultimodalOutputPB output_pb;
     output_pb.add_split_size(3);
-    EXPECT_FALSE(assembleMMRdmaOutput(
-        {embedding}, {MMRdmaSlotPB::ROLE_UNSPECIFIED}, &output_pb, &output));
-    EXPECT_FALSE(assembleMMRdmaOutput(
-        {embedding}, {MMRdmaSlotPB::EMBEDDING}, &output_pb, &output));
+    EXPECT_FALSE(assembleMMRdmaOutput({embedding}, {MMRdmaSlotPB::ROLE_UNSPECIFIED}, &output_pb, &output));
+    EXPECT_FALSE(assembleMMRdmaOutput({embedding}, {MMRdmaSlotPB::EMBEDDING}, &output_pb, &output));
 }
 
 }  // namespace

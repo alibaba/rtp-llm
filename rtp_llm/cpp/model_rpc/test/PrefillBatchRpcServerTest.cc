@@ -306,8 +306,8 @@ public:
     int       calls       = 0;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
-                                                      std::string = "") override {
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput> inputs, std::string = "", const std::string& = "") override {
         ++calls;
         if (throws) {
             throw std::runtime_error("embedding failed");

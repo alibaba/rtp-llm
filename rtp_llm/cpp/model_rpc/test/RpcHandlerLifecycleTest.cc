@@ -403,6 +403,35 @@ protected:
     }
 };
 
+TEST(PrefillAllocateRequestTest, ExpandedMultimodalInputDropsPromptAndMedia) {
+    GenerateInputPB request;
+    request.set_request_id(kRequestId);
+    request.add_token_ids(1);
+    request.add_token_ids(2);
+    request.set_rendered_prompt("system secret user prompt");
+    request.add_multimodal_inputs()->set_multimodal_url("signed-media-url");
+    request.mutable_generate_config();
+
+    RPCContext                   rpc_context{&request, nullptr};
+    RemoteServerResource         resource;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, meta);
+    context.generate_input            = std::make_shared<GenerateInput>();
+    context.generate_input->input_ids = torch::tensor({10, 11, 12}, torch::kInt32);
+    context.markMultimodalProcessed(true);
+
+    PrefillRpcServer server;
+    auto             allocate_request = server.buildAllocateRequest(context);
+
+    ASSERT_EQ(allocate_request.input().token_ids_size(), 3);
+    EXPECT_EQ(allocate_request.input().token_ids(0), 10);
+    EXPECT_EQ(allocate_request.input().token_ids(1), 11);
+    EXPECT_EQ(allocate_request.input().token_ids(2), 12);
+    EXPECT_TRUE(allocate_request.input().rendered_prompt().empty());
+    EXPECT_EQ(allocate_request.input().multimodal_inputs_size(), 0);
+}
+
 TEST_F(RpcHandlerLifecycleTest, LocalSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::COMPLETE);
 }

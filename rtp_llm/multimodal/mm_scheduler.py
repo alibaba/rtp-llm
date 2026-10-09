@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
 import torch.profiler
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
@@ -52,9 +51,7 @@ class MMSchedulerExecutionError(MMSchedulerError):
         self.source_type = source_type
         self.source_message = source_message
         self.is_oom = is_oom
-        super().__init__(
-            f"batch embedding failed: {source_type}: {source_message}"
-        )
+        super().__init__(f"batch embedding failed: {source_type}: {source_message}")
 
 
 class MMSchedulerOverloadError(MMSchedulerError):
@@ -140,7 +137,22 @@ class _EmbeddingRequest:
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
-        self.n_images = sum(len(wi.mm_inputs) for wi in work_items)
+        self.n_images = 0
+        for work_item in work_items:
+            preprocess_result = work_item.preprocess_result
+            expansion_metadata = (
+                preprocess_result[2]
+                if isinstance(preprocess_result, tuple)
+                and len(preprocess_result) > 2
+                and isinstance(preprocess_result[2], list)
+                and all(isinstance(item, dict) for item in preprocess_result[2])
+                else None
+            )
+            self.n_images += (
+                len(expansion_metadata)
+                if expansion_metadata is not None
+                else len(work_item.mm_inputs)
+            )
         self.future: Future[None] = Future()
 
 
@@ -452,9 +464,7 @@ class MMScheduler:
                             # TOCTOU where a caller cancels a still-PENDING request.
                             if not req.future.done():
                                 try:
-                                    self._fail(
-                                        req, source_type, source_message, is_oom
-                                    )
+                                    self._fail(req, source_type, source_message, is_oom)
                                 except InvalidStateError:
                                     pass
         finally:
@@ -553,11 +563,7 @@ class MMScheduler:
         with self._lock:
             if self._stopped.is_set():
                 return None
-            return [
-                req
-                for req in batch
-                if req.future.set_running_or_notify_cancel()
-            ]
+            return [req for req in batch if req.future.set_running_or_notify_cancel()]
 
     def _execute_batch(self, batch: List[_EmbeddingRequest]) -> None:
         """Run the batched forward and write results back.

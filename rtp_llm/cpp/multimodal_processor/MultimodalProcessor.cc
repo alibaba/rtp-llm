@@ -1,6 +1,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -179,6 +180,42 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
+ErrorResult<torch::Tensor>
+MultimodalProcessor::expandRenderedPrompt(const std::string&                              rendered_prompt,
+                                          const std::vector<MultimodalExpansionMetadata>& metadata) {
+    if (prompt_expander_.is_none()) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR,
+                         "multimodal prompt expansion is not available on the LLM backend");
+    }
+    try {
+        py::gil_scoped_acquire acquire;
+        py::list               metadata_list;
+        for (const auto& entry : metadata) {
+            py::dict item;
+            item["kind"]         = entry.is_video ? "video" : "image";
+            item["frame_number"] = entry.frame_number;
+            item["frame_count"]  = entry.frame_count;
+            item["soft_tokens"]  = entry.soft_tokens_per_frame;
+            if (entry.is_video) {
+                if (entry.frame_indices.size() != 1) {
+                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                                     "Gemma4 video expansion requires one frame index per feature");
+                }
+                item["fps"]         = entry.fps;
+                item["frame_index"] = entry.frame_indices[0];
+            }
+            metadata_list.append(std::move(item));
+        }
+        auto expanded = prompt_expander_.attr("expand_rendered_prompt")(rendered_prompt, metadata_list);
+        if (expanded.is_none()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal prompt expansion returned no token IDs");
+        }
+        return torch::tensor(expanded.cast<std::vector<int32_t>>(), torch::kInt32);
+    } catch (const py::error_already_set& error) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, error.what());
+    }
+}
+
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
@@ -192,13 +229,86 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
             }
         }
     }
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
-    input->multimodal_features = std::move(mm_embedding_res.mm_features);
-    input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
+    CHECK_AND_RETURN_REF(mm_embedding_res,
+                         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->rendered_prompt));
+    input->multimodal_features   = std::move(mm_embedding_res.mm_features);
+    input->mm_position_ids       = std::move(mm_embedding_res.mm_position_ids);
+    input->mm_extra_input        = std::move(mm_embedding_res.mm_extra_input);
+    input->mm_expansion_metadata = std::move(mm_embedding_res.mm_expansion_metadata);
+    if (input->mm_expansion_metadata.has_value()) {
+        const auto& metadata = input->mm_expansion_metadata.value();
+        if (metadata.size() != input->multimodal_features->size()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "multimodal expansion metadata count does not match feature count");
+        }
+        const auto                   original_inputs = input->multimodal_inputs.value();
+        std::vector<MultimodalInput> expanded_inputs;
+        expanded_inputs.reserve(metadata.size());
+        size_t  original_index       = 0;
+        int32_t expected_frame       = 0;
+        int32_t expected_frame_count = 0;
+        int32_t previous_frame_index = -1;
+        for (size_t metadata_index = 0; metadata_index < metadata.size(); ++metadata_index) {
+            const auto& entry = metadata[metadata_index];
+            if (original_index >= original_inputs.size() || entry.frame_count <= 0
+                || entry.frame_number != expected_frame || entry.frame_number >= entry.frame_count
+                || entry.soft_tokens_per_frame <= 0 || input->multimodal_features.value()[metadata_index].dim() < 1
+                || input->multimodal_features.value()[metadata_index].size(0) != entry.soft_tokens_per_frame) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal frame expansion metadata");
+            }
+            constexpr int32_t kVideoType = 2;
+            if (entry.is_video != (original_inputs[original_index].mm_type == kVideoType)) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                                 "multimodal expansion metadata type does not match input");
+            }
+            if (entry.is_video) {
+                if (expected_frame == 0) {
+                    expected_frame_count = entry.frame_count;
+                    previous_frame_index = -1;
+                }
+                if (entry.frame_count != expected_frame_count || !std::isfinite(entry.fps) || entry.fps <= 0
+                    || entry.frame_indices.size() != 1 || entry.frame_indices[0] < previous_frame_index) {
+                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid Gemma4 video expansion metadata");
+                }
+                previous_frame_index = entry.frame_indices[0];
+            } else if (entry.frame_number != 0 || entry.frame_count != 1 || !entry.frame_indices.empty()) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid Gemma4 image expansion metadata");
+            }
+            expanded_inputs.push_back(original_inputs[original_index]);
+            if (entry.frame_number + 1 == entry.frame_count) {
+                ++original_index;
+                expected_frame = 0;
+            } else {
+                ++expected_frame;
+            }
+        }
+        if (original_index != original_inputs.size()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "multimodal expansion metadata does not cover every input");
+        }
+        input->multimodal_inputs = std::move(expanded_inputs);
+    }
+    torch::Tensor token_ids = input->input_ids;
+    if (mm_embedding_res.expanded_token_ids.has_value()) {
+        token_ids = mm_embedding_res.expanded_token_ids.value();
+        if (!token_ids.defined() || token_ids.dim() != 1 || token_ids.scalar_type() != torch::kInt32) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "expanded multimodal token IDs must be a one-dimensional int32 tensor");
+        }
+        if (input->prefix_length > 0) {
+            token_ids = torch::cat({input->input_ids.slice(0, 0, input->prefix_length), token_ids});
+        }
+    } else if (!input->rendered_prompt.empty() && input->mm_expansion_metadata.has_value()
+               && !prompt_expander_.is_none()) {
+        CHECK_AND_RETURN_REF(local_expanded_ids,
+                             expandRenderedPrompt(input->rendered_prompt, input->mm_expansion_metadata.value()));
+        token_ids = local_expanded_ids;
+        if (input->prefix_length > 0) {
+            token_ids = torch::cat({input->input_ids.slice(0, 0, input->prefix_length), token_ids});
+        }
+    }
     CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
+        expanded_ids, expandTokenIds(input->multimodal_features.value(), token_ids, input->multimodal_inputs.value()));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;

@@ -388,6 +388,8 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         for (size_t i = 0; i < input->input_ids.numel(); ++i) {
             new_request->add_token_ids(ids_ptr[i]);
         }
+        new_request->clear_rendered_prompt();
+        new_request->clear_multimodal_inputs();
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
