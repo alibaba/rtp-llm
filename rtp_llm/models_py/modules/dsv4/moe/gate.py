@@ -125,6 +125,7 @@ class Gate(nn.Module):
         n_hash_layers: int = 0,
         vocab_size: int = 0,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        fp32_logits: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -136,6 +137,7 @@ class Gate(nn.Module):
         self.score_func = score_func
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
+        self.fp32_logits = fp32_logits
         self._dbg_prefix: Optional[str] = None
 
         from rtp_llm.utils.model_weight import W
@@ -191,7 +193,7 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
-        if os.environ.get("DSV4_GATE_FP32", "0") == "1":
+        if self.fp32_logits or os.environ.get("DSV4_GATE_FP32", "0") == "1":
             scores = F.linear(x.float(), self.weight.float())
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)

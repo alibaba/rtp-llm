@@ -49,6 +49,7 @@ def _fused_rmsnorm_rope_kernel(
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    ROUND_NORM: tl.constexpr,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
     # site flattens [B, S, H, D] to [B*S*H, D], so N can exceed 2^22 and
@@ -92,6 +93,10 @@ def _fused_rmsnorm_rope_kernel(
         real = real * w_real
         imag = imag * w_imag
 
+    if ROUND_NORM:
+        real = real.to(x_ptr.dtype.element_ty).to(tl.float32)
+        imag = imag.to(x_ptr.dtype.element_ty).to(tl.float32)
+
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
     sin = tl.load(freq_base + 1)
@@ -125,6 +130,7 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
+    ROUND_NORM: tl.constexpr,
 ):
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
@@ -160,6 +166,10 @@ def _fused_rmsnorm_rope_group_heads_kernel(
         real = real * w_real[None, :]
         imag = imag * w_imag[None, :]
 
+    if ROUND_NORM:
+        real = real.to(x_ptr.dtype.element_ty).to(tl.float32)
+        imag = imag.to(x_ptr.dtype.element_ty).to(tl.float32)
+
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
     sin = tl.load(freq_base + 1)
@@ -183,6 +193,7 @@ def fused_rmsnorm_rope(
     out: torch.Tensor | None = None,
     inplace: bool = False,
     group_heads: int | None = None,
+    round_norm_to_input_dtype: bool = False,
 ) -> torch.Tensor:
     """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
 
@@ -201,6 +212,8 @@ def fused_rmsnorm_rope(
     output buffer, ``out`` may alias ``x``, and ``inplace=True`` writes back
     into ``x``.  ``group_heads`` groups Q-style rows sharing the same frequency
     slot; valid values are 1, 2, 4, and 8.
+    ``round_norm_to_input_dtype`` preserves a separate RMSNorm's dtype boundary
+    before RoPE, as required by the released V4.1 reference.
     """
     assert x.is_cuda
     assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
@@ -294,6 +307,7 @@ def fused_rmsnorm_rope(
             HAS_WEIGHT=has_weight,
             BLOCK_D=BLOCK_D,
             GROUP_HEADS=selected_group_heads,
+            ROUND_NORM=round_norm_to_input_dtype,
             num_warps=4 if BLOCK_D <= 512 else 8,
         )
     else:
@@ -315,6 +329,7 @@ def fused_rmsnorm_rope(
             EPS=eps,
             HAS_WEIGHT=has_weight,
             BLOCK_D=BLOCK_D,
+            ROUND_NORM=round_norm_to_input_dtype,
             num_warps=4 if BLOCK_D <= 512 else 8,
         )
     return out_flat.view(*orig_shape)

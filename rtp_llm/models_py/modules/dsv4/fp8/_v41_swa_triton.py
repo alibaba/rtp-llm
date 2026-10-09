@@ -286,6 +286,23 @@ def dequantize_swa_k_cache(
     return out
 
 
+def roundtrip_swa(kv: torch.Tensor) -> torch.Tensor:
+    """Give fresh attention rows the same precision as stored SWA rows.
+
+    Use a temporary linear page: the persistent ring omits older fresh rows
+    that a long prefill still needs to attend to.
+    """
+    if not kv.is_cuda or kv.ndim != 2 or not _valid_keys(kv, kv.device, kv.shape[0]):
+        raise ValueError("V4.1 fresh SWA requires CUDA floating [N, 512] rows")
+    rows = kv.shape[0]
+    if not rows:
+        return kv.clone()
+    pool = torch.empty((1, rows, ENTRY_BYTES), device=kv.device, dtype=torch.uint8)
+    slots = torch.arange(rows, device=kv.device, dtype=torch.int32)
+    quantize_and_insert_swa_k_cache(kv, pool, slots)
+    return dequantize_swa_k_cache(pool, slots, out_dtype=kv.dtype)
+
+
 def _check_gather_output(out, device, slot_mapping, gather_lens, offset):
     if (
         slot_mapping.ndim != 2
