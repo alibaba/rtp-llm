@@ -407,6 +407,10 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
+    # cache_config_test_utils -> cache_types -> torch_deps() keeps libtorch_cuda
+    # in the link closure, so like its sibling tests this one needs a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(

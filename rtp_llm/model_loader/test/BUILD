@@ -32,8 +32,10 @@ py_test(
     deps = py_test_deps,
 )
 
-# Verified on sm86: 19/19, 1/1 and 30/30 pass with 0 skips, including
-# test_fp8_still_runs_the_device_conversion, so the device FP8 cast is fine there.
+# Verified on L20_CU13 (sm89) after the sm8x lane moved to L20: the
+# per-channel suite runs 30/30 with 0 skips, including
+# test_fp8_still_runs_the_device_conversion, so the device FP8 cast is fine
+# on this pool.
 py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],

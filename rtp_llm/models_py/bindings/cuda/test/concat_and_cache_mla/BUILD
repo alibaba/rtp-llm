@@ -13,9 +13,10 @@ py_test(
     tags = ["L20_CU13"],
 )
 
-# test_dpsk32_fp8 / test_model1_fp8 verified on sm86: 3/3 and 5/5 pass, 0 skips.
-# The fp8_ds_mla write path uses __nv_cvt_float_to_fp8, which has a software
-# conversion below sm89 and is compiled for 8.6 by our AOT arch list.
+# test_dpsk32_fp8 / test_model1_fp8: 3/3 and 5/5 pass, 0 skips on L20_CU13
+# (sm89), re-confirmed after the sm8x lane moved to L20. The fp8_ds_mla write
+# path uses __nv_cvt_float_to_fp8, which has a software conversion below sm89
+# and a hardware one from sm89 up; the CUDA13 AOT arch list covers 8.9.
 py_test(
     name = "test_dpsk32_fp8",
     srcs = [

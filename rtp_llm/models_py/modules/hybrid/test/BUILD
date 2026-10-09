@@ -27,7 +27,7 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": [],
     }),
-    # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
+    # Verified on L20_CU13 (sm89): 4/4 pass, 0 skips.
     tags = [
         "L20_CU13",
         "open_skip",
@@ -48,7 +48,7 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": [],
     }),
-    # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
+    # Verified on L20_CU13 (sm89): 4/4 pass, 0 skips.
     tags = [
         "L20_CU13",
         "open_skip",

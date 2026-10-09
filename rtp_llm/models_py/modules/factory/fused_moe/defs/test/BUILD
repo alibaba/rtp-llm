@@ -5,8 +5,8 @@ py_test_deps = [
 # The test uses CPU tensors and mocked collectives, but importing
 # models_py.modules reaches the compiled librtp_compute_ops module.  Run it on
 # accelerator images that provide that dependency instead of claiming that a
-# default CPU runner can import it safely.  Any CUDA worker satisfies that —
-# no H20 pin, so it stays on the default CUDA 13 pool (gpu=L20D_DEV) / ut-sm8x job.
+# default CPU runner can import it safely.  Pinned to L20_CU13 with one GPU
+# for the ut-sm8x lane.
 py_test(
     name = "fused_moe_allreduce_contract_test",
     srcs = ["fused_moe_allreduce_contract_test.py"],

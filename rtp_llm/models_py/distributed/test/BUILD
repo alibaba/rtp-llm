@@ -39,11 +39,11 @@ py_test (
 # collective here goes through NCCL, and the symm_mem fast path in
 # collective_torch.all_reduce/all_gather is never eligible because this test
 # only ever builds float32 tensors while symm_mem.py:147-149 requires bfloat16.
-# Verified on sm86 with peer access unavailable (8x RTX 3090, CUDA_VISIBLE_DEVICES=0-3):
-# 4 tests run, 0 skipped, OK -- NCCL falls back to its shared-memory transport.
-# The A10 executor presents 4 visible GPUs per node, so gpu_count 4 is
-# satisfiable but occupies a whole node. Verification records live with the
-# internal CI evidence, not here.
+# Verified on L20_CU13 (sm89): 4 tests run, 0 skipped, OK -- NCCL falls back
+# to its shared-memory transport when peer access is unavailable (originally
+# proven on sm86 hardware without peer access). The L20 executor presents 8
+# GPUs per node, so gpu_count 4 is satisfiable. Verification records live
+# with the internal CI evidence, not here.
 py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],

@@ -79,6 +79,8 @@ cc_test(
     ],
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # ViT output RDMA slot planning + manifest reassembly, driven by a fake transport and CPU tensors.
@@ -100,4 +102,6 @@ cc_test(
     ],
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

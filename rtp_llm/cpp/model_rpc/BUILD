@@ -71,7 +71,11 @@ cc_library(
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "RPCPool.h",
+            # Owned by :response_buffer so its public header has a single cc_library.
+            "ResponseBuffer.h",
+        ],
     ),
     visibility = ["//visibility:public"],
     deps = [
@@ -133,6 +137,10 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
+        # ResponseBuffer.h includes <grpcpp/...> and exposes grpc:: types in
+        # its public interface; declare grpc explicitly instead of relying on
+        # the proto target's transitive dependency.
+        "@grpc//:grpc++",
         "@havenask//aios/autil:time",
     ],
 )
