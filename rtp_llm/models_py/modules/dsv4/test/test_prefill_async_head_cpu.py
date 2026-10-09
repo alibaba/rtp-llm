@@ -12,11 +12,12 @@ import importlib.util
 import os
 import pathlib
 import sys
+import threading
 import types
 import unittest
 from runpy import run_path
 from typing import Any, Dict, NamedTuple, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -1042,6 +1043,68 @@ class PrebuiltValidation(unittest.TestCase):
     def test_no_prediction_outstanding_returns_none(self):
         builder = head_prebuild.AsyncHeadBuilder()
         self.assertIsNone(builder.consume((1, 2)))
+
+    def test_rejected_or_replaced_prediction_drains_device_work(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                event = Mock()
+                builder = head_prebuild.AsyncHeadBuilder()
+                builder._result = ((1,), types.SimpleNamespace(event=event))
+                if replace:
+                    builder.kick((2,), lambda: "next")
+                    self.assertEqual(builder.consume((2,)), "next")
+                else:
+                    self.assertIsNone(builder.consume((2,)))
+                event.synchronize.assert_called_once_with()
+
+    def test_eager_misses_join_worker_before_rebinding_modules(self):
+        for flag, info, prefix in (
+            ("1", None, torch.tensor([4096])),
+            ("1", _recipe_cp_info(), None),
+            ("0", _recipe_cp_info(), torch.tensor([4096])),
+        ):
+            with self.subTest(flag=flag, missing_info=info is None, prefix=prefix):
+                entered, release, returned = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                state = types.SimpleNamespace(context="main")
+                builder = head_prebuild.AsyncHeadBuilder()
+
+                def build():
+                    state.context = "predicted"
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("test did not release builder")
+                    state.context = "main"
+                    return None
+
+                builder.kick((1,), build)
+                self.assertTrue(entered.wait(5))
+                observed = []
+
+                def consume():
+                    try:
+                        head_prebuild.consume_async_head(
+                            info, prefix, torch.device("cpu"), 4, 0, 1024
+                        )
+                        observed.append(state.context)
+                    finally:
+                        returned.set()
+
+                with patch.object(head_prebuild, "_BUILDER", builder), patch.dict(
+                    os.environ, {"DSV4_PREFILL_ASYNC_HEAD": flag}
+                ):
+                    consumer = threading.Thread(target=consume)
+                    consumer.start()
+                    try:
+                        self.assertFalse(returned.wait(0.1))
+                    finally:
+                        release.set()
+                        consumer.join(5)
+                    self.assertFalse(consumer.is_alive())
+                    self.assertEqual(observed, ["main"])
 
     def test_recipe_domain_gate(self):
         ctx = _build_ctx(0, 4096)

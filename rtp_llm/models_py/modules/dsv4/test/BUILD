@@ -630,6 +630,14 @@ py_test(
 )
 
 py_test(
+    name = "test_prefill_async_head_stream",
+    srcs = ["test_prefill_async_head_stream.py"],
+    deps = ["//rtp_llm:torch"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_prefill_meta_shared_build_cpu",
     srcs = ["test_prefill_meta_shared_build_cpu.py"],
     deps = ["//rtp_llm:torch"],

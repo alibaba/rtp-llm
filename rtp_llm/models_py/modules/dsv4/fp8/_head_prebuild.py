@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import fields, is_dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -180,6 +182,7 @@ class AsyncHeadBuilder:
 
     # -- main-thread API ----------------------------------------------------
     def kick(self, key: Tuple, build_fn) -> None:
+        self.consume(None)
         with self._cond:
             # One outstanding build at a time. A stale unconsumed result is
             # fenced+dropped by the caller (consume path) before we get here.
@@ -196,7 +199,7 @@ class AsyncHeadBuilder:
                 self._thread.start()
             self._cond.notify_all()
 
-    def consume(self, key: Tuple) -> Optional[PrebuiltHead]:
+    def consume(self, key: Optional[Tuple]) -> Optional[PrebuiltHead]:
         with self._cond:
             idle = self._pending is None and not self._busy and self._result is None
         if idle:
@@ -208,7 +211,14 @@ class AsyncHeadBuilder:
         if result is None:
             return None
         _result_key, bundle = result
-        if bundle is None or _result_key != key:
+        if bundle is None:
+            return None
+        if key is None or _result_key != key:
+            # Rejected builds can still have pending device work, including
+            # writes to shared geometry caches that the eager path will read.
+            event = getattr(bundle, "event", None)
+            if event is not None:
+                event.synchronize()
             return None
         return bundle
 
@@ -438,13 +448,20 @@ def _build_under_inference_mode(kwargs, inference_mode: bool):
 
 
 def _build_with_stream_fence(
-    kwargs, inference_mode: bool = True
+    kwargs, inference_mode: bool = True, ready_event=None
 ) -> Optional[PrebuiltHead]:
     device = kwargs["device"]
     if device.type == "cuda":
         stream = _builder_stream(device)
+        if ready_event is not None:
+            stream.wait_event(ready_event)
         with torch.cuda.stream(stream):
-            bundle = _build_under_inference_mode(kwargs, inference_mode)
+            try:
+                bundle = _build_under_inference_mode(kwargs, inference_mode)
+            except Exception:
+                # A failed build may already have populated shared CUDA caches.
+                stream.synchronize()
+                raise
         event = torch.cuda.Event()
         event.record(stream)
         bundle.event = event
@@ -494,7 +511,13 @@ def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device) ->
         # thread, where ``is_inference_mode_enabled()`` would read the wrong
         # (builder) state.
         inference_mode = torch.is_inference_mode_enabled()
-        _builder().kick(key, lambda: _build_with_stream_fence(kwargs, inference_mode))
+        ready_event = None
+        if device.type == "cuda":
+            ready_event = torch.cuda.Event()
+            ready_event.record(torch.cuda.current_stream(device))
+        _builder().kick(
+            key, lambda: _build_with_stream_fence(kwargs, inference_mode, ready_event)
+        )
     except Exception:
         # The kick itself must never break a forward.
         if not getattr(maybe_kick_async_head, "_failure_logged", False):
@@ -557,21 +580,22 @@ def consume_async_head(
     outstanding, key mismatch, or mask/restore content mismatch. On a hit the
     caller must still run :func:`patch_prebuilt_metas` before using the meta.
     """
-    if not async_head_enabled():
-        return None
-    if (
+    enabled = async_head_enabled()
+    capturing = (
         torch.cuda.is_available()
         and device.type == "cuda"
         and torch.cuda.is_current_stream_capturing()
-    ):
-        # The join/fence/content-check are not capture-legal; decline.
-        return None
-    key = key_from_forward_inputs(
-        cp_info, prefix_lengths, device, cp_size, cp_rank, num_tokens
     )
-    if key is None:
+    key = None
+    if enabled and not capturing and cp_info is not None and cp_size > 1:
+        key = key_from_forward_inputs(
+            cp_info, prefix_lengths, device, cp_size, cp_rank, num_tokens
+        )
+    builder = _BUILDER
+    if builder is None:
         return None
-    builder = _builder()
+    # Even a non-CP/tail/request-boundary miss must join before the eager
+    # forward mutates the attention modules temporarily bound by the worker.
     bundle = builder.consume(key)
     if bundle is None:
         return None
@@ -597,7 +621,34 @@ def _fence_bundle(bundle: PrebuiltHead, device) -> None:
     builder's writes.
     """
     if bundle.event is not None and device.type == "cuda":
-        torch.cuda.current_stream(device).wait_event(bundle.event)
+        stream = torch.cuda.current_stream(device)
+        stream.wait_event(bundle.event)
+        # wait_event orders writes, but only record_stream keeps builder-owned
+        # storage alive until the main stream has finished reading it.
+        seen = set()
+        for value in (bundle.cp_ctx, bundle.meta_by_ratio, bundle.meta_args):
+            _record_consumer_stream(value, stream, seen)
+
+
+def _record_consumer_stream(value, stream, seen) -> None:
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, torch.Tensor):
+        if value.is_cuda:
+            value.record_stream(stream)
+    elif isinstance(value, dict):
+        for child in value.values():
+            _record_consumer_stream(child, stream, seen)
+    elif isinstance(value, (tuple, list)):
+        for child in value:
+            _record_consumer_stream(child, stream, seen)
+    elif is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            _record_consumer_stream(getattr(value, field.name), stream, seen)
+    elif isinstance(value, SimpleNamespace):
+        for child in vars(value).values():
+            _record_consumer_stream(child, stream, seen)
 
 
 # ---------------------------------------------------------------------------

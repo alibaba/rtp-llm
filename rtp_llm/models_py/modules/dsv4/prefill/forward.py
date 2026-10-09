@@ -382,19 +382,18 @@ def forward_layers(
     # runs byte-identically. The bundle's block-table-dependent fields are
     # rebuilt against the real table at the propagate call further down.
     _async_head_bundle = None
-    if cp_info is not None and cp_size > 1:
-        from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+    from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
 
-        _async_head_bundle = _head_prebuild.consume_async_head(
-            cp_info,
-            getattr(attn_inputs, "prefix_lengths", None),
-            input_ids.device,
-            cp_size,
-            cp_rank,
-            int(input_ids.size(0)),
-        )
-        if _async_head_bundle is not None:
-            cp_ctx = _async_head_bundle.cp_ctx
+    _async_head_bundle = _head_prebuild.consume_async_head(
+        cp_info,
+        getattr(attn_inputs, "prefix_lengths", None),
+        input_ids.device,
+        cp_size,
+        cp_rank,
+        int(input_ids.size(0)),
+    )
+    if _async_head_bundle is not None:
+        cp_ctx = _async_head_bundle.cp_ctx
     if cp_ctx is None and cp_info is not None and cp_size > 1:
         cp_ctx = build_cp_context_for_forward(
             cp_info,
