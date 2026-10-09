@@ -45,6 +45,13 @@ py_library(
     srcs = ["device_resource.py"],
 )
 
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    deps = [":device_resource"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "PYTHONNOUSERSITE": "1"},
+)
+
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],

@@ -2,14 +2,13 @@ import json
 import logging
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from filelock import FileLock, Timeout
 
@@ -156,9 +155,7 @@ class DeviceResource:
                 )
                 return None
             return [
-                int(p.strip())
-                for p in result.stdout.strip().splitlines()
-                if p.strip()
+                int(p.strip()) for p in result.stdout.strip().splitlines() if p.strip()
             ]
         except subprocess.TimeoutExpired:
             logging.warning("nvidia-smi timed out querying gpu %s", gpu_id)
@@ -172,13 +169,11 @@ class DeviceResource:
         """Check if a process is alive by probing /proc/<pid>."""
         return os.path.exists(f"/proc/{pid}")
 
-    def _has_zombie_gpu_contexts(self, gpu_id: str) -> bool:
+    def _gpu_unavailable(self, gpu_id: str) -> bool:
         """Whether this GPU should be considered unusable.
 
-        Covers two cases: dead processes still holding memory (the driver
-        sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
-        until a reset), and a device we cannot query at all -- treated as bad, so
-        a degraded GPU is skipped rather than handed out repeatedly.
+        Existing compute processes and devices we cannot query are skipped.
+        An advisory lock does not establish ownership of an existing process.
 
         "Cannot query" only means anything where nvidia-smi exists. On PPU and
         ROCm workers it never does, and treating that as a zombie rejected all 16
@@ -191,22 +186,13 @@ class DeviceResource:
         if pids is None:
             logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
             return True
-        if not pids:
-            return False
-        return all(not self._pid_alive(p) for p in pids)
+        return bool(pids)
 
     def _ensure_gpus_released(self, timeout: int = 30):
-        """Wait until acquired GPUs have no stale compute processes.
+        """Wait for compute contexts to disappear without signaling processes.
 
-        Uses SIGTERM first to allow graceful CUDA cleanup, then SIGKILL
-        as a last resort. Detects zombie GPU contexts (dead processes that
-        still hold GPU memory) which indicate unrecoverable state.
-
-        Returns True if GPUs are clean, False if zombie contexts detected.
+        Returns False when availability cannot be established within the budget.
         """
-        my_pid = os.getpid()
-        sigterm_sent: Set[int] = set()
-        sigkill_sent: Set[int] = set()
         deadline = time.time() + timeout
 
         while time.time() < deadline:
@@ -214,39 +200,13 @@ class DeviceResource:
             for gpu_id in self.gpu_ids:
                 pids = self._get_gpu_pids(gpu_id)
                 if pids is None:
-                    # Unknowable: no nvidia-smi, or it failed. Nothing to clean up
-                    # and nothing to conclude. Iterating None here used to raise.
-                    continue
-                stale = [p for p in pids if p != my_pid]
-                live_stale = [p for p in stale if self._pid_alive(p)]
-
-                if not stale:
-                    continue
-
-                if not live_stale:
-                    # All nvidia-smi PIDs are dead → zombie GPU contexts
-                    logging.warning(
-                        f"GPU {gpu_id} has zombie CUDA contexts (dead PIDs: {stale}). "
-                        f"Memory is permanently leaked until GPU reset."
-                    )
+                    if _nvidia_smi() is None:
+                        continue
                     return False
-
+                if not pids:
+                    continue
                 all_clear = False
-                for pid in live_stale:
-                    if pid not in sigterm_sent:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            logging.info(f"SIGTERM pid {pid} on GPU {gpu_id}")
-                            sigterm_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                    elif pid not in sigkill_sent:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            logging.info(f"SIGKILL pid {pid} on GPU {gpu_id}")
-                            sigkill_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
+                logging.info("GPU %s still has compute processes: %s", gpu_id, pids)
                 break
 
             if all_clear:
@@ -254,7 +214,7 @@ class DeviceResource:
             time.sleep(1)
 
         logging.warning(
-            f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}"
+            f"Waiting for GPU release timed out after {timeout}s for GPUs {self.gpu_ids}"
         )
         return False
 
@@ -285,8 +245,8 @@ class DeviceResource:
                         except Timeout as _:
                             logging.info(f"lock device {id} failed")
                             break
-                        if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                        if self._gpu_unavailable(str(id)):
+                            logging.info(f"skip GPU {id}: busy or not queryable")
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")
@@ -376,9 +336,8 @@ class DeviceResource:
                         gpus_clean = self._ensure_gpus_released()
                         if gpus_clean:
                             break
-                        # Zombie contexts found — release these GPUs and retry
                         logging.warning(
-                            f"GPUs {self.gpu_ids} have zombie contexts, retrying"
+                            f"GPUs {self.gpu_ids} are occupied or unavailable, retrying"
                         )
                         self.gpu_ids = []
                         self.gpu_locks.close()
