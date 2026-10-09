@@ -13,7 +13,8 @@ accepted-length callback only when its width is at most one compression group.
 With ``G <= ratio`` it can complete at most one new compressed entry, while the
 ``2 * ratio`` raw-key ring cannot alias the committed partial group. Rejected
 tail entries therefore remain outside the logical length and are overwritten
-before they can become visible. CP, PD and padding remain unsupported; CUDA
+before they can become visible. CP and padding remain unsupported; PD requires
+an explicit committed side-cache publication plan. CUDA
 Graph handles exact-batch decode and target verification, plus bounded packed
 MTP-draft prefill with device metadata. Prefix-cache reuse is page-aligned.
 """
@@ -383,8 +384,6 @@ class Qwen4ExpQSARuntimeContext:
                 raise RuntimeError("qwen4_exp QSA Graph requires an exact batch graph")
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
-            if inputs.cache_store_inputs is not None:
-                raise RuntimeError("qwen4_exp QSA indexer state does not support PD")
             prefixes = inputs.prefix_lengths
             if (
                 not is_target_verify
@@ -395,6 +394,11 @@ class Qwen4ExpQSARuntimeContext:
             ):
                 raise RuntimeError("qwen4_exp QSA prefix reuse is not implemented")
 
+        from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+            validate_pd_cache_inputs,
+        )
+
+        validate_pd_cache_inputs(all_inputs)
         modes = tuple(bool(inputs.is_prefill) for inputs in all_inputs)
         if any(mode != expect_prefill for mode in modes):
             expected = "prefill" if expect_prefill else "ordinary decode"

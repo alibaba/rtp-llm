@@ -10,9 +10,10 @@ from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
     Qwen4ExpMTPModel,
+    normalize_mtp_prefill_positions,
 )
 from rtp_llm.ops import HybridAttentionType
-from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyCacheStoreInputs, PyModelInputs
 
 
 class _Matmul(nn.Module):
@@ -34,6 +35,123 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
+    def test_prepare_normalizes_unpublished_cold_and_prefix_hit_positions(self):
+        # Match updatePrefillPostDraftModelInput: shift each prompt's position
+        # rows left, then retain its native tail anchor. Include a cold row
+        # alongside prefix hits so both cache writers use the same RoPE origin.
+        for factor in (1, 3):
+            for suffix in (1, 3, 4, 8):
+                with self.subTest(factor=factor, suffix=suffix):
+                    prefixes = [0, 128, 256]
+                    lengths = [3, suffix, 1]
+                    positions = [
+                        torch.arange(prefix, prefix + length, dtype=torch.int32)
+                        for prefix, length in zip(prefixes, lengths)
+                    ]
+                    expected = torch.cat(positions).repeat_interleave(factor)
+                    shifted = torch.cat(
+                        [torch.cat((row[1:], row[-1:])) for row in positions]
+                    ).repeat_interleave(factor)
+                    groups = {}
+                    for tag in ("full", "indexer_kv", "indexer_state"):
+                        groups[tag] = SimpleNamespace(
+                            is_prefill=True,
+                            is_target_verify=False,
+                            is_cuda_graph=False,
+                            cache_store_inputs=None,
+                            prefix_lengths_device=torch.tensor(
+                                prefixes, dtype=torch.int32
+                            ),
+                            cu_seqlens_device=torch.tensor(
+                                [0, 3, 3 + suffix, 4 + suffix], dtype=torch.int32
+                            ),
+                            combo_position_ids=shifted.clone(),
+                        )
+                    inputs = SimpleNamespace(
+                        input_ids=torch.zeros(sum(lengths), dtype=torch.int32),
+                        combo_position_ids=shifted.clone(),
+                        attention_inputs=groups,
+                    )
+                    model = Qwen4ExpMTPModel.__new__(Qwen4ExpMTPModel)
+                    nn.Module.__init__(model)
+                    model.config = SimpleNamespace(
+                        attn_config=SimpleNamespace(
+                            rope_config=SimpleNamespace(index_factor=factor)
+                        )
+                    )
+                    with patch.object(
+                        Qwen4ExpModel, "prepare_fmha_impl", return_value={}
+                    ):
+                        model.prepare_fmha_impl(inputs)
+                        torch.testing.assert_close(inputs.combo_position_ids, expected)
+                        # Accepted-token prefills already use canonical rows.
+                        model.prepare_fmha_impl(inputs)
+                    torch.testing.assert_close(inputs.combo_position_ids, expected)
+                    for value in inputs.attention_inputs.values():
+                        torch.testing.assert_close(value.combo_position_ids, expected)
+
+    def test_pd_main_and_indexer_share_normalized_cache_positions(self):
+        writer = SimpleNamespace(write=lambda *_: None)
+        plan = PyCacheStoreInputs()
+        shifted = torch.tensor(
+            [129, 130, 130, 256], dtype=torch.int32
+        ).repeat_interleave(3)
+        groups = {
+            tag: SimpleNamespace(
+                cache_store_inputs=plan,
+                cache_store_writer=writer,
+                is_prefill=True,
+                is_target_verify=False,
+                is_cuda_graph=False,
+                prefix_lengths_device=torch.tensor([128, 256], dtype=torch.int32),
+                cu_seqlens_device=torch.tensor([0, 3, 4], dtype=torch.int32),
+                combo_position_ids=shifted if tag != "full" else shifted.clone(),
+            )
+            for tag in ("full", "indexer_kv", "indexer_state")
+        }
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(4, dtype=torch.int32),
+            combo_position_ids=shifted.clone(),
+            attention_inputs=groups,
+        )
+        pointers = {
+            tag: value.combo_position_ids.data_ptr() for tag, value in groups.items()
+        }
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
+            normalize_mtp_prefill_positions(inputs, 3)
+        expected = torch.tensor(
+            [128, 129, 130, 256], dtype=torch.int32
+        ).repeat_interleave(3)
+        torch.testing.assert_close(inputs.combo_position_ids, expected)
+        for tag, value in groups.items():
+            torch.testing.assert_close(value.combo_position_ids, expected)
+            self.assertEqual(value.combo_position_ids.data_ptr(), pointers[tag])
+
+    def test_decode_verify_and_graph_positions_are_preserved(self):
+        for prefill, verify, graph in (
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+        ):
+            with self.subTest(prefill=prefill, verify=verify, graph=graph):
+                shifted = torch.tensor([129, 130, 130], dtype=torch.int32)
+                inputs = SimpleNamespace(
+                    input_ids=torch.zeros(3, dtype=torch.int32),
+                    combo_position_ids=shifted,
+                    attention_inputs={
+                        "full": SimpleNamespace(
+                            cache_store_inputs=None,
+                            is_prefill=prefill,
+                            is_target_verify=verify,
+                            is_cuda_graph=graph,
+                        )
+                    },
+                )
+                normalize_mtp_prefill_positions(inputs, 1)
+                torch.testing.assert_close(
+                    shifted, torch.tensor([129, 130, 130], dtype=torch.int32)
+                )
+
     def test_draft_prefill_graph_requires_explicit_opt_in(self):
         for value, expected in (("0", False), ("1", True)):
             with patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": value}):

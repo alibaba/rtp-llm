@@ -7,6 +7,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
+    qwen4_pd_enabled,
 )
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
 from rtp_llm.ops import DataType, HybridAttentionType, KvCacheDataType, RoleType
@@ -120,7 +121,10 @@ class Qwen4Exp(Qwen35Moe):
                 )
             parallelism = getattr(self, "parallelism_config", None)
             role_type = getattr(parallelism, "role_type", RoleType.PDFUSION)
-            if role_type in (RoleType.PREFILL, RoleType.DECODE):
+            if (
+                role_type in (RoleType.PREFILL, RoleType.DECODE)
+                and not qwen4_pd_enabled()
+            ):
                 raise RuntimeError(
                     "qwen4_exp QSA does not support PD-separated PREFILL/DECODE "
                     "roles; refusing before indexer weights are loaded"
@@ -141,7 +145,10 @@ class Qwen4Exp(Qwen35Moe):
         if getattr(config, "enable_qwen4_ple", False):
             parallelism = getattr(self, "parallelism_config", None)
             role_type = getattr(parallelism, "role_type", RoleType.PDFUSION)
-            if role_type in (RoleType.PREFILL, RoleType.DECODE):
+            if (
+                role_type in (RoleType.PREFILL, RoleType.DECODE)
+                and not qwen4_pd_enabled()
+            ):
                 raise RuntimeError(
                     "qwen4_exp PLE does not support PD-separated PREFILL/DECODE "
                     "roles; refusing before its rank-local n-gram table is loaded"

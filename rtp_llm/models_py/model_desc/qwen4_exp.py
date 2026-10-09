@@ -35,6 +35,11 @@ from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+    prepare_side_cache_store_writers,
+    publish_layer_side_caches,
+    validate_pd_cache_inputs,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
@@ -199,7 +204,16 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             if self.is_mtp_draft:
                 input_lengths = qsa_runtime.main_inputs.input_lengths
                 max_input_length = max(int(length) for length in input_lengths.tolist())
-                if max_input_length > int(self.qsa_indexer.compress_ratio):
+                # PD prefix hits retain local draft-prefill cu_kv coordinates
+                # even when only one token remains. Publication distinguishes
+                # them from post-rejection commits, whose KV ends are absolute.
+                pd_prefill = (
+                    getattr(qsa_runtime.main_inputs, "cache_store_inputs", None)
+                    is not None
+                )
+                if pd_prefill or max_input_length > int(
+                    self.qsa_indexer.compress_ratio
+                ):
                     return qsa_runtime.select_draft_prefix_reuse_prefill_tokens(
                         q,
                         raw_keys,
@@ -759,8 +773,7 @@ class Qwen4ExpModel(Qwen35Model):
         cp = self.parallelism_config.prefill_cp_config
         if cp.is_enabled() or cp.is_prefill_enabled():
             raise RuntimeError("qwen4_exp PLE does not support prefill CP yet")
-        if getattr(attention_inputs, "cache_store_inputs", None) is not None:
-            raise RuntimeError("qwen4_exp PLE does not support PD cache-store yet")
+        validate_pd_cache_inputs((attention_inputs,))
         # Prefix reuse is supported for page-aligned prefixes: the prefill path
         # resumes state/context from the page holding the last prefix token (and
         # fails fast there when a prefix is not page-aligned).
@@ -1645,6 +1658,18 @@ class Qwen4ExpModel(Qwen35Model):
                 "qwen4_exp PLE target transaction must be finalized or rolled "
                 "back before the next forward"
             )
+        attention_inputs = get_attention_inputs_value(inputs)
+        has_side_caches = bool(self.ple_layers) or any(
+            getattr(getattr(layer, "self_attn", None), "qsa_indexer", None) is not None
+            for layer in self.layers
+        )
+        side_cache_writers = (
+            prepare_side_cache_store_writers(
+                attention_inputs, self.kv_cache, layer_count=len(self.layers)
+            )
+            if has_side_caches
+            else {}
+        )
         hidden_states = self.word_embedding(inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
@@ -1732,6 +1757,7 @@ class Qwen4ExpModel(Qwen35Model):
                 attn_meta=attn_meta,
                 qsa_runtime=qsa_runtime,
             )
+            publish_layer_side_caches(self.kv_cache, i, side_cache_writers)
             if layer_in_norm is not None:
                 logging.warning(
                     "[qwen4-layer-stats] forward=%d layer=%d in=%.4f out=%.4f",

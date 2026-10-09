@@ -764,6 +764,28 @@ class Qwen4ExpQSAConstructionTest(TestCase):
         self.assertFalse(hasattr(runtime, "draft_q"))
         self.assertEqual(fmha.selected.shape, (5, 11))
 
+    def test_mtp_pd_short_prefix_hit_uses_prefill_not_rejection_commit(self):
+        attention = self._attention(is_mtp=True)
+        for length in (1, 3, 4):
+            with self.subTest(length=length):
+                inputs = self._prefill_inputs()
+                inputs.input_lengths = torch.tensor([length], dtype=torch.int32)
+                inputs.prefix_lengths = torch.tensor([128], dtype=torch.int32)
+                inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+                inputs.cache_store_inputs = SimpleNamespace()
+                runtime = self._runtime(attention, inputs)
+                selected = attention._qsa_selected_indices(
+                    torch.randn(length, 16), runtime
+                )
+                self.assertEqual(selected.shape, (length, 11))
+                self.assertEqual(runtime.draft_prefix_reuse_q.shape, (length, 4, 8))
+                self.assertFalse(hasattr(runtime, "draft_q"))
+                inputs.cache_store_inputs = None
+                commit_runtime = self._runtime(attention, inputs)
+                attention._qsa_selected_indices(torch.randn(length, 16), commit_runtime)
+                self.assertEqual(commit_runtime.draft_q.shape, (length, 4, 8))
+                self.assertFalse(hasattr(commit_runtime, "draft_prefix_reuse_q"))
+
     def test_target_verify_validation_fails_before_projection_and_main_writer(self):
         events = []
 
