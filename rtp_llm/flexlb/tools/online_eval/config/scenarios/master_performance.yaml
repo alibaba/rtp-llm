@@ -25,7 +25,7 @@ program: steady
 parameters:
   criteria:
     benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10
-    warmup_s: 300
+    warmup_s: 180
     measure_s: 180
     sample_s: 1
     max_gap_s: 3
@@ -71,7 +71,7 @@ parameters:
         priority: 50
         max_input_tokens: 32768
     client:
-      DURATION_S: '510'
+      DURATION_S: '390'
       MAX_CONCURRENCY: '65536'
       TIMEOUT_MS: '120000'
       RESPONSE_TIMEOUT: '130'

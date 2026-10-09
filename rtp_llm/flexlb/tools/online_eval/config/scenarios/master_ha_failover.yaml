@@ -55,9 +55,9 @@ parameters:
           priority: 50
     baseline_wait: {wait_s: 20}
     settle: {wait_s: 5}
-    survivor_wait: {wait_s: 30}
-    outage_wait: {wait_s: 45}
-    both_wait: {wait_s: 30}
+    survivor_wait: {wait_s: 20}
+    outage_wait: {wait_s: 30}
+    both_wait: {wait_s: 20}
     kill_a: {mode: kill, target: A}
     kill_b: {mode: kill, target: B}
     b_ready: {target: B, inflight_zero: false}
