@@ -78,6 +78,35 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
+def _project_decode_weights(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    if not (x.is_cuda and x.dtype == torch.bfloat16 and is_sm120(x.device)):
+        return F.linear(x, weight)
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_weight_projection_triton import (
+        project_weights_if_supported,
+    )
+
+    projected = project_weights_if_supported(x, weight)
+    if projected is not None:
+        return projected
+    flat = x.reshape(-1, x.shape[-1])
+    if flat.shape[0] == 0:
+        return F.linear(x, weight)
+    # SM120 small-M cuBLAS paths round these BF16 scores differently. Keep
+    # reduction geometry fixed so speculative rows cannot change TopK membership.
+    tiles = []
+    for start in range(0, flat.shape[0], 8):
+        tile = flat[start : start + 8]
+        rows = tile.shape[0]
+        if rows < 8:
+            tile = F.pad(tile, (0, 0, 0, 8 - rows))
+        # FP32 output avoids cuBLAS's intermediate BF16 reduction truncation;
+        # retain the existing BF16 rounding boundary before quantization.
+        projected = torch.mm(tile, weight.t(), out_dtype=torch.float32)
+        tiles.append(projected[:rows].to(x.dtype))
+    result = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
+    return result.reshape(*x.shape[:-1], weight.shape[0])
+
+
 # Run the prefill indexer score+topk tail on a dedicated side stream so it
 # overlaps the same layer's main-stream attention prep (main compressor write,
 # Q materialize, workspace gathers). The tail is pure local kernels (no NCCL);
@@ -246,6 +275,37 @@ def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
     )
 
 
+def _canonicalize_fp8_topk(logits, out, row_ends, row_starts=None) -> None:
+    if not (logits.is_cuda and is_sm120(logits.device)):
+        _canonicalize_prefill_topk_out(out)
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8._topk_canonical_triton import (
+        canonicalize_topk_if_supported,
+    )
+
+    if canonicalize_topk_if_supported(logits, out, row_ends, row_starts):
+        return
+    # Large or unsupported layouts retain the same deterministic tie policy.
+    col = torch.arange(logits.shape[1], device=logits.device).unsqueeze(0)
+    starts = torch.zeros_like(row_ends) if row_starts is None else row_starts
+    lengths = row_ends - starts
+    # Put valid entries before padding so stable sort also handles -inf ties.
+    absolute = col + starts[:, None]
+    window = logits.gather(1, absolute.clamp(max=logits.shape[1] - 1).long())
+    masked = torch.where(
+        col < lengths[:, None], window, torch.full_like(window, float("-inf"))
+    )
+    count = min(out.shape[1], logits.shape[1])
+    selected = torch.argsort(masked, dim=-1, descending=True, stable=True)[:, :count]
+    selected = selected.to(torch.int32)
+    selected.masked_fill_(
+        torch.arange(count, device=out.device)[None, :] >= lengths[:, None], -1
+    )
+    out.fill_(-1)
+    out[:, :count].copy_(selected)
+    _canonicalize_prefill_topk_out(out)
+
+
 def _run_prefill_topk_torch(
     logits: torch.Tensor,
     row_starts: torch.Tensor,
@@ -265,9 +325,9 @@ def _run_prefill_topk_torch(
     indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
-    if _fp8_prefill_topk_canonicalize():
-        _canonicalize_prefill_topk_out(indices)
     out[:, :k_eff].copy_(indices)
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _run_prefill_topk(
@@ -295,7 +355,7 @@ def _run_prefill_topk(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
         if _fp8_prefill_topk_canonicalize():
-            _canonicalize_prefill_topk_out(out)
+            _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -310,7 +370,7 @@ def _run_prefill_topk(
         _fp8_prefill_topk_force_radix_sort(),
     )
     if _fp8_prefill_topk_canonicalize():
-        _canonicalize_prefill_topk_out(out)
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
@@ -352,6 +412,10 @@ def _run_topk_v3(
         k,
         max_seq_len,
     )
+    # Atomic selection emits an unordered set. Keep the requested attention
+    # reduction order stable in decode and target verification as in prefill.
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_fp8_topk(logits, output, lengths)
     return True
 
 
@@ -765,7 +829,7 @@ class IndexerFP8(PoolBackedModule):
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = F.linear(x, self.weights_proj)
+            weights = _project_decode_weights(x, self.weights_proj)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -826,6 +890,8 @@ class IndexerFP8(PoolBackedModule):
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
                     k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
+                if _fp8_prefill_topk_canonicalize():
+                    _canonicalize_fp8_topk(score_2d, out_topk_2d, lengths_i32)
             return out_topk_buffer
         finally:
             self._clear_nested_pool()

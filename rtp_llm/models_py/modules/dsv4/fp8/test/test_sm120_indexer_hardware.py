@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8 import indexer
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
@@ -37,6 +40,75 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
         self.device = torch.device("cuda", torch.cuda.current_device())
         torch.manual_seed(23)
 
+    def test_decode_weight_projection_is_batch_invariant(self) -> None:
+        dim, heads = 4096, 64
+        weight = (
+            torch.randn(heads, dim, dtype=torch.bfloat16, device=self.device) * 0.01
+        )
+        token = torch.randn(1, 1, dim, dtype=torch.bfloat16, device=self.device)
+        expected = indexer._project_decode_weights(token, weight)[0, 0]
+        reference = torch.nn.functional.linear(token.double(), weight.double())[0, 0]
+        torch.testing.assert_close(expected.double(), reference, rtol=8e-3, atol=2e-4)
+
+        def fixed_tile_reference(x):
+            flat = x.reshape(-1, dim)
+            tiles = []
+            for start in range(0, flat.shape[0], 8):
+                tile = flat[start : start + 8]
+                count = tile.shape[0]
+                if count < 8:
+                    tile = torch.nn.functional.pad(tile, (0, 0, 0, 8 - count))
+                projected = torch.mm(tile, weight.t(), out_dtype=torch.float32)
+                tiles.append(projected[:count].to(x.dtype))
+            return torch.cat(tiles).reshape(*x.shape[:-1], heads)
+
+        for rows in (1, 2, 3, 4, 7, 8, 9, 15, 16, 31, 64, 65, 127):
+            with self.subTest(rows=rows):
+                # Change both row position and neighboring tokens, not just shape.
+                data = torch.randn(
+                    rows, 1, dim * 2, dtype=torch.bfloat16, device=self.device
+                )
+                x = data[..., ::2]
+                positions = sorted({0, rows // 2, rows - 1})
+                for position in positions:
+                    x[position].copy_(token[0])
+                actual = indexer._project_decode_weights(x, weight)
+                torch.testing.assert_close(
+                    actual, fixed_tile_reference(x), rtol=0, atol=0
+                )
+                full_reference = torch.nn.functional.linear(x.double(), weight.double())
+                torch.testing.assert_close(
+                    actual.double(), full_reference, rtol=8e-3, atol=2e-4
+                )
+                torch.testing.assert_close(
+                    actual[positions, 0],
+                    expected.expand(len(positions), -1),
+                    rtol=0,
+                    atol=0,
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = indexer._project_decode_weights(x, weight)
+                for _ in range(2):
+                    x.copy_(torch.randn_like(x))
+                    for position in positions:
+                        x[position].copy_(token[0])
+                    graph.replay()
+                    torch.testing.assert_close(
+                        captured, fixed_tile_reference(x), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        captured[positions, 0],
+                        expected.expand(len(positions), -1),
+                        rtol=0,
+                        atol=0,
+                    )
+                del graph
+        empty = torch.empty(0, 1, dim, dtype=torch.bfloat16, device=self.device)
+        self.assertEqual(
+            indexer._project_decode_weights(empty, weight).shape, (0, 1, heads)
+        )
+
     def test_topk_v3_binding_and_values(self) -> None:
         if not hasattr(rtp_llm_ops, "topk_v3"):
             self.fail("SM120 build is missing the required rtp_llm_ops.topk_v3 binding")
@@ -65,6 +137,134 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
         graph.replay()
         torch.cuda.synchronize(self.device)
         assert_values()
+
+    def test_canonical_topk_is_stable_during_graph_replay(self) -> None:
+        width = 8192
+        lengths = torch.tensor(
+            [8192, 4097, 37, 0], dtype=torch.int32, device=self.device
+        )
+        # Unique scores separate output-order stability from cutoff tie policy.
+        logits = torch.stack(
+            [torch.randperm(width, device=self.device) for _ in range(4)]
+        ).float()
+
+        with mock.patch.dict(
+            os.environ,
+            {"DSV4_TOPK_V3": "1", "DSV4_INDEXER_TOPK_CANONICALIZE": "1"},
+        ):
+            for topk in (512, 1024, 2048):
+                with self.subTest(topk=topk):
+                    output = torch.empty(
+                        (4, topk), dtype=torch.int32, device=self.device
+                    )
+                    self.assertTrue(
+                        indexer._run_topk_v3(logits, lengths, output, topk, width)
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        indexer._run_topk_v3(logits, lengths, output, topk, width)
+                    for _ in range(2):
+                        expected = torch.full_like(output, -1)
+                        for row, length in enumerate(lengths.cpu().tolist()):
+                            count = min(topk, length)
+                            if count:
+                                indices = logits[row, :length].topk(count).indices
+                                expected[row, :count] = indices.sort().values.int()
+                        for _ in range(16):
+                            graph.replay()
+                            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                        logits.neg_()
+
+    def test_prefill_and_decode_canonicalize_cutoff_ties(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"DSV4_TOPK_V3": "1", "DSV4_INDEXER_TOPK_CANONICALIZE": "1"},
+        ):
+            for width in (1024, 2048, 8192, 32768):
+                for topk in (512, 1024, 2048):
+                    for prefill in (False, True):
+                        with self.subTest(width=width, topk=topk, prefill=prefill):
+                            scores = torch.randint(
+                                -16, 17, (4, width), device=self.device
+                            ).float()
+                            scores[0].zero_()
+                            starts = torch.tensor(
+                                [0, 17, 5, 100] if prefill else [0] * 4,
+                                dtype=torch.int32,
+                                device=self.device,
+                            )
+                            lengths = torch.tensor(
+                                [width, width - 17, 37, 0],
+                                dtype=torch.int32,
+                                device=self.device,
+                            )
+                            ends = starts + lengths
+                            output = torch.empty(
+                                (4, topk), dtype=torch.int32, device=self.device
+                            )
+
+                            def forward():
+                                if prefill:
+                                    indexer._run_prefill_topk(
+                                        scores, starts, ends, output, topk, 4
+                                    )
+                                else:
+                                    self.assertTrue(
+                                        indexer._run_topk_v3(
+                                            scores, ends, output, topk, width
+                                        )
+                                    )
+
+                            forward()
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph):
+                                forward()
+                            for variant in range(3):
+                                expected = torch.full_like(output, -1)
+                                for row, (start, end) in enumerate(
+                                    zip(starts.cpu().tolist(), ends.cpu().tolist())
+                                ):
+                                    count = min(topk, end - start)
+                                    if count:
+                                        indices = torch.argsort(
+                                            scores[row, start:end],
+                                            descending=True,
+                                            stable=True,
+                                        )[:count]
+                                        expected[row, :count] = (
+                                            indices.sort().values.int()
+                                        )
+                                for _ in range(8):
+                                    graph.replay()
+                                    torch.testing.assert_close(
+                                        output, expected, rtol=0, atol=0
+                                    )
+                                if variant == 0:
+                                    scores.neg_()
+                                else:
+                                    scores[0].fill_(float("inf"))
+                                    scores[1:].fill_(float("-inf"))
+
+    def test_canonical_topk_fallback_preserves_lowest_index_ties(self) -> None:
+        for width, stride in ((1025, 2), (32769, 1)):
+            with self.subTest(width=width, stride=stride):
+                scores = torch.zeros((2, width * stride), device=self.device)[
+                    :, ::stride
+                ]
+                starts = torch.tensor([3, 17], dtype=torch.int32, device=self.device)
+                ends = torch.full_like(starts, width)
+                output = torch.zeros((2, 512), dtype=torch.int32, device=self.device)
+                indexer._canonicalize_fp8_topk(scores, output, ends, starts)
+                expected = torch.arange(512, device=self.device, dtype=torch.int32)
+                torch.testing.assert_close(
+                    output, expected.expand(2, -1), rtol=0, atol=0
+                )
+                scores.fill_(float("-inf"))
+                ends[1] = starts[1] + 37
+                indexer._canonicalize_fp8_topk(scores, output, ends, starts)
+                expected_rows = expected.expand(2, -1).clone()
+                expected_rows[1, 37:] = -1
+                torch.testing.assert_close(output, expected_rows, rtol=0, atol=0)
 
     def test_paged_decode_uses_sm120_fallback_with_eight_heads(self) -> None:
         self.assertTrue(has_fp8_paged_mqa_logits(self.device))
