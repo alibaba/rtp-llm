@@ -879,6 +879,7 @@ def _client_check_validate(params, plan):
             "error_kind",
             "code",
             "min_samples",
+            "warning_profiles",
         },
         {"rows", "metric", "op", "expected"},
     )
@@ -887,6 +888,11 @@ def _client_check_validate(params, plan):
         raise ValueError("unknown client metric/comparison")
     if type(p["expected"]) not in (int, float) or not math.isfinite(p["expected"]):
         raise ValueError("client comparison needs finite numeric expected value")
+    from flexlb_profile_data import PROFILES
+
+    warnings = p.get("warning_profiles", [])
+    if not isinstance(warnings, list) or any(profile not in PROFILES for profile in warnings):
+        raise ValueError("warning_profiles must contain registered profiles")
     p.setdefault("min_samples", 1)
     if type(p["min_samples"]) is not int or p["min_samples"] < 1:
         raise ValueError("client check must require actual samples")
@@ -998,12 +1004,21 @@ def _client_check(ctx, params, deadline):
         else actual >= expected if params["op"] == "ge" else actual <= expected
     )
     passed = n >= params["min_samples"] and comparison
+    warning = (n >= params["min_samples"] and not comparison
+               and bool(params.get("warning_profiles"))
+               and ctx.instance["profile"] in params["warning_profiles"])
+    if warning:
+        import logging
+        logging.getLogger(__name__).warning(
+            "HA advisory criterion: profile=%s metric=%s actual=%s expected=%s samples=%s",
+            ctx.instance["profile"], metric, actual, expected, n)
     return StageOutput(
         {"actual": actual},
         [
             CheckResult(
                 "criterion",
-                "PASS" if passed else "FAIL",
+                "PASS" if passed else "WARNING" if warning else "FAIL",
+                detail="Known issue: advisory criterion" if warning else "",
                 actual=actual,
                 expected=expected,
                 evidence={

@@ -41,6 +41,9 @@ def build_spec(payload, directory, view_links=None):
         details("Playback iterations", payload["iterations"]),
         details("Traffic semantics", payload["traffic_manifests"]),
     ]
+    if payload["workload"].get("telemetry_warnings"):
+        sections.insert(0, details("采集告警：预算内的短暂缺口",
+                                   payload["workload"]["telemetry_warnings"]))
     if payload.get("unavailable_report_views"):
         sections.append(details("未生成的报告视角", payload["unavailable_report_views"]))
     items = [

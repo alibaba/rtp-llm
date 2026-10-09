@@ -191,6 +191,21 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["finding_confirmed"], ["check.comparison"])
 
+    def test_warning_is_visible_and_does_not_fail_execution(self):
+        handler = StageHandler(
+            "inspect", lambda p, plan: p,
+            lambda ctx, p, d: StageOutput(
+                {"ok": True}, [CheckResult("complete", "WARNING", "known issue")]),
+            {"ok": "boolean"}, checks=frozenset({"complete"}),
+        )
+        doc = source()
+        doc["stages"].append({"id": "advisory", "action": "inspect"})
+        result = self.run_plan(doc, {"inspect": handler})
+        self.assertEqual(result["status"], "PASS")
+        check = result["stages"][-1]["checks"][0]
+        self.assertEqual(check["status"], "WARNING")
+        self.assertEqual(check["detail"], "known issue")
+
     def test_adapter_output_and_check_contract_errors_are_not_findings(self):
         handler = StageHandler(
             "inspect",

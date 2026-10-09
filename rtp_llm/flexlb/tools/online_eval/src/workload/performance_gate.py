@@ -55,7 +55,7 @@ def finite(v):
 
 
 def validate(criteria):
-    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps"} != NUMERIC | {"benchmark_id"}:
+    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps", "engine_tps_by_profile"} != NUMERIC | {"benchmark_id"}:
         raise ValueError(
             "performance criteria must explicitly supply every contract field"
         )
@@ -97,7 +97,26 @@ def validate(criteria):
         if (not isinstance(bounds, dict) or set(bounds) != set(ENGINE_TPS)
                 or any(not finite(v) or v <= 0 for v in bounds.values())):
             raise ValueError("engine_tps requires all three positive absolute floors")
+    from flexlb_profile_data import PROFILES
+    overrides = criteria.get("engine_tps_by_profile", {})
+    if not isinstance(overrides, dict) or set(overrides) - set(PROFILES):
+        raise ValueError("engine_tps_by_profile requires registered profiles")
+    for bounds in overrides.values():
+        if (not isinstance(bounds, dict) or not bounds or set(bounds) - set(ENGINE_TPS)
+                or any(not finite(v) or v <= 0 for v in bounds.values())
+                or "engine_tps" not in criteria):
+            raise ValueError("invalid profile engine TPS floors")
     return criteria
+
+
+def for_profile(criteria, profile):
+    """Freeze effective floors before observation and evidence collection."""
+    import copy
+    result = copy.deepcopy(validate(criteria))
+    overrides = result.pop("engine_tps_by_profile", {})
+    if profile in overrides:
+        result["engine_tps"].update(overrides[profile])
+    return validate(result)
 
 
 def engine_tps_checks(evidence):

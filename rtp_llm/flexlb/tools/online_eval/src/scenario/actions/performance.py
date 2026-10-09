@@ -7,7 +7,7 @@ from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.actions.elastic import _validate
-from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS, write_evidence, compact_flow
+from workload.performance_gate import for_profile, validate, report, analyze, trace_workload_sha, ENGINE_TPS, write_evidence, compact_flow
 from traffic.traffic_source import sha256_file
 
 
@@ -61,7 +61,7 @@ def provenance(ctx, flow, criteria):
 
 def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
-    c = p["criteria"]
+    c = for_profile(p["criteria"], ctx.instance["profile"])
     origin = time.time() * 1000
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000

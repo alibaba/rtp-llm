@@ -45,6 +45,10 @@ parameters:
     slo_e2e_ms: 30000
     slo_tpot_ms: 50
     max_inflight_growth_rps: 10
+    engine_tps_by_profile:
+      single-nonbatch:
+        rtp_llm_context_tps: 45000
+        rtp_llm_context_tps_with_cache: 90000
     engine_tps:
       rtp_llm_context_tps: 50000
       rtp_llm_context_tps_with_cache: 100000

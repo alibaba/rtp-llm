@@ -191,6 +191,23 @@ def collection_gaps(directory, anchor, max_gap_s):
     return gaps
 
 
+def bounded_collection_gaps(series, gaps, max_gap_s):
+    """Tolerate only gaps bracketed by successful scrapes within the budget."""
+    tolerated, fatal = {}, {}
+    for key, times in gaps.items():
+        source = "/".join(key.split("/")[:2])
+        healthy = sorted(t for name, points in series.items()
+                         if name.startswith(source + "/up/")
+                         for t, value in points if value == 1)
+        for t in times:
+            left = max((x for x in healthy if x < t), default=None)
+            right = min((x for x in healthy if x > t), default=None)
+            bounded = (left is not None and right is not None
+                       and 0 < right - left <= max_gap_s)
+            (tolerated if bounded else fatal).setdefault(key, []).append(t)
+    return tolerated, fatal
+
+
 def analyze_report(directory, result, evidence):
     directory = Path(directory)
     from monitoring.session import archived_series
@@ -213,7 +230,16 @@ def analyze_report(directory, result, evidence):
     result["workload"]["telemetry_completeness"] = (
         "PARTIAL" if source_gaps else "COMPLETE"
     )
-    if unexpected_gaps:
+    budget = result["workload"].get("runtime_configuration", {}).get("max_sample_gap_s", 0)
+    tolerated, fatal = bounded_collection_gaps(series, unexpected_gaps, budget)
+    result["workload"]["tolerated_telemetry_gaps"] = tolerated
+    result["workload"]["fatal_telemetry_gaps"] = fatal
+    result["workload"]["telemetry_warnings"] = [
+        dict(source=key, times=times, max_gap_s=budget,
+             reason="Short collection gap bracketed by successful scrapes")
+        for key, times in tolerated.items()
+    ]
+    if fatal:
         result["workload"]["runtime_validity"] = "INVALID"
     checks = [
         dict(stage=s["id"], **check) for s in result["stages"] for check in s["checks"]

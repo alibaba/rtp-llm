@@ -165,6 +165,7 @@ def build_spec(payload, presentation, default_path):
             state_samples=len(states),
             monitoring=payload["workload"].get("telemetry_completeness"),
             telemetry_errors=payload["workload"].get("telemetry_integrity_errors", []),
+            telemetry_warnings=payload["workload"].get("telemetry_warnings", []),
         )),
         links("其他报告视角", [dict(label="全量监控", href="../" + default_path.parent.name + "/report.html")]),
     ]
