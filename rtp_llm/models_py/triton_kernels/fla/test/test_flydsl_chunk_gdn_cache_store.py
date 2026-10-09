@@ -285,6 +285,9 @@ class FlyDSLChunkGDNCacheStoreTest(unittest.TestCase):
         for bi in range(total_blocks):
             wrote_t = (ssm_t[bi] != -999.0).any().item()
             wrote_f = (ssm_f[bi] != -999.0).any().item()
+            # Every assigned 64-token block must hold a checkpoint, including
+            # the first one; parity alone also passes when both paths skip it.
+            self.assertEqual(wrote_f, bi > 0, f"{tag} block {bi} missing checkpoint")
             self.assertEqual(
                 wrote_t,
                 wrote_f,

@@ -64,10 +64,11 @@ def h20_oss_suites():
                 },
                 gpu_type = ["H20_CU13"],
             ),
+            # The m1 request has 69 GLM-4.7-Flash tokens, so this runs two prefill chunks.
             smoke_test(
                 name = "mla_glm4_moe_lite",
                 task_info = "data/model/glm4_moe_lite/q_r_h20.json",
-                smoke_args = "--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
+                smoke_args = "--warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
                 gpu_type = ["H20_CU13"],
             ),
         ],
@@ -223,7 +224,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "dense_fp8pb_dynamic",
                 task_info = "data/model/qwen3/q_r_h20.json",
-                smoke_args = "--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                # The existing 497-token prompt exercises eight 64-token prefill chunks.
+                smoke_args = "--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
@@ -505,7 +507,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "eagle_mtp_tp2",
                 task_info = "data/model/qwen2_14b/q_r_mtp.json",
-                smoke_args = "--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                # 320 leaves room for the existing 155-token prompt and 100-token generation.
+                smoke_args = "--max_seq_len 320 --seq_size_per_block 64 --prefill_chunk_size 64 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --reserver_runtime_mem_mb 21954 --tp_size 2",
                 gpu_type = ["H20_CU13"],
             ),
             # Request tier flags remain accepted; deployments select DEVICE or HOST.
