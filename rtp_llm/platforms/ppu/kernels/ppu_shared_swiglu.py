@@ -39,8 +39,6 @@ def silu_mul_merged_bf16(gate_up, limit=0.0):
         or gate_up.shape[-1] % 2
     ):
         raise ValueError("PPU shared SwiGLU requires contiguous BF16 [..., 2H]")
-    if torch.cuda.get_device_name(gate_up.device) != "ZW-M890P":
-        raise RuntimeError("PPU shared SwiGLU requires ZW-M890P")
     h = gate_up.shape[-1] // 2
     out = torch.empty(
         (*gate_up.shape[:-1], h), dtype=gate_up.dtype, device=gate_up.device

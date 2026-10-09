@@ -30,7 +30,6 @@ def is_supported(routed, shared):
         and routed.shape == shared.shape
         and routed.is_contiguous()
         and shared.is_contiguous()
-        and torch.cuda.get_device_name(routed.device) == "ZW-M890P"
     )
 
 

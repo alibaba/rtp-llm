@@ -8,12 +8,11 @@ def _register() -> None:
 
     if get_device_type() != DeviceType.Ppu:
         return
-    import torch
     from rtp_llm.platforms.ppu.models.dsv4.ppu_provider import (
         register_m890p_dsv4_provider,
     )
 
-    register_m890p_dsv4_provider(device_name=torch.cuda.get_device_name(), ep_size=1)
+    register_m890p_dsv4_provider(ep_size=1)
 
 
 def install() -> None:

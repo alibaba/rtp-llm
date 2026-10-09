@@ -32,9 +32,6 @@ def _ceil_to_multiple(value: int, multiple: int) -> int:
 def _require_m890p(tensor: torch.Tensor) -> None:
     if not tensor.is_cuda:
         raise ValueError("M890P MXFP4 kernels require a CUDA-compatible PPU tensor")
-    device_name = torch.cuda.get_device_name(tensor.device)
-    if device_name != "ZW-M890P":
-        raise RuntimeError(f"M890P MXFP4 kernels cannot run on device {device_name!r}")
 
 
 def _load_deep_gemm():

@@ -9,7 +9,6 @@ def build_model(*, build_ctx, request, **kwargs):
     provider = PpuModuleProvider(
         build_ctx.selection.model_metadata["execution_options"]
     )
-    provider.require_device_name(build_ctx.selection.platform.device_name)
     return baseline.build_model(
         build_ctx=build_ctx, request=request, platform_provider=provider, **kwargs
     )
@@ -25,7 +24,6 @@ def build_decode_model(*, build_ctx, request, **kwargs):
     provider = PpuDecodeProvider(
         build_ctx.selection.model_metadata["execution_options"]
     )
-    provider.require_device_name(build_ctx.selection.platform.device_name)
     return baseline.build_model(
         build_ctx=build_ctx, request=request, platform_provider=provider, **kwargs
     )

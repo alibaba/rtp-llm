@@ -21,7 +21,7 @@ from rtp_llm.platforms.ppu.models.dsv4.manifest import (
 )
 
 
-def selection(rank=0, **changed):
+def selection(rank=0, *, device_name="ZW-M890P", **changed):
     metadata = dict(
         model_type="deepseek_v4",
         num_layers=43,
@@ -44,7 +44,7 @@ def selection(rank=0, **changed):
     )
     metadata.update(changed)
     return ModuleSelectionContext(
-        DeviceRuntimeContext(DeviceType.Ppu, "ZW-M890P", rank), json.dumps(metadata)
+        DeviceRuntimeContext(DeviceType.Ppu, device_name, rank), json.dumps(metadata)
     )
 
 
@@ -464,6 +464,17 @@ class Dsv4PlanTest(unittest.TestCase):
         ):
             with self.subTest(role="DECODE", flagged=flagged):
                 ctx = self.decode_context(**flagged)
+                ctx.prepare([request_for("model", ctx.selection)])
+                self.assertEqual(len(ctx.bindings), 130)
+
+    def test_device_name_no_longer_disqualifies(self):
+        for device_name in ("ZW-M890P", "PPU-ZW810E"):
+            with self.subTest(role="PREFILL", device_name=device_name):
+                ctx = self.context(selection(device_name=device_name))
+                ctx.prepare([request_for("model", ctx.selection)])
+                self.assertEqual(len(ctx.bindings), 130)
+            with self.subTest(role="DECODE", device_name=device_name):
+                ctx = self.decode_context(device_name=device_name)
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
 

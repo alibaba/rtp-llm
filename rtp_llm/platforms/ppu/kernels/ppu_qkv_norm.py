@@ -71,8 +71,6 @@ def normalize_decode_qkv(raw, q_weight, kv_weight, freqs, eps):
         for t in tensors
     ):
         raise ValueError("Merged QKV inputs must be contiguous tensors on one PPU")
-    if torch.cuda.get_device_name(raw.device) != "ZW-M890P":
-        raise ValueError("Merged Decode QKV requires M890P")
     if (
         raw.dtype != torch.bfloat16
         or q_weight.dtype != raw.dtype

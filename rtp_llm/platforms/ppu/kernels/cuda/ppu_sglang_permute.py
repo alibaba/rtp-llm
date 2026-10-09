@@ -51,8 +51,6 @@ def fused_permute(a: torch.Tensor, sfa: torch.Tensor):
         raise ValueError(
             "DSV4 PPU fused permute requires FP8 payload and FP32 scales on one device"
         )
-    if torch.cuda.get_device_name(a.device) != "ZW-M890P":
-        raise RuntimeError("DSV4 PPU fused permute requires ZW-M890P")
     """
     Fused JIT kernel: permute(1,0,2).contiguous() for two 3-D tensors in one launch.
 

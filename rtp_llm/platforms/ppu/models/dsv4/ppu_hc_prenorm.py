@@ -43,9 +43,6 @@ def launch_geometry(m: int, k: int, n: int) -> dict:
 
 @lru_cache(maxsize=None)
 def _require_device(index: int) -> None:
-    name = torch.cuda.get_device_name(index)
-    if name != "ZW-M890P":
-        raise RuntimeError(f"deterministic PPU HC requires ZW-M890P, got {name}")
     logging.info(
         "DSV4_HC_BACKEND deepgemm_deterministic: existing DeepGEMM partials + torch.sum"
     )

@@ -22,7 +22,6 @@ from rtp_llm.models_py.modules.dsv4.platform_provider import (
     register_dsv4_platform_provider,
 )
 
-M890P_DEVICE_NAME = "ZW-M890P"
 FP8_INDEXER_MODE = "FP8"
 _MOE_OBSERVABILITY_EVENT = "dsv4_moe_provider_selection"
 _LOGGER = logging.getLogger(__name__)
@@ -145,14 +144,6 @@ class M890PDsv4Provider:
         from .ppu_hc_prenorm import tf32_hc_prenorm_gemm
 
         return tf32_hc_prenorm_gemm(*args, **kwargs)
-
-    @staticmethod
-    def require_device_name(device_name: str) -> None:
-        if device_name != M890P_DEVICE_NAME:
-            raise RuntimeError(
-                f"DSV4 candidate provider requires {M890P_DEVICE_NAME}, "
-                f"got {device_name!r}"
-            )
 
     def build_block(
         self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any
@@ -303,9 +294,7 @@ class M890PDsv4Provider:
         return PpuFp4Linear(*args, **kwargs)
 
 
-def register_m890p_dsv4_provider(
-    *, device_name: str, ep_size: int
-) -> M890PDsv4Provider:
+def register_m890p_dsv4_provider(*, ep_size: int) -> M890PDsv4Provider:
     """Explicitly register the EP1/EP8 candidate before model construction.
 
     This function is intentionally never called at import time. Only the EP1
@@ -314,7 +303,6 @@ def register_m890p_dsv4_provider(
     """
 
     provider = M890PDsv4Provider()
-    provider.require_device_name(device_name)
     if type(ep_size) is not int or ep_size not in (1, 8):
         _fail_closed(f"provider registration for ep_size={ep_size!r}")
     register_dsv4_platform_provider(provider)
@@ -323,7 +311,6 @@ def register_m890p_dsv4_provider(
 
 __all__ = [
     "FP8_INDEXER_MODE",
-    "M890P_DEVICE_NAME",
     "M890PDsv4Provider",
     "register_m890p_dsv4_provider",
 ]

@@ -70,9 +70,6 @@ def _runtime_eligible() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
-        current_device = torch.cuda.current_device()
-        if torch.cuda.get_device_name(current_device) != "ZW-M890P":
-            return False
         import deep_gemm
     except (ImportError, RuntimeError):
         return False
@@ -231,8 +228,6 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
             raise ValueError("ppu_grouped_fp4 weights/scales must share one device")
         if any(not tensor.is_contiguous() for tensor in tensors):
             raise ValueError("ppu_grouped_fp4 weights/scales must be contiguous")
-        if torch.cuda.get_device_name(w1.device) != "ZW-M890P":
-            raise RuntimeError("ppu_grouped_fp4 requires ZW-M890P")
 
         import deep_gemm
 

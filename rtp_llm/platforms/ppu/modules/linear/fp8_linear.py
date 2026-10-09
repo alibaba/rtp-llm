@@ -17,7 +17,6 @@ from torch import nn
 
 FP8_BLOCK_SIZE = 128
 FP8_QUANT_EPS = 1.0e-4
-M890P_DEVICE_NAME = "ZW-M890P"
 _DENSE_SYMBOL = "fp8_gemm_nt"
 _QUANT_LEGACY_SYMBOL = "per_token_group_quant_fp8"
 _QUANT_V2_SYMBOL = "per_token_group_quant_fp8_v2"
@@ -80,15 +79,6 @@ def _require_cuda_contiguous(tensor: torch.Tensor, name: str) -> None:
 
 def _require_m890p(tensor: torch.Tensor, name: str) -> None:
     _require_cuda_contiguous(tensor, name)
-    device_index = tensor.device.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    device_name = torch.cuda.get_device_name(device_index)
-    if device_name != M890P_DEVICE_NAME:
-        raise RuntimeError(
-            f"{name} must be on {M890P_DEVICE_NAME}, got {device_name!r} "
-            f"at {tensor.device}"
-        )
 
 
 def checkpoint_ue8m0_scale_to_fp32(

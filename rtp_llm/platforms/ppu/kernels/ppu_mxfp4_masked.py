@@ -73,8 +73,6 @@ def mxfp4_experts_masked(
     if not isinstance(expert_x, tuple) or len(expert_x) != 2:
         raise ValueError("Expert input must be a packed MXFP4 (data, scale) tuple")
     x, scale = full_slot_mxfp4_views(*expert_x)
-    if torch.cuda.get_device_name(x.device) != "ZW-M890P":
-        raise RuntimeError("Masked MXFP4 experts require a PPU M890P")
     w13, s13 = full_slot_mxfp4_views(*weight13)
     w2, s2 = full_slot_mxfp4_views(*weight2)
     e, m, packed_d = x.shape

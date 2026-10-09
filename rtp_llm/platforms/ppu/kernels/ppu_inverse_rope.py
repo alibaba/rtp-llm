@@ -52,9 +52,7 @@ def is_supported(x, freqs, rope_dim):
         return False
     batch, seq = x.shape[:2]
     per_batch = freqs.ndim == 2 and freqs.shape[0] == batch
-    return (
-        per_batch or freqs.numel() == batch * seq * (rope_dim // 2)
-    ) and torch.cuda.get_device_name(x.device) == "ZW-M890P"
+    return per_batch or freqs.numel() == batch * seq * (rope_dim // 2)
 
 
 def inverse_rope_inplace(x, freqs, rope_dim):

@@ -36,7 +36,6 @@ def is_supported(scores, starts, ends, out, topk):
         and scores.is_cuda
         and scores.stride(1) == 1
         and scores.shape[1] < 2**31
-        and torch.cuda.get_device_name(scores.device) == "ZW-M890P"
         and all(t.device == scores.device for t in (starts, ends, out))
         and all(
             t.dtype == torch.int32 and t.is_contiguous() for t in (starts, ends, out)

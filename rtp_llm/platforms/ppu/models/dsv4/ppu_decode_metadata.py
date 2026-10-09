@@ -50,12 +50,11 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
         device = torch.device(device)
         if (
             device.type != "cuda"
-            or torch.cuda.get_device_name(device) != "ZW-M890P"
             or config.q_len not in (1, 2, 3, 4)
             or not 0 < config.max_batch_size <= 128
             or not config.paged_pool_specs
         ):
-            raise ValueError("PPU metadata Graph requires paged M890P Decode q_len=1/2/3/4")
+            raise ValueError("PPU metadata Graph requires paged PPU Decode q_len=1/2/3/4")
         super().__init__(config, device, attn_inputs)
         self._metadata_graph = None
         self._source_tables = None

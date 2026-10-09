@@ -9,7 +9,6 @@ from rtp_llm.platforms.ppu.kernels.cuda.sglang_jit import load_sglang_kernel
 def is_supported(input, masked_m):
     return (
         input.is_cuda
-        and torch.cuda.get_device_name(input.device) == "ZW-M890P"
         and input.dtype == torch.bfloat16
         and input.ndim == 3
         and input.shape[-1] > 0

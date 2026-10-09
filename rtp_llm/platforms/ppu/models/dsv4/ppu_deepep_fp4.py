@@ -33,8 +33,8 @@ def prepare_routed_mxfp4_weights(cfg, layer_weights):
             raise ValueError(
                 "PPU routed weights require EP-local MXFP4/E8M0 checkpoint geometry"
             )
-    if not w1.is_cuda or torch.cuda.get_device_name(w1.device) != "ZW-M890P":
-        raise RuntimeError("PPU routed MXFP4 requires ZW-M890P weights")
+    if not w1.is_cuda:
+        raise RuntimeError("PPU routed MXFP4 requires PPU-resident weights")
     result = (
         torch.cat((w1.view(torch.uint8), w3.view(torch.uint8)), dim=1).contiguous(),
         prepare_fp4_weight_scale_mxfp4(torch.cat((s1, s3), dim=1).contiguous()),

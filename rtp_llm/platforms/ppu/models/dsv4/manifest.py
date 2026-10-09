@@ -76,7 +76,6 @@ def _supports_ppu_prefill(selection, request, cache_mode):
     metadata = selection.model_metadata
     options = metadata.get("execution_options", {})
     checks = (
-        (selection.platform.device_name == "ZW-M890P", "requires ZW-M890P"),
         (
             _supports_flash_model(metadata),
             "requires Flash target or its MTP1/MTP2/MTP3 SWA draft in PD mode",
@@ -161,7 +160,6 @@ def supports_ppu_fp4_decode(selection, request):
     options = metadata.get("execution_options", {})
     comm = metadata.get("moe_communication", {})
     checks = (
-        (selection.platform.device_name == "ZW-M890P", "requires ZW-M890P"),
         (
             _supports_flash_model(metadata),
             "requires Flash target or its MTP1/MTP2/MTP3 SWA draft in PD mode",

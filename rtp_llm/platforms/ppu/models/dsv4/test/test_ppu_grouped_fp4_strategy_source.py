@@ -93,7 +93,7 @@ class PpuGroupedFP4SourceContractTest(unittest.TestCase):
         self.assertIn("_supports_topology(cfg)", ast.unparse(can_handle))
         self.assertIn("_runtime_eligible()", ast.unparse(can_handle))
 
-    def test_runtime_eligibility_rejects_generic_gpu_and_missing_symbol(self):
+    def test_runtime_eligibility_rejects_unavailable_cuda_and_missing_symbol(self):
         runtime_eligible = self.helpers["_runtime_eligible"]
 
         class FakeCuda:
@@ -123,11 +123,7 @@ class PpuGroupedFP4SourceContractTest(unittest.TestCase):
         with patch.dict(sys.modules, {"deep_gemm": deep_gemm}):
             self.assertFalse(runtime_eligible())
 
-        set_cuda(available=True, name="NVIDIA H100")
-        with patch.dict(sys.modules, {"deep_gemm": deep_gemm}):
-            self.assertFalse(runtime_eligible())
-
-        set_cuda(available=True, name="ZW-M890P")
+        set_cuda(available=True, name="PPU-ZW810E")
         with patch.dict(sys.modules, {"deep_gemm": deep_gemm}):
             self.assertTrue(runtime_eligible())
 
@@ -194,7 +190,6 @@ class PpuGroupedFP4SourceContractTest(unittest.TestCase):
         required_fragments = (
             "packed int8/uint8 MXFP4 weights",
             "float8_e8m0fnu checkpoint scales",
-            "ZW-M890P",
             "m_grouped_gemm_fp4_fp4_bf16_nt_nopad",
             "compact_mxfp4_routes_nopad",
             "self.routed_tp_size = routed_tp_size",
