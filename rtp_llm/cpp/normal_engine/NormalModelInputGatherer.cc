@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
+#include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 
@@ -31,10 +32,9 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
             RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
                                     "MTP cache snapshots require one non-beam sequence per stream");
             const auto& table = kernel ? state.next_kv_cache_kernel_block_id_gpu : state.next_kv_cache_block_id_gpu;
-            RTP_LLM_CHECK_WITH_INFO(
-                table.defined() && table.is_cuda() && table.scalar_type() == torch::kInt32 && table.dim() == 3
-                    && table.size(1) == 1,
-                "MTP cache snapshot must be a CUDA int32 [group,1,blocks] tensor");
+            RTP_LLM_CHECK_WITH_INFO(table.defined() && table.is_cuda() && table.scalar_type() == torch::kInt32
+                                        && table.dim() == 3 && table.size(1) == 1,
+                                    "MTP cache snapshot must be a CUDA int32 [group,1,blocks] tensor");
             RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(table.size(0)) == tags.size(),
                                     "MTP cache snapshot group count differs from gather tags");
             width = std::max(width, static_cast<size_t>(table.size(2)));
@@ -92,6 +92,7 @@ struct GatherModelInputContext {
     int*              prefix_lengths_host;
     int*              merged_text_mask;
     int*              mm_features_locs;
+    int64_t*          mm_features_spans;
     int               token_idx;
     int               cum_output_seq_len;
     int               mm_feature_index;
@@ -122,6 +123,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.prefix_lengths_host  = nullptr;
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
+    ctx.mm_features_spans    = ctx.has_multimodal_input ? model_input.mm_features_spans.data_ptr<int64_t>() : nullptr;
 
     size_t kv_cache_mapping_offset = 0;
     if (mode == GatherContextMode::DECODE) {
@@ -147,10 +149,10 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     return ctx;
 }
 
-void copyKvCacheBlocksToModelInput(GptModelInputs&         model_input,
+void copyKvCacheBlocksToModelInput(GptModelInputs&          model_input,
                                    const GenerateStreamPtr& stream,
-                                   int                     stream_batch_idx,
-                                   int                     model_batch_idx) {
+                                   int                      stream_batch_idx,
+                                   int                      model_batch_idx) {
     if (!model_input.kv_cache_kernel_block_id.defined() || !ordinaryStreamHasBlockTable(stream)) {
         return;
     }
@@ -245,6 +247,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
 
         ctx.mm_features_locs[ctx.mm_feature_index] =
             ctx.token_idx + static_cast<int>(std::max<int64_t>(feature_loc - reuse_length, 0));
+        ctx.mm_features_spans[ctx.mm_feature_index * 3]     = ctx.batch_idx - ctx.total_decode_batch_size;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 1] = feature_loc;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 2] = feature_end;
         ctx.mm_feature_index++;
 
         if (!mm_extra_input.empty()) {
@@ -393,10 +398,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
 
     GptModelInputs model_input;
-    model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
-    model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.combo_tokens = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+    if (config_.has_engram) {
+        model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
+    }
+    model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
@@ -428,8 +436,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             torch::empty({(int64_t)(current_tokens_size * config_.position_id_len_factor)}, pinned_i32);
     }
     if (has_multimodal_input) {
-        model_input.text_tokens_mask = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
-        model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.text_tokens_mask  = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+        model_input.mm_features_locs  = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.mm_features_spans = torch::empty({(int64_t)multimodal_features_len, 3}, pinned_i64);
     }
 
     model_input.kv_block_stride_bytes     = config_.block_stride_bytes;
@@ -484,12 +493,14 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             const auto& state = stream->getNormalAsyncDeviceState();
             if (stream->currentBatchSize() != 1 || !state.last_sample_token_gpu.defined()
                 || !state.last_sample_token_gpu.is_cuda() || !state.next_seq_len_gpu.defined()
-                || !state.next_seq_len_gpu.is_cuda()) {
+                || !state.next_seq_len_gpu.is_cuda()
+                || (config_.has_engram && !state.engram_token_window_gpu.defined())) {
                 use_normal_device_state = false;
                 break;
             }
         }
     }
+    std::vector<torch::Tensor> normal_engram_windows_gpu;
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
     if (use_normal_device_state) {
@@ -501,7 +512,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
         const bool use_mtp_cache_snapshot  = stream->hasMtpCacheSnapshot();
-        const auto current_batch_size      = use_mtp_cache_snapshot ? 1 : stream->currentBatchSize();
+        if (config_.has_engram && !use_mtp_cache_snapshot && !use_normal_device_state) {
+            stream->waitPendingAsyncBookkeeping();
+        }
+        const auto current_batch_size = use_mtp_cache_snapshot ? 1 : stream->currentBatchSize();
         if (use_mtp_cache_snapshot) {
             RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
                                     "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
@@ -544,6 +558,9 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
+                if (config_.has_engram) {
+                    normal_engram_windows_gpu.push_back(state.engram_token_window_gpu);
+                }
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
@@ -557,6 +574,12 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
+                if (config_.has_engram) {
+                    fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                                           stream->seqLength() - 1,
+                                           1,
+                                           model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
+                }
                 if (ctx.need_cal_position_id) {
                     stream->generateNextPositionId(ctx.combo_position_ids
                                                    + ctx.batch_idx * config_.position_id_len_factor);
@@ -579,6 +602,9 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
+        if (config_.has_engram) {
+            model_input.engram_token_windows = torch::cat(normal_engram_windows_gpu, 0);
+        }
         model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
         model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
     }
@@ -615,8 +641,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
             model_input.trace_ids.push_back(stream->traceId());
-            auto input_tokens = stream->currentExecuteTokens(i);
-            auto input_masks  = stream->textTokensMask();
+            auto      input_tokens = stream->currentExecuteTokens(i);
+            auto      input_masks  = stream->textTokensMask();
             const int position     = stream->generateInput()->custom_output_token_position;
             // Return sequences occupy separate context rows; preserve one selected
             // index per sequence in the same order consumed by output dispatch.
@@ -625,6 +651,12 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                     ctx.token_idx + position - stream->prefixLength();
             }
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
+            if (config_.has_engram) {
+                fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                                       stream->prefixLength(),
+                                       input_tokens.size(),
+                                       model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
+            }
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
                 if (input_tokens[index] >= ctx.input_vocab_size
@@ -687,7 +719,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     // correct tensor size.
     if (ctx.has_multimodal_input && model_input.mm_features_locs.defined()
         && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
-        model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+        model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+        model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
     model_input.prefix_lengths =
         deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
@@ -766,9 +799,9 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         const auto state = stream->getMtpAsyncDeviceState();
         if (GenerateStream::hasMtpCacheSnapshot(state)) {
             const auto& source = state.next_kv_cache_kernel_block_id_gpu;
-            RTP_LLM_CHECK_WITH_INFO(
-                source.defined() && source.is_cuda() && source.scalar_type() == torch::kInt32 && source.dim() == 3,
-                "MTP kernel snapshot must be a CUDA int32 [group,batch,blocks] tensor");
+            RTP_LLM_CHECK_WITH_INFO(source.defined() && source.is_cuda() && source.scalar_type() == torch::kInt32
+                                        && source.dim() == 3,
+                                    "MTP kernel snapshot must be a CUDA int32 [group,batch,blocks] tensor");
             RTP_LLM_CHECK_WITH_INFO(source.size(0) == device_tensor.size(0),
                                     "MTP kernel snapshot group count differs from gathered table");
             RTP_LLM_CHECK_WITH_INFO(source.size(2) <= device_tensor.size(2),

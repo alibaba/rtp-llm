@@ -94,6 +94,9 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
+    # The visitor routes v41 vision inputs through the master schedule path;
+    # non-vision requests carry no v41 payload.
+    v41_inputs = None
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()
@@ -187,6 +190,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
+        visitor.cache_key_seed = 0
+        visitor.remote_vit = False
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None

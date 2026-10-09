@@ -84,7 +84,10 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             return await self.client._send_schedule_request(
-                "127.0.0.1:7001", mock.MagicMock(priority=50), 1.0, 3540218608800727041
+                "127.0.0.1:7001",
+                mock.MagicMock(priority=50, vit_only=False),
+                1.0,
+                3540218608800727041,
             )
 
     async def test_success_records_request_id_status_and_business_code(self):
@@ -180,7 +183,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
             "rtp_llm.server.master_client.start_client_span", return_value=(None, None)
         ):
             response = await self.client._send_schedule_request(
-                "127.0.0.1:7001", mock.MagicMock(priority=50), 1.0, 42
+                "127.0.0.1:7001", mock.MagicMock(priority=50, vit_only=False), 1.0, 42
             )
 
         self.assertEqual(SUCCESS_CODE, response.code)
@@ -198,7 +201,10 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await self.client._send_schedule_request(
-                    "127.0.0.1:7001", mock.MagicMock(priority=50), 1.0, 42
+                    "127.0.0.1:7001",
+                    mock.MagicMock(priority=50, vit_only=False),
+                    1.0,
+                    42,
                 )
         self.assertEqual(1, len(stub.cancel_reasons))
         self.assertIsNone(stub.cancel_metadata)

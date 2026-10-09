@@ -59,6 +59,12 @@ struct OpaqueKVCacheSpec: public KVCacheSpec {
         return 0;
     }
 
+    // Logical payload entries, excluding byte alignment. For BLOCK_STRIDE CP
+    // slices this describes the complete logical ring, before byte slicing.
+    uint32_t entriesPerBlock() const {
+        return entry_count_;
+    }
+
     rtp_llm::DataType memoryLayoutDType() const override {
         return entry_dtype_;
     }
@@ -245,7 +251,7 @@ protected:
                                              uint32_t                entry_count,
                                              const SpecBuildContext& ctx) {
         const auto cp_size = fixedRegionCpSize(desc, ctx);
-        if (cp_size <= 1 || !isPrefillCpSliced(desc, ctx) || !cpPrefillSliceBlockStride(desc)) {
+        if (cp_size <= 1 || !cpPrefillSliceBlockStride(desc)) {
             return blockStrideBytes(desc, payload_bytes, entry_count);
         }
         const size_t align             = desc.block_stride_bytes_alignment > 0 ?
@@ -257,7 +263,9 @@ protected:
                                 desc.tag.c_str(),
                                 full_stride_bytes,
                                 cp_size);
-        return full_stride_bytes / cp_size;
+        // Both PD roles must agree on the complete physical block. Only the
+        // prefill allocation stores one rank's contiguous byte slice.
+        return isPrefillCpSliced(desc, ctx) ? full_stride_bytes / cp_size : full_stride_bytes;
     }
 
 protected:

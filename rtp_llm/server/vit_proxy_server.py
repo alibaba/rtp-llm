@@ -71,6 +71,8 @@ def _resolve_rpc_timeout_seconds(
     default_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
 ) -> float:
     """Resolve each input's complete RPC budget, then use the longest one."""
+    if request.timeout_ms > 0:
+        return min(request.timeout_ms / 1000.0, default_timeout_seconds)
     max_timeout_seconds = 0.0
     for mm_input in request.multimodal_inputs:
         cfg_ms = mm_input.mm_preprocess_config.mm_timeout_ms
@@ -363,9 +365,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
-        self._transport_router = MMOutputProxyRouter(
-            connection_pool, transport_config
-        )
+        self._transport_router = MMOutputProxyRouter(connection_pool, transport_config)
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
@@ -715,9 +715,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         for probe in probes:
             probe.cancel()
 
-    def ReleaseRdmaLease(
-        self, request: ReleaseLeasePB, context
-    ) -> EmptyPB:
+    def ReleaseRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
         self._transport_router.release(request, context)
         return EmptyPB()
 

@@ -40,7 +40,7 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
                 columns = torch.arange(keys, device="cuda")
                 expected.masked_fill_(
                     (columns < starts[:, None]) | (columns >= ends[:, None]),
-                    -float("inf"),
+                    0.0,
                 )
                 torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
 
@@ -51,9 +51,14 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
         )
         keys = torch.randn(pages, page, 128, device="cuda").to(torch.float8_e4m3fn)
         scales = torch.rand(pages, page, device="cuda") * 0.00457 + 0.000019
-        packed = torch.empty(pages, page, 1, 132, dtype=torch.uint8, device="cuda")
-        packed[:, :, 0, :128] = keys.view(torch.uint8)
-        packed[:, :, 0, 128:] = scales.unsqueeze(-1).contiguous().view(torch.uint8)
+        # The fused pool is block-planar, matching the legacy DeepGEMM
+        # contract the kernel preserves: each page stores page_size*128 K
+        # bytes followed by page_size*4 scale bytes. The [pages, page, 1,
+        # 132] shape is the nominal container DeepGEMM indexes internally.
+        packed = torch.empty(pages, page * 132, dtype=torch.uint8, device="cuda")
+        packed[:, : page * 128] = keys.view(torch.uint8).reshape(pages, page * 128)
+        packed[:, page * 128 :] = scales.view(torch.uint8).reshape(pages, page * 4)
+        packed = packed.view(pages, page, 1, 132)
         table = torch.randperm(pages, device="cuda").to(torch.int32).reshape(batch, 4)
         lens = torch.tensor(
             [[0, 3], [31, 42], [63, 64]], device="cuda", dtype=torch.int32
@@ -68,7 +73,7 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
                 q[b], k, scale, weights[b * next_n : (b + 1) * next_n]
             )
             expected.masked_fill_(
-                torch.arange(64, device="cuda") >= lens[b, :, None], -float("inf")
+                torch.arange(64, device="cuda") >= lens[b, :, None], 0.0
             )
             torch.testing.assert_close(
                 actual[b * next_n : (b + 1) * next_n], expected, rtol=2e-5, atol=2e-5

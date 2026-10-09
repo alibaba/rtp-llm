@@ -443,6 +443,104 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
+    async def test_v41_canonical_ids_and_image_count_reach_backend_and_response(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageInput,
+            V41PreparedInputs,
+        )
+
+        image = V41ImageInput(
+            1,
+            torch.zeros(1, 3, 14, 14, dtype=torch.bfloat16),
+            1,
+            1,
+            torch.tensor([0, 1, 2, 3]),
+            "a" * 64,
+            "b" * 64,
+        )
+        prepared = V41PreparedInputs(
+            "", (7, 129264, 129264, 129264, 129264, 8), (-1, 0, 1, 2, 3, -1), (image,)
+        )
+        output = GenerateOutput(
+            output_ids=torch.tensor([9]),
+            finished=True,
+            aux_info=AuxInfo(input_len=6, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 129264, 8],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                v41_inputs=prepared,
+                max_seq_len=32,
+            )
+        )
+        submitted = visitor.last_generate_input
+        self.assertIs(submitted.v41_inputs, prepared)
+        self.assertEqual(
+            submitted.token_ids.flatten().tolist(), list(prepared.token_ids)
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["image_tokens"].int64_param, 4
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["prompt_token_num"].int64_param, 6
+        )
+
+    async def test_v41_expansion_over_limit_rejects_before_enqueue(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41PreparedInputs,
+        )
+
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        prepared = V41PreparedInputs("", (1, 2, 3), (-1, -1, -1), ())
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [1],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                v41_inputs=prepared,
+                max_seq_len=3,
+            )
+        )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(_finish_reason(chunks[0]), DASH_ERROR_TOO_LONG.finish_reason)
+
+    async def test_v41_download_failure_returns_protocol_error_before_enqueue(self):
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        request = self._minimal_request()
+        request.parameters["payload"].string_param = "{}"
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer._prepare_v41_image_request",
+            side_effect=FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "invalid image payload"
+            ),
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    request,
+                    [1],
+                    SamplingParams(),
+                    DashScRequestControls(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    v41_processor_config=object(),
+                )
+            )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(
+            _finish_reason(chunks[0]), DASH_ERROR_BAD_REQUEST.finish_reason
+        )
+
     async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(

@@ -1,0 +1,234 @@
+import base64
+import io
+import os
+from pathlib import Path
+import unittest
+from unittest import TestCase, main
+
+import torch
+from PIL import Image
+from tokenizers import Tokenizer
+
+from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
+from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.grpc_util import trans_tensor
+
+
+def data_url(color):
+    stream = io.BytesIO()
+    Image.new("RGB", (42, 84), color=color).save(stream, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode()
+
+
+class V41ImageRendererTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        checkpoint_env = os.environ.get("DSV41_MODEL_PATH")
+        if not checkpoint_env:
+            raise unittest.SkipTest(
+                "DSV41_MODEL_PATH not set; checkpoint-dependent tests run where the "
+                "V4.1 model is available"
+            )
+        checkpoint = Path(checkpoint_env)
+        backend = Tokenizer.from_file(str(checkpoint / "tokenizer.json"))
+
+        class Adapter:
+            unk_token_id = None
+
+            def encode(self, text):
+                return backend.encode(text, add_special_tokens=False).ids
+
+            def convert_tokens_to_ids(self, text):
+                return backend.token_to_id(text)
+
+        cls.renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
+        cls.renderer.encoding_module = cls.renderer._load_encoding_module(
+            str(checkpoint)
+        )
+        cls.renderer.tokenizer = Adapter()
+        cls.renderer.think_mode = False
+
+    def test_mixin_preserves_norm_precision_and_three_delimiters(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_mixin import (
+            V41VitWeights,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        config = V41Config.from_path(os.environ["DSV41_MODEL_PATH"])
+        with torch.device("meta"):
+            adapter = DeepSeekV41VisionEmbedding(config)
+        state = adapter.state_dict()
+        weights = V41VitWeights({"vision_model": adapter})
+        self.assertEqual(set(weights.weight_names), set(state))
+        self.assertEqual(weights.ckpt_prefix, "")
+        fp32_norms = {
+            name for name, tensor in state.items() if tensor.dtype == torch.float32
+        }
+        self.assertEqual(len(fp32_norms), 65)
+        self.assertTrue(
+            all(
+                name.endswith((".norm1.weight", ".norm2.weight"))
+                or name == "vision.norm.weight"
+                for name in fp32_norms
+            )
+        )
+        self.assertEqual(
+            {name for name in state if name.startswith("image_")},
+            {"image_start", "image_newline", "image_end"},
+        )
+
+    def test_user_and_tool_images_keep_prompt_order(self):
+        first, second = data_url((17, 23, 42)), data_url((73, 19, 2))
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Inspect"},
+                            {"type": "image_url", "image_url": {"url": first}},
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_1",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": second}}
+                        ],
+                    },
+                    {"role": "user", "content": "Compare the two images."},
+                ],
+                "max_tokens": 256,
+            }
+        )
+        original = request.model_dump()
+        _, media = self.renderer._encode_request(request)
+        self.assertEqual([image["url"] for image in media["images"]], [first, second])
+        prepared = self.renderer.prepare_v41_inputs(request)
+        self.assertEqual(len(prepared.images), 2)
+        self.assertLess(prepared.images[0].start, prepared.images[1].start)
+        self.assertEqual(
+            prepared.image_mask.sum().item(),
+            sum(image.length for image in prepared.images),
+        )
+        self.assertNotEqual(*prepared.image_content_hashes)
+        self.assertEqual(request.model_dump(), original)
+        rendered = self.renderer.render_chat(request)
+        self.assertEqual(rendered.input_ids, list(prepared.token_ids))
+        self.assertEqual(rendered.multimodal_inputs, [])
+        self.assertEqual(
+            rendered.v41_inputs.image_content_hashes, prepared.image_content_hashes
+        )
+        generate_input = GenerateInput(
+            request_id=17,
+            token_ids=torch.tensor(rendered.input_ids, dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(max_new_tokens=256),
+            v41_inputs=rendered.v41_inputs,
+        )
+        wire = trans_input(generate_input)
+        restored = GenerateInputPB.FromString(wire.SerializeToString())
+        self.assertEqual(restored.v41_inputs.schema_version, 1)
+        self.assertEqual(list(restored.token_ids), rendered.input_ids)
+        self.assertEqual(tuple(restored.v41_inputs.token_types), prepared.token_types)
+        self.assertEqual(
+            list(restored.v41_inputs.image_mask), prepared.image_mask.tolist()
+        )
+        self.assertEqual(len(restored.multimodal_inputs), 0)
+        for source, destination in zip(prepared.images, restored.v41_inputs.images):
+            self.assertEqual(destination.start, source.start)
+            self.assertEqual(destination.processor_identity, source.processor_identity)
+            self.assertEqual(destination.content_sha256, source.content_sha256)
+            self.assertEqual(list(destination.types), source.types.tolist())
+            self.assertTrue(
+                torch.equal(trans_tensor(destination.patches), source.patches)
+            )
+
+    def test_text_remains_renderable_and_resize_override_fails(self):
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+                ]
+            }
+        )
+        actual = self.renderer.render_chat(request)
+        prepared = self.renderer.prepare_v41_inputs(request)
+        self.assertEqual(actual.input_ids, list(prepared.token_ids))
+        self.assertEqual(prepared.images, ())
+        self.assertIsNotNone(actual.v41_inputs)
+        self.assertFalse(actual.v41_inputs.image_mask.any().item())
+        appended = prepared.append_text(" tail", [17, 18])
+        self.assertEqual(appended.token_types[-2:], (-1, -1))
+        # Appended generation text has no new image payload. As on CED,
+        # typed metadata distinguishes text from image rows, even for an ID
+        # that the prompt preprocessor otherwise treats as a placeholder.
+        literal_marker = prepared.append_text(" image", [129264])
+        self.assertEqual(literal_marker.token_types[-1], -1)
+        self.assertFalse(literal_marker.image_mask[-1])
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url((0, 0, 0))},
+                                "preprocess_config": {"resized_height": 123},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with self.assertRaisesRegex(FtRuntimeException, "fixed by the model config"):
+            self.renderer.prepare_v41_inputs(request)
+
+    def test_invalid_image_bytes_are_request_errors(self):
+        png = base64.b64decode(data_url((1, 2, 3)).split(",", 1)[1])
+        for payload in (b"not an image", png[:40]):
+            with self.subTest(payload=payload):
+                url = "data:image/png;base64," + base64.b64encode(payload).decode()
+                request = ChatCompletionRequest.model_validate(
+                    {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": url}}
+                                ],
+                            }
+                        ]
+                    }
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "image payload"
+                ) as raised:
+                    self.renderer.prepare_v41_inputs(request)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
+
+
+if __name__ == "__main__":
+    main()

@@ -502,8 +502,67 @@ class MMProcessEngine:
 
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
+        if mm_inputs.HasField("v41_inputs"):
+            from rtp_llm.utils.grpc_util import trans_tensor
+
+            typed = mm_inputs.v41_inputs
+            if typed.schema_version != 1:
+                raise ValueError("unsupported V4.1 input schema version")
+            if mm_inputs.multimodal_inputs:
+                raise ValueError(
+                    "typed V4.1 images cannot be combined with generic images"
+                )
+            return self.submit_v41(
+                [
+                    dict(
+                        start=image.start,
+                        n_vit_h=image.n_vit_h,
+                        n_vit_w=image.n_vit_w,
+                        patches=trans_tensor(image.patches),
+                        types=torch.tensor(list(image.types), dtype=torch.int32),
+                        content_sha256=image.content_sha256,
+                        processor_identity=image.processor_identity,
+                    )
+                    for image in typed.images
+                ],
+                timeout_ms=mm_inputs.timeout_ms,
+            )
         converted_inputs = trans_mm_input(mm_inputs)
         return self.mm_embedding_impl(converted_inputs)
+
+    def submit_v41(self, images, timeout_ms=0) -> MMEmbeddingRes:
+        """Schedule typed images through the same bounded GPU queue as other models."""
+        validate = getattr(self.mm_part, "validate_prepared_images", None)
+        if validate is None:
+            raise ValueError("typed V4.1 inputs require a V4.1 vision model")
+        # Validate the complete request before handing any image to GPU execution.
+        validated = validate(images)
+        if len(validated) > self._scheduler.max_request_images:
+            raise MMSchedulerRequestTooLargeError(
+                "V4.1 request exceeds image-count limit"
+            )
+        work_items = []
+        for image in validated:
+            # Empty URL bypasses the generic URL cache. The model cache uses the
+            # trusted content hash and processor identity, and bypasses empty hashes.
+            item = MMWorkItem(
+                [MultimodalInput("", MMUrlType.IMAGE)],
+                mm_timeout_ms=(
+                    min(timeout_ms, self.vit_config.mm_timeout_ms)
+                    if timeout_ms > 0
+                    else self.vit_config.mm_timeout_ms
+                ),
+            )
+            item.preprocess_result = [image]
+            work_items.append(item)
+        self.inc_query_num()
+        try:
+            if not work_items:
+                return MMEmbeddingRes([])
+            embeddings, positions, extra = self._compute_embeddings(work_items)
+            return MMEmbeddingRes(embeddings, positions, extra)
+        finally:
+            self.dec_query_num()
 
     def mm_embedding_cpp(
         self,

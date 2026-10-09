@@ -439,6 +439,23 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    prepared = getattr(input_py, "v41_inputs", None)
+    if prepared is not None:
+        typed = input_pb.v41_inputs
+        typed.schema_version = 1
+        typed.token_types.extend(prepared.token_types)
+        typed.image_mask.extend(prepared.image_mask.tolist())
+        for image in prepared.images:
+            target = typed.images.add()
+            target.start, target.n_vit_h, target.n_vit_w = (
+                image.start,
+                image.n_vit_h,
+                image.n_vit_w,
+            )
+            target.types.extend(image.types.tolist())
+            target.patches.CopyFrom(trans_from_tensor(image.patches))
+            target.content_sha256 = image.content_sha256
+            target.processor_identity = image.processor_identity
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:

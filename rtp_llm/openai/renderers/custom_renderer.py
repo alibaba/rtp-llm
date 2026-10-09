@@ -300,7 +300,9 @@ class RenderedInputs:
         input_urls: List[str] = [],
         input_urls_type: List[MMUrlType] = [],
         preprocess_configs: List[MMPreprocessConfig] = [],
+        v41_inputs=None,
     ):
+        self.v41_inputs = v41_inputs
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
         self.multimodal_inputs = []
@@ -475,6 +477,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        v41_inputs=None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -485,6 +488,7 @@ class CustomChatRenderer:
                     request_id=request_id,
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
+                    v41_inputs=v41_inputs,
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,

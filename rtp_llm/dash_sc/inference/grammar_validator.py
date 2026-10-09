@@ -655,7 +655,19 @@ class GrammarValidator:
             )
             return xgr.GrammarCompiler(
                 tokenizer_info,
-                max_threads=self._compile_threads,
+                # Serial on purpose: xgrammar 0.2.8's multi-thread
+                # GrammarCompiler was observed hanging in sandbox workers on
+                # loaded CI hosts — pool task threads block in native futexes
+                # with near-zero CPU and Join() never returns (task threads
+                # stall ~100ms into their first task; an exact C++-side cause
+                # such as a poisoned per-key once-flag remains a hypothesis,
+                # not a proven root cause). The single-threaded path has no
+                # thread pool, so the hang is structurally impossible, and a
+                # serial compile of a 248k-vocab structural tag costs ~2-12
+                # CPU-seconds, well inside the 30s admission deadline. The
+                # sandbox exists for isolation and correctness, not compile
+                # throughput; the engine keeps its own multi-thread compiler.
+                max_threads=1,
                 cache_enabled=True,
                 cache_limit_bytes=self._cache_limit_bytes,
             )
