@@ -392,6 +392,37 @@ class AtomicWeight(WeightModule):
             return name.format(i=str(layer_id), i_1=str(layer_id + 1))
         return name
 
+    @staticmethod
+    def _lora_ckpt_relative_names(full_ckpt_name: str) -> List[str]:
+        base = (
+            full_ckpt_name[: -len(".weight")]
+            if full_ckpt_name.endswith(".weight")
+            else full_ckpt_name
+        )
+        if base.startswith("model."):
+            return [base[len("model.") :], base]
+        return [base]
+
+    def _resolve_lora_tensor_name(
+        self,
+        database: BaseDatabase,
+        layer_id: Optional[int],
+        full_ckpt_name: str,
+        suffix: str,
+        lora_name: str,
+    ) -> str:
+        candidates = [
+            self.lora_tensor_name(
+                layer_id, self.lora_base_name.format(relative_name, suffix)
+            )
+            for relative_name in self._lora_ckpt_relative_names(full_ckpt_name)
+        ]
+        available_names = set(database.get_lora_tensor_names(lora_name))
+        return next(
+            (candidate for candidate in candidates if candidate in available_names),
+            candidates[0],
+        )
+
     def _load_raw_lora(
         self,
         database: BaseDatabase,
@@ -472,10 +503,13 @@ class AtomicWeight(WeightModule):
         assert self.lora_a_process_func is not None
         before_merge_tensors = []
         for ckpt_weight in self.weights:
-            ckpt_name = self.lora_base_name.format(
-                ckpt_weight.name[: -len(".weight")], self.lora_A_suffix
+            tensor_name = self._resolve_lora_tensor_name(
+                database,
+                layer_id,
+                ckpt_weight.name,
+                self.lora_A_suffix,
+                lora_name,
             )
-            tensor_name = self.lora_tensor_name(layer_id, ckpt_name)
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
@@ -512,10 +546,13 @@ class AtomicWeight(WeightModule):
         assert self.lora_b_process_func is not None
         before_merge_tensors = []
         for ckpt_weight in self.weights:
-            ckpt_name = self.lora_base_name.format(
-                ckpt_weight.name[: -len(".weight")], self.lora_B_suffix
+            tensor_name = self._resolve_lora_tensor_name(
+                database,
+                layer_id,
+                ckpt_weight.name,
+                self.lora_B_suffix,
+                lora_name,
             )
-            tensor_name = self.lora_tensor_name(layer_id, ckpt_name)
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(

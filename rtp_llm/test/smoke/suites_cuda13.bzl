@@ -454,3 +454,18 @@ def cuda13_suites():
             ":v4_flash_flexlb_shortest_ttft_cache_affinity_direct_2p2d_sm100_x86",
         ],
     )
+
+    # Qwen3.5 MoE (decider-35b-a3b) on sm_120 (RTX 5000 Pro, TRT-LLM-v2
+    # sm_12x path). The internal manual download target stages the checkpoint on FUSE.
+    native.test_suite(
+        name = "smoke_sm120_qwen35_decision_models",
+        tests = [
+            smoke_test(
+                name = "decider_35b_a3b_bf16_sm120",
+                task_info = "data/model/qwen35/decider_35b_a3b_bf16_sm120.json",
+                # 65GB bf16 weights + KV cache do not fit a single 72GB card.
+                smoke_args = "--act_type BF16 --tp_size 2 --seq_size_per_block 2048 --max_seq_len 4096 --warm_up 0",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+        ],
+    )

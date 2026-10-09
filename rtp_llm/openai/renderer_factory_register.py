@@ -120,7 +120,7 @@ def _register_builtin_lazy_renderers() -> None:
         "rtp_llm.openai.renderers.qwen3_code_renderer",
     )
     register_lazy_renderer(
-        ["qwen35_moe", "qwen35_dense", "qwen35_moe_mtp"],
+        ["qwen35_moe", "qwen35_dense", "qwen35_moe_mtp", "qwen35_dense_mtp"],
         "rtp_llm.openai.renderers.qwen35_renderer",
     )
     register_lazy_renderer(

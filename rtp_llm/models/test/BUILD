@@ -32,3 +32,21 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
+
+py_test(
+    name = "decision_module_test",
+    srcs = ["decision_module_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen35_dense_config_test",
+    srcs = ["qwen35_dense_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen35_moe_flat_config_test",
+    srcs = ["qwen35_moe_flat_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

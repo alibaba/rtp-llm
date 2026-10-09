@@ -1,5 +1,6 @@
 import functools
-from typing import Any, Collection, Dict, List
+import logging
+from typing import Any, Collection, Dict, List, Optional
 
 import torch
 
@@ -36,6 +37,7 @@ from rtp_llm.utils.model_weight import (
     transpose_pad,
     transpose_stack_moe_w1,
 )
+from rtp_llm.utils.util import get_config_from_path
 
 
 def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int):
@@ -201,10 +203,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 W.embedding,
                 [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
             ),
-            AtomicWeight(
-                W.lm_head,
-                [CkptWeightInfo("lm_head.weight", identity)],
-            ),
+            self._create_lm_head_weight(),
             AtomicWeight(
                 W.final_ln_gamma,
                 [CkptWeightInfo(self.prefix + "norm.weight", plus_one)],
@@ -224,6 +223,12 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             layer_weight.extend(self._create_ffn_weight())
             all_layer_weights.append(layer_weight)
         return ModelWeightInfo(layer_weights=all_layer_weights, weights=weights)
+
+    def _create_lm_head_weight(self) -> WeightModule:
+        return AtomicWeight(
+            W.lm_head,
+            [CkptWeightInfo("lm_head.weight", identity)],
+        )
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:
         return [
@@ -721,6 +726,76 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
+        # Decision-style dense checkpoints (e.g. autojev) ship NO lm_head tensor
+        # (a separate decision readout head is served by the KEV module), while
+        # official Qwen3.5 dense checkpoints carry one. AtomicWeight has no
+        # allow-missing support (a missing key raises out of load_tensor), and
+        # the tolerate_failed/choose_available combo used by _fix_tie_lm_head
+        # would swallow genuine load errors, so instead detect the lm_head
+        # statically here via the same _process_meta/weight_keys hook used for
+        # prefix detection and declare an explicit embedding fallback below.
+        self._has_lm_head = True
+        self._lm_head_ckpt_name: Optional[str] = None
+
+    def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
+        super()._process_meta(meta_dict, weight_keys)
+        lm_head_name = self._detect_lm_head_ckpt_name(weight_keys)
+        if lm_head_name is not None:
+            self._lm_head_ckpt_name = lm_head_name
+            self._has_lm_head = True
+        elif self._lm_head_ckpt_name is None:
+            # Only downgrade when no call ever saw an lm_head; _process_meta may
+            # run once per ckpt file list, and every list carries the full keys.
+            self._has_lm_head = False
+
+    @staticmethod
+    def _detect_lm_head_ckpt_name(weight_keys: Collection[str]) -> Optional[str]:
+        # Standard HF layout keeps lm_head at the checkpoint root; wrapped VLM
+        # layouts may nest it (e.g. "model.lm_head.weight"). Skip MTP draft keys.
+        if "lm_head.weight" in weight_keys:
+            return "lm_head.weight"
+        for key in weight_keys:
+            if key.endswith("lm_head.weight") and "mtp." not in key:
+                return key
+        return None
+
+    def _has_decision_block(self) -> bool:
+        # Decision checkpoints describe their downstream head in a "decision"
+        # block of config.json (see downstream_modules/decision_module.py) and
+        # are never served for generation, so a placeholder lm_head suffices.
+        config_json = get_config_from_path(self.model_config.ckpt_path) or {}
+        return "decision" in config_json
+
+    def _create_lm_head_weight(self) -> WeightModule:
+        if self._has_lm_head:
+            return AtomicWeight(
+                W.lm_head,
+                [
+                    CkptWeightInfo(
+                        self._lm_head_ckpt_name or "lm_head.weight", identity
+                    )
+                ],
+            )
+        if not self.tie_word_embeddings and not self._has_decision_block():
+            # Ordinary checkpoints keep the loud failure: substituting the
+            # embedding tensor here would silently serve garbage logits.
+            raise ValueError(
+                f"{self.model_config.ckpt_path} has no lm_head.weight and no "
+                "decision head; refusing to substitute embed_tokens.weight"
+            )
+        # Tied embeddings ARE the lm_head, and decision checkpoints generate
+        # nothing, so the embedding tensor (same [vocab, hidden] shape) is the
+        # right placeholder in both cases; the decision readout is loaded
+        # separately outside this weight pipeline.
+        logging.warning(
+            "Qwen35DenseWeight: checkpoint has no lm_head.weight, "
+            "falling back to %sembed_tokens.weight as lm_head",
+            self.prefix,
+        )
+        return AtomicWeight(
+            W.lm_head,
+            [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
+        )
 
     def _create_ffn_weight(self) -> List[WeightModule]:
         return build_qwen35_dense_ffn_weights(

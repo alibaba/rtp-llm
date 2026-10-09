@@ -51,6 +51,14 @@ def _matches_cuda_graph_selection_mode(
     return True
 
 
+def _rope_is_composed(
+    impl: type[AttentionImpl], attn_configs: AttentionConfigs
+) -> bool:
+    """Rope-priority hook; impls that do not declare it keep the rope in-kernel."""
+    hook = getattr(impl, "rope_is_composed", None)
+    return bool(hook(attn_configs)) if callable(hook) else False
+
+
 def _implementation_allows_cuda_graph_selection_mode(
     impl: type[AttentionImpl], mode: CudaGraphSelectionMode
 ) -> bool:
@@ -249,24 +257,25 @@ def get_fmha_impl(
             attn_configs, attn_inputs, fmha_config
         )
 
-    for impl in mha_impls:
-        # Check if this FMHA implementation is disabled before creating instance
-        impl_class_name = impl.__name__
-
+    def _passes_prechecks(impl: type[AttentionImpl]) -> bool:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
-            continue
+            return False
 
         # Skip if this FMHA implementation is disabled in config
-        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
-            continue
+        if _is_fmha_impl_disabled(impl.__name__, fmha_config):
+            return False
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
-            continue
+            return False
 
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
-            continue
+            return False
+        return True
+
+    def _instantiate(impl: type[AttentionImpl]) -> Optional[AttentionImpl]:
+        impl_class_name = impl.__name__
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
@@ -286,7 +295,7 @@ def get_fmha_impl(
             ):
                 raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
-            continue
+            return None
         if selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
             # Backend priority is part of model semantics. Do not skip an eager
             # backend (for example HeadWise sink/sliding-window attention) and
@@ -298,6 +307,26 @@ def get_fmha_impl(
                 )
             return instance
         if _matches_cuda_graph_selection_mode(instance, selection_mode):
+            return instance
+        return None
+
+    composed_impl: Optional[type[AttentionImpl]] = None
+    for impl in mha_impls:
+        if not _passes_prechecks(impl):
+            continue
+        if _rope_is_composed(impl, attn_configs):
+            # Kernels whose rope is native (for example TRT-LLM cubins that
+            # implement MRoPE) keep priority; an impl that would have to swap
+            # its rope module is only the fallback selection pass.
+            if composed_impl is None:
+                composed_impl = impl
+            continue
+        instance = _instantiate(impl)
+        if instance is not None:
+            return instance
+    if composed_impl is not None:
+        instance = _instantiate(composed_impl)
+        if instance is not None:
             return instance
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope

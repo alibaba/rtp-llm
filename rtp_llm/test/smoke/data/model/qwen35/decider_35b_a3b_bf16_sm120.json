@@ -1,0 +1,71 @@
+{
+  "_comment": "Checkpoint staged from the OpenLM Pangu mirror of Mapika/decider-35b-a3b.",
+  "model_type": "qwen35_moe",
+  "model_path": "/mnt/fuse/smoke-test/hf/Mapika--decider-35b-a3b--91470e65478656eb68fde8c0ccdfe575d69d0309",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:s1"
+          }
+        ],
+        "max_tokens": 30,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Hmm, the user is asking about CAP Theorem, a fundamental concept in distributed systems. This is a technical topic, so I should provide a clear"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 16,
+          "total_tokens": 46,
+          "completion_tokens": 30
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:s2"
+          }
+        ],
+        "max_tokens": 30,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "嗯，用户想要关于英语听力方法的问题，可能是想用于教学、学习讨论或者内容创作。需要设计一些有深度且能引发思考"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 48,
+          "completion_tokens": 30
+        }
+      }
+    }
+  ]
+}
