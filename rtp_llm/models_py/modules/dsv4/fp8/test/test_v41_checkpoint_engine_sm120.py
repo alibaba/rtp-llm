@@ -38,7 +38,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
     expert_down_reference,
     load_reference_kernel,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import mhc_fp32
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
+    mhc_fp32,
+    mhc_post_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
@@ -95,6 +98,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_recipe = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR_RECIPE") == "1"
     compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
     compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
+    compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
     paired = (
         compare_tp8
         or compare_mhc
@@ -102,6 +106,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_recipe
         or compare_sparse
         or compare_down
+        or compare_post
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -137,7 +142,16 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             profiles.extend(
                 (f"{base}_shared_down_reference", f"{base}_expert_down_reference")
             )
+    if compare_post:
+        for base in (
+            "tp8_projection_mhc_fp32_compressor_recipe",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+        ):
+            profiles.append(f"{base}_expert_down_reference_mhc_post_reference")
     trace_steps = dict.fromkeys(profiles, 0)
+    post_trace_steps = {}
+    post_trace_requests = {}
+    post_request_prompts = {}
     try:
         if paired and precision != "baseline":
             raise ValueError("Paired comparison requires unpatched production math")
@@ -150,6 +164,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         ):
             raise ValueError(
                 "Expert output comparison requires all ten preceding controls"
+            )
+        if compare_post and not compare_down:
+            raise ValueError(
+                "mHC post comparison requires all fourteen preceding controls"
             )
         reference_kernel = load_reference_kernel() if compare_down else None
         reference_hash = (
@@ -233,16 +251,48 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
+                post = profile.endswith("_mhc_post_reference")
+                down_profile = profile.removesuffix("_mhc_post_reference")
                 recipe = "compressor_recipe" in profile
                 sparse = "sparse_sink_div_rn" in profile
                 sparse_decode = sparse and "sparse_sink_div_rn_prefill" not in profile
-                down = profile.endswith(
+                down = down_profile.endswith(
                     ("_shared_down_reference", "_expert_down_reference")
                 )
-                routed_down = profile.endswith("_expert_down_reference")
+                routed_down = down_profile.endswith("_expert_down_reference")
                 tracing = (
                     bool(trace_directory) and rank == 0 and trace_steps[profile] < 3
                 )
+                prompt_index = 0
+                trace_step = trace_steps[profile]
+                post_metadata = {}
+                if post:
+                    tracing = False
+                    if trace_directory and rank == 0 and request.input_ids.numel():
+                        attn = next(iter(request.attention_inputs.values()))
+                        request_id, _, _, _, start, count = request.v41_cache_spans[
+                            0
+                        ].tolist()
+                        ids = request.input_ids.tolist()
+                        if attn.is_prefill:
+                            prompt_index = prompts.index(ids)
+                            post_request_prompts[request_id] = prompt_index
+                            consumed = ids.copy()
+                        else:
+                            prompt_index = post_request_prompts[request_id]
+                            consumed = [*sequences[request_id], *ids]
+                        assert count == len(ids) and start + count == len(consumed)
+                        trace_step = post_trace_steps.get((profile, prompt_index), 0)
+                        trace_request = post_trace_requests.setdefault(
+                            (profile, prompt_index), request_id
+                        )
+                        tracing = trace_step < 3 and request_id == trace_request
+                        post_metadata = {
+                            "mhc_post_reference": True,
+                            "prompt_index": prompt_index,
+                            "prompt_token_ids": prompts[prompt_index],
+                            "consumed_token_ids": consumed,
+                        }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
                 ) as snapshots, tp8_projection(
@@ -260,6 +310,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     down,
                     routed=routed_down,
                     kernel=reference_kernel,
+                ), mhc_post_reference(
+                    post,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -280,7 +332,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     if paired:
                         trace_root /= profile
                     save_model_trace(
-                        trace_root / f"native-prompt0-step{trace_steps[profile]}.pt",
+                        trace_root / f"native-prompt{prompt_index}-step{trace_step}.pt",
                         snapshots,
                         {
                             "input_ids": request.input_ids.tolist(),
@@ -290,6 +342,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             "hca_bf16_projection": recipe,
                             "sparse_sink_div_rn_prefill": sparse,
                             "sparse_sink_div_rn_decode": sparse_decode,
+                            **post_metadata,
                             **(
                                 {
                                     "shared_down_reference": True,
@@ -301,7 +354,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             ),
                         },
                     )
-                    trace_steps[profile] += 1
+                    if post:
+                        post_trace_steps[profile, prompt_index] = trace_step + 1
+                    else:
+                        trace_steps[profile] += 1
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
                 assert bool(hidden.isfinite().all())
                 if request.input_ids.numel():
@@ -409,6 +465,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             flush=True,
                         )
                     dist.barrier(group=control)
+                if (
+                    compare_post
+                    and rank == 0
+                    and os.environ.get("DSV41_TEST_TRACE_DIR")
+                ):
+                    expected_traces = {
+                        (profile, prompt): min(3, new_tokens)
+                        for profile in profiles
+                        if profile.endswith("_mhc_post_reference")
+                        for prompt in range(len(prompts))
+                    }
+                    assert post_trace_steps == expected_traces, post_trace_steps
                 peers = [None] * 8
                 dist.all_gather_object(peers, outputs_by_prompt, group=control)
                 for profile in profiles:
