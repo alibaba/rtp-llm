@@ -57,3 +57,42 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
+
+py_test(
+    name = "bf16_scalar_linear_test",
+    srcs = ["bf16_scalar_linear_test.py"],
+    deps = ["//rtp_llm:rtp_llm_lib", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME"],
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "bf16_router_linear_test",
+    srcs = ["bf16_router_linear_test.py"],
+    deps = ["//rtp_llm:rtp_llm_lib", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME"],
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "bf16_gdn_linear_test",
+    srcs = ["bf16_gdn_linear_test.py"],
+    deps = ["//rtp_llm:rtp_llm_lib", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME"],
+    tags = ["manual"],
+    timeout = "long",
+)
+py_test(
+    name = "bf16_gate_linear_test",
+    srcs = ["bf16_gate_linear_test.py"],
+    deps = ["//rtp_llm:rtp_llm_lib", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME"],
+    tags = ["manual"],
+    timeout = "long",
+)

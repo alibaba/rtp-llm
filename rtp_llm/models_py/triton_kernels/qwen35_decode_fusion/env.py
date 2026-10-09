@@ -17,6 +17,7 @@ _TRUE_ENV_VALUES = {"1", "true", "t", "yes", "y", "on"}
 
 
 _phase_enabled = ContextVar("qwen35_fusion_phase_enabled", default=None)
+_is_prefill_phase = ContextVar("qwen35_is_prefill_phase", default=None)
 
 
 def _env_enabled(name: str) -> bool:
@@ -28,10 +29,12 @@ def fusion_phase(*, is_prefill: bool):
     """Enable reused fusion helpers only for decode; prefill stays native."""
     enabled = not is_prefill and _env_enabled(DECODE_FUSION_ENV)
     token = _phase_enabled.set(enabled)
+    phase_token = _is_prefill_phase.set(is_prefill)
     try:
         yield
     finally:
         _phase_enabled.reset(token)
+        _is_prefill_phase.reset(phase_token)
 
 
 def is_decode_fusion_enabled() -> bool:
@@ -46,3 +49,8 @@ def quantized_linear_for(linear):
     ):
         return linear
     return None
+
+
+def is_decode_phase() -> bool:
+    """Explicit decode scope, independent of the optional fusion master switch."""
+    return _is_prefill_phase.get() is False
