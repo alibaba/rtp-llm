@@ -2,6 +2,7 @@ package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.httpserver.ActiveRequestWebFilter;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +26,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
     private final LBStatusConsistencyService consistency;
+    private final ActiveRequestWebFilter httpRequests;
     private final FlexlbGrpcServer grpcServer;
     private final GracefulLifecycleReporter reporter;
     private final Environment environment;
@@ -44,19 +46,22 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     @Autowired
     public ApplicationLifecycle(
             LBStatusConsistencyService consistency,
+            ActiveRequestWebFilter httpRequests,
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
             Environment environment) {
-        this(consistency, grpcServer, reporter, environment, DEFAULT_WARM_UP_WAIT_MS);
+        this(consistency, httpRequests, grpcServer, reporter, environment, DEFAULT_WARM_UP_WAIT_MS);
     }
 
     ApplicationLifecycle(
             LBStatusConsistencyService consistency,
+            ActiveRequestWebFilter httpRequests,
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
             Environment environment,
             long warmUpWaitMs) {
         this.consistency = consistency;
+        this.httpRequests = httpRequests;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
         this.environment = environment;
@@ -116,6 +121,8 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long drainStartedAt = System.nanoTime();
         // Keep scheduler, forwarder and transport dependencies alive until all
         // accepted RPCs finish. The platform owns the forced-kill deadline.
+        // HTTP fanout can still need FE-to-Master RPCs, so finish HTTP before stopping gRPC.
+        httpRequests.drain();
         grpcServer.drain();
         shutdownCompletedSuccessfully = true;
         reporter.reportShutdownComplete(

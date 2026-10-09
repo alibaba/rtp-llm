@@ -6,7 +6,9 @@ import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -123,7 +125,7 @@ public final class MasterEngineSynchronizer {
                 engineSyncExecutor.submit(new EngineSyncRunner(
                         modelName, workerDirectory,
                         workerAddressService, statusCheckExecutor, engineHealthReporter,
-                        engineGrpcService, roleType, cacheAwareService,
+                        engineGrpcService, roleType, flexlbConfig.getWorkerRegistry().getEngineType(), cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
@@ -137,6 +139,11 @@ public final class MasterEngineSynchronizer {
     }
 
     public boolean isReady() {
+        if (flexlbConfig.getWorkerRegistry().getEngineType() == EngineType.EMBEDDING) {
+            return requiredRoles.stream().allMatch(
+                    role -> workerDirectory.statusSnapshot(role).values().stream()
+                            .anyMatch(WorkerStatus::isActiveGeneration));
+        }
         return requiredRoles.stream()
                 .allMatch(role -> workerDirectory.routingCapacity(role) > 0);
     }

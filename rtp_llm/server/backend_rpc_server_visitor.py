@@ -703,16 +703,23 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
         for input in inputs:
             self.fill_request_info(input)
+            input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        if self.host_service.service_available:
-            for input in inputs:
-                await self.route_ips(input)
-
+        # Atomic RPC needs a preassigned backend when master admission is enabled.
+        if self.host_service.service_available and any(
+            not input.generate_config.role_addrs for input in inputs
+        ):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch RPC requires a preassigned backend; use per-request scheduling",
+            )
         return await self.model_rpc_client.batch_enqueue(inputs)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:

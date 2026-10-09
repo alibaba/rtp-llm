@@ -2,10 +2,13 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.enums.EngineType;
 
 @Getter
 @Setter
 public final class WorkerRegistryConfig {
+
+    private EngineType engineType = EngineType.LLM;
 
     private HealthConfig health = new HealthConfig();
     private CacheStatusConfig cacheStatus = new CacheStatusConfig();

@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.frontend.frontend_worker import FrontendWorker, PipelineResponse
+from rtp_llm.frontend.frontend_worker import (
+    FrontendWorker,
+    MultiSequencesPipelineResponse,
+    PipelineResponse,
+)
+from rtp_llm.ops import RoleType
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateOutput,
@@ -45,13 +51,25 @@ class CustomOutputResponseTest(unittest.TestCase):
         if not batch:
             return worker._format_response_new(response, config)
         worker.generate_env_config = None
+        worker.backend_rpc_server_visitor = SimpleNamespace(
+            pd_sep_config=SimpleNamespace(role_type=RoleType.PDFUSION),
+            host_service=SimpleNamespace(service_available=False),
+        )
         worker.pipeline = SimpleNamespace(
-            batch_infer=AsyncMock(return_value=[response]),
+            batch_infer_prepared=AsyncMock(return_value=[response]),
             tokenizer=[],
             _special_tokens=None,
             create_generate_config=lambda *args, **kwargs: config,
         )
-        return asyncio.run(worker.batch_infer(["prompt"], 1, {})).response_batch[0]
+        result = worker.inference(
+            True,
+            prompt_batch=["prompt"],
+            generate_config=config.model_dump(),
+            **{request_id_field_name: 1},
+        )
+        return asyncio.run(
+            CompleteResponseAsyncGenerator.get_last_value(result)
+        ).response_batch[0]
 
     def test_single_multi_preserve_prefill_output(self):
         for count, matrix in product((0, 1, 2), (False, True)):
@@ -71,19 +89,23 @@ class CustomOutputResponseTest(unittest.TestCase):
             self.assertEqual(complete.custom_output, first.custom_output)
             self.assertNotIn("custom_output", absent.model_dump(exclude_none=True))
 
-    def test_batch_infer_preserves_legacy_response_contract(self):
+    def test_batch_infer_uses_shared_response_contract(self):
         for count, with_scores in product((0, 1, 2), (False, True)):
             with self.subTest(count=count, with_scores=with_scores):
                 values = [[[-0.5, 1.5]], [[2.0, 3.0]]][: max(count, 1)]
                 if not with_scores:
                     values = [None] * len(values)
                 result = self.format_response(values, count, batch=True)
-                self.assertIsInstance(result, PipelineResponse)
-                self.assertEqual(result.response, "text")
-                self.assertIsInstance(result.aux_info, dict)
-                self.assertIsNone(result.input_ids)
-                self.assertIsNone(result.output_ids)
-                self.assertEqual(result.custom_output, values[0])
+                expected = self.format_response(values, count)
+                self.assertEqual(result.model_dump(), expected.model_dump())
+                self.assertIsInstance(
+                    result,
+                    MultiSequencesPipelineResponse if count > 0 else PipelineResponse,
+                )
+                self.assertEqual(
+                    result.custom_output,
+                    (values if count > 0 else values[0]) if with_scores else None,
+                )
                 if not with_scores:
                     self.assertNotIn(
                         "custom_output", result.model_dump(exclude_none=True)

@@ -1,12 +1,16 @@
 package org.flexlb.service.grace;
 
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.httpserver.ActiveRequestWebFilter;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.Environment;
+import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
+import org.springframework.mock.web.server.MockServerWebExchange;
+import reactor.core.publisher.Sinks;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -14,11 +18,50 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class ApplicationLifecycleTest {
+    @Test
+    void httpExchangesFinishBeforeGrpcStopsAndServingResourcesAreDestroyed() throws Exception {
+        var consistency = mock(LBStatusConsistencyService.class);
+        var grpc = mock(FlexlbGrpcServer.class);
+        var http = new ActiveRequestWebFilter();
+        var response = Sinks.<Void>empty();
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.post("/dispatcher/batch_infer"));
+        var request = http.filter(exchange, ignored -> response.asMono()).toFuture();
+        var destroyed = new AtomicBoolean();
+        var context = new AnnotationConfigApplicationContext();
+        var lifecycle = new ApplicationLifecycle(consistency, http, grpc,
+                mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
+        context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
+        context.registerBean("servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
+        context.refresh();
+        var closing = CompletableFuture.runAsync(context::close);
+        try {
+            verify(consistency, timeout(2000)).offline();
+            assertThrows(TimeoutException.class, () -> closing.get(100, TimeUnit.MILLISECONDS));
+            verifyNoInteractions(grpc);
+            assertFalse(destroyed.get());
+        } finally {
+            response.tryEmitEmpty();
+            request.get(2, TimeUnit.SECONDS);
+            closing.get(3, TimeUnit.SECONDS);
+        }
+        verify(grpc).drain();
+        assertTrue(destroyed.get());
+        assertTrue(lifecycle.shutdownCompletedSuccessfully());
+    }
+
     @Test
     void contextCloseDrainsTransportBeforeDestroyingServingResources() throws Exception {
         var consistency = mock(LBStatusConsistencyService.class);
@@ -33,7 +76,7 @@ class ApplicationLifecycleTest {
         }).when(grpc).drain();
         var destroyed = new AtomicBoolean();
         var context = new AnnotationConfigApplicationContext();
-        var lifecycle = new ApplicationLifecycle(consistency, grpc,
+        var lifecycle = new ApplicationLifecycle(consistency, new ActiveRequestWebFilter(), grpc,
                 mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean("servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
@@ -57,7 +100,7 @@ class ApplicationLifecycleTest {
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
              var child = new AnnotationConfigApplicationContext()) {
-            var lifecycle = new ApplicationLifecycle(consistency, grpc,
+            var lifecycle = new ApplicationLifecycle(consistency, new ActiveRequestWebFilter(), grpc,
                     mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
@@ -76,7 +119,7 @@ class ApplicationLifecycleTest {
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
             context.registerBean(GracefulLifecycleReporter.class,
                     () -> mock(GracefulLifecycleReporter.class));
-            context.register(ApplicationLifecycle.class);
+            context.register(ActiveRequestWebFilter.class, ApplicationLifecycle.class);
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
         }
@@ -89,7 +132,7 @@ class ApplicationLifecycleTest {
         var reporter = mock(GracefulLifecycleReporter.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
-        var lifecycle = new ApplicationLifecycle(consistency, grpc, reporter, environment, 0L);
+        var lifecycle = new ApplicationLifecycle(consistency, new ActiveRequestWebFilter(), grpc, reporter, environment, 0L);
         lifecycle.online();
         assertTrue(lifecycle.isHealthy());
         verifyNoInteractions(grpc);
