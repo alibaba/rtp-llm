@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -13,6 +14,13 @@
 namespace rtp_llm {
 
 class V41PPLocalCache;
+
+// Allocation exhaustion is a recoverable admission failure, distinct from an
+// unexpected implementation/CUDA error that must poison a coordinated session.
+class V41PPAllocationFailure: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // A prepared dispatch holds physical pages independently of request retirement.
 // The caller must drain GPU work and PP tickets before dropping its last copy.

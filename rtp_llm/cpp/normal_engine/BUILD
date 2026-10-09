@@ -49,6 +49,20 @@ cc_library(
 )
 
 cc_library(
+    name = "v41_pp_admission",
+    srcs = ["pipeline/V41PPAdmission.cc"],
+    hdrs = ["pipeline/V41PPAdmission.h"],
+    copts = copts(),
+    deps = [
+        ":v41_pp_local_cache",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",

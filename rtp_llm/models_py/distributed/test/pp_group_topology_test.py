@@ -37,8 +37,8 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         # gloo is already up: mark initialized so _get_group resolves keys directly.
         ct._initialized = True
         ct._group_map.clear()
-        ct._group_map[ct.Group.WORLD] = torch.distributed.group.WORLD
         ct._create_process_groups(cfg, "gloo", None)
+        assert ct._group_map[ct.Group.WORLD] is torch.distributed.group.WORLD
         if pp_size == 1:
             assert ct._get_group(ct.Group.STAGE) is torch.distributed.group.WORLD
 
@@ -105,6 +105,19 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         with patch.object(torch.cuda, "current_device", return_value=0), patch.object(
             torch.Tensor, "to", cpu_staging
         ):
+            # Exercise explicit-send WORLD registration after external init,
+            # independently of the smaller stage capacity collective.
+            world_ranks = torch.full((world_size,), -1, dtype=torch.int64)
+            if world_size > 1:
+                callbacks["allgather"](
+                    [world_ranks],
+                    ct._CPP_PARALLEL_MODE_WORLD,
+                    [torch.tensor([rank], dtype=torch.int64)],
+                    False,
+                )
+            else:
+                world_ranks[0] = rank
+            assert world_ranks.tolist() == list(range(world_size))
             for local_block_num in local_blocks:
                 block_nums = torch.full((stage_size,), -1, dtype=torch.int32)
                 block_nums[local_rank] = local_block_num

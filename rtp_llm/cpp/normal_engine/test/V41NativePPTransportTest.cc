@@ -16,6 +16,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
+#include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -75,6 +77,65 @@ private:
     int64_t                        generation_;
     int64_t                        request_id_;
     int64_t                        incarnation_;
+};
+
+// A real caller-owned global input, retained across coordinated admission.
+// Deliberately permit malformed/foreign inputs to reach the production WORLD
+// transaction instead of rejecting them in this test fixture.
+class V41PPGlobalInputs {
+public:
+    using TensorMember = torch::Tensor GptModelInputs::*;
+
+    static const std::map<std::string, TensorMember>& fields() {
+        static const std::map<std::string, TensorMember> members{
+            {"spans", &GptModelInputs::v41_cache_spans},
+            {"ids", &GptModelInputs::combo_tokens},
+            {"windows", &GptModelInputs::engram_token_windows},
+            {"lengths", &GptModelInputs::input_lengths},
+            {"prefixes", &GptModelInputs::prefix_lengths},
+            {"decode_lengths", &GptModelInputs::sequence_lengths},
+            {"positions", &GptModelInputs::combo_position_ids},
+            {"table", &GptModelInputs::kv_cache_kernel_block_id},
+            {"physical_table", &GptModelInputs::kv_cache_block_id},
+            {"zero_blocks", &GptModelInputs::kv_cache_blocks_to_zero},
+            {"copy_mapping", &GptModelInputs::kv_cache_update_mapping},
+            {"mask", &GptModelInputs::attention_mask},
+        };
+        return members;
+    }
+
+    std::map<std::string, torch::Tensor> tensors() const {
+        std::map<std::string, torch::Tensor> result;
+        for (const auto& [name, member] : fields()) {
+            if ((inputs.*member).defined()) {
+                result.emplace(name, inputs.*member);
+            }
+        }
+        return result;
+    }
+
+    void setTensor(const std::string& name, const torch::Tensor& value) {
+        inputs.*fields().at(name) = value;
+    }
+
+    void control(const std::string& name) {
+        if (name == "shutdown") {
+            inputs.shutdown = true;
+        } else if (name == "warmup") {
+            inputs.warmup = true;
+        } else if (name == "verify") {
+            inputs.is_target_verify = true;
+        } else if (name == "multimodal") {
+            inputs.multimodal_features = std::vector<torch::Tensor>{torch::ones({1})};
+        } else if (name == "pp_frame") {
+            inputs.pp_intermediates.emplace("hidden_states", torch::ones({1}));
+        } else {
+            throw std::invalid_argument("unknown global input test control");
+        }
+    }
+
+    GptModelInputs inputs{};
+    V41PPCacheBatchPtr batch;
 };
 
 class V41NativePPTransportTest {
@@ -205,9 +266,70 @@ public:
         V41PPLocalCache candidate(manager_, model, parallelism);
     }
 
+    std::shared_ptr<V41PPGlobalInputs>
+    globalInputs(const std::map<std::string, torch::Tensor>& tensors,
+                 const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
+        requireOpen();
+        auto result = std::make_shared<V41PPGlobalInputs>();
+        for (const auto& [name, value] : tensors) {
+            result->setTensor(name, value);
+        }
+        for (const auto& allocation : allocations) {
+            result->inputs.v41_cache_leases.push_back(allocation ? allocation->retain() : nullptr);
+        }
+        return result;
+    }
+
+    V41PPCacheBatchPtr prepareGlobal(const std::shared_ptr<V41PPGlobalInputs>& global) {
+        requireOpen();
+        if (!admission_) {
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+        }
+        global->batch = admission_->prepare(global->inputs);
+        return global->batch;
+    }
+
+    void commitGlobal(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireAdmission();
+        admission_->commit(batch);
+    }
+
+    void abortGlobal(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireAdmission();
+        admission_->abort(batch);
+    }
+
+    void retireGlobal(const std::array<int64_t, 3>& source) {
+        requireOpen();
+        requireAdmission();
+        admission_->retire(source);
+    }
+
+    size_t activeGlobal() const {
+        return admission_ ? admission_->activeRequests() : 0;
+    }
+
+    bool globalFailed() const {
+        return admission_ && admission_->failed();
+    }
+
+    torch_ext::PyModelInputs splitGlobalInputs(const std::shared_ptr<V41PPGlobalInputs>& source) {
+        requireOpen();
+        requireAdmission();
+        if (!admission_->ownsBatch(source->batch)) {
+            throw std::invalid_argument("native PP global fixture requires its coordinated batch");
+        }
+        // Split the actual accepted global inputs, preserving their local page
+        // table and hidden leases. Do not manufacture an independent fixture.
+        GptModelInputs global = source->inputs;
+        return splitInputs(source->batch, std::move(global));
+    }
+
     torch_ext::PyModelInputs localInputs(const V41PPCacheBatchPtr& batch, torch_ext::PyModelInputs inputs) {
         requireOpen();
-        if (!local_cache_ || !local_cache_->ownsBatch(batch)) {
+        if (!ownsBatch(batch)) {
             throw std::invalid_argument("native PP local inputs require this owner's admitted batch");
         }
         inputs.v41_cache_spans = torch::empty({static_cast<int64_t>(batch->bindings().size()), 6}, torch::kInt64);
@@ -246,6 +368,11 @@ public:
         if (total != ids.numel()) {
             throw std::invalid_argument("native PP CP fixture token count disagrees with spans");
         }
+        global.kv_cache_kernel_block_id = batch->kernelBlockTable().permute({1, 0, 2}).contiguous().cuda();
+        return splitInputs(batch, std::move(global));
+    }
+
+    torch_ext::PyModelInputs splitInputs(const V41PPCacheBatchPtr& batch, GptModelInputs global) {
         torch_ext::PyContextParallelParams cp;
         ZigZagProcessor processor(parallelism_, false);
         processor.handleInputs(global, cp);
@@ -253,7 +380,6 @@ public:
         local.input_ids = global.combo_tokens;
         local.combo_position_ids = global.combo_position_ids;
         local.engram_token_windows = global.engram_token_windows;
-        const auto table = batch->kernelBlockTable().squeeze(-1);
         for (const auto& group : manager_->allLayerCacheBase().topology().groups()) {
             torch_ext::PyAttentionInputs attention;
             attention.is_prefill = true;
@@ -264,8 +390,8 @@ public:
             attention.context_parallel_info = cp;
             attention.cu_seqlens = torch::cat({torch::zeros({1}, torch::kInt32),
                                              global.input_lengths.cpu().cumsum(0).to(torch::kInt32)});
-            attention.kv_cache_kernel_block_id = table.narrow(1, group.canonical_idx, 1).contiguous();
-            attention.kv_cache_kernel_block_id_device = attention.kv_cache_kernel_block_id.cuda();
+            attention.kv_cache_kernel_block_id_device = global.kv_cache_kernel_block_id[group.canonical_idx];
+            attention.kv_cache_kernel_block_id = attention.kv_cache_kernel_block_id_device.cpu();
             local.attention_inputs_by_tag.emplace(group.tag, std::move(attention));
         }
         return localInputs(batch, std::move(local));
@@ -343,6 +469,7 @@ public:
 
     void close() {
         finish();
+        admission_.reset();
         local_cache_.reset();
         executor_.reset();
         manager_->stopMetricsReporting();
@@ -350,6 +477,16 @@ public:
     }
 
 private:
+    void requireAdmission() const {
+        if (!admission_) {
+            throw std::invalid_argument("native PP fixture has not entered global admission");
+        }
+    }
+
+    bool ownsBatch(const V41PPCacheBatchPtr& batch) const {
+        return (local_cache_ && local_cache_->ownsBatch(batch)) || (admission_ && admission_->ownsBatch(batch));
+    }
+
     void requireLocal() const {
         if (!local_cache_) {
             throw std::invalid_argument("native PP local fixture has not prepared a dispatch");
@@ -379,7 +516,7 @@ private:
 
     void retainLocalRound(const V41PPCacheBatchPtr& batch) {
         requireOpen();
-        if (!local_cache_ || !local_cache_->ownsBatch(batch) || !tickets_.empty() || !round_leases_.empty()) {
+        if (!ownsBatch(batch) || !tickets_.empty() || !round_leases_.empty()) {
             throw std::invalid_argument("native PP local test requires its admitted batch and a drained round");
         }
         round_leases_ = batch->leases();
@@ -392,6 +529,7 @@ private:
     std::shared_ptr<KVCacheManager>         manager_;
     std::unique_ptr<PPExecutor>            executor_;
     std::unique_ptr<V41PPLocalCache>       local_cache_;
+    std::unique_ptr<V41PPAdmission>        admission_;
     PPTickets                             tickets_;
     std::vector<KVCacheAllocationLeasePtr> round_leases_;
 };
@@ -401,6 +539,15 @@ private:
 
 PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     rtp_llm::registerExecCtxOps(m);
+    py::register_exception<rtp_llm::V41InputRejected>(m, "NativeInputRejected", PyExc_RuntimeError);
+    py::class_<rtp_llm::test::V41PPGlobalInputs, std::shared_ptr<rtp_llm::test::V41PPGlobalInputs>>(m, "GlobalInputs")
+        .def_property_readonly("tensors", &rtp_llm::test::V41PPGlobalInputs::tensors)
+        .def_readonly("batch", &rtp_llm::test::V41PPGlobalInputs::batch)
+        .def("set_tensor", &rtp_llm::test::V41PPGlobalInputs::setTensor)
+        .def("control", &rtp_llm::test::V41PPGlobalInputs::control)
+        .def_property_readonly("lease_count", [](const rtp_llm::test::V41PPGlobalInputs& global) {
+            return global.inputs.v41_cache_leases.size();
+        });
     py::class_<rtp_llm::V41PPCacheBatch, rtp_llm::V41PPCacheBatchPtr>(m, "LocalBatch")
         .def_property_readonly("block_tables", [](const rtp_llm::V41PPCacheBatch& batch) {
             std::vector<rtp_llm::KVCacheAllocationLease::BlockTables> tables;
@@ -447,6 +594,16 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def("retire_local", &rtp_llm::test::V41NativePPTransportTest::retireLocal)
         .def_property_readonly("active_local", &rtp_llm::test::V41NativePPTransportTest::activeLocal)
         .def("check_local_config", &rtp_llm::test::V41NativePPTransportTest::checkLocalConfig)
+        .def("global_inputs", &rtp_llm::test::V41NativePPTransportTest::globalInputs,
+             py::arg("tensors"),
+             py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
+        .def("prepare_global", &rtp_llm::test::V41NativePPTransportTest::prepareGlobal)
+        .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
+        .def("abort_global", &rtp_llm::test::V41NativePPTransportTest::abortGlobal)
+        .def("retire_global", &rtp_llm::test::V41NativePPTransportTest::retireGlobal)
+        .def_property_readonly("active_global", &rtp_llm::test::V41NativePPTransportTest::activeGlobal)
+        .def_property_readonly("global_failed", &rtp_llm::test::V41NativePPTransportTest::globalFailed)
+        .def("split_global_inputs", &rtp_llm::test::V41NativePPTransportTest::splitGlobalInputs)
         .def("local_inputs", &rtp_llm::test::V41NativePPTransportTest::localInputs)
         .def("split_local_inputs", &rtp_llm::test::V41NativePPTransportTest::splitLocalInputs)
         .def("send_local", &rtp_llm::test::V41NativePPTransportTest::sendLocal)

@@ -235,6 +235,10 @@ def _create_process_groups(
     """
     global _group_map
 
+    # External initialization and registry recovery also enter here. Keep the
+    # existing WORLD group available to C++ callbacks on every creation path.
+    _group_map[Group.WORLD] = torch.distributed.group.WORLD
+
     world_rank = parallelism_config.world_rank
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size

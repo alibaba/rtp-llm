@@ -139,8 +139,8 @@ V41PPLocalCache::allocate(int64_t request_id, const KVCacheAllocationLeasePtr& r
         info.reuse_cache = info.enable_device_cache = info.enable_remove_skipped_blocks = false;
         const auto allocation = manager_->malloc(info);
         if (!allocation.success) {
-            throw std::runtime_error("V4.1 local PP allocation failed with status "
-                                     + std::to_string(static_cast<int>(allocation.status)));
+            throw V41PPAllocationFailure("V4.1 local PP allocation failed with status "
+                                         + std::to_string(static_cast<int>(allocation.status)));
         }
         result->lease = manager_->retainAllocation(result->resource->cacheResource(0));
     }
