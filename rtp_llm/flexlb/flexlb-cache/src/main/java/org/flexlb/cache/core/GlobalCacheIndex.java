@@ -1,10 +1,12 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.util.SyncDiagnostics;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,6 +23,8 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Component
 public class GlobalCacheIndex {
+
+    private static final int CACHE_REMOVE_LOCK_CHUNK_SIZE = 256;
 
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
@@ -52,7 +56,9 @@ public class GlobalCacheIndex {
             return;
         }
 
+        long diagStart = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         lock.lock();
+        long diagAcquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         try {
             Set<String> engines = blockToEnginesMap.computeIfAbsent(
                     blockCacheKey, k -> ConcurrentHashMap.newKeySet());
@@ -62,7 +68,11 @@ public class GlobalCacheIndex {
                 totalMappings.increment();
             }
         } finally {
+            long diagReleased = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             lock.unlock();
+            if (SyncDiagnostics.ENABLED) {
+                SyncDiagnostics.cacheLock("add", engineIpPort, diagStart, diagAcquired, diagReleased, blockToEnginesMap.size());
+            }
         }
     }
 
@@ -77,7 +87,9 @@ public class GlobalCacheIndex {
             return;
         }
 
+        long diagStart = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         lock.lock();
+        long diagAcquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         try {
             Set<String> engines = blockToEnginesMap.get(blockCacheKey);
             if (engines == null) {
@@ -94,7 +106,11 @@ public class GlobalCacheIndex {
                 }
             }
         } finally {
+            long diagReleased = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             lock.unlock();
+            if (SyncDiagnostics.ENABLED) {
+                SyncDiagnostics.cacheLock("remove", engineIp, diagStart, diagAcquired, diagReleased, blockToEnginesMap.size());
+            }
         }
     }
 
@@ -102,27 +118,48 @@ public class GlobalCacheIndex {
      * Remove an engine
      *
      * @param engineIp Engine IP
+     * @param blockCacheKeys Detached local keys of this generation; the caller
+     *                       must serialize retirement against updates of the same engine
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
-
-        lock.lock();
-        try {
-            blockToEnginesMap.forEach((blockCacheKey, engines) -> {
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
-                    totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
-                    if (engines.isEmpty()) {
-                        blockToEnginesMap.remove(blockCacheKey);
+        // Use the detached local view; do not scan blocks owned only by other workers.
+        // Bound each critical section so surviving workers can keep updating their indexes.
+        Iterator<Long> keys = blockCacheKeys.iterator();
+        long start = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
+        long wait = 0L;
+        long hold = 0L;
+        long maxHold = 0L;
+        int acquisitions = 0;
+        while (keys.hasNext()) {
+            long waiting = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
+            lock.lock();
+            long acquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
+            try {
+                for (int count = 0; count < CACHE_REMOVE_LOCK_CHUNK_SIZE && keys.hasNext(); count++) {
+                    Long key = keys.next();
+                    Set<String> engines = blockToEnginesMap.get(key);
+                    if (engines != null && engines.remove(engineIp)) {
+                        totalMappings.decrement();
+                        if (engines.isEmpty()) {
+                            blockToEnginesMap.remove(key);
+                        }
                     }
                 }
-            });
-        } finally {
-            lock.unlock();
+            } finally {
+                long released = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
+                lock.unlock();
+                wait += acquired - waiting;
+                hold += released - acquired;
+                maxHold = Math.max(maxHold, released - acquired);
+                acquisitions++;
+            }
+        }
+        if (SyncDiagnostics.ENABLED) {
+            SyncDiagnostics.cacheRemoval(engineIp, start, wait, hold, maxHold,
+                    acquisitions, blockCacheKeys.size(), blockToEnginesMap.size());
         }
     }
 

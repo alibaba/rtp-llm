@@ -27,7 +27,7 @@ parameters:
     target_p: 64
     warmup_timeout_s: 240
     baseline_s: 60
-    observe_s: 300
+    observe_s: 240
     sample_s: 1
     window_s: 10
     step_s: 1

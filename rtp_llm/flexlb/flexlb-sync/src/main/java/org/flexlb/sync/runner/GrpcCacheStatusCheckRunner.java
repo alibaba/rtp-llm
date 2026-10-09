@@ -12,6 +12,7 @@ import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
+import org.flexlb.util.SyncDiagnostics;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
+    private final long diagCreatedNs = System.nanoTime();
     private final String ipPort;
     private final String modelName;
     private final String site;
@@ -108,10 +110,18 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             long startTime = System.nanoTime() / 1000;
+            long diagSendNs = System.nanoTime();
+            long diagSendEpochMs = System.currentTimeMillis();
+            java.util.concurrent.atomic.AtomicLong diagWireNs = new java.util.concurrent.atomic.AtomicLong();
+            boolean diagSample = SyncDiagnostics.ENABLED && roleType.requiresCacheKeys()
+                    && SyncDiagnostics.sample("poll:cache:" + ipPort);
+            if (diagSample) SyncDiagnostics.event("event=rpc_send kind=cache worker={} id={} queue_ms={} send_epoch_ms={}",
+                    ipPort, id, SyncDiagnostics.ms(diagSendNs - diagCreatedNs), diagSendEpochMs);
             long currentCacheVersion = getCurrentCacheVersion();
 
             engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
                             requestTimeoutMs, roleType)
+                    .whenComplete((response, failure) -> diagWireNs.set(System.nanoTime()))
                     .thenApply(cacheStatusPB -> {
                         logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                                         + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
@@ -120,6 +130,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
                     })
                     .handleAsync((cacheStatus, failure) -> {
+                        long diagCallbackNs = System.nanoTime();
+                        long[] diagLockBefore = SyncDiagnostics.lockSnapshot();
                         try {
                             Throwable cause = unwrapCompletionFailure(failure);
                             if (cause != null) {
@@ -140,6 +152,18 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         } catch (Throwable callbackFailure) {
                             logger.error("Cache status callback failed for {}",
                                     ipPort, callbackFailure);
+                        }
+                        long diagEndNs = System.nanoTime();
+                        long[] diagLockAfter = SyncDiagnostics.lockSnapshot();
+                        long wire = diagWireNs.get();
+                        if (diagSample || SyncDiagnostics.ENABLED && diagEndNs - diagSendNs > 100_000_000L
+                                && SyncDiagnostics.sample("slow:cache:" + ipPort)) {
+                            SyncDiagnostics.event("event=rpc_done kind=cache worker={} role={} id={} send_epoch_ms={} queue_ms={} rpc_ms={} callback_queue_ms={} process_ms={} lock_wait_ms={} lock_hold_ms={} success={}",
+                                    ipPort, roleType, id, diagSendEpochMs, SyncDiagnostics.ms(diagSendNs - diagCreatedNs),
+                                    SyncDiagnostics.ms(wire - diagSendNs), SyncDiagnostics.ms(diagCallbackNs - wire),
+                                    SyncDiagnostics.ms(diagEndNs - diagCallbackNs),
+                                    SyncDiagnostics.ms(diagLockAfter[0] - diagLockBefore[0]),
+                                    SyncDiagnostics.ms(diagLockAfter[1] - diagLockBefore[1]), failure == null);
                         }
                         return null;
                     }, callbackExecutor)
