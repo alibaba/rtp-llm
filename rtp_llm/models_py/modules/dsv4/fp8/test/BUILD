@@ -106,7 +106,7 @@ py_test(
 
 py_test(
     name = "test_v41_decode_global_sm120",
-    srcs = ["test_v41_decode_global_sm120.py", "test_v41_decode_global.py"],
+    srcs = ["test_v41_decode_global_sm120.py", "test_v41_decode_global.py", "v41_compressor_precision.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["RTX_5000_PRO"],
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
