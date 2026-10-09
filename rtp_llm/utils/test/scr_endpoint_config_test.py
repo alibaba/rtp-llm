@@ -195,7 +195,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     backend._engine_config.runtime_config,
                     configs.parallelism_config,
                     restored,
-                    configs.distribute_config.gang_annocation_path,
+                    None,
                 )
                 self.assertIs(backend._world_info, restored)
                 backend.engine.update_runtime_endpoints.assert_called_once_with(

@@ -74,7 +74,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
             local_world = resolve_world_info(current, generation="g1")
-            update_worker_addrs(runtime, self.pc, local_world, "/unused/annotations")
+            update_worker_addrs(runtime, self.pc, local_world)
             self.assertEqual(
                 get_dp_addrs_from_world_info(local_world, self.pc), ["127.0.0.1:18631"]
             )
@@ -93,7 +93,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         runtime = NS()
         with patch("socket.gethostbyname", side_effect=["192.0.2.20", "192.0.2.21"]):
             for ip in ["192.0.2.20", "192.0.2.21"]:
-                update_worker_addrs(runtime, self.pc, self.world, "/unused/annotations")
+                update_worker_addrs(runtime, self.pc, self.world)
                 self.assertEqual(
                     runtime.worker_addrs, [ip + ":18632:18634", ip + ":18642:18644"]
                 )
@@ -105,7 +105,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 1, 2, 1
         runtime = NS()
         with patch("socket.gethostbyname", return_value="192.0.2.30"):
-            update_worker_addrs(runtime, self.pc, self.world, "/unused/annotations")
+            update_worker_addrs(runtime, self.pc, self.world)
         self.assertEqual(runtime.worker_addrs, ["192.0.2.30:18642:18644"])
         self.assertEqual(runtime.worker_grpc_addrs, ["127.0.0.1:18641"])
 
@@ -174,9 +174,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         lifecycle.register(
             "kv",
             CallbackHook(
-                fixup=lambda _g: update_worker_addrs(
-                    runtime_config, self.pc, world, "/unused/annotations"
-                ),
+                fixup=lambda _g: update_worker_addrs(runtime_config, self.pc, world),
                 release=lambda _g: releases.append(
                     (
                         configs.server_config.ip,

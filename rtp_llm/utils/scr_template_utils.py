@@ -29,6 +29,7 @@ from typing import Any, Callable
 from typing import Mapping as TypingMapping
 from typing import Optional
 
+from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.scr_runtime_fixup import fixup_runtime_after_restore
 from rtp_llm.utils.scr_template_lifecycle import CallbackHook, get_template_lifecycle
@@ -68,6 +69,7 @@ class _BackendVisitorTemplateHook:
         self.visitor = visitor
         self.configs = py_env_configs
         self.world_info = world_info
+        self.gang_info = GangInfoReader.from_config(py_env_configs.distribute_config)
 
     def restore_fixup(self, context: RestoreContext) -> None:
         from rtp_llm.distribute.distributed_server import (
@@ -90,7 +92,7 @@ class _BackendVisitorTemplateHook:
         world_info = context.resolve_world_info(
             current,
             self.configs.parallelism_config,
-            self.configs.distribute_config.gang_annocation_path,
+            self.gang_info,
         )
         self.visitor.update_addresses(
             get_dp_addrs_from_world_info(world_info, self.configs.parallelism_config)

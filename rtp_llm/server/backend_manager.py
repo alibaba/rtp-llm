@@ -13,6 +13,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType
+from rtp_llm.utils import scr_vip
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
@@ -70,7 +71,10 @@ class BackendManager(object):
             engine_config.runtime_config,
             engine_config.parallelism_config,
             world_info,
-            self.py_env_configs.distribute_config.gang_annocation_path,
+            scr_vip.real_ip_by_vip(
+                self.py_env_configs.parallelism_config,
+                self._distributed_server.gang_info,
+            ),
         )
         self._engine_config = engine_config
         self._world_info = world_info
@@ -145,14 +149,17 @@ class BackendManager(object):
         world_info = context.resolve_world_info(
             current,
             self.py_env_configs.parallelism_config,
-            self.py_env_configs.distribute_config.gang_annocation_path,
+            self._distributed_server.gang_info,
         )
         self.py_env_configs.server_config.ip = context.pod_ip
         update_worker_addrs(
             self._engine_config.runtime_config,
             self._engine_config.parallelism_config,
             world_info,
-            self.py_env_configs.distribute_config.gang_annocation_path,
+            scr_vip.real_ip_by_vip(
+                self.py_env_configs.parallelism_config,
+                self._distributed_server.gang_info,
+            ),
         )
         self._world_info = world_info
         refresh = getattr(self.engine, "update_runtime_endpoints", None)

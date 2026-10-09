@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ from rtp_llm.distribute.distributed_server import (
     get_master,
 )
 from rtp_llm.utils import scr_vip
+from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr_restore_context import RestoreContext
 
 
@@ -87,16 +89,17 @@ class ScrVipIntegrationTest(unittest.TestCase):
             (start_dash_sc_server, "rtp_llm.dash_sc", "DashScApp"),
         ):
             for node_rank in (0, 2):
-                for local_rank in (0, 1):
+                for local_rank, tp_size in itertools.product((0, 1), (1, 2, 4)):
                     with self.subTest(
                         launcher=launcher.__name__,
                         node_rank=node_rank,
                         local_rank=local_rank,
+                        tp_size=tp_size,
                     ):
                         configs = PyEnvConfigs()
                         pc = configs.parallelism_config
                         pc.world_size, pc.local_world_size = 4, 2
-                        pc.tp_size, pc.dp_size, pc.ep_size = 2, 2, 4
+                        pc.tp_size, pc.dp_size, pc.ep_size = tp_size, 4 // tp_size, 4
                         pc.world_rank = node_rank
                         app_type = MagicMock()
                         module = ModuleType(module_name)
@@ -114,7 +117,9 @@ class ScrVipIntegrationTest(unittest.TestCase):
                             entry(local_rank, 0, None, configs)
                         self.assertEqual(pc.world_rank, node_rank + local_rank)
                         self.assertEqual(pc.local_rank, local_rank)
-                        self.assertEqual(pc.dp_rank, node_rank // 2)
+                        self.assertEqual(
+                            pc.dp_rank, (node_rank + local_rank) // tp_size
+                        )
                         app_type.return_value.start.assert_called_once()
 
     def test_vip_is_used_for_store_registration_frontend_and_restore(self):
@@ -157,14 +162,16 @@ class ScrVipIntegrationTest(unittest.TestCase):
                         [f"22.0.1.{2 + rank // 2}"] * 2,
                     )
                     restored = RestoreContext("seed", "10.1.0.3").resolve_world_info(
-                        world, pc, configs.distribute_config.gang_annocation_path
+                        world, pc, GangInfoReader.from_config(configs.distribute_config)
                     )
                     self.assertEqual(restored.self.ip, world.self.ip)
                     self.assertEqual(restored.self.server_port, world.self.server_port)
                     world.members[0].ip = "21.0.0.1"
                     with self.assertRaisesRegex(RuntimeError, "cannot change"):
                         RestoreContext("seed", "10.1.0.3").resolve_world_info(
-                            world, pc, configs.distribute_config.gang_annocation_path
+                            world,
+                            pc,
+                            GangInfoReader.from_config(configs.distribute_config),
                         )
 
     def test_cpp_broadcast_converts_group_root_for_nonzero_tp_and_dp_groups(self):

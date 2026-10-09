@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.utils import scr_vip
+from rtp_llm.utils.gang_info import GangInfoReader
 
 
 class ScrVipTest(unittest.TestCase):
@@ -14,6 +15,7 @@ class ScrVipTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "annotations"
+        self.reader = GangInfoReader(str(self.path))
         self.rows = {
             "model-rank-0": {"ip": "22.0.1.2", "real_ip": "10.0.0.2"},
             "model-rank-1": {"ip": "22.0.1.3", "real_ip": "10.0.0.3"},
@@ -70,7 +72,7 @@ class ScrVipTest(unittest.TestCase):
             scr_vip, "validate_device"
         ) as device:
             restored = RestoreContext("seed", "10.0.0.3").resolve_world_info(
-                world, self.pc, str(self.path)
+                world, self.pc, self.reader
             )
         sleep.assert_called_once_with(0.5)
         device.assert_called_once_with("22.0.1.3")
@@ -95,7 +97,7 @@ class ScrVipTest(unittest.TestCase):
         ) as device:
             with self.assertRaisesRegex(KeyError, "real_ip"):
                 RestoreContext("seed", "10.0.0.3").resolve_world_info(
-                    world, self.pc, str(self.path)
+                    world, self.pc, self.reader
                 )
         sleep.assert_called_once_with(0.5)
         device.assert_not_called()
@@ -112,7 +114,7 @@ class ScrVipTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "cannot change"):
                 RestoreContext("seed", "10.0.0.3").resolve_world_info(
-                    world, self.pc, str(self.path)
+                    world, self.pc, self.reader
                 )
         self.assertEqual(world.members[0].ip, "22.0.1.2")
 
@@ -136,29 +138,27 @@ class ScrVipTest(unittest.TestCase):
                 if readiness[-1] is None:
                     self.assertEqual(
                         context.resolve_world_info(
-                            self._world(), self.pc, str(self.path)
+                            self._world(), self.pc, self.reader
                         ).self.ip,
                         "22.0.1.3",
                     )
                 else:
                     with self.assertRaisesRegex(RuntimeError, "network not ready"):
-                        context.resolve_world_info(
-                            self._world(), self.pc, str(self.path)
-                        )
+                        context.resolve_world_info(self._world(), self.pc, self.reader)
                 sleep.assert_called_once_with(0.5)
 
     def test_control_plane_addresses_and_new_underlay(self):
         self.assertEqual(
-            scr_vip.read_topology(4, 2, str(self.path)), {0: "22.0.1.2", 1: "22.0.1.3"}
+            scr_vip.read_topology(4, 2, self.reader), {0: "22.0.1.2", 1: "22.0.1.3"}
         )
         self.rows["model-rank-1"]["real_ip"] = "10.1.2.3"
         self._write_rows(self.rows)
         self.assertEqual(
-            scr_vip.real_ip_by_vip(4, 2, str(self.path))["22.0.1.3"], "10.1.2.3"
+            scr_vip.real_ip_by_vip(self.pc, self.reader)["22.0.1.3"], "10.1.2.3"
         )
         with patch.object(scr_vip, "validate_device") as check:
             self.assertEqual(
-                scr_vip.internal_ip(self.pc, "10.0.0.3", str(self.path)), "22.0.1.3"
+                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader), "22.0.1.3"
             )
             check.assert_called_once_with("22.0.1.3")
 
@@ -170,7 +170,7 @@ class ScrVipTest(unittest.TestCase):
             scr_vip.time, "sleep", side_effect=lambda _: self._write_rows(self.rows)
         ), patch.object(scr_vip, "validate_device"):
             self.assertEqual(
-                scr_vip.topology(self.pc, str(self.path), wait=True),
+                scr_vip.topology(self.pc, self.reader, wait=True),
                 {0: "22.0.1.2", 1: "22.0.1.3"},
             )
 
@@ -182,7 +182,7 @@ class ScrVipTest(unittest.TestCase):
             scr_vip.time, "monotonic", side_effect=[0, 121]
         ), patch.object(scr_vip, "validate_device") as device:
             with self.assertRaisesRegex(KeyError, "real_ip"):
-                scr_vip.internal_ip(self.pc, "10.0.0.3", str(self.path))
+                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader)
             device.assert_not_called()
 
     def test_worker_node_topology_must_match_gpu_topology(self):
@@ -191,7 +191,7 @@ class ScrVipTest(unittest.TestCase):
                 os.environ, {name: wrong}
             ), patch.object(scr_vip, "validate_device") as device:
                 with self.assertRaisesRegex(ValueError, name):
-                    scr_vip.topology(self.pc, str(self.path), wait=True)
+                    scr_vip.topology(self.pc, self.reader, wait=True)
                 device.assert_not_called()
 
     def test_incomplete_duplicate_and_unmerged_maps_fail(self):
@@ -209,7 +209,7 @@ class ScrVipTest(unittest.TestCase):
             with self.subTest(rows=rows):
                 self._write_rows(rows)
                 with self.assertRaises(ValueError):
-                    scr_vip.read_topology(4, 2, str(self.path))
+                    scr_vip.read_topology(4, 2, self.reader)
 
     def test_only_scr_template_multinode_uses_vip(self):
         for switch in (None, "", "0", "false", "1", "true", "yes", "on"):
@@ -236,14 +236,12 @@ class ScrVipTest(unittest.TestCase):
                         ) as topology:
                             self.assertEqual(scr_vip.enabled(self.pc), expected)
                             self.assertEqual(
-                                scr_vip.internal_ip(
-                                    self.pc, "10.0.0.3", str(self.path)
-                                ),
+                                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader),
                                 "22.0.1.3" if expected else "10.0.0.3",
                             )
                             if expected:
                                 topology.assert_called_once_with(
-                                    self.pc, str(self.path), wait=True
+                                    self.pc, self.reader, wait=True
                                 )
                             else:
                                 topology.assert_not_called()
@@ -261,7 +259,7 @@ class ScrVipTest(unittest.TestCase):
                     scr_vip.time, "monotonic", side_effect=[0, 121]
                 ), patch.object(scr_vip, "validate_device") as device:
                     with self.assertRaises(error):
-                        scr_vip.internal_ip(self.pc, "10.0.0.3", str(self.path))
+                        scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader)
                     device.assert_not_called()
 
     def test_unready_network_never_falls_back(self):
@@ -271,7 +269,7 @@ class ScrVipTest(unittest.TestCase):
             scr_vip, "validate_device", side_effect=RuntimeError("network not ready")
         ):
             with self.assertRaisesRegex(RuntimeError, "network not ready"):
-                scr_vip.internal_ip(self.pc, "10.0.0.3", str(self.path))
+                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader)
 
     def test_platform_network_contract(self):
         addresses = json.dumps([{"addr_info": [{"local": "22.0.1.3"}]}])
@@ -317,7 +315,7 @@ class ScrVipTest(unittest.TestCase):
         members = world.members
         before = [vars(member).copy() for member in members]
         with patch.object(scr_vip, "validate_device"):
-            restored = scr_vip.validate_world_info(world, self.pc, str(self.path))
+            restored = scr_vip.validate_world_info(world, self.pc, self.reader)
         self.assertIs(restored, world)
         self.assertIs(restored.members, members)
         self.assertEqual([vars(member) for member in members], before)
@@ -361,16 +359,76 @@ class ScrVipTest(unittest.TestCase):
         for real_ip in ("10.0.0.3", "10.2.0.3"):
             self.rows["model-rank-1"]["real_ip"] = real_ip
             self._write_rows(self.rows)
-            update_worker_addrs(config, self.pc, world, str(self.path))
+            update_worker_addrs(
+                config, self.pc, world, scr_vip.real_ip_by_vip(self.pc, self.reader)
+            )
             self.assertEqual(config.worker_addrs[2], f"{real_ip}:22292:22294")
             self.assertEqual(config.worker_grpc_addrs[2], "22.0.1.3:22291")
         world.members[2].ip = "22.0.1.99"
         with self.assertRaisesRegex(KeyError, "22.0.1.99"):
-            update_worker_addrs(config, self.pc, world, str(self.path))
+            update_worker_addrs(
+                config, self.pc, world, scr_vip.real_ip_by_vip(self.pc, self.reader)
+            )
+
+    def test_backend_restore_rereads_underlay_with_the_same_reader(self):
+        from rtp_llm.server.backend_manager import BackendManager
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 4, 1, 0
+        world = self._world()
+        runtime = SimpleNamespace()
+        backend = BackendManager.__new__(BackendManager)
+        backend.py_env_configs = SimpleNamespace(
+            parallelism_config=self.pc,
+            server_config=SimpleNamespace(ip="10.0.0.3"),
+            distribute_config=SimpleNamespace(),
+        )
+        backend._distributed_server = SimpleNamespace(gang_info=self.reader)
+        backend._engine_config = SimpleNamespace(
+            runtime_config=runtime, parallelism_config=self.pc
+        )
+        backend._world_info = world
+        backend.engine = Mock()
+        endpoints = [(m.ip, m.server_port, m.world_rank) for m in world.members]
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch(
+            "rtp_llm.server.backend_manager.get_world_info", return_value=world
+        ), patch.object(scr_vip, "validate_device"):
+            for real_ip in ("10.1.0.3", "10.2.0.3"):
+                self.rows["model-rank-1"]["real_ip"] = real_ip
+                self._write_rows(self.rows)
+                backend.restore_fixup(RestoreContext("seed", real_ip))
+                self.assertEqual(runtime.worker_addrs[2], f"{real_ip}:22292:22294")
+                self.assertEqual(runtime.worker_grpc_addrs[2], "22.0.1.3:22291")
+                self.assertEqual(
+                    [
+                        (m.ip, m.server_port, m.world_rank)
+                        for m in backend._world_info.members
+                    ],
+                    endpoints,
+                )
+                backend.engine.update_runtime_endpoints.assert_called_with(
+                    runtime, world
+                )
+
+    def test_missing_cache_mapping_fails_without_advertising_vip(self):
+        from rtp_llm.config.engine_config import update_worker_addrs
+
+        with self.assertRaisesRegex(
+            ValueError, "requires a current VIP-to-real-IP mapping"
+        ):
+            update_worker_addrs(SimpleNamespace(), self.pc, self._world())
+
+    def test_non_scr_does_not_read_gang_projection(self):
+        self.path.unlink()
+        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}):
+            self.assertIsNone(scr_vip.real_ip_by_vip(self.pc, self.reader))
+            self.assertEqual(
+                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader), "10.0.0.3"
+            )
 
     def test_non_uniform_world_fails(self):
         with self.assertRaises(ValueError):
-            scr_vip.read_topology(5, 2, str(self.path))
+            scr_vip.read_topology(5, 2, self.reader)
 
 
 if __name__ == "__main__":

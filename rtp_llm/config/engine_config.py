@@ -327,7 +327,7 @@ def update_worker_addrs(
     runtime_config: RuntimeConfig,
     parallelism_config: ParallelismConfig,
     world_info,
-    annotation_path: str,
+    real_ip_by_vip: dict[str, str] | None = None,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info."""
     if world_info is None:
@@ -339,15 +339,8 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
-    real_ip_by_vip = (
-        scr_vip.real_ip_by_vip(
-            parallelism_config.world_size,
-            parallelism_config.local_world_size,
-            annotation_path,
-        )
-        if scr_vip.enabled(parallelism_config)
-        else None
-    )
+    if scr_vip.enabled(parallelism_config) and real_ip_by_vip is None:
+        raise ValueError("SCR VIP CacheStore requires a current VIP-to-real-IP mapping")
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (

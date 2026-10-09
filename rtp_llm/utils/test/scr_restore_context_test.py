@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr_restore_context import RestoreContext
 
 
@@ -32,7 +33,9 @@ class RestoreContextTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "local listener port layout"):
                 RestoreContext("seed", "192.0.2.20").resolve_world_info(
-                    world, SimpleNamespace(world_size=1), "/unused/annotations"
+                    world,
+                    SimpleNamespace(world_size=1),
+                    GangInfoReader("/unused/annotations"),
                 )
         self.assertEqual(world.self.ip, "192.0.2.10")
         self.assertEqual(world.self.cache_store_listen_port, 9002)
@@ -61,10 +64,16 @@ class RestoreContextTest(unittest.TestCase):
         ):
             context = RestoreContext("seed", "192.0.2.20")
             self.assertIs(
-                context.resolve_world_info(world, pc, "/unused/annotations"), world
+                context.resolve_world_info(
+                    world, pc, GangInfoReader("/unused/annotations")
+                ),
+                world,
             )
             self.assertIs(
-                context.resolve_world_info(world, pc, "/unused/annotations"), world
+                context.resolve_world_info(
+                    world, pc, GangInfoReader("/unused/annotations")
+                ),
+                world,
             )
         reader.assert_called_once_with("seed")
 

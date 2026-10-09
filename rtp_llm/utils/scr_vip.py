@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from rtp_llm.utils.gang_info import read_c2_gang_info
+from rtp_llm.utils.gang_info import GangInfoReader
 
 VIP_INTERFACE = "scr_vxlan0"
 NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
@@ -28,10 +28,10 @@ def enabled(pc) -> bool:
     return template_phase_active() and pc.world_size > pc.local_world_size
 
 
-def _read_topology(world_size: int, local_world_size: int, annotation_path: str):
+def _read_topology(world_size: int, local_world_size: int, gang_info: GangInfoReader):
     if local_world_size <= 0 or world_size % local_world_size:
         raise ValueError("SCR VIP requires equally sized nodes")
-    rows = read_c2_gang_info(annotation_path)
+    rows = gang_info.read()
     if not isinstance(rows, dict):
         raise ValueError("SCR gang info must be an object")
     nodes = {}
@@ -59,16 +59,16 @@ def _read_topology(world_size: int, local_world_size: int, annotation_path: str)
 
 
 def read_topology(
-    world_size: int, local_world_size: int, annotation_path: str
+    world_size: int, local_world_size: int, gang_info: GangInfoReader
 ) -> dict[int, str]:
-    return _read_topology(world_size, local_world_size, annotation_path)[0]
+    return _read_topology(world_size, local_world_size, gang_info)[0]
 
 
-def real_ip_by_vip(
-    world_size: int, local_world_size: int, annotation_path: str
-) -> dict[str, str]:
-    """Read the current underlay, including after a Pod moves during restore."""
-    return _read_topology(world_size, local_world_size, annotation_path)[1]
+def real_ip_by_vip(pc, gang_info: GangInfoReader) -> dict[str, str] | None:
+    """Resolve the current underlay only when multi-node SCR uses VIPs."""
+    if not enabled(pc):
+        return None
+    return _read_topology(pc.world_size, pc.local_world_size, gang_info)[1]
 
 
 def validate_device(address: str) -> None:
@@ -96,7 +96,7 @@ def validate_device(address: str) -> None:
         probe.bind((address, 0))
 
 
-def topology(pc, annotation_path: str, *, wait: bool = False) -> dict[int, str]:
+def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, str]:
     if not 0 <= pc.world_rank < pc.world_size:
         raise ValueError("SCR world rank is outside the topology")
     if pc.local_world_size <= 0 or pc.world_size % pc.local_world_size:
@@ -115,7 +115,7 @@ def topology(pc, annotation_path: str, *, wait: bool = False) -> dict[int, str]:
     deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:
-            nodes = read_topology(pc.world_size, pc.local_world_size, annotation_path)
+            nodes = read_topology(pc.world_size, pc.local_world_size, gang_info)
             validate_device(nodes[int(os.environ["RANK_ID"])])
             return nodes
         except (
@@ -130,10 +130,10 @@ def topology(pc, annotation_path: str, *, wait: bool = False) -> dict[int, str]:
             time.sleep(0.5)
 
 
-def internal_ip(pc, fallback: str, annotation_path: str) -> str:
+def internal_ip(pc, fallback: str, gang_info: GangInfoReader) -> str:
     if not enabled(pc):
         return fallback
-    return topology(pc, annotation_path, wait=True)[int(os.environ["RANK_ID"])]
+    return topology(pc, gang_info, wait=True)[int(os.environ["RANK_ID"])]
 
 
 def configure_network(pc) -> None:
@@ -150,13 +150,13 @@ def configure_network(pc) -> None:
     os.environ["GLOO_SOCKET_IFNAME"] = VIP_INTERFACE
 
 
-def validate_world_info(current, pc, annotation_path: str):
+def validate_world_info(current, pc, gang_info: GangInfoReader):
     """Validate checkpointed endpoints without changing membership or port layout.
 
     The network manager owns underlay and transport recovery. RTP verifies its
     existing VIP topology after the restore barrier, including frontend subsets.
     """
-    nodes = topology(pc, annotation_path, wait=True)
+    nodes = topology(pc, gang_info, wait=True)
     if current.self is None:
         raise ValueError("SCR VIP world requires a local worker")
     if current.self.world_rank != pc.world_rank:

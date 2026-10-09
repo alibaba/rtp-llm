@@ -20,7 +20,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.utils import scr_vip
-from rtp_llm.utils.gang_info import read_c2_gang_info
+from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
 
 
@@ -149,7 +149,7 @@ def get_local_world_info(
     ip = scr_vip.internal_ip(
         parallelism_config,
         server_config.ip or socket.gethostbyname(socket.gethostname()),
-        distribute_config.gang_annocation_path,
+        GangInfoReader.from_config(distribute_config),
     )
     self_info = WorkerInfo(
         ip=ip,
@@ -272,10 +272,11 @@ class DistributedServer(object):
         server_config = py_env_configs.server_config
         distribute_config = py_env_configs.distribute_config
         pc = py_env_configs.parallelism_config
+        self.gang_info = GangInfoReader.from_config(distribute_config)
         ip = scr_vip.internal_ip(
             pc,
             server_config.ip or socket.gethostbyname(socket.gethostname()),
-            distribute_config.gang_annocation_path,
+            self.gang_info,
         )
         # internal_ip has validated the platform network before transports open.
         scr_vip.configure_network(pc)
@@ -541,7 +542,9 @@ def get_master(
     if scr_vip.enabled(parallelism_config):
         return (
             scr_vip.topology(
-                parallelism_config, distribute_config.gang_annocation_path, wait=True
+                parallelism_config,
+                GangInfoReader.from_config(distribute_config),
+                wait=True,
             )[0],
             port,
         )
@@ -605,7 +608,7 @@ def get_master_from_file(distribute_config) -> (str, str):
 
 
 def get_master_from_c2(distribute_config) -> (str, str):
-    gang_info_json = read_c2_gang_info(distribute_config.gang_annocation_path)
+    gang_info_json = GangInfoReader.from_config(distribute_config).read()
     logging.info(f"gang info json: {gang_info_json}")
     return get_master_from_json(gang_info_json)
 
