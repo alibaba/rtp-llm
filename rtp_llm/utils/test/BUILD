@@ -46,6 +46,12 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_deep_gemm_test",
+    srcs = ["jit_cache_deep_gemm_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = [
