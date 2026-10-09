@@ -259,6 +259,17 @@ py_test(
 )
 
 py_test(
+    name = "test_native_l20_transfer_sm120",
+    srcs = ["test_native_l20_transfer.py", "test_v41_pp_delayed_state.py"],
+    main = "test_native_l20_transfer.py",
+    data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [
