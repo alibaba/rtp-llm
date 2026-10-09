@@ -6,11 +6,11 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
 import requests
-
 from rtp_llm.test.perf_test.dataclass import (
     ResponseInfo,
     TestResultMetrics,
     analyze_results,
+    counted_throughput,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -111,7 +111,9 @@ def _curl_server_single_worker(
             logging.warning(f"request failed: {response.content}")
             return ResponseInfo({}, False)
         logging.debug(response.text)
-        return ResponseInfo(response.json())
+        return ResponseInfo(
+            response.json(), expected_output_len=int(gen_config["min_new_tokens"])
+        )
     except Exception as e:
         logging.warning(f" request exception: {e}")
         return ResponseInfo({}, False)
@@ -244,8 +246,11 @@ class BatchPerfImpl(object):
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
         measurements: List[TestResultMetrics] = []
         all_measure_responses: List[ResponseInfo] = []
+        measured_elapsed_s = 0.0
         for i in range(measure_runs):
+            window_start = time.perf_counter()
             responses = self._curl_server_responses()
+            measured_elapsed_s += time.perf_counter() - window_start
             metric = analyze_results(responses)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
@@ -277,6 +282,23 @@ class BatchPerfImpl(object):
         else:
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
+
+        pooled = analyze_results(all_measure_responses)
+        results.total_requests = pooled.total_requests
+        results.success_requests = pooled.success_requests
+        results.fail_requests = pooled.fail_requests
+        gpu_count = int(
+            os.environ.get(
+                "PERF_GPU_COUNT",
+                os.environ.get(
+                    "WORLD_SIZE",
+                    str(self.dp_size * int(os.environ.get("TP_SIZE", "1"))),
+                ),
+            )
+        )
+        results.counted_throughput = counted_throughput(
+            all_measure_responses, measured_elapsed_s, gpu_count
+        )
 
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that

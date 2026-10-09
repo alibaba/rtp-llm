@@ -991,3 +991,9 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "counted_throughput_test",
+    srcs = ["counted_throughput_test.py"],
+    deps = [":perf_test_lib"],
+)

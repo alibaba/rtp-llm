@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -46,19 +47,38 @@ class ResponseInfo:
     }
     """
 
-    def __init__(self, response: Dict[str, Any], success: bool = True):
+    def __init__(
+        self,
+        response: Dict[str, Any],
+        success: bool = True,
+        expected_output_len: int = 0,
+    ):
+        self.success = False
+        self.valid_completion = False
+        self.reuse_len = 0
         if not success:
             return
         self.success = success
         aux_info = response.get("aux_info", {})
         self.input_len = aux_info.get("input_len", 0)
         self.output_len = aux_info.get("output_len", 0)
+        self.reuse_len = aux_info.get("reuse_len", 0)
         self.wait_time = aux_info.get("wait_time", 0.0)
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
         self.decode_time = self.total_time - self.prefill_time
         self.decode_time_per_token = (
             self.decode_time / (self.output_len - 1) if self.output_len > 1 else 0.0
+        )
+        counts = (self.input_len, self.output_len, self.reuse_len)
+        times = (self.wait_time, self.total_time, self.prefill_time, self.decode_time)
+        self.valid_completion = (
+            response.get("finished") is True
+            and all(type(value) is int and value >= 0 for value in counts)
+            and self.reuse_len <= self.input_len
+            and self.output_len >= max(1, expected_output_len)
+            and all(math.isfinite(value) and value >= 0 for value in times)
+            and self.total_time > 0
         )
 
 
@@ -79,6 +99,7 @@ class TestResultMetrics:
     avg_decode_time: float = 0.0
     max_decode_time: float = 0.0
     decode_time_var: float = 0.0
+    counted_throughput: Optional[Dict[str, Any]] = None
 
 
 def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
@@ -135,6 +156,34 @@ def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
             / success_count
         )
     return metrics
+
+
+def counted_throughput(
+    responses: List[ResponseInfo], elapsed_s: float, gpu_count: int
+) -> Dict[str, Any]:
+    """Count terminal completions over the caller's measured wall-clock window."""
+    if not math.isfinite(elapsed_s) or elapsed_s <= 0:
+        raise ValueError("measurement duration must be finite and positive")
+    if type(gpu_count) is not int or gpu_count <= 0:
+        raise ValueError("GPU count must be a positive integer")
+    completed = [r for r in responses if r.success and r.valid_completion]
+    generated = sum(r.output_len for r in completed)
+    logical = sum(r.input_len for r in completed)
+    uncached = sum(r.input_len - r.reuse_len for r in completed)
+    return {
+        "valid": bool(responses) and len(completed) == len(responses),
+        "total_requests": len(responses),
+        "completed_requests": len(completed),
+        "elapsed_s": elapsed_s,
+        "gpu_count": gpu_count,
+        "generated_tokens": generated,
+        "logical_input_tokens": logical,
+        "uncached_input_tokens": uncached,
+        "generated_tps": generated / elapsed_s,
+        "generated_tps_per_gpu": generated / elapsed_s / gpu_count,
+        "logical_input_tpm": logical * 60 / elapsed_s,
+        "uncached_input_tpm": uncached * 60 / elapsed_s,
+    }
 
 
 class MetricState(object):
@@ -209,6 +258,11 @@ def create_metrics_table(
                     "avg_wait_time": metrics.avg_wait_time,
                     "avg_prefill_time": metrics.avg_prefill_time,
                     "avg_decode_time": metrics.avg_decode_time,
+                    # Counted window throughput (F8): valid only when every
+                    # response finished and the measured window elapsed is
+                    # finite; grid mode previously dropped this field even
+                    # though BatchPerfImpl computes it for every measure run.
+                    "counted_throughput": metrics.counted_throughput,
                 }
             )
         else:
@@ -235,6 +289,7 @@ class TpsSearchStep:
     avg_decode_time: float  # ms
     success_rate: float
     satisfies_tpot: bool
+    counted_throughput: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -246,6 +301,7 @@ class TpsResult:
     actual_tpot: float = 0.0  # ms
     tps: float = 0.0  # tokens/s = best_bs / (actual_tpot / 1000)
     search_steps: List[TpsSearchStep] = field(default_factory=list)
+    counted_throughput: Optional[Dict[str, Any]] = None
 
 
 def create_tps_result_table(
@@ -289,12 +345,14 @@ def create_tps_result_table(
                 "best_bs": r.best_bs,
                 "actual_tpot": r.actual_tpot,
                 "tps": r.tps,
+                "counted_throughput": r.counted_throughput,
                 "search_steps": [
                     {
                         "batch_size": s.batch_size,
                         "avg_decode_time": s.avg_decode_time,
                         "success_rate": s.success_rate,
                         "satisfies_tpot": s.satisfies_tpot,
+                        "counted_throughput": s.counted_throughput,
                     }
                     for s in sorted(r.search_steps, key=lambda x: x.batch_size)
                 ],
@@ -391,6 +449,7 @@ def create_distribution_metrics_table(
                     "avg_decode_time_per_token": m.avg_decode_time,
                     "max_decode_time_per_token": m.max_decode_time,
                     "avg_wait_time": m.avg_wait_time,
+                    "counted_throughput": m.counted_throughput,
                 }
             )
         else:
