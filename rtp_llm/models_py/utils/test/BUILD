@@ -36,10 +36,10 @@ py_test (
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 py_test (
@@ -50,8 +50,8 @@ py_test (
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "1",
     },
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

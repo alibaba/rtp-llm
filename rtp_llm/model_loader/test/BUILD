@@ -6,8 +6,8 @@ py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -22,8 +22,8 @@ py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -38,16 +38,16 @@ py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
     name = "test_swizzle_load_config",
     srcs = ["test_swizzle_load_config.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -57,9 +57,9 @@ py_test(
         # auto_model: the finalize coverage imports rtp_llm.models.base_model.
         "//rtp_llm/models_py/standalone:auto_model",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    # Metadata-only test; A10_CU13 supplies the runtime without an H20 reservation.
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    # Metadata-only test; L20_CU13 supplies the runtime without an H20 reservation.
+    tags = ["L20_CU13"],
 )
 
 py_test(

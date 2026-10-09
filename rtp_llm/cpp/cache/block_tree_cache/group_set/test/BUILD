@@ -27,21 +27,21 @@ test_deps = [
 
 cc_test(
     name = "group_set_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["GroupSetTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "full_group_set_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
@@ -50,11 +50,11 @@ cc_test(
 
 cc_test(
     name = "swa_group_set_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["SWAGroupSetTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
@@ -63,11 +63,11 @@ cc_test(
 
 cc_test(
     name = "linear_group_set_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["LinearGroupSetTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],

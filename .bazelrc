@@ -181,7 +181,7 @@ build:cuda13 --define=use_remote_kv_cache=false
 # nvcc 13 dropped Volta (sm_70) and Turing (sm_75); supported set on
 # CUDA 13.x is sm_80..sm_120.  With sm_70/sm_75 left in the list nvcc
 # fatals out at:  Unsupported gpu architecture 'compute_70'.
-# The CUDA 13 x86 test pools execute sm_86 (A10_CU13) and sm_103
+# The CUDA 13 x86 test pools execute sm_86/sm_89 (L20_CU13) and sm_103
 # (L20D_TEST/B300) cubins.  sm_100 and sm_120 are compiled for compatibility
 # only on x86: sm_100 execution coverage comes from the ARM GB200 lane
 # (SM100_ARM_CU13), and sm_120 has no execution pool yet.

@@ -14,8 +14,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -32,8 +32,8 @@ py_test(
     env = {
         "MM_CACHE_ITEM_NUM": "0",
     },
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -47,8 +47,8 @@ py_test(
     data = [
         ":testdata",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -116,6 +116,6 @@ py_test(
     deps = [
         "//rtp_llm:config_ops",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

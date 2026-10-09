@@ -58,8 +58,8 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -79,8 +79,8 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -95,8 +95,8 @@ cc_test(
         "//rtp_llm/cpp/cache",
     ] + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -112,8 +112,8 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # The executor caches RTP_LLM_STREAM_ASYNC, so test both settings in fresh processes.
@@ -133,8 +133,8 @@ cc_test(
                 "RTP_LLM_STREAM_ASYNC": stream_async,
             },
         }),
-        exec_properties = {"gpu": "A10_CU13"},
-        tags = ["A10_CU13"],
+        exec_properties = {"gpu": "L20_CU13"},
+        tags = ["L20_CU13"],
         deps = [":mock_engine"] + cuda13_torch_link_deps,
     )
     for mode, stream_async in [

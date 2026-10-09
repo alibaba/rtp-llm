@@ -29,10 +29,10 @@ py_test (
     }),
     # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (
@@ -50,10 +50,10 @@ py_test (
     }),
     # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (

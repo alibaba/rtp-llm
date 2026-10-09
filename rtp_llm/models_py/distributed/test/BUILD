@@ -54,11 +54,11 @@ py_test(
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "4",
     },
 )
@@ -171,11 +171,11 @@ py_test(
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
     exec_properties = {
-        "gpu": "A10_CU13",
+        "gpu": "L20_CU13",
         "gpu_count": "4",
     },
 )
