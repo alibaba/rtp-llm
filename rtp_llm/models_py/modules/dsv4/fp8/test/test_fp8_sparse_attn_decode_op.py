@@ -41,7 +41,11 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
 
         fake_flash_mla.flash_mla_with_kvcache = fake_flash_mla_with_kvcache
         old_flash_mla = sys.modules.get("flash_mla")
+        old_flash_mla_legacy = sys.modules.get("flash_mla_legacy")
+        # The production shim prefers the isolated legacy wheel; alias the
+        # fake under both names so the mock still intercepts it.
         sys.modules["flash_mla"] = fake_flash_mla
+        sys.modules["flash_mla_legacy"] = fake_flash_mla
         try:
             op = SparseAttnV4DecodeFp8Op(
                 n_heads=4,
@@ -51,8 +55,8 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             q = torch.zeros(2, 3, 4, 512, dtype=torch.bfloat16)
             kv_cache = torch.zeros(8, 256, 584, dtype=torch.uint8)
             attn_sink = torch.zeros(4, dtype=torch.float32)
-            topk = torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(
-                2, 3, 128
+            topk = (
+                torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(2, 3, 128)
             )
             block_table = torch.full((2, 257), -1, dtype=torch.int32)
             cache_seqlens = torch.tensor([65537, 65537], dtype=torch.int32)
@@ -77,6 +81,10 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
                 sys.modules.pop("flash_mla", None)
             else:
                 sys.modules["flash_mla"] = old_flash_mla
+        if old_flash_mla_legacy is None:
+            sys.modules.pop("flash_mla_legacy", None)
+        else:
+            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
 
 
 if __name__ == "__main__":

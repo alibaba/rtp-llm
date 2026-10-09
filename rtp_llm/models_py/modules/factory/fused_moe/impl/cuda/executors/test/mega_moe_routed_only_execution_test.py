@@ -437,11 +437,26 @@ def _se_worker(
             max_tokens_per_rank=capacity,
             chunking_enabled=not cp_request_lengths,
         )
-        assert isinstance(mega_se.fused_moe.fused_experts, MegaMoeSEExecutor)
+        # DeepGEMM 2.8 removed the fused shared_recipe API: when the wheel
+        # still provides it, auto selects MegaMoE-SE; otherwise the strategy
+        # degrades to ordinary MegaMoE plus the standalone shared expert
+        # (same weights and quantization), which the numerical comparison
+        # below covers either way.
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            _mega_moe_se_available,
+        )
+
+        if _mega_moe_se_available():
+            assert isinstance(mega_se.fused_moe.fused_experts, MegaMoeSEExecutor)
+            assert mega_se.fused_moe.includes_shared_expert
+            assert mega_se._moe.shared_experts is None
+            assert mega_se._moe._shared_executor is None
+        else:
+            assert isinstance(mega_se.fused_moe.fused_experts, MegaMoeExecutor)
+            assert not mega_se.fused_moe.includes_shared_expert
+            assert mega_se._moe.shared_experts is not None
+            assert mega_se._moe._shared_executor is not None
         assert isinstance(reference.fused_moe.fused_experts, LocalLoopExecutor)
-        assert mega_se.fused_moe.includes_shared_expert
-        assert mega_se._moe.shared_experts is None
-        assert mega_se._moe._shared_executor is None
         assert reference.shared_experts is not None
         assert reference._moe._shared_executor is not None
 

@@ -63,16 +63,10 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
 
 
 def _mega_moe_rank_nvcc_tmpdir(rank: int) -> str:
-    base_dir = (
-        os.environ.get(_MEGA_MOE_NVCC_TMPDIR_ENV)
-        or os.environ.get("DG_JIT_CACHE_DIR")
-        or os.environ.get("TRITON_CACHE_DIR")
-        or "/tmp"
-    )
-    return os.path.join(
-        base_dir,
-        "rtp_llm_mega_moe_nvcc",
-        f"rank_{int(rank)}",
+    from rtp_llm.models_py.utils.deep_gemm_scratch import rank_nvcc_tmpdir
+
+    return rank_nvcc_tmpdir(
+        rank, "rtp_llm_mega_moe_nvcc", os.environ.get(_MEGA_MOE_NVCC_TMPDIR_ENV)
     )
 
 
