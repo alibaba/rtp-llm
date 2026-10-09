@@ -428,7 +428,12 @@ def h20_oss_suites():
             smoke_test(
                 name = "next_dash_structural_tag_think",
                 task_info = "data/model/qwen3_next/dash_structural_tag_think.json",
-                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
+                # The sandbox grammar compile itself is ~150 ms, but concurrent
+                # engine startups (first JIT-cache-v2 use on a fresh worker) can
+                # starve the single sandbox worker far past the 30 s default; keep the
+                # admission deadline generous so load spikes cannot reject the
+                # request with a spurious grammar-unavailable error.
+                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1 --grammar_admission_compile_timeout_s 120 --grammar_admission_queue_timeout_s 120",
                 gpu_type = ["H20_CU13"],
             ),
         ],
