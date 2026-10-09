@@ -391,6 +391,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
+        if (!py_attn_inputs.prefix_lengths.is_cuda()) {
+            // A CUDA input length can accompany a host prefix on MTP prefix
+            // hits. Its device mirror is a deferred H2D destination: fill it
+            // on this stream before the metadata kernel reads it.
+            fusedCopy(d2d_copies_);
+            d2d_copies_.clear();
+        }
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths_device,
                                           py_attn_inputs.prefix_lengths_device,
                                           py_attn_inputs.cu_seqlens_device,
@@ -720,8 +727,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // d2d_copies_ accumulates across ALL micro-batches before the single
-    // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
+    // d2d_copies_ normally accumulates across micro-batches until the final
+    // flush. Mixed device lengths/host prefixes flush before metadata reads.
+    // Per micro-batch this adds ~6 copies from
     // buildPyAttentionInputs + padding_offset, plus group_count from
     // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
     // micro-batches and hybrid group_count of 4 the worst case is ~20.
