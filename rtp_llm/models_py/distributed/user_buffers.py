@@ -44,7 +44,9 @@ class UserBufferCommunicator:
             )
         self.local_rank = local_rank
         self.world_size = world_size
-        self.device = torch.device(f"cuda:{local_rank}")
+        from rtp_llm.device.device_type import get_device_type, DeviceType
+        _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
+        self.device = torch.device(f"{_dn}:{local_rank}")
         self.buffer_size = buffer_size
         self.per_rank_buffer_size = buffer_size // world_size
         self.group = group

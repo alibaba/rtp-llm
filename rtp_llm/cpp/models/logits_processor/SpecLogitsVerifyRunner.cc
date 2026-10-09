@@ -149,7 +149,7 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
 #if USING_CUDA
     if (task.draft_tokens_ready_event && draft_tokens.is_cuda()) {
         // Async MTP records this on the producer stream; order our D2H after it.
-        task.draft_tokens_ready_event->block(cuda_graph::graphGetCurrentStream());
+        cuda_graph::graphBlockEvent(*task.draft_tokens_ready_event, cuda_graph::graphGetCurrentStream());
     }
 #endif
     auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
@@ -231,7 +231,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
     result.logits_row_indices_gpu = std::move(row_indices_gpu);
     result.spec_cap_gpu           = std::move(spec_cap_gpu);
     result.ready_event            = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    result.ready_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*result.ready_event, cuda_graph::graphGetCurrentStream());
     result.consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     last_consumed_event_  = result.consumed_event;
 #endif

@@ -78,12 +78,29 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
 
 #undef FOREACH_BUFFER_TORCH_TYPE_MAP
 
+inline MemoryType allocationTypeToMemoryType(AllocationType alloc_type) {
+    if (alloc_type == AllocationType::HOST) {
+        return MemoryType::MEMORY_CPU;
+    }
+#if USING_ASCEND
+    return MemoryType::MEMORY_NPU;
+#else
+    return MemoryType::MEMORY_GPU;
+#endif
+}
+
 inline MemoryType torchDeviceToMemoryType(const c10::Device& device) {
-    return device.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    if (device.is_cuda()) return MemoryType::MEMORY_GPU;
+    if (device.is_privateuseone()) return MemoryType::MEMORY_NPU;
+    return MemoryType::MEMORY_CPU;
 }
 
 inline c10::Device memoryTypeToTorchDevice(const MemoryType& memory_type) {
-    return memory_type == MemoryType::MEMORY_GPU ? torch::DeviceType::CUDA : torch::DeviceType::CPU;
+    switch (memory_type) {
+        case MemoryType::MEMORY_GPU: return torch::DeviceType::CUDA;
+        case MemoryType::MEMORY_NPU: return torch::Device(torch::kPrivateUse1);
+        default: return torch::DeviceType::CPU;
+    }
 }
 
 }  // namespace rtp_llm
