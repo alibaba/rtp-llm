@@ -270,6 +270,15 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_cp_producer_metadata_sm120",
+    srcs = ["test_v41_cp_producer_metadata_sm120.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [
