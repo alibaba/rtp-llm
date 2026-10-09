@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -97,6 +98,8 @@ public:
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     void                    refreshKVCacheInfoSnapshot();
+    // Coalesce refresh requests into one pending slot; never build on the caller thread.
+    void                    requestKVCacheInfoSnapshotRefresh();
 
     // Sleep/wake_up: physical KV memory release/restore + metadata reset.
     // releaseKVCacheMemoryBacking: releases the physical pages of the KV big buffer while keeping its VA.
@@ -172,6 +175,8 @@ private:
     void        reportMetricsLoop();
     void        reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool cache_keys_initialized_now);
     KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void        refreshKVCacheInfoSnapshotLocked();
+    void        cacheStatusSnapshotRefreshLoop();
 
     // 成员变量
     CacheConfig         config_;
@@ -198,6 +203,15 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+
+    // Serialize snapshot construction/publication with sleep/wake metadata resets.
+    // Request submission never takes this mutex.
+    std::mutex              cache_status_refresh_mutex_;
+    std::mutex              cache_status_refresh_request_mutex_;
+    std::condition_variable cache_status_refresh_cv_;
+    std::thread             cache_status_refresh_thread_;
+    bool                    cache_status_refresh_pending_{false};
+    bool                    cache_status_refresh_stopping_{false};
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

@@ -834,8 +834,8 @@ absl::Status NormalEngine::step() {
                 resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
             status = executor_->process(streams, tps_schedule_time_us);
             if (status.ok() && refresh_cache_status_snapshot) {
-                RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
-                resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+                RTP_LLM_PROFILE_SCOPE("engine.normal.request_cache_status_snapshot");
+                resource_context_.cache_manager->requestKVCacheInfoSnapshotRefresh();
             }
         }
 

@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <algorithm>
 #include <limits>
@@ -56,6 +59,68 @@ private:
     std::string old_value_;
     bool        had_value_ = false;
 };
+
+// Pause after buildKVCacheInfo has collected keys, before it publishes the snapshot.
+class BlockingSnapshotAllocator: public MockKVCacheAllocator {
+public:
+    using MockKVCacheAllocator::MockKVCacheAllocator;
+
+    size_t availableTokensNum() const override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const size_t                build = ++build_count_;
+        cv_.notify_all();
+        cv_.wait(lock, [&]() { return build <= released_builds_; });
+        return build;
+    }
+
+    bool waitForBuilds(size_t count) const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&]() { return build_count_ >= count; });
+    }
+
+    void releaseBuilds(size_t count) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_builds_ = count;
+        cv_.notify_all();
+    }
+
+    size_t buildCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return build_count_;
+    }
+
+private:
+    mutable std::mutex              mutex_;
+    mutable std::condition_variable cv_;
+    mutable size_t                 build_count_    = 0;
+    size_t                         released_builds_ = 0;
+};
+
+// Declare after the manager so failed assertions cannot leave its worker blocked during destruction.
+class ScopedSnapshotBuildRelease {
+public:
+    explicit ScopedSnapshotBuildRelease(std::shared_ptr<BlockingSnapshotAllocator> allocator):
+        allocator_(std::move(allocator)) {}
+
+    ~ScopedSnapshotBuildRelease() {
+        allocator_->releaseBuilds(std::numeric_limits<size_t>::max());
+    }
+
+private:
+    std::shared_ptr<BlockingSnapshotAllocator> allocator_;
+};
+
+template<typename Predicate>
+bool waitForSnapshotCondition(Predicate condition) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    return true;
+}
 }  // namespace
 
 class KVCacheManagerTest: public ::testing::Test {
@@ -1078,6 +1143,128 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     auto current_keys = current.cached_keys;
     std::sort(current_keys.begin(), current_keys.end());
     EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+}
+
+TEST_F(KVCacheManagerTest, RequestKVCacheInfoSnapshotRefresh_CoalescesPendingRequestsAndSamplesLatestKeys) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+    auto         cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    auto         kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    auto allocator    = std::make_shared<BlockingSnapshotAllocator>(cache_config);
+    allocator->setSharedBlockCache(shared_cache);
+    kv_cache_manager->allocator_ = allocator;
+    ScopedSnapshotBuildRelease unblock_on_exit(allocator);
+
+    shared_cache->put(10, std::vector<BlockIdxType>{1}, false);
+    kv_cache_manager->requestKVCacheInfoSnapshotRefresh();
+    ASSERT_TRUE(allocator->waitForBuilds(1));
+
+    // The first build already captured key 10. All requests arriving while it is
+    // blocked must return promptly and coalesce into exactly one subsequent build.
+    auto requests = std::async(std::launch::async, [&]() {
+        for (int i = 0; i < 100; ++i) {
+            kv_cache_manager->requestKVCacheInfoSnapshotRefresh();
+        }
+    });
+    const auto request_status = requests.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(request_status, std::future_status::ready);
+    if (request_status != std::future_status::ready) {
+        allocator->releaseBuilds(std::numeric_limits<size_t>::max());
+    }
+    requests.get();
+    ASSERT_EQ(request_status, std::future_status::ready);
+
+    // Change the cache after all notifications, proving the worker samples at
+    // consumption time rather than retaining keys from request submission.
+    shared_cache->put(11, std::vector<BlockIdxType>{2}, false);
+    allocator->releaseBuilds(1);
+    ASSERT_TRUE(allocator->waitForBuilds(2));
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(-1, true).cached_keys, (std::vector<CacheKeyType>{10}));
+
+    allocator->releaseBuilds(2);
+    ASSERT_TRUE(waitForSnapshotCondition([&]() {
+        std::lock_guard<std::mutex> lock(kv_cache_manager->cache_status_snapshot_mutex_);
+        return kv_cache_manager->cache_status_snapshot_
+               && kv_cache_manager->cache_status_snapshot_->available_kv_cache == 2;
+    }));
+    auto keys = kv_cache_manager->getKVCacheInfo(-1, true).cached_keys;
+    std::sort(keys.begin(), keys.end());
+    EXPECT_EQ(keys, (std::vector<CacheKeyType>{10, 11}));
+
+    allocator->releaseBuilds(std::numeric_limits<size_t>::max());
+    kv_cache_manager.reset();
+    EXPECT_EQ(allocator->buildCount(), 2u);
+}
+
+TEST_F(KVCacheManagerTest, RequestKVCacheInfoSnapshotRefresh_DestructionWaitsForBuildAndDiscardsPendingRequest) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+    auto         cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    auto         kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto allocator = std::make_shared<BlockingSnapshotAllocator>(cache_config);
+    allocator->setSharedBlockCache(kv_cache_manager->allocator_->sharedBlockCache());
+    kv_cache_manager->allocator_ = allocator;
+    ScopedSnapshotBuildRelease unblock_on_exit(allocator);
+
+    kv_cache_manager->requestKVCacheInfoSnapshotRefresh();
+    ASSERT_TRUE(allocator->waitForBuilds(1));
+    kv_cache_manager->requestKVCacheInfoSnapshotRefresh();
+
+    auto* manager = kv_cache_manager.get();
+    auto  destruction = std::async(std::launch::async, [manager = std::move(kv_cache_manager)]() mutable {
+        manager.reset();
+    });
+    // The allocator barrier keeps the in-flight worker (and consequently the
+    // manager's destructor) alive until the stopping state has been observed.
+    EXPECT_TRUE(waitForSnapshotCondition([&]() {
+        std::lock_guard<std::mutex> lock(manager->cache_status_refresh_request_mutex_);
+        return manager->cache_status_refresh_stopping_;
+    }));
+    EXPECT_EQ(destruction.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    allocator->releaseBuilds(std::numeric_limits<size_t>::max());
+    EXPECT_EQ(destruction.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    destruction.get();
+    EXPECT_EQ(allocator->buildCount(), 1u);
+}
+
+TEST_F(KVCacheManagerTest, RequestKVCacheInfoSnapshotRefresh_MetadataResetCannotBeOverwrittenByOlderBuild) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+    auto         cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    auto         kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    auto allocator    = std::make_shared<BlockingSnapshotAllocator>(cache_config);
+    allocator->setSharedBlockCache(shared_cache);
+    kv_cache_manager->allocator_ = allocator;
+    ScopedSnapshotBuildRelease unblock_on_exit(allocator);
+
+    shared_cache->put(10, std::vector<BlockIdxType>{1}, false);
+    kv_cache_manager->requestKVCacheInfoSnapshotRefresh();
+    ASSERT_TRUE(allocator->waitForBuilds(1));
+    {
+        std::unique_lock<std::mutex> lock(kv_cache_manager->cache_status_refresh_mutex_, std::try_to_lock);
+        EXPECT_FALSE(lock.owns_lock());
+    }
+
+    auto reset = std::async(std::launch::async, [&]() {
+        return kv_cache_manager->restoreKVCacheMemoryBackingAndResetMetadata();
+    });
+    allocator->releaseBuilds(1);
+    const bool reset_build_started = allocator->waitForBuilds(2);
+    EXPECT_TRUE(reset_build_started);
+    if (reset_build_started) {
+        EXPECT_TRUE(shared_cache->allCacheKeys().empty());
+    }
+    allocator->releaseBuilds(std::numeric_limits<size_t>::max());
+    EXPECT_EQ(reset.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(reset.get());
+
+    EXPECT_TRUE(kv_cache_manager->getKVCacheInfo(-1, true).cached_keys.empty());
+    EXPECT_EQ(allocator->buildCount(), 2u);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {

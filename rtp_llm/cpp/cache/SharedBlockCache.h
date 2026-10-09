@@ -65,6 +65,11 @@ public:
         std::vector<BlockIdxType> group_blocks;
     };
 
+    struct CacheKeysSnapshot {
+        std::vector<CacheKeyType> keys;
+        int64_t                   version = 0;
+    };
+
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
 
 public:
@@ -99,6 +104,9 @@ public:
     size_t size() const;
 
     std::vector<CacheKeyType> allCacheKeys() const;
+
+    // Capture keys and their version under the same lock.
+    CacheKeysSnapshot snapshotCacheKeys() const;
 
     int64_t version() const;
     // Caller must quiesce users and reset all group-pool metadata together.

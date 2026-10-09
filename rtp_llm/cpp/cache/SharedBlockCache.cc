@@ -451,13 +451,18 @@ size_t SharedBlockCache::size() const {
 }
 
 std::vector<CacheKeyType> SharedBlockCache::allCacheKeys() const {
+    return snapshotCacheKeys().keys;
+}
+
+SharedBlockCache::CacheKeysSnapshot SharedBlockCache::snapshotCacheKeys() const {
     std::lock_guard<std::mutex> lock(mu_);
-    std::vector<CacheKeyType>   keys;
-    keys.reserve(lru_cache_.size());
+    CacheKeysSnapshot          snapshot;
+    snapshot.version = version_;
+    snapshot.keys.reserve(lru_cache_.size());
     for (const auto& [key, item] : lru_cache_.items()) {
-        keys.push_back(key);
+        snapshot.keys.push_back(key);
     }
-    return keys;
+    return snapshot;
 }
 
 int64_t SharedBlockCache::version() const {
