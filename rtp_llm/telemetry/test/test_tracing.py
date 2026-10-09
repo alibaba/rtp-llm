@@ -574,6 +574,64 @@ class TestActiveRuntime(TracingTestCase):
         assert tracing.CURRENT_TRACE_STATE.get() is state
         state.finish()
 
+    def test_batch_identity_is_task_local_and_does_not_leak_to_next_request(self):
+        import asyncio
+
+        exporter = _start_in_memory_runtime()
+
+        async def run():
+            ready = asyncio.Event()
+            started = []
+
+            async def batch(index):
+                state = tracing.start_server_span(f"batch-{index}", {})
+                state.begin_batch(f"external-{index}")
+                first_id = state.batch_request_id
+                state.begin_batch(f"external-{index}")
+                assert state.batch_request_id == first_id
+                started.append(state)
+                if len(started) == 2:
+                    ready.set()
+                await ready.wait()
+                assert tracing.CURRENT_TRACE_STATE.get() is state
+                carrier = dict(state.batch_metadata())
+                assert carrier["x-rtp-llm-batch-request-id"] == first_id
+                assert carrier["x-rtp-llm-external-request-id"] == f"external-{index}"
+                item, _ = tracing.start_batch_item_span(801 + index, index)
+                item.finish()
+                state.finish()
+                return first_id
+
+            ids = await asyncio.gather(batch(0), batch(1))
+            assert len(set(ids)) == 2
+            plain = tracing.start_server_span("ordinary", {})
+            assert plain.batch_request_id == ""
+            assert plain.batch_metadata() == []
+            plain.finish()
+
+        asyncio.run(run())
+        tracing.shutdown_telemetry()
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 5
+        assert (
+            len({s.attributes["request_id"] for s in spans if s.name != "ordinary"})
+            == 4
+        )
+
+    def test_batch_external_id_text_metadata_and_inactive_noop(self):
+        _start_in_memory_runtime()
+        state = tracing.start_server_span("batch", {})
+        state.begin_batch("external-非ASCII")
+        assert state.external_request_id == "external-非ASCII"
+        assert "x-rtp-llm-external-request-id" not in dict(state.batch_metadata())
+        state.finish()
+        tracing.shutdown_telemetry()
+        inactive = tracing.RequestTraceState()
+        with mock.patch.object(tracing.uuid, "uuid4", side_effect=AssertionError):
+            inactive.begin_batch("disabled")
+        assert inactive.batch_request_id == ""
+        assert inactive.batch_metadata() == []
+
     def test_client_span_child_of_server_span(self):
         exporter = _start_in_memory_runtime()
         state = tracing.start_server_span("server", {})

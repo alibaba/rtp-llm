@@ -38,7 +38,11 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
+from rtp_llm.telemetry import (
+    inject_context_to_metadata,
+    start_batch_item_span,
+    start_client_span,
+)
 from rtp_llm.utils.base_model_datatypes import (
     GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
@@ -313,12 +317,29 @@ def _record_client_span_usage(
     if client_span is None:
         return
     try:
-        generate_outputs = outputs.generate_outputs if outputs is not None else []
-        if not generate_outputs:
+        aux_infos = (
+            [out.aux_info for out in outputs.generate_outputs]
+            if outputs is not None
+            else []
+        )
+        _record_client_aux_usage(
+            client_span, aux_infos, include_all_sequences=include_all_sequences
+        )
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+
+
+def _record_client_aux_usage(
+    client_span: Any, aux_infos: Any, *, include_all_sequences: bool = True
+) -> None:
+    """Shared token rules for converted outputs and in-memory batch protobufs."""
+    if client_span is None:
+        return
+    try:
+        if not aux_infos:
             return
         if not include_all_sequences:
-            generate_outputs = generate_outputs[:1]
-        aux_infos = [out.aux_info for out in generate_outputs]
+            aux_infos = aux_infos[:1]
         input_len = aux_infos[0].input_len
         if (
             input_len <= 0
@@ -356,10 +377,22 @@ def _record_client_span_latency(
     if client_span is None:
         return
     try:
-        generate_outputs = outputs.generate_outputs if outputs is not None else []
-        if not generate_outputs:
+        aux_infos = (
+            [out.aux_info for out in outputs.generate_outputs]
+            if outputs is not None
+            else []
+        )
+        _record_client_aux_latency(client_span, aux_infos)
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+
+
+def _record_client_aux_latency(client_span: Any, aux_infos: Any) -> None:
+    if client_span is None:
+        return
+    try:
+        if not aux_infos:
             return
-        aux_infos = [out.aux_info for out in generate_outputs]
         if any(
             not isinstance(aux.output_len, int)
             or isinstance(aux.output_len, bool)
@@ -397,6 +430,69 @@ def _record_client_span_latency(
             )
     except Exception:  # noqa: BLE001 - fail-open
         pass
+
+
+def _finish_batch_item_spans(item_spans, inputs, response, failure, conversion_index):
+    """Observe the complete wire response without re-running business conversion."""
+    valid_response = response is not None and len(response.results) == len(inputs)
+    for i, span in enumerate(item_spans):
+        if span is None:
+            continue
+        item_error = None
+        error_type = ""
+        try:
+            if valid_response:
+                result_pb = response.results[i]
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
+                ):
+                    error_type = "BusinessError"
+                    span.set_attribute(
+                        trace_attrs.RTP_LLM_ERROR_CODE, result_pb.error_info.error_code
+                    )
+                elif i == conversion_index:
+                    item_error = failure
+                else:
+                    output_pb = result_pb.final_output.flatten_output
+                    # Missing or incomplete aux info cannot establish per-sequence usage.
+                    if len(output_pb.aux_info) == len(output_pb.finished):
+                        aux_infos = output_pb.aux_info
+                        _record_client_aux_usage(
+                            span,
+                            aux_infos,
+                            include_all_sequences=not inputs[
+                                i
+                            ].generate_config.has_num_beams(),
+                        )
+                        _record_client_aux_latency(
+                            span,
+                            [
+                                AuxInfo(
+                                    input_len=aux.input_len,
+                                    output_len=aux.output_len,
+                                    cost_time=aux.cost_time_us / 1000.0,
+                                    first_token_cost_time=aux.first_token_cost_time_us
+                                    / 1000.0,
+                                )
+                                for aux in aux_infos
+                            ],
+                        )
+            elif response is not None:
+                error_type = "InvalidResponse"
+            elif conversion_index is not None and i != conversion_index:
+                error_type = "NotSubmitted"
+            else:
+                item_error = failure
+                if isinstance(failure, asyncio.CancelledError):
+                    error_type = "Cancelled"
+        except Exception:  # noqa: BLE001 - preserve the business outcome
+            logging.debug("batch item trace extraction failed", exc_info=True)
+        finally:
+            try:
+                span.finish(error=item_error, error_type=error_type)
+            except Exception:  # noqa: BLE001 - finish the remaining items as well
+                logging.debug("batch item trace cleanup failed", exc_info=True)
 
 
 class StreamState:
@@ -1544,65 +1640,148 @@ class ModelRpcClient(object):
             else None
         )
 
-        batch_input_pb = BatchGenerateInputPB()
-        for inp in batch_inputs:
-            input_pb = trans_input(inp)
-            batch_input_pb.inputs.append(input_pb)
-
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
-        logging.debug(
-            f"batch request: [{len(inputs)} items] send to address: {target_address}"
-        )
-
+        item_spans = []
+        rpc_span = None
+        response_call = None
+        response = None
+        rpc_status = None
+        failure = None
+        transport_failure = None
+        conversion_index = None
         try:
-            channel = await self._channel_pool.get(target_address)
-            stub = RpcServiceStub(channel)
-            grpc_kwargs = (
-                {"timeout": grpc_timeout_seconds}
-                if grpc_timeout_seconds is not None
-                else {}
+            batch_input_pb = BatchGenerateInputPB()
+            for i, inp in enumerate(batch_inputs):
+                conversion_index = i
+                span, item_metadata = start_batch_item_span(inp.request_id, i)
+                item_spans.append(span)
+                input_pb = trans_input(inp)
+                carrier = dict(item_metadata)
+                if carrier.get("traceparent"):
+                    input_pb.request_info.trace_context.traceparent = carrier[
+                        "traceparent"
+                    ]
+                    input_pb.request_info.trace_context.tracestate = carrier.get(
+                        "tracestate", ""
+                    )
+                batch_input_pb.inputs.append(input_pb)
+
+            conversion_index = None
+
+            target_address = self._addresses[
+                inputs[0].request_id % len(self._addresses)
+            ]
+            logging.debug(
+                f"batch request: [{len(inputs)} items] send to address: {target_address}"
             )
-            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
 
-            if len(response.results) != len(inputs):
-                raise FtRuntimeException(
-                    ExceptionType.EXECUTION_EXCEPTION,
-                    "batch RPC returned an invalid result cardinality: "
-                    f"received {len(response.results)} results for {len(inputs)} requests",
+            rpc_span, metadata = start_client_span(
+                "rtp_llm.batch_generate_call", target_address
+            )
+            if rpc_span is not None:
+                trace_state = CURRENT_TRACE_STATE.get()
+                if trace_state is not None:
+                    if trace_state.batch_request_id:
+                        rpc_span.set_attribute(
+                            trace_attrs.REQUEST_ID, trace_state.batch_request_id
+                        )
+                    if trace_state.external_request_id:
+                        rpc_span.set_attribute(
+                            trace_attrs.RTP_LLM_EXTERNAL_REQUEST_ID,
+                            trace_state.external_request_id,
+                        )
+                    metadata.extend(trace_state.batch_metadata())
+                rpc_span.set_attribute("rtp_llm.batch.size", len(inputs))
+
+            try:
+                channel = await self._channel_pool.get(target_address)
+                stub = RpcServiceStub(channel)
+                grpc_kwargs = (
+                    {"timeout": grpc_timeout_seconds}
+                    if grpc_timeout_seconds is not None
+                    else {}
                 )
+                if metadata:
+                    grpc_kwargs["metadata"] = metadata
+                response_call = stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
+                response = await response_call
+                rpc_status = StatusCode.OK
 
-            results = []
-            for i, result_pb in enumerate(response.results):
-                if result_pb.HasField("error_info") and (
-                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
-                    or result_pb.error_info.error_message
-                ):
-                    exception_type = _trans_rpc_error_code(
-                        result_pb.error_info.error_code
-                    )
-                    error_message = (
-                        result_pb.error_info.error_message
-                        or _rpc_error_code_name(result_pb.error_info.error_code)
-                    )
+                if len(response.results) != len(inputs):
                     raise FtRuntimeException(
-                        exception_type,
-                        f"batch item {i} failed: {error_message}",
+                        ExceptionType.EXECUTION_EXCEPTION,
+                        "batch RPC returned an invalid result cardinality: "
+                        f"received {len(response.results)} results for {len(inputs)} requests",
                     )
-                stream_state = StreamState()
-                output = trans_output(
-                    batch_inputs[i], result_pb.final_output, stream_state
-                )
-                _validate_prefill_only_completed(batch_inputs[i], stream_state)
-                results.append(output)
-            return results
 
-        except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
-        except FtRuntimeException:
+                results = []
+                for i, result_pb in enumerate(response.results):
+                    if result_pb.HasField("error_info") and (
+                        result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                        or result_pb.error_info.error_message
+                    ):
+                        exception_type = _trans_rpc_error_code(
+                            result_pb.error_info.error_code
+                        )
+                        error_message = (
+                            result_pb.error_info.error_message
+                            or _rpc_error_code_name(result_pb.error_info.error_code)
+                        )
+                        raise FtRuntimeException(
+                            exception_type,
+                            f"batch item {i} failed: {error_message}",
+                        )
+                    conversion_index = i
+                    stream_state = StreamState()
+                    output = trans_output(
+                        batch_inputs[i], result_pb.final_output, stream_state
+                    )
+                    _validate_prefill_only_completed(batch_inputs[i], stream_state)
+                    results.append(output)
+                    conversion_index = None
+                return results
+
+            except grpc.RpcError as e:
+                rpc_status = e.code()
+                transport_failure = e
+                self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
+            except FtRuntimeException:
+                raise
+            except Exception as e:
+                logging.error(f"batch rpc unknown error: {str(e)}")
+                raise e
+        except asyncio.CancelledError as error:
+            failure = transport_failure = error
+            # A completed aio call exposes its terminal code immediately. Never
+            # wait for an unfinished RPC just to populate telemetry.
+            if (
+                rpc_span is not None
+                and response_call is not None
+                and response_call.done()
+            ):
+                try:
+                    rpc_status = await response_call.code()
+                except Exception:  # noqa: BLE001 - preserve cancellation
+                    pass
             raise
-        except Exception as e:
-            logging.error(f"batch rpc unknown error: {str(e)}")
-            raise e
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            # No scan and no extra status observation when tracing is disabled.
+            if any(span is not None for span in item_spans):
+                _finish_batch_item_spans(
+                    item_spans, batch_inputs, response, failure, conversion_index
+                )
+            if rpc_span is not None:
+                _record_client_rpc_status(rpc_span, rpc_status)
+                rpc_span.finish(
+                    error=transport_failure or (failure if response is None else None),
+                    error_type=(
+                        "Cancelled"
+                        if isinstance(transport_failure, asyncio.CancelledError)
+                        else ""
+                    ),
+                )
 
     async def _wait_greennet_verdict(
         self, input_py: GenerateInput, input_pb: GenerateInputPB
