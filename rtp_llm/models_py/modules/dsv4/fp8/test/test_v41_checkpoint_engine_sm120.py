@@ -85,16 +85,27 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_tp8 = os.environ.get("DSV41_TEST_COMPARE_TP8") == "1"
     compare_mhc = os.environ.get("DSV41_TEST_COMPARE_MHC") == "1"
     compare_compressor = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR") == "1"
-    paired = compare_tp8 or compare_mhc or compare_compressor
+    compare_recipe = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR_RECIPE") == "1"
+    paired = compare_tp8 or compare_mhc or compare_compressor or compare_recipe
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
         profiles.append("mhc_fp32")
         if compare_tp8:
             profiles.append("tp8_projection_mhc_fp32")
+    base_profiles = profiles.copy()
     if compare_compressor:
         profiles += [
             "compressor_bf16" if profile == "baseline" else f"{profile}_compressor_bf16"
-            for profile in profiles
+            for profile in base_profiles
+        ]
+    if compare_recipe:
+        profiles += [
+            (
+                "compressor_recipe"
+                if profile == "baseline"
+                else f"{profile}_compressor_recipe"
+            )
+            for profile in base_profiles
         ]
     current_profile = [precision]
     trace_steps = dict.fromkeys(profiles, 0)
@@ -187,7 +198,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 ), mhc_fp32(
                     "mhc_fp32" in profile
                 ), compressor_bf16(
-                    profile.endswith("compressor_bf16")
+                    profile.endswith(("compressor_bf16", "compressor_recipe")),
+                    fused=profile.endswith("compressor_recipe"),
+                    hca_projection=profile.endswith("compressor_recipe"),
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -214,6 +227,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             "input_ids": request.input_ids.tolist(),
                             "cache_spans": request.v41_cache_spans.tolist(),
                             "precision_profile": profile,
+                            "compressor_fused": profile.endswith("compressor_recipe"),
+                            "hca_bf16_projection": profile.endswith(
+                                "compressor_recipe"
+                            ),
                         },
                     )
                     trace_steps[profile] += 1
