@@ -64,7 +64,7 @@ public class RouteService {
             }
             try {
                 balanceContext.setResponse(result);
-                if (result != null && result.isSuccess()) {
+                if (result != null && result.isSuccess() && !balanceContext.getRequest().isVitRouteOnly()) {
                     recentCacheKeyTraceReporter.report(balanceContext);
                 }
             } catch (RuntimeException completionSideEffectFailure) {
@@ -80,7 +80,8 @@ public class RouteService {
             return CompletableFuture.failedFuture(new IllegalStateException(
                     "RequestScheduler is required for the configured scheduling path"));
         }
-        if (balanceContext.getConfig().getDispatcher().requiresGenerateInput()
+        if (!balanceContext.getRequest().isVitRouteOnly()
+                && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
