@@ -616,6 +616,47 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
                     actual = sparse_paged_gqa_attn(*inputs, **options)
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
+    def test_tail_only_selection_and_zero_length_graph_replay(self):
+        inputs = self.inputs()
+        q, cache, table, lengths, selected = inputs
+        lengths.fill_(3)
+        selected.fill_(-1)
+        selected[:, :, 2047] = 0
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
+                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
+            },
+        ):
+            sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = sparse_paged_gqa_attn(
+                    *inputs, page_size=128, kv_head_num=1, graph_capture=True
+                )
+            for slot in (2047, 2048, 2050):
+                selected.fill_(-1)
+                selected[:, :, slot] = 0
+                graph.replay()
+                torch.testing.assert_close(
+                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
+                )
+            selected.fill_(-1)
+            selected[:, :, 2048:].copy_(torch.arange(3, device="cuda")[None, None, :])
+            graph.replay()
+            expected = self.original(inputs)
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+            # Keep selected entries valid-looking while length changes. Replay
+            # must read the new device length and overwrite old split states.
+            lengths.zero_()
+            graph.replay()
+            torch.testing.assert_close(actual, torch.zeros_like(actual))
+            lengths.fill_(3)
+            graph.replay()
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+
 
 if __name__ == "__main__":
     unittest.main()

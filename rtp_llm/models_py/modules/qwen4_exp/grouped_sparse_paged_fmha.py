@@ -81,7 +81,9 @@ def _grouped_sparse_paged_split_kernel(
     maximum = tl.full((16,), float("-inf"), tl.float32)
     normalizer = tl.zeros((16,), tl.float32)
     acc = tl.zeros((16, 256), tl.float32)
-    for step in range(NB):
+    limit = tl.maximum(0, tl.minimum(NB, tl.cdiv(WIDTH - split * NB * BK, BK)))
+    limit = tl.where(length > 0, limit, 0)
+    for step in range(limit):
         offset = (split * NB + step) * BK + cols
         token = tl.load(row + offset, mask=offset < WIDTH, other=-1)
         logical = token // PAGE
@@ -110,8 +112,8 @@ def _grouped_sparse_paged_split_kernel(
         value = tl.load(kp + CKV, mask=valid[:, None], other=0).to(tl.float32)
         prob_hi = prob.to(tl.bfloat16)
         prob_lo = (prob - prob_hi.to(tl.float32)).to(tl.bfloat16)
-        acc = acc * alpha[:, None] + tl.dot(prob_hi, value.to(tl.bfloat16))
-        acc += tl.dot(prob_lo, value.to(tl.bfloat16))
+        acc = tl.dot(prob_hi, value.to(tl.bfloat16), acc * alpha[:, None])
+        acc = tl.dot(prob_lo, value.to(tl.bfloat16), acc)
         normalizer = normalizer * alpha + tl.sum(prob, 1)
         maximum = new_max
     base = ((batch * 3 + head) * S + query) * NS * 258 + split * 258
