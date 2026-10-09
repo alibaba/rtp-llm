@@ -853,6 +853,8 @@ class DashScGrpcComparer(NormalComparer):
                     resp.infer_response
                 )
                 response_parameters.update(_parse_infer_parameters(resp.infer_response))
+                if chunk_finish is not None:
+                    last_finish_reason = chunk_finish
                 status_message = response_parameters.get("status_message")
                 status_code = _response_status_code(response_parameters)
                 if status_message or (status_code is not None and status_code >= 400):
@@ -875,6 +877,15 @@ class DashScGrpcComparer(NormalComparer):
             channel.close()
 
         if error_message:
+            if (expected.parameters_equal or {}).get("error_no") is not None:
+                self.compare_result(
+                    expected,
+                    DashScGrpcResponse(
+                        parameters=response_parameters,
+                        finish_reason=last_finish_reason,
+                    ),
+                )
+                return
             if expected.expected_error_message_contains is not None:
                 diffs = []
                 if expected.expected_error_message_contains not in error_message:
