@@ -12,8 +12,10 @@ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer-ci/flashi
 
 # Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
 # against torch 2.11+cu130; SHAs encoded in filename).
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/deep_gemm-2.8.1%2B057ca59-cp310-cp310-linux_aarch64.whl
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl
+# Preserve existing model KV formats through a separate namespace.
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl
 
@@ -25,14 +27,9 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl
 
-# DSV4 mHC uses TileLang by default. apache-tvm-ffi 0.1.11+ is
-# incompatible with the TVM bundled in this TileLang wheel.
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl
-# apache-tvm-ffi 0.1.11+ dropped the hasattr() guard in registry._add_class_attrs,
-# so it re-registers fields inherited from ancestor types (ir.Type.span et al) onto
-# the TVM bundled in the TileLang wheel above and dies with "attribute '__dict__' of
-# 'type' objects is not writable". 0.1.10 matches the x86 cuda13 lock.
-apache-tvm-ffi==0.1.10
+# TileLang 0.1.15 requires the TVM FFI 0.1.11/0.1.12 ABI.
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl
+apache-tvm-ffi==0.1.12
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl
 

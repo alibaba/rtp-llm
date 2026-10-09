@@ -741,16 +741,19 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "{\"地点\": [\"我国\"], \"人物\": [], \"组织\": [\"社会主义事业\"], \"其他实体\": [\"两个文明建设\"]}",
-                            "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在"
+                            "content": "{\"地点\": [\"我国\"], \"人物\": [], \"组织\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
+                            "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
+                            "function_call": null,
+                            "tool_calls": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 63,
-                    "total_tokens": 105,
-                    "completion_tokens": 42
+                    "total_tokens": 106,
+                    "completion_tokens": 43
                 }
             },
             "compare_config": {
@@ -769,10 +772,9 @@
                         "我国"
                     ],
                     "人物": [],
-                    "组织": [
-                        "社会主义事业"
-                    ],
+                    "组织": [],
                     "其他实体": [
+                        "社会主义事业",
                         "两个文明建设"
                     ]
                 }
@@ -1182,15 +1184,22 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风 3级\"}"
+                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\"}",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 57,
-                    "completion_tokens": 39
+                    "total_tokens": 56,
+                    "completion_tokens": 38
                 }
             },
             "compare_config": {
@@ -1203,7 +1212,7 @@
                     "weather": "晴",
                     "temperature": "15°C",
                     "humidity": "30%",
-                    "wind": "北风 3级"
+                    "wind": "北风3级"
                 },
                 "required_json_keys": [
                     "city",
@@ -1253,15 +1262,22 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"15°C\",\n    \"condition\": \"多云\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\",\n    \"update_time\": \"2025-04-09 14:00\"\n  }\n}"
+                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\", \"update_time\": \"2025-04-07 10:00\"}",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 91,
-                    "completion_tokens": 70
+                    "total_tokens": 75,
+                    "completion_tokens": 54
                 }
             },
             "compare_config": {
@@ -1270,18 +1286,20 @@
                 "json_content": true,
                 "json_object": true,
                 "expected_json": {
-                    "location": "北京",
-                    "weather": {
-                        "temperature": "15°C",
-                        "condition": "多云",
-                        "humidity": "45%",
-                        "wind": "北风 3级",
-                        "update_time": "2025-04-09 14:00"
-                    }
+                    "city": "北京",
+                    "weather": "晴",
+                    "temperature": "15°C",
+                    "humidity": "30%",
+                    "wind": "北风3级",
+                    "update_time": "2025-04-07 10:00"
                 },
                 "required_json_keys": [
-                    "location",
-                    "weather"
+                    "city",
+                    "humidity",
+                    "temperature",
+                    "update_time",
+                    "weather",
+                    "wind"
                 ]
             }
         },
@@ -1326,16 +1344,19 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "{\n  \"city\": \"北京\",\n  \"weather\": \"晴\",\n  \"temperature\": 25,\n  \"humidity\": 40,\n  \"wind\": \"西北风3级\",\n  \"updated\": \"2025-04-01 10:00\"\n}",
-                            "reasoning_content": "我们根据用户要求，查询北京天气并以JSON"
+                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"22°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\"\n  },\n  \"note\": \"此为模拟数据，实际天气请查询官方气象服务\"\n}",
+                            "reasoning_content": "我们被要求查询北京的天气，并以JSON格式",
+                            "function_call": null,
+                            "tool_calls": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 90,
-                    "completion_tokens": 69
+                    "total_tokens": 105,
+                    "completion_tokens": 84
                 }
             },
             "compare_config": {
@@ -1346,8 +1367,8 @@
                 "expected_json": {
                     "location": "北京",
                     "weather": {
-                        "temperature": "15°C",
-                        "condition": "多云",
+                        "temperature": "22°C",
+                        "condition": "晴",
                         "humidity": "45%",
                         "wind": "北风 3级"
                     },
@@ -1431,15 +1452,22 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\"advice\": \"天气较冷，建议穿着厚外套、毛衣等保暖衣物。\", \"city\": \"北京\", \"date\": \"2025-04-09\", \"weather\": \"多云转晴，气温8℃~18℃，北风3-4级\"}"
+                            "content": "{\"advice\":\"天气较冷，建议穿着厚外套、毛衣等保暖衣物。\",\"city\":\"北京\",\"date\":\"2025-04-17\",\"weather\":\"多云转晴，伴有轻度霾，气温10℃~22℃，南风2-3级\"}",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 78,
-                    "completion_tokens": 60
+                    "total_tokens": 75,
+                    "completion_tokens": 57
                 }
             },
             "compare_config": {
@@ -1456,8 +1484,8 @@
                 "expected_json": {
                     "advice": "天气较冷，建议穿着厚外套、毛衣等保暖衣物。",
                     "city": "北京",
-                    "date": "2025-04-09",
-                    "weather": "多云转晴，气温8℃~18℃，北风3-4级"
+                    "date": "2025-04-17",
+                    "weather": "多云转晴，伴有轻度霾，气温10℃~22℃，南风2-3级"
                 }
             }
         },
@@ -1532,15 +1560,22 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\n  \"advice\": \"北京今天天气晴朗，气温适中，适合户外活动。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-04-05\",\n  \"weather\": \"晴转多云，微风，气温12°C~24°C，空气质量良。\"\n}"
+                            "content": "{\"advice\":\"天气寒冷，建议穿着羽绒服、毛衣、保暖裤等厚实衣物，并佩戴帽子、围巾和手套。\",\"city\":\"北京\",\"date\":\"2025-01-17\",\"weather\":\"晴转多云，伴有轻度雾霾，气温-4℃至5℃，北风2-3级，相对湿度30%-50%，空气质量指数为185（中度污染）。\"}",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 87,
-                    "completion_tokens": 66
+                    "total_tokens": 107,
+                    "completion_tokens": 86
                 }
             },
             "compare_config": {
@@ -1555,10 +1590,10 @@
                     "weather"
                 ],
                 "expected_json": {
-                    "advice": "北京今天天气晴朗，气温适中，适合户外活动。",
+                    "advice": "天气寒冷，建议穿着羽绒服、毛衣、保暖裤等厚实衣物，并佩戴帽子、围巾和手套。",
                     "city": "北京",
-                    "date": "2025-04-05",
-                    "weather": "晴转多云，微风，气温12°C~24°C，空气质量良。"
+                    "date": "2025-01-17",
+                    "weather": "晴转多云，伴有轻度雾霾，气温-4℃至5℃，北风2-3级，相对湿度30%-50%，空气质量指数为185（中度污染）。"
                 }
             }
         },
