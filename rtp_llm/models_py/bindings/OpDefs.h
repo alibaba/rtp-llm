@@ -239,6 +239,7 @@ struct PyCacheStoreInputs {
     // Eligible non-warmup PD-prefill work item, filtered by PyWrappedModel before entering Python.
     torch::Tensor input_lengths_host;     // int32, [decoder + context]
     torch::Tensor prefix_lengths_host;    // int32, [context]
+    torch::Tensor publish_start_tokens;   // CPU int32, [context]; required for nonempty Prefill writes
     torch::Tensor host_kv_cache_offset;   // int32, [batch, tag-local blocks]
     torch::Tensor request_id;             // int64, [context]
     torch::Tensor request_pd_separation;  // bool, [context]
