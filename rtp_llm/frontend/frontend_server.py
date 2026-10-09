@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -461,9 +462,9 @@ class FrontendServer(object):
             trace_state.set_attribute(trace_attrs.HTTP_REQUEST_METHOD, "POST")
             trace_state.set_attribute(trace_attrs.HTTP_METHOD, "POST")
 
-        def generate_call():
+        async def generate_call():
             assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
+            response = await self._openai_endpoint.chat_completion_async(
                 request_id, request, raw_request
             )
             assert isinstance(
@@ -702,6 +703,8 @@ class FrontendServer(object):
         assert self._frontend_worker is not None
         start_time = current_time_ms()
         response_generator = generate_call()
+        if inspect.isawaitable(response_generator):
+            response_generator = await response_generator
         return CompleteResponseAsyncGenerator(
             __gen_response_with_report(start_time, response_generator),
             response_generator._collect_complete_response_func,

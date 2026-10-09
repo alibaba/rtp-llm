@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -38,6 +39,12 @@ public:
 
     std::map<int, int> multimodalLengths() const {
         std::map<int, int> lengths;
+        if (v41_inputs && multimodal_features) {
+            for (const auto& feature : *multimodal_features) {
+                lengths[1] += feature.size(0);  // MMUrlType::IMAGE
+            }
+            return lengths;
+        }
         if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
             return {};
         } else {
@@ -84,6 +91,7 @@ public:
     bool                            fake_query            = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
@@ -224,8 +232,8 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
-                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ =
+            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
     }
 
 private:

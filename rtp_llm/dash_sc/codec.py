@@ -707,7 +707,7 @@ class DashScRequestControls:
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -964,6 +964,7 @@ def parse_sampling_params(
 def parse_request_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
+    model_type: str | None = None,
 ) -> DashScRequestControls:
     """Parse non-sampling request controls.
 
@@ -1009,13 +1010,35 @@ def parse_request_controls(
     if max_new_think_tokens is not None:
         max_new_think_tokens = int(max_new_think_tokens)
 
-    reasoning_effort = _parse_optional_parameter_reasoning_effort(
-        request, "reasoning_effort"
-    )
-    if reasoning_effort is None:
-        reasoning_effort = _extract_reasoning_effort_value(
-            _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+    if model_type == "deepseek_v41":
+        from rtp_llm.openai.reasoning_effort import normalize_v41_reasoning_effort
+
+        raw_effort = _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+        if "reasoning_effort" in request.parameters:
+            parameter = request.parameters["reasoning_effort"]
+            if parameter.HasField("int64_param"):
+                raw_effort = parameter.int64_param
+            elif parameter.HasField("string_param"):
+                raw_effort = parameter.string_param
+            else:
+                raise DashScParameterError(
+                    "reasoning_effort must be a strict string or integer"
+                )
+        try:
+            normalized = normalize_v41_reasoning_effort(raw_effort)
+            reasoning_effort = (
+                raw_effort if raw_effort in (None, "none") else normalized
+            )
+        except ValueError as error:
+            raise DashScParameterError(str(error)) from error
+    else:
+        reasoning_effort = _parse_optional_parameter_reasoning_effort(
+            request, "reasoning_effort"
         )
+        if reasoning_effort is None:
+            reasoning_effort = _extract_reasoning_effort_value(
+                _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+            )
 
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
@@ -1051,6 +1074,7 @@ def parse_request_controls(
 
 def parse_dash_sc_grpc_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
 ) -> tuple[ParsedInputIds | None, SamplingParams | None, DashScRequestControls | None]:
     """Parse one ``ModelInferRequest`` into ids, sampling, and request controls.
 
@@ -1064,7 +1088,7 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_request_controls(request, ds_attrs),
+        parse_request_controls(request, ds_attrs, model_type=model_type),
     )
 
 
@@ -1530,6 +1554,8 @@ class StreamResponseBuilder:
     __slots__ = (
         "_dash_sc_request_id",
         "_model_name",
+        "_image_tokens",
+        "_prompt_token_fallback",
         "_request_log_tag",
         "_request_input_ids",
         "_return_input_ids",
@@ -1562,9 +1588,17 @@ class StreamResponseBuilder:
         generate_config: Any = None,
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
+        image_tokens: int | None = None,
+        prompt_token_fallback: int | None = None,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
+        self._image_tokens = image_tokens
+        self._prompt_token_fallback = (
+            len(request_input_ids or [])
+            if prompt_token_fallback is None
+            else prompt_token_fallback
+        )
         self._request_log_tag = request_log_tag
         self._request_input_ids = request_input_ids
         self._return_input_ids = return_input_ids
@@ -1611,7 +1645,7 @@ class StreamResponseBuilder:
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
-            else len(self._request_input_ids or [])
+            else self._prompt_token_fallback
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
 
@@ -1628,8 +1662,10 @@ class StreamResponseBuilder:
             _append_aux_info_metrics_outputs(
                 infer,
                 out_py,
-                prompt_token_fallback=len(self._request_input_ids or []),
+                prompt_token_fallback=self._prompt_token_fallback,
             )
+            if self._image_tokens is not None:
+                infer.parameters["image_tokens"].int64_param = self._image_tokens
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0
             )
@@ -1787,3 +1823,37 @@ def build_dash_error_response(
     infer.parameters["status_name"].string_param = error_spec.status_name
     infer.parameters["status_message"].string_param = status_message
     return resp
+
+
+def parse_v41_image_request(request) -> list[dict[str, str]]:
+    """Extract ordered images from Spectrum's media-only payload."""
+    raw = _parse_optional_parameter_string(request, "payload")
+    try:
+        payload = json.loads(raw) if raw is not None else None
+    except ValueError as error:
+        raise DashScParameterError("invalid V4.1 payload JSON") from error
+    if not isinstance(payload, dict):
+        raise DashScParameterError("V4.1 payload must be a JSON object")
+    input_value = payload.get("input")
+    messages = input_value.get("messages") if isinstance(input_value, dict) else None
+    if not isinstance(messages, list):
+        raise DashScParameterError("V4.1 payload.input.messages must be an array")
+    images = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            raise DashScParameterError("V4.1 media content must be an array")
+        for item in content:
+            if not isinstance(item, dict):
+                raise DashScParameterError("V4.1 media item must be an object")
+            if "image" in item:
+                url = item["image"]
+            elif item.get("type") == "image_url":
+                source = item.get("image_url")
+                url = source.get("url") if isinstance(source, dict) else None
+            else:
+                raise DashScParameterError("V4.1 payload supports images only")
+            if not isinstance(url, str) or not url:
+                raise DashScParameterError("V4.1 image URL must be non-empty")
+            images.append({"url": url})
+    return images

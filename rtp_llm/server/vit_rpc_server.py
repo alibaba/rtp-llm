@@ -66,9 +66,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         local_device_id: int = 0,
     ):
         self.engine = mm_process_engine
-        self._transport = create_mm_output_transport(
-            transport_config, local_device_id
-        )
+        self._transport = create_mm_output_transport(transport_config, local_device_id)
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
@@ -98,7 +96,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             kmonitor.report(
                 GaugeMetrics.VIT_INPUT_IMAGE_COUNT_METRIC,
-                len(multimodal_inputs.multimodal_inputs),
+                (
+                    len(multimodal_inputs.v41_inputs.images)
+                    if multimodal_inputs.HasField("v41_inputs")
+                    else len(multimodal_inputs.multimodal_inputs)
+                ),
                 tags,
             )
             res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)

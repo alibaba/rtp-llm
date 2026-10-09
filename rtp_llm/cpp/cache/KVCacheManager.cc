@@ -224,7 +224,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    // Decode retains every received FULL page on each TP rank. Its sharding
+    // flag describes the upstream prefill layout for transport/state sizing,
+    // not local allocation: applying the CP mapper here would underallocate by the CP factor.
+    if (cp_cfg.kv_cache_sharded && cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE
+        && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -251,6 +255,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
+    {
+        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
+        cache_status_refresh_stopped_ = true;
+    }
+    cache_status_refresh_cv_.notify_all();
+    if (cache_status_refresh_thread_.joinable()) {
+        cache_status_refresh_thread_.join();
+    }
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -394,11 +406,17 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     bool       keys_initialized_now     = false;
     if (is_first_malloc) {
         if (!keys_already_initialized) {
-            initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+            initCacheKeys(malloc_info.batch_kv_cache_resource,
+                          malloc_info.complete_token_ids,
+                          seq_size_per_block,
+                          config_.cache_key_hash_seed);
             keys_initialized_now = true;
         }
     } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource,
+                        malloc_info.complete_token_ids,
+                        seq_size_per_block,
+                        config_.cache_key_hash_seed);
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 
@@ -649,9 +667,45 @@ void KVCacheManager::refreshKVCacheInfoSnapshot() {
     if (!coordinator_manager_ || !cacheStatusSnapshotEnabled()) {
         return;
     }
-    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
-    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-    cache_status_snapshot_ = std::move(snapshot);
+    {
+        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
+        if (cache_status_refresh_stopped_) {
+            return;
+        }
+        if (!cache_status_refresh_thread_.joinable()) {
+            {
+                std::lock_guard<std::mutex> snapshot_lock(cache_status_snapshot_mutex_);
+                cache_status_snapshot_ = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, false));
+            }
+            cache_status_refresh_thread_ = std::thread(&KVCacheManager::cacheStatusRefreshLoop, this);
+        }
+        cache_status_refresh_requested_ = true;
+    }
+    cache_status_refresh_cv_.notify_one();
+}
+
+void KVCacheManager::cacheStatusRefreshLoop() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(cache_status_refresh_mutex_);
+            cache_status_refresh_cv_.wait(
+                lock, [this] { return cache_status_refresh_stopped_ || cache_status_refresh_requested_; });
+            if (cache_status_refresh_stopped_) {
+                return;
+            }
+            cache_status_refresh_requested_ = false;
+        }
+        // Coalesce requests arriving during construction into one subsequent refresh.
+        // Main's atomic BlockTree key snapshot and FULL-pool capacity projection
+        // remain the source of truth; this worker only moves work off the engine loop.
+        try {
+            auto                        snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, true));
+            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+            cache_status_snapshot_ = std::move(snapshot);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("cache status refresh failed: %s", error.what());
+        }
+    }
 }
 
 KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {

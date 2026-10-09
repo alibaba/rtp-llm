@@ -281,7 +281,7 @@ LocalRpcServer::prepareInput(const GenerateInputPB&                             
                              std::shared_ptr<GenerateInput>&                                     output,
                              const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span) {
     output = QueryConverter::transQuery(&input_pb);
-    if (mm_processor_ != nullptr && output->multimodal_inputs) {
+    if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span);
         if (!mm_res.ok()) {

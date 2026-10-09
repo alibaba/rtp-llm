@@ -61,6 +61,11 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
+    if (is_dspark_ && role != ModelInputsModelRole::TARGET && inputs.engram_token_windows.defined()) {
+        auto draft_inputs                 = inputs;
+        draft_inputs.engram_token_windows = torch::Tensor();
+        return model->forward(draft_inputs);
+    }
     return model->forward(inputs);
 }
 
@@ -893,8 +898,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // Draft prefill uses one block; draft decode uses 1 + gamma.
             RTP_LLM_CHECK_WITH_INFO(params.sp_config.gen_num_per_cycle >= 0,
                                     "draft CUDA graph speculative cycle count must be non-negative");
-            const size_t fake_count = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
-            const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+            const size_t fake_count               = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
+            const size_t fake_width               = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
             model_params.kernel_block_table_width = std::max(real_width, fake_width);
         }
 #endif
@@ -1488,6 +1493,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    const auto engram_anchor_windows = model_input.engram_token_windows;
 
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
@@ -1511,13 +1517,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // Proposal and target verification are two model phases with different
         // token widths and cache roles. Keep the target gather output intact;
         // both inputs are derived from one immutable round state on rank 0.
-        GptModelInputs proposal_input;
+        // TP synchronization broadcasts numeric payloads in canonical tag
+        // order; every rank must retain its configured group identities.
+        GptModelInputs proposal_input = model_input;
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_proposal_and_tp_sync)");
             if (isTpRank0()) {
                 dspark_round_state =
                     batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
-                proposal_input = model_input;
                 batch_stream_processor_->prepareDSparkProposeModelInput(
                     dspark_round_state, proposal_input, buffer_holder_);
                 ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
@@ -1824,16 +1831,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
     }
 
-    return dispatchDecodeOutput(stream_groups,
-                                streams,
-                                speculative_sampler_output,
-                                model_input.combo_position_ids,
-                                model_input.kv_cache_block_id,
-                                model_input.kv_cache_kernel_block_id,
-                                std::move(draft_prefill_model_output),
-                                std::move(draft_prefill_sampler_output),
-                                std::move(rejection_event),
-                                std::move(draft_event));
+    auto dispatch_result = dispatchDecodeOutput(stream_groups,
+                                                streams,
+                                                speculative_sampler_output,
+                                                model_input.combo_position_ids,
+                                                model_input.kv_cache_block_id,
+                                                model_input.kv_cache_kernel_block_id,
+                                                std::move(draft_prefill_model_output),
+                                                std::move(draft_prefill_sampler_output),
+                                                std::move(rejection_event),
+                                                std::move(draft_event));
+    if (dispatch_result.ok() && engram_anchor_windows.defined()) {
+        auto next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
+            engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
+        int64_t row = 0;
+        for (const auto& stream : stream_groups.allStreams()) {
+            stream->setEngramTokenWindowGpu(next_history.narrow(0, row++, 1));
+        }
+    }
+    return dispatch_result;
 }
 
 void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams) {
@@ -2899,7 +2915,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
     auto next_position_ids_all =
         is_dspark_ ? advanceDSparkPositionIds(
-            verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                         verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                      torch::Tensor();
 
     torch::Tensor next_kv_cache_block_id;

@@ -145,6 +145,20 @@ def _abort_bind_barrier(bind_barrier) -> None:
         logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
 
 
+def _v41_image_processor_config(model_config):
+    if model_config.model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
+        return None
+    from rtp_llm.config.dsv41_config import V41Config
+    from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+        V41ImageProcessorConfig,
+    )
+
+    # deepseek_v41_config is the flattened text execution config. Vision
+    # preprocessing consumes the full checkpoint config owned by the MM mixin.
+    raw = model_config.mm_related_params.config["v41_config"]
+    return V41ImageProcessorConfig.from_model_config(V41Config.from_dict(raw))
+
+
 class DashScShutdownManager:
     """Tracks DashSc draining state and accepted in-flight RPCs."""
 
@@ -721,6 +735,7 @@ class DashScApp:
                             "[DashScApp] grammar admission validator disabled: %s", e
                         )
                         grammar_validator = None
+                v41_processor_config = _v41_image_processor_config(model_config)
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -734,6 +749,8 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                    v41_processor_config=v41_processor_config,
+                    max_seq_len=model_config.max_seq_len,
                 )
 
             loop = self._start_enqueue_loop()

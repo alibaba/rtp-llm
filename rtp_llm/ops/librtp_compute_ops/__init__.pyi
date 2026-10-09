@@ -193,6 +193,10 @@ class KVCache:
         """Return the kernel sequence size per block for a cache tag."""
         ...
 
+    def get_entries_per_block(self, arg0: str) -> int:
+        """Opaque logical entries per layer-cache block, excluding padding; zero for other specs."""
+        ...
+
 class ParamsBase:
     def __init__(self) -> None: ...
     def fill_params(
@@ -256,6 +260,9 @@ class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
 class PyContextParallelParams:
+    prefill_qkv_restore_indice_cpu: torch.Tensor
+    prefill_qkv_padding_mask_cpu: torch.Tensor
+    prefill_mm_spans: torch.Tensor
     prefill_actual_input_lengths_cpu: torch.Tensor
     prefill_prefix_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
@@ -300,6 +307,9 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    need_all_hidden_states: bool
+    need_all_logits: bool
+    engram_token_windows: torch.Tensor
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -412,6 +422,7 @@ class PyModelOutputs:
     def mtp_target_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
 
 class PyMultimodalInputs:
+    mm_features_spans: torch.Tensor
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property

@@ -2,7 +2,14 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
@@ -156,13 +163,18 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
     return name
 
 
+class ThinkingConfig(BaseModel):
+    type: Literal["enabled", "disabled"]
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
     tool_choice: Optional[ToolChoice] = None
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[Union[StrictInt, StrictStr]] = None
+    thinking: Optional[ThinkingConfig] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None

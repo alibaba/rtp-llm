@@ -339,7 +339,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 
     auto& input = prefill_context.generate_input;
     RTP_LLM_CHECK_WITH_INFO(input != nullptr, "multimodal processing requires a prepared generate input");
-    if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
+    if (!input->v41_inputs && (!input->multimodal_inputs || input->multimodal_inputs->empty())) {
         prefill_context.markMultimodalProcessed(false);
         return;
     }

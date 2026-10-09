@@ -103,6 +103,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -171,8 +172,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const auto& model_cache_config =
             is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
         const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
-        const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
-        const auto& topology = model_init_params.kv_cache_layer_layout->topology();
+        const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
+        const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
         RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
                                 "CUDA graph max sequence length must be positive");
         const size_t max_seq_len = static_cast<size_t>(params.model_config_.max_seq_len);
@@ -185,15 +186,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const size_t warmup_span = params.model_config_.attn_config.tokens_per_block;
         RTP_LLM_CHECK_WITH_INFO(warmup_span > 0 && runtime_tokens_per_block > 0,
                                 "CUDA graph fake block spans must be positive");
-        const size_t warmup_len = warmUpInputLength(max_seq_len, max_reserved_step);
-        const size_t decode_tokens = warmup_len + max_reserved_step;
+        const size_t warmup_len           = warmUpInputLength(max_seq_len, max_reserved_step);
+        const size_t decode_tokens        = warmup_len + max_reserved_step;
         const size_t decode_warmup_blocks = decode_tokens / warmup_span + (decode_tokens % warmup_span != 0);
-        const size_t prefill_warmup_blocks = warmup_len / runtime_tokens_per_block
-                                             + (warmup_len % runtime_tokens_per_block != 0);
+        const size_t prefill_warmup_blocks =
+            warmup_len / runtime_tokens_per_block + (warmup_len % runtime_tokens_per_block != 0);
         const size_t fake_count = std::max<size_t>({1, decode_warmup_blocks, prefill_warmup_blocks});
         const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
-        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width)
-                                    <= std::numeric_limits<int64_t>::max(),
+        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width) <= std::numeric_limits<int64_t>::max(),
                                 "CUDA graph kernel block table width exceeds int64 range");
         model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
     }
@@ -731,8 +731,23 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
         state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
-        state.last_real_seq_len     = cur_real_seq_len;
-        state.next_real_seq_len     = cur_real_seq_len + 1;
+        if (has_engram_) {
+            torch::Tensor previous = prev_state.engram_token_window_gpu;
+            if (!previous.defined()) {
+                // The first publication (including PD admission) owns stable
+                // host history. Later rounds use the immutable GPU tail.
+                auto                 history = stream->completeTokenIdsVec(0);
+                std::vector<int32_t> tail(3, -1);
+                for (int lag = 0; lag < 3 && lag < static_cast<int>(history.size()); ++lag) {
+                    tail[lag] = history[history.size() - 1 - lag];
+                }
+                previous = torch::tensor(tail, cuda_i32).reshape({1, 3});
+            }
+            state.engram_token_window_gpu =
+                torch::cat({state.last_sample_token_gpu.reshape({1, 1}), previous.narrow(1, 0, 3)}, 1);
+        }
+        state.last_real_seq_len = cur_real_seq_len;
+        state.next_real_seq_len = cur_real_seq_len + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }

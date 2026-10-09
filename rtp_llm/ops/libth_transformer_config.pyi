@@ -82,6 +82,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    v41_kv_source_layer_ids: list[int]
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
@@ -883,6 +884,7 @@ class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
+    mm_padding_size: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
         ...
@@ -1059,6 +1061,8 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    cache_min_replay_tokens: int
+    cache_key_hash_seed: int
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -1853,7 +1857,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
     Check if RoPE cache matches the given config
     """
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], initial_hash: int = 0) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """

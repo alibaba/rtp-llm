@@ -81,6 +81,8 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "is_deepseek_v41",
+        "deepseek_v41_config",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
@@ -564,6 +566,8 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.is_deepseek_v41: bool = False
+        self.deepseek_v41_config = None
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only
         # from sp_config.gen_num_per_cycle.
         self.dspark_noise_token_id: Optional[int] = None
