@@ -1,7 +1,9 @@
 #include "gtest/gtest.h"
 
+#include <atomic>
 #include <chrono>
 #include <iostream>
+#include <thread>
 
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
@@ -32,6 +34,61 @@ void putOne(SharedBlockCache& cache,
 }
 
 }  // namespace
+
+TEST(SharedBlockCacheTest, CacheKeysSnapshotSurvivesMetadataReset) {
+    SharedBlockCache cache;
+    const auto       empty_snapshot = cache.snapshotCacheKeys();
+    EXPECT_TRUE(empty_snapshot.keys.empty());
+    EXPECT_EQ(empty_snapshot.version, cache.version());
+
+    putOne(cache, 7, 107, rootDep());
+    const auto snapshot = cache.snapshotCacheKeys();
+    EXPECT_EQ(snapshot.keys, (CacheKeysType{7}));
+    EXPECT_EQ(snapshot.version, empty_snapshot.version + 1);
+
+    cache.resetMetadata();
+    putOne(cache, 9, 109, rootDep());
+    const auto current_snapshot = cache.snapshotCacheKeys();
+    EXPECT_EQ(current_snapshot.keys, (CacheKeysType{9}));
+    EXPECT_EQ(current_snapshot.version, snapshot.version + 2);
+    EXPECT_EQ(snapshot.keys, (CacheKeysType{7}));
+    EXPECT_EQ(snapshot.version, empty_snapshot.version + 1);
+}
+
+TEST(SharedBlockCacheTest, CacheKeysSnapshotKeepsVersionConsistentDuringConcurrentPuts) {
+    SharedBlockCache  cache;
+    const auto        initial_version = cache.version();
+    std::atomic<bool> start{false};
+    std::atomic<bool> done{false};
+    constexpr int     kKeyCount = 2000;
+    std::thread writer([&] {
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        for (int key = 1; key <= kKeyCount; ++key) {
+            putOne(cache, key, key, rootDep());
+            std::this_thread::yield();
+        }
+        done.store(true);
+    });
+
+    start.store(true);
+    bool consistent = true;
+    do {
+        const auto snapshot = cache.snapshotCacheKeys();
+        if (snapshot.version - initial_version != static_cast<int64_t>(snapshot.keys.size())) {
+            consistent = false;
+            break;
+        }
+        std::this_thread::yield();
+    } while (!done.load());
+    writer.join();
+
+    EXPECT_TRUE(consistent);
+    const auto snapshot = cache.snapshotCacheKeys();
+    EXPECT_EQ(snapshot.keys.size(), kKeyCount);
+    EXPECT_EQ(snapshot.version, initial_version + kKeyCount);
+}
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     SharedBlockCache cache;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <unordered_set>
 
@@ -103,6 +104,15 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 
 KVCacheManager::~KVCacheManager() {
     stop_.store(true, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(cache_status_refresh_request_mutex_);
+        cache_status_refresh_stopping_ = true;
+        cache_status_refresh_pending_  = false;
+    }
+    cache_status_refresh_cv_.notify_one();
+    if (cache_status_refresh_thread_.joinable()) {
+        cache_status_refresh_thread_.join();
+    }
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
@@ -165,6 +175,9 @@ bool KVCacheManager::init() {
 
     initKVMemoryController();
     initConnectorCoordinator();
+    if (cacheStatusSnapshotEnabled()) {
+        cache_status_refresh_thread_ = std::thread(&KVCacheManager::cacheStatusSnapshotRefreshLoop, this);
+    }
     return true;
 }
 
@@ -653,12 +666,58 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 }
 
 void KVCacheManager::refreshKVCacheInfoSnapshot() {
+    std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
+    refreshKVCacheInfoSnapshotLocked();
+}
+
+void KVCacheManager::refreshKVCacheInfoSnapshotLocked() {
     if (!allocator_ || !cacheStatusSnapshotEnabled()) {
         return;
     }
-    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
-    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-    cache_status_snapshot_ = std::move(snapshot);
+    RTP_LLM_PROFILE_SCOPE("cache_manager.refresh_cache_status_snapshot");
+    std::shared_ptr<const KVCacheInfo> snapshot =
+        std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
+    {
+        std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+        cache_status_snapshot_.swap(snapshot);
+    }
+    // Release the previous snapshot outside the reader-facing publication lock.
+}
+
+void KVCacheManager::requestKVCacheInfoSnapshotRefresh() {
+    {
+        std::lock_guard<std::mutex> lock(cache_status_refresh_request_mutex_);
+        if (cache_status_refresh_stopping_ || !cache_status_refresh_thread_.joinable()
+            || cache_status_refresh_pending_) {
+            return;
+        }
+        // There is no per-request payload: the worker samples current cache state.
+        // Repeated requests overwrite this one pending slot.
+        cache_status_refresh_pending_ = true;
+    }
+    cache_status_refresh_cv_.notify_one();
+}
+
+void KVCacheManager::cacheStatusSnapshotRefreshLoop() {
+    std::unique_lock<std::mutex> lock(cache_status_refresh_request_mutex_);
+    while (true) {
+        cache_status_refresh_cv_.wait(
+            lock, [this]() { return cache_status_refresh_stopping_ || cache_status_refresh_pending_; });
+        if (cache_status_refresh_stopping_) {
+            return;
+        }
+        // Clear before building so requests arriving during the build survive.
+        cache_status_refresh_pending_ = false;
+        lock.unlock();
+        try {
+            refreshKVCacheInfoSnapshot();
+        } catch (const std::exception& exception) {
+            RTP_LLM_LOG_ERROR("refresh cache status snapshot failed: %s", exception.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("refresh cache status snapshot failed: unknown exception");
+        }
+        lock.lock();
+    }
 }
 
 KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -675,8 +734,9 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         std::vector<CacheKeyType> device_cache_keys;
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
-            device_cache_keys = shared_cache->allCacheKeys();
-            info.version      = shared_cache->version();
+            auto snapshot     = shared_cache->snapshotCacheKeys();
+            device_cache_keys = std::move(snapshot.keys);
+            info.version      = snapshot.version;
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
@@ -714,6 +774,9 @@ bool KVCacheManager::releaseKVCacheMemoryBacking() {
 }
 
 bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
+    // Wait for an in-flight refresh before resetting any metadata. Keep the lock
+    // through publication so a pre-reset build cannot overwrite the new snapshot.
+    std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
     if (!kv_memory_controller_) {
         RTP_LLM_LOG_ERROR("restoreKVCacheMemoryBackingAndResetMetadata failed: kv memory controller not initialized");
         return false;
@@ -735,19 +798,23 @@ bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
             block_cache->clear();
         }
     }
-    refreshKVCacheInfoSnapshot();
+    refreshKVCacheInfoSnapshotLocked();
     RTP_LLM_LOG_INFO("restoreKVCacheMemoryBackingAndResetMetadata done: reset %zu block pools", block_pools.size());
     return true;
 }
 
 bool KVCacheManager::releaseMemoryCacheBacking() {
+    std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
     if (!coordinator_) {
         return true;  // no connector coordinator -> memory cache not enabled
     }
-    return coordinator_->releaseMemoryCacheBacking();
+    const bool success = coordinator_->releaseMemoryCacheBacking();
+    refreshKVCacheInfoSnapshotLocked();
+    return success;
 }
 
 bool KVCacheManager::restoreMemoryCacheBacking() {
+    std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
     if (!coordinator_) {
         return true;
     }
