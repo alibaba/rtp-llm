@@ -7,11 +7,9 @@ Role addresses use the protocol string values PREFILL and DECODE.
 
 from __future__ import annotations
 
-import json
 import sys
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -19,13 +17,12 @@ import grpc
 
 from runtime.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
 from runtime.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
-from runtime.network import http_get_json, http_post_json, wait_for
+from runtime.network import http_get_json, http_post_json
 
 DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10
 RECOVERY_TIMEOUT_S = 30.0
 STREAM_CANCEL_TIMEOUT_S = 5.0
-FIRST_OUTPUT_TIMEOUT_S = 15.0
 
 CHANNEL_OPTIONS = [
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
@@ -65,10 +62,6 @@ def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
         return http_text(url, timeout)
     except Exception:
         return None
-
-
-# Keep the public import path compatible with existing extensions.
-from monitoring.metrics import parse_prometheus_samples
 
 
 @dataclass
@@ -138,12 +131,6 @@ class StreamHandle:
         finally:
             self.snap.terminated = True
             self.snap.terminated_s = time.monotonic()
-
-    def wait_first_output(self, timeout_s: float = FIRST_OUTPUT_TIMEOUT_S) -> bool:
-        deadline = time.monotonic() + timeout_s
-        while not self.snap.first_received and time.monotonic() < deadline:
-            time.sleep(0.02)
-        return self.snap.first_received
 
     def wait_end(self, timeout_s: float = STREAM_CANCEL_TIMEOUT_S) -> bool:
         self.thread.join(timeout_s)
@@ -474,10 +461,6 @@ class EngineOps:
         snap = self.snapshot()
         return {e["name"]: e for e in snap.get("engines", [])}
 
-    def addr_to_name(self) -> dict:
-        snap = self.snapshot()
-        return {e["grpc_addr"]: e["name"] for e in snap.get("engines", [])}
-
     def inject(self, engine_name: str, config: dict) -> dict:
         status, body = http_post_json(
             f"http://127.0.0.1:{self.mock_http_port}/inject",
@@ -609,58 +592,11 @@ class EngineOps:
         )
         return data if status == 200 else None
 
-    def master_alive_count(self, role: str) -> int:
-        """Alive worker count for "PREFILL"/"DECODE" from master info (-1 unknown)."""
-        data = self.master_info()
-        if not data:
-            return -1
-        summary = data.get("worker_summary", {}) or {}
-        entry = summary.get(role, {}) or {}
-        try:
-            return int(entry.get("alive", -1))
-        except (TypeError, ValueError):
-            return -1
-
-    # -- engine verification helpers ---------------------------------------
-
-    def verify_engine_received(self, rid: int, method: str) -> tuple[bool, str]:
-        snap = self.snapshot()
-        for engine in snap.get("engines", []):
-            lifecycle = engine.get("request_lifecycle", {})
-            if str(rid) in lifecycle:
-                lc = lifecycle[str(rid)]
-                if lc.get("method") == method:
-                    return True, f"engine={engine['name']} method={method}"
-        return False, f"rid={rid} method={method} not found in any engine"
-
-    def verify_engine_cancelled(self, rid: int) -> tuple[bool, str]:
-        snap = self.snapshot()
-        for engine in snap.get("engines", []):
-            if rid in engine.get("cancelled_rids", []):
-                return True, f"engine={engine['name']}"
-            lifecycle = engine.get("request_lifecycle", {})
-            if (
-                str(rid) in lifecycle
-                and lifecycle[str(rid)].get("end_state") == "cancelled"
-            ):
-                return True, f"engine={engine['name']}"
-        return False, f"rid={rid} not cancelled in any engine"
-
     def master_inflight(self) -> Optional[dict]:
         return http_get_json(
             f"http://127.0.0.1:{self.master_http_port}/rtp_llm/inflight_status",
             timeout=5,
         )
-
-    def master_scheduler_inflight(self) -> int:
-        """Canonical Master request count; -1 means the endpoint could not be read."""
-        data = self.master_inflight()
-        if data is None:
-            return -1
-        try:
-            return int(data.get("scheduler_inflight", -1))
-        except (TypeError, ValueError):
-            return -1
 
     # -- master prometheus (management port) --------------------------------
 
@@ -721,51 +657,6 @@ class EngineOps:
             if body is not None:
                 return body
         return None
-
-    def master_prometheus_metric(
-        self, name_pattern: str, labels: Optional[dict] = None
-    ) -> Optional[dict]:
-        """Scrape the master prometheus exposition, prefix+label filtered.
-
-        Args:
-            name_pattern: metric-name PREFIX.  Prometheus names lose the
-                Java dots: the ``app.flexlb.inflight.ttl.expired.qps``
-                counter is exposed as
-                ``flexlb_app_flexlb_inflight_ttl_expired_qps_total``.
-            labels: optional {label_name: required_value} — a sample
-                matches only when it carries ALL of these pairs.
-
-        Returns:
-            ``{labels_key: value}`` over the matching samples, where
-            labels_key is ``name`` for unlabeled samples and
-            ``name{k1="v1",k2="v2"}`` (the sample's own label order)
-            otherwise — ``.values()`` yields the plain value list.  None
-            when the exposition endpoint is unreachable; ``{}`` when
-            reachable but no sample matches.
-
-        Sparse-counter semantics (read before computing deltas): the
-        master only reports non-zero series, so "sequence absent" and
-        "value zero" are indistinguishable — a missing key means "no
-        such event has ever happened (yet)".  Before/after delta callers
-        must therefore treat a missing key as a 0 baseline; that is safe
-        because these counters first APPEAR with a non-zero value (the
-        first event), so a None→0 baseline never masks an event nor
-        double-counts one.
-        """
-        body = self.master_prometheus_text()
-        if body is None:
-            return None
-        result: dict = {}
-        for name, label_values, value in parse_prometheus_samples(
-            body, name_pattern, labels
-        ):
-            if label_values:
-                rendered = ",".join(f'{k}="{v}"' for k, v in label_values.items())
-                key = f"{name}{{{rendered}}}"
-            else:
-                key = name
-            result[key] = value
-        return result
 
     # -- composite request helper ------------------------------------------
 
@@ -854,42 +745,3 @@ def inject_type(
             f"failed: {status} {body}"
         )
     return body or {}
-
-
-def inject_type_all(ops: "EngineOps", names: list, fault_type: str, **params) -> None:
-    for name in names:
-        inject_type(ops, name, fault_type, **params)
-
-
-def clear_type_all(ops: "EngineOps", names: list, fault_type: str) -> None:
-    for name in names:
-        try:
-            inject_type(ops, name, fault_type, enabled=False)
-        except Exception:
-            pass
-
-
-def engine_inflight_clean(
-    ops: "EngineOps", names: list, timeout_s: float = 10.0
-) -> tuple:
-    """Engine-side leak check: every named engine reports inflight == 0 and
-    leak_detected == false in /snapshot."""
-
-    def clean() -> bool:
-        snap = ops.snapshot_by_name()
-        return all(
-            snap.get(n, {}).get("inflight", 0) == 0
-            and not snap.get(n, {}).get("leak_detected", False)
-            for n in names
-        )
-
-    ok = wait_for(clean, timeout_s, 0.5)
-    snap = ops.snapshot_by_name()
-    detail = {
-        n: (
-            snap.get(n, {}).get("inflight", -1),
-            snap.get(n, {}).get("leak_detected", None),
-        )
-        for n in names
-    }
-    return ok, f"{json.dumps(detail, sort_keys=True)}"

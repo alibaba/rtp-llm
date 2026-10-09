@@ -16,31 +16,6 @@ class ClientRecords:
         with self._lock:
             return copy.deepcopy(self._records)
 
-    def snapshot_cohort(self, start_s, end_s, basis="issued"):
-        if basis not in {"issued", "submitted", "terminal"}:
-            raise ValueError("unknown cohort basis")
-        if end_s < start_s:
-            raise ValueError("inverted cohort window")
-        records = self.snapshot_records()
-
-        def timestamp(record):
-            if basis == "submitted":
-                return record["schedule"]["started_s"]
-            return record["issued_s" if basis == "issued" else "transport_terminal_s"]
-
-        selected = [
-            r
-            for r in records
-            if timestamp(r) is not None and start_s <= timestamp(r) < end_s
-        ]
-        return dict(
-            records=selected,
-            record_count=len(selected),
-            basis=basis,
-            window=[start_s, end_s],
-            env_epoch=self.env_epoch,
-        )
-
     def issue(self, rid, clock):
         rpc = dict(
             method=None,

@@ -41,6 +41,8 @@ class ReportBundleTest(unittest.TestCase):
             },
         )}
         rendered = render_context(spec)
+        self.assertIn('<details class="report-block report-context">', rendered)
+        self.assertNotIn('class="report-block report-context" open', rendered)
         self.assertIn('>old</h3>', rendered)
         self.assertIn('>new</h3>', rendered)
         self.assertIn('>master.source_commit</dt><dd>abc</dd>', rendered)

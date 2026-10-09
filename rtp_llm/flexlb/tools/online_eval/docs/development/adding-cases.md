@@ -30,17 +30,22 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 ## Python 的归属与注册
 
-case 专属代码集中在 `src/cases/<case>/`：
+`src/cases/config.py` 和 `registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
 
 | 文件 | 职责 |
 |---|---|
 | `program.py` | `default`、额外变体、步骤顺序、输出引用与门禁依赖 |
 | `actions.py` | 专属现场操作、取证、deadline 与清理 |
-| `inputs.py`、`analysis.py` | 输入合同与根据显式证据计算的门禁 |
-| `metrics.py`、`report.py` | 声明的数值输出与既定结果的展示 |
+| `inputs.py`、`analysis.py` | 业务指标绑定、输入合同与根据显式证据计算的门禁 |
+| `metrics.py` | 将业务证据投影成声明的指标；采集、归档与通用统计仍复用公共组件 |
+| `report.py`、`panels.py`、`view.py` | 业务结果展示、面板装配与专属视图校验；HTML 交互和 bundle 协议复用 `reporting/` |
+| `runtime.py` | 业务所需的有界现场采样或客户端会话，不复制公共进程、HTTP 或 gRPC 底座 |
+| `comparison.py` | 业务声明的对齐策略校验，不重算跨 run 门禁 |
 | `publication.py`、`replay.py` | 产物发布与显式离线重判 |
 
-按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。`cases.registry.PROGRAMS` 将稳定 case 名映射到 program 模块；YAML 只能选择注册入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
+按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。这里的归属表示业务合同由谁维护，不表示代码永远不可复用：同类 program 可显式注册同一实现；跨业务一致的统计、协议、采集或渲染功能才提到公共组件。不能因文件名同为 `analysis.py` 或 `metrics.py` 就把不同业务口径合并。
+
+`cases.registry.PROGRAMS` 将稳定 case 名映射到 program 模块；YAML 只能选择注册入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
 program 的 `ACTION_HANDLERS` 声明所属能力；分析策略用 `ANALYSIS_POLICY_VALIDATOR` 校验，未声明则拒绝顶层 `analysis`。指标用 `case.metric(id, ...)` 声明依赖，编译检查 ID、单位与身份标签。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 

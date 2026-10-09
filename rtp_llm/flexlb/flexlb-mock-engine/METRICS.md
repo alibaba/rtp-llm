@@ -1,181 +1,60 @@
-# Mock metric contract and cleanup
+# Mock 指标合同
 
-Audited against framework commit `7caf62e452` and its C++ real-engine source.
-This change covers the mock control server's Prometheus exposition and the
-stress, scenario, report and Whale no-Fetch consumers. It does not remove
-state used by `/snapshot`, request lifecycle checks or scheduling.
+指标定义以 `MockControlServer` 的 HTTP exposition、`JavaMockEngineCluster.whaleMetrics` 和相应 Java 测试为准。测试采集与报告声明位于 [online_eval 指标配置](../tools/online_eval/config/monitoring/README.md)；不在此复制完整 metric registry。
 
-## Names shared with real
+## 来源与身份
 
-| Removed name | Supported name | Source and meaning |
-|---|---|---|
-| `mock_engine_running` | `rtp_llm_running_stream_size` | Executing prefill + decode request counters, matching the existing Whale scheduler gauge. The old `runningTasks.size()` also included queued/allocated lifecycle entries; it cannot be relabelled unchanged. |
-| `mock_engine_waiting` | `rtp_llm_wait_stream_size` | Scheduler queue, excluding decode ALLOCATE reservations waiting for P/Fetch. |
-| `mock_engine_cache_blocks` | `rtp_llm_kv_cache_pool_total_blocks` | Simulated device block-pool capacity. |
-| `mock_engine_available_blocks` | `rtp_llm_kv_cache_pool_available_blocks` | Free + evictable cached blocks; excludes held and request-referenced blocks. |
+HTTP `/metrics` 默认按 role 汇总；`?per_engine=true` 带 `engine_name`、`role`、`grpc_port`、`engine_ip` 等身份标签。重启后的计数器属于新一代引擎，不能直接跨代作差。Whale KMonitor 与 HTTP 是独立观察者，不应混用窗口或把多观察者速率相加。
 
-C++ definitions: `rtp_llm/cpp/metrics/RtpLLMMetrics.cc`,
-`engine_base/schedulers/FIFOScheduler.cc` and `cache/BlockPool.cc`.
-Mock sources: `JavaMockEngineCluster.getSnapshot/whaleMetrics` and
-`MockLruBlockCache`. The snapshot retains `running` as lifecycle inventory
-and adds `scheduler_running` for the executing-stream gauge.
+`rtp_llm_` 表示有对应真实引擎语义的观测，不保证模拟时间或数值等于真实 GPU。`mock_` 保留模拟器专属状态和口径，不能只换前缀来合并。
 
-Per-engine labels remain `engine_name`, `role`, `grpc_port`, `engine_ip`;
-default `/metrics` sums gauges/counters by role. These labels describe mock
-engines, not real pool/group topology. Comparing capacities across backends
-still requires matching block size and topology. No GPU allocation is measured.
+## 执行 TPS 与墙钟 TPS
 
-## Deliberately retained mock names
+Prefill 批次 i 的 C 为实际计算 context token，I 为含复用的输入 token，E 为实测执行微秒：
 
-`mock_prefill_batch_size` is a Prometheus histogram of the size of each
-Prefill execution batch after engine-side regrouping. Its `_bucket`, `_count`
-and `_sum` series are available per engine and aggregated by role. The buckets
-represent every executed batch, including batches between scrapes; sampled
-`rtp_llm_context_batch_size` events and the instantaneous active-request
-gauge do not have that property. `/snapshot` retains `prefill_batches`,
-`prefill_batch_requests`, and `max_prefill_batch_size` for lifecycle checks.
+- `rtp_llm_context_tps` = `1e6 × ΣC / ΣE`，只纳入 C、E 都为正的批次。
+- `rtp_llm_context_tps_with_cache` 独立按 I、E 都为正的批次计算。
+- `rtp_llm_context_wall_tps` 和 `rtp_llm_context_wall_tps_with_cache` 分别以实际 report 墙钟窗口为分母；`rtp_llm_wall_tps_report_interval_us` 记录该窗口。
 
-| Family | Actual consumer | Why the proposed real name is incorrect |
-|---|---|---|
-| `mock_engine_held_blocks`, `mock_engine_referenced_blocks` | `aggregate_canvas_run.py` → KV block-pool panels | Held means keyless allocations; referenced means indexed cache-key blocks in use. Real request-ref includes both classes; free means unallocated. Neither mock split can be renamed to free/request-ref. In this mock pool, request-held total = held + referenced = total − available. |
-| `mock_engine_cache_key_hits_total`, `mock_engine_cache_keys_requested_total` | Cache-hit aggregation/panels and scenario balance samples | Cumulative admission-time prefix-matched **keys** vs requested keys. Current real recent-cache-key hit/total are per-request **token gauges**, based on `RecentCacheKeyWindow`, not cumulative residency counters. |
-| `mock_engine_prefill_ms_avg`, `mock_engine_decode_ms_avg` | Per-engine execution curves; decode balance scoring | Means over bounded recent simulated execution samples in milliseconds. Real `rtp_llm_model_forward_us` reports individual forward execution in microseconds; decode request duration can span multiple steps. Multiplying by 1000 does not fix the sample/granularity difference. |
-| `mock_engine_accepted_total`, `mock_engine_completed_total` | Elastic transient/balance checks; Whale `observe.py` | Cumulative mock lifecycle counters, not the real engine's QPS gauges. |
-| `mock_engine_cache_evictions_total`, `mock_engine_kv_admission_fails_total`, `mock_engine_lack_mem_rejects_total`, `mock_engine_decode_reuse_blocks_total` | KV aggregation, admission/reuse panels | Mock block eviction and admission events remain useful; no verified identical real contract was found. |
+完全命中的批次可能 C=0、I>0，因此两个执行 TPS 的分母可能不同，不能相减推导命中率。Wall pair 可用于窗口复用率，但不同引擎 report interval 不同时，直接汇总速率的比值不等于精确汇总 token 的比值。
 
-The real cache-hit evidence is `PrefillCacheHitMetricsReporter.cc`:
-`fillPrefillRecentCacheKeyMetricsCollector` assigns `hit_token_count` and
-`input_token_count`; `record` matches a recent-key window. The mock already
-has a separate `WhalePrefillMatchMetrics` implementation for that real
-contract. Reusing its name for the lifetime key counters would collide with
-an existing, different measurement. Recent-cache-key gauges and cumulative
-key counters have separate measurement semantics.
+Token 成员在执行开始时冻结，完成派发后与实际执行时间原子发布。执行前取消不计工作；执行后取消不抹去已执行工作。成功请求累计 token 是另一种业务口径。
+长步骤尚未完成时没有执行样本，报告保持缺失；完全空闲的窗口报告 0。独立观察者保留各自 cursor 和 wall origin，崩溃后重新建立 generation。
 
-## Removed Prometheus families
+参考为 `RtpLLMMetrics.h` 的 `RtpLLMTokenPSMetricsCollector`、`RtpLLMMetrics.cc` 及执行器时间边界。Mock 实测时间包含模拟等待和运行时开销，不证明绝对 GPU 吞吐；不模拟完整 chunked prefill / beam 执行或 per-priority TPS。比较时固定输入、完整 Fetch、模型与采集版本，并对齐 DP / 引擎聚合口径。
 
-Ten families are removed from HELP/TYPE, per-engine and role output:
+Decode 的 `rtp_llm_sp_estimate_tpot_us` 使用模拟 step 微秒除以实际推进 stream 新产生 token 的平均数；不包含 Prefill 首 token、中途加入或 KV 增长失败的 stream。它是执行估计，不能替代客户端 TTFT / TPOT，也不伪造 draft proposal 和接受率。
 
-- `mock_engine_up`: health and per-engine stopped state remain available.
-- `mock_engine_cache_keys`: no analysis consumer. Cache inventory is **not**
-  replaced by hit/request counters; it remains in `/snapshot.cache_keys`.
-- `mock_engine_active_kv_tokens`, `mock_engine_available_kv_tokens`: no
-  analysis consumer of these series; block-pool analysis is already used.
-  Snapshot token fields remain needed for capacity/injection checks.
-- `mock_engine_rpc_total`: the initial zero-consumer finding was incorrect.
-  `whale_mock/observe.py` consumed Fetch counts. It now sums the existing
-  `/snapshot.engines[].rpc_counts.fetch_response` by role, rejecting absent
-  counters/roles instead of assuming zero. RPC instrumentation stays intact.
-- `mock_engine_prefill_ms_p99`, `mock_engine_decode_ms_p99`,
-  `mock_engine_prefill_ms_count`, `mock_engine_decode_ms_count`: only collected
-  for a future planned score; no implemented analysis used them. Counts are
-  bounded queue sizes, not monotonic sample counters. Snapshot diagnostics
-  remain, and the role avg still uses queue counts as weights.
-- `mock_engine_cancelled_total`: sampled but never used by a case or report.
-  Cancellation analysis uses snapshot request IDs/lifecycle and event logs.
+## 队列、批次与累计量
 
-## Migration boundary and verification
+| 指标 | 口径 |
+|---|---|
+| `rtp_llm_running_stream_size` | 正在执行的 stream；不等于 snapshot 的全部生命周期条目 |
+| `rtp_llm_wait_stream_size` | 调度等待；不把 Decode ALLOCATE 预留算作等待执行 |
+| `mock_prefill_batch_size` | 每个实际执行批次的 histogram，包含 scrape 之间执行的批次 |
+| `mock_engine_prefill_ms_avg`、`mock_engine_decode_ms_avg` | 有界近期模拟执行样本的 ms 均值，不能换单位后冒充单次 `rtp_llm_model_forward_us` |
+| `mock_engine_cache_key_hits_total`、`mock_engine_cache_keys_requested_total` | 准入时 prefix-match 的累计 key 数；真实 recent-cache-key 观测是 per-request token gauge，两者不可合并 |
+| `mock_engine_accepted_total`、`mock_engine_completed_total` | 模拟生命周期 counter，不是 QPS gauge |
 
-Deploy producer, collectors, scenario framework and offline analyzer from
-the same revision. Old names are not dual-emitted. Generated report JSON
-keys (`total_blocks`, queue columns, etc.) remain stable; archived raw
-Prometheus captures with the old names should use their original analyzer.
-In particular old running values cannot be converted to scheduler-running
-values by renaming.
+`prefill_batches`、`prefill_batch_requests` 和 `max_prefill_batch_size` 描述引擎执行组批，不能用它们反推 Master FIXED_WINDOW 批形。Counter 需要根据声明窗口作差或 rate，并显式处理重启；采样缺失不是 0。
 
-Tests cover both HTTP exposition modes (including absence of removed
-HELP/TYPE/sample lines), block-pool values, reserved-vs-running decode
-state, collection through consolidated time series into queue/KV aggregation,
-scenario consumers, and fail-closed no-Fetch verification.
+## KV 与 Memory cache
 
-Validation on 2026-09-21:
+`rtp_llm_kv_cache_pool_total_blocks` 表示模拟 device pool 容量，
+`rtp_llm_kv_cache_pool_available_blocks` 包括 free 与可驱逐 cache block，排除 held 和被请求引用的 block。
+`mock_engine_held_blocks` 是无 key 分配，`mock_engine_referenced_blocks` 是在用的 cache-key block，二者之和才是本模型的请求持有量，不能把任一项改名为 free 或完整 request-ref。
 
-- Python: 129 elastic scenario tests; 48 collector/shared-runtime/cache-hit/
-  migration/twin tests; 4 no-Fetch observer tests. All 181 passed.
-- Java on 111, isolated run `20260921_064254.`: 35 tests across
-  `PythonCompatControlApiTest`, `MetricsValidationTest`,
-  `BlockPoolMetricsObservabilityTest`, `MockRemoteDecodeEngineTest`,
-  `CacheKeyHitMetricsTest`, `KvAllocatedReportOptInTest`, and
-  `WhalePrefillMatchMetricsTest`; zero failures/errors/skips.
-  After the final cancelled-counter removal, the 17 control/metrics tests
-  were rerun successfully (`metrics-final`).
-- Maven: `./mvnw -B -P'opensource,!internal' -pl flexlb-mock-engine -am test
-  -Dtest=<classes above> -Dsurefire.failIfNoSpecifiedTests=false`.
-- No live Whale deployment or workload benchmark was changed or run.
+Device 与 Memory 复用 token 分别由
+`rtp_llm_stream_cache_device_reuse_length` 和 `rtp_llm_stream_cache_memory_reuse_length` 表示，不重叠；
+`rtp_llm_kv_cache_hit_rate` 是总复用 token / 输入 token 的百分比。
+Memory `...available_block_num` 包括可回收条目，`...used_ratio` 描述 pinned 容量；常驻前缀的占用需看 `mock_memory_cache_occupancy_ratio`。
 
-## Prefill TPS alignment (`execution_us_v1`)
+`rtp_llm_kv_cache_evicted_block_lifetime_ms` 必须按 `scope=gpu,backing=device` 或 `scope=memory,backing=memory` 分开分析。没有驱逐表示没有 lifetime 观测，不能补 0。容量比较还需固定 block size、CP 与拓扑；这些是元数据模型，不是实际内存页观测。
 
-The previous HTTP context pair counted tokens per scrape without dividing by
-elapsed time. Whale used successful-request totals divided by modeled formula
-milliseconds. Neither was the real execution TPS contract.
+## 引擎移除准入
 
-The source of truth is `rtp_llm/cpp/metrics/RtpLLMMetrics.h`:
-`RtpLLMTokenPSMetricsCollector::addTokenSize` gives each positive numerator
-its own batch execution-time sum. For completed batches i, let C be executed
-context tokens (input minus reuse), I be context input including reuse, and
-E be measured execution microseconds:
+`mock_engine_admission_open` 表示新工作 RPC 闸门；
+`mock_engine_admitted_rpcs_total` 和 `mock_engine_rejected_rpcs_total` 分别统计通过和被移除闸门拒绝的 RPC。
+一次 batch 算一个 RPC，不能当请求数。关闭入口不暂停已有任务推进；受理计数在关闭后不得增长。
 
-- `context_tps = 1e6 × Σ(C_i where C_i>0 and E_i>0) / Σ(E_i for those batches)`.
-- `context_tps_with_cache` applies the same rule independently to I.
-- The wall pair divides the same numerators by actual elapsed report time.
-  `wall_tps_report_interval_us` records that time per engine.
-
-For a fully cached batch, C can be zero while I is positive. Thus execution
-TPS denominators can differ; subtracting the two rates is not a cache-hit
-calculation. Window hit ratios now use the wall pair. A sum across engines
-is a wall-rate-weighted reuse ratio when their report intervals differ;
-it is not an exact pooled token ratio in that case. Successful-request
-snapshot totals remain a separate run-level view.
-
-`RtpLLMMetrics.cc` and the two loop reporters in the header define missing
-versus idle samples: no completed sample while an execution is active is
-silent; a fully idle interval reports zero. Each mock HTTP/Whale reader has
-an independent cursor and retains its wall origin through silent intervals.
-The first completed sample is included. Crash resets start a new generation
-and old completed callbacks cannot add tokens to that generation.
-
-`NormalExecutor.cc` times execution from scheduler handoff through dispatch
-(with process-start fallback); `MtpExecutor.cc` also uses the scheduler
-interval. It is not simply `model_forward_us`. Mock records actual elapsed
-time from batch execution start through simulated completion dispatch,
-including modeled delay and runtime overhead. Batch token membership is
-frozen at start: cancellation before start excludes work; cancellation after
-start does not erase executed work. Both numerator and duration publish
-atomically. Successful-request counters retain their original meaning.
-
-This alignment covers the mock's one-phase prefill batches and engine totals.
-The real `StreamGroups.h` supports execution slices and batch multiplicity;
-mock does not model chunked prefill/beam execution or emit per-priority TPS.
-Compare real engine totals (sum priority buckets where present). Simulated
-execution time is not evidence of absolute GPU throughput. Decode TPS was
-not changed or certified by this prefill migration.
-
-Consumers preserve separate execution and wall curves. Elastic throughput
-checks use wall TPS. `scripts/commands/compare_runs.py` displays frozen run
-report bundles, including archived controls and measurement labels; it does
-not certify TPS compatibility or recompute metrics. Capture
-both versions with aligned producers/collectors and matching workload, and
-use full output fetching; old raw captures cannot be repaired by renaming.
-The aggregator infers the contract from the new measured-window series;
-deploy a single producer revision per experiment rather than mixed fleets.
-
-Verification on 2026-09-21:
-
-- 191 Python tests across collector/runtime/telemetry/migration/cache/twin,
-  elastic scenarios and the prefill contract. These cover deliberately
-  unequal execution denominators, wall hit ratios, missing samples and both
-  accepting and rejecting gate paths at that revision. The optional TPS gate
-  and its three tests were subsequently removed; comparison retains the
-  automatic mixed-contract check.
-- 49 remote Java tests passed on host 111, run `20260921_070951.`, job
-  `tps-final`; after adjusting Whale's wall endpoint to follow its atomic
-  snapshot, the 30 TPS/Whale tests passed again (`tps-clock-final`).
-- Deterministic ledger tests cover ratio-of-sums, zero-compute batches,
-  long-step silence, first sample, independent observers and crash reset.
-  Integration tests cover HTTP role sums, cancellation and Whale parity.
-- No live GPU comparison or production TPS benchmark was run.
-
-### 移除时的新 RPC 准入
-
-`mock_engine_admission_open` 表示入口是否接受新工作 RPC。`mock_engine_admitted_rpcs_total` 统计通过入口闸门的 RPC，`mock_engine_rejected_rpcs_total` 统计移除闸门拒绝的 RPC；一次 batch 算一次 RPC，并非 batch 内请求数。三者带引擎身份标签，关闭闸门不暂停已有任务推进。
-
-`remove_engine` 两种模式都先关闭准入，再撤销 discovery。返回的 `admission` 保存关闭时间、关闭时和最终受理计数及拒绝计数；受理计数在关闭后必须不增长。Generate、Enqueue、RemoteGenerate 和迟到 Fetch 以 UNAVAILABLE 拒绝。既有流、状态与清理接口保留；`drained`、`remaining_work` 描述关停结果，与业务测量的有效性分别解释。
+来源类型、PromQL、窗口和缺失规则必须随 run 归档。未知指标、单位冲突和必需样本缺失应显式失败；日志、文件或 debug API 证据须独立声明，不建立降级回退链。

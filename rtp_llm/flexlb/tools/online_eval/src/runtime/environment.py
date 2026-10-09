@@ -23,7 +23,6 @@ from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
 from runtime.master_artifact import configure_master
 from runtime.network import (
     PROBE_BIND_HOST,
-    http_get_json,
     http_post_json,
     port_accepting,
     port_in_use,
@@ -897,11 +896,6 @@ class EnvManager:
             raise RuntimeError(f"master instance '{name}' is not running")
         return mp
 
-    def master_instance_http(self, env: FlexEnv, name: str) -> str:
-        """HTTP base URL of one registered instance (probing + assertions)."""
-        mspec = env.master_specs[name]
-        return f"http://{mspec.bind_ip}:{mspec.http_port}"
-
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
         """gRPC target (bind_ip:grpc_port) — the GRPC_TARGETS entry format."""
         mspec = env.master_specs[name]
@@ -923,22 +917,6 @@ class EnvManager:
         in-memory state zeroed, converges from the zero-point)."""
         mspec = env.master_specs[name]
         return self.start_master_instance(env, mspec)
-
-    def freeze_master_instance(self, env: FlexEnv, name: str) -> None:
-        """Mode 2 directed fault: SIGSTOP ONE instance.
-
-        Port stays up, process is unresponsive, in-memory state retained
-        (hot-recovery semantics on SIGCONT — no cold restart).
-        """
-        mp = self._live_instance(env, name)
-        self._log(f"SIGSTOP master instance '{name}' (pid={mp.pid})")
-        mp.freeze()
-
-    def unfreeze_master_instance(self, env: FlexEnv, name: str) -> None:
-        """Mode 2 recovery: SIGCONT the frozen instance (hot recovery)."""
-        mp = self._live_instance(env, name)
-        self._log(f"SIGCONT master instance '{name}' (pid={mp.pid})")
-        mp.unfreeze()
 
     # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
 

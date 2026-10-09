@@ -76,14 +76,6 @@ def validate_profile_identity(profile: str, overrides: Mapping[str, object]) -> 
             raise ProfileIdentityError(f"{axis} is a profile identity field for {profile}")
 
 
-def profile_dispatches_batch(profile: str) -> bool:
-    """True when *profile*'s dispatcher axis is BATCH (master sends via
-    EnqueueBatch; clients consume FetchResponse)."""
-    if profile == STRESS_PROFILE:
-        return STRESS_BASE["dispatcher"]["type"] == "BATCH"
-    return PROFILE_SPECS[profile]["dispatcher"] == "batch"
-
-
 # ===========================================================================
 # Override spec
 # ===========================================================================

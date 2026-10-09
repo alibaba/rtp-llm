@@ -259,19 +259,6 @@ class HaTrafficRunner:
     def now() -> float:
         return time.time()
 
-    def wait_finish(self, extra_s: float = 60.0):
-        """Wait for the natural DURATION_S exit (all rows flushed); the
-        stop_async SIGTERM path is only a timeout fallback."""
-        result = None
-        if self.proc is not None:
-            if not self.proc.wait(extra_s):
-                # Timeout fallback: SIGTERM (buffered rows may be lost —
-                # the window-comparison assertions tolerate that).
-                result = self._client.stop_async(self.proc, self.out_dir)
-            else:
-                result = self._client.stop_async(self.proc, self.out_dir)
-        return result
-
     def rows(self) -> list:
         path = self.out_dir / "client_events.jsonl"
         rows = []

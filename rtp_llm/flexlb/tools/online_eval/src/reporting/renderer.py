@@ -125,7 +125,7 @@ def render_context(spec):
             rendered.append(heading + '<div class="context-grid">' + ''.join(groups) + '</div>')
     if not rendered:
         return ""
-    return '<details class="report-block report-context" open><summary>运行信息（制品与配置）</summary><div class="block-body">' + ''.join(rendered) + '</div></details>'
+    return '<details class="report-block report-context"><summary>运行信息（制品与配置）</summary><div class="block-body">' + ''.join(rendered) + '</div></details>'
 
 
 def render_sections(sections):
