@@ -17,6 +17,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -681,6 +682,38 @@ class RequestTraceState:
         self._renderer_completed = False
         self._lock = threading.Lock()
 
+        self.batch_request_id = ""
+        self.external_request_id = ""
+
+    def begin_batch(self, external_request_id: str = "") -> None:
+        """Assign observation identity without consuming engine request IDs."""
+        if not is_telemetry_active() or self.server_span is None:
+            return
+        try:
+            if not self.batch_request_id:
+                self.batch_request_id = "batch-" + uuid.uuid4().hex
+            self.external_request_id = external_request_id[:128]
+            self.set_attribute(trace_attrs.REQUEST_ID, self.batch_request_id)
+            if self.external_request_id:
+                self.set_attribute(
+                    trace_attrs.RTP_LLM_EXTERNAL_REQUEST_ID, self.external_request_id
+                )
+        except Exception:  # noqa: BLE001 - observation must not affect inference
+            pass
+
+    def batch_metadata(self) -> List[Tuple[str, str]]:
+        """Extra carrier for BatchGenerateCall only; W3C propagation is separate."""
+        if not is_telemetry_active() or not self.batch_request_id:
+            return []
+        metadata = [("x-rtp-llm-batch-request-id", self.batch_request_id)]
+        # gRPC text metadata accepts printable ASCII. Preserve the original
+        # attribute locally even when it cannot be carried in a text header.
+        if self.external_request_id and all(
+            32 <= ord(char) <= 126 for char in self.external_request_id
+        ):
+            metadata.append(("x-rtp-llm-external-request-id", self.external_request_id))
+        return metadata
+
     @property
     def server_context(self) -> Optional[Any]:
         """Context containing the server span, parent for child CLIENT spans."""
@@ -943,7 +976,7 @@ def start_client_span(
 
     Returns (handle, metadata) where metadata carries W3C traceparent for gRPC.
     Scope guard: only produces a span when a RequestTraceState exists
-    (chat completions entry), so batch/embedding routes stay untraced.
+    (a traced request entry), so embedding routes stay untraced.
     Returns (None, []) whenever telemetry is inactive; never raises.
     """
     if not is_telemetry_active():
@@ -1000,6 +1033,39 @@ def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
         return ClientSpanHandle(span, _internal_error_description, context_token)
     except Exception:  # noqa: BLE001 - fail-open
         return None
+
+
+def start_batch_item_span(
+    request_id: int, index: int
+) -> Tuple[Optional[ClientSpanHandle], List[Tuple[str, str]]]:
+    """Give each item its own parent carrier without activating shared context."""
+    if not is_telemetry_active():
+        return None, []
+    try:
+        state = CURRENT_TRACE_STATE.get()
+        tracer = get_tracer()
+        if state is None or state.server_context is None or tracer is None:
+            return None, []
+        span = tracer.start_span(
+            "rtp_llm.batch_request",
+            context=state.server_context,
+            kind=trace.SpanKind.INTERNAL,
+            attributes={
+                trace_attrs.REQUEST_ID: str(request_id),
+                "rtp_llm.batch.index": index,
+                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                trace_attrs.GEN_AI_OPERATION_NAME: "generate",
+            },
+        )
+        if state.external_request_id:
+            span.set_attribute(
+                trace_attrs.RTP_LLM_EXTERNAL_REQUEST_ID, state.external_request_id
+            )
+        metadata = inject_context_to_metadata(trace.set_span_in_context(span))
+        return ClientSpanHandle(span, _request_error_description), metadata
+    except Exception:  # noqa: BLE001 - tracing must not break batch inference
+        return None, []
 
 
 def start_server_span(
