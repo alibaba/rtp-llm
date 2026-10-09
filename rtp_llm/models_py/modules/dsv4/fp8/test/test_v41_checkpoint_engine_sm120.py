@@ -38,6 +38,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import mhc_fp32
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
+    sparse_sink_div_rn,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
@@ -86,7 +89,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_mhc = os.environ.get("DSV41_TEST_COMPARE_MHC") == "1"
     compare_compressor = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR") == "1"
     compare_recipe = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR_RECIPE") == "1"
-    paired = compare_tp8 or compare_mhc or compare_compressor or compare_recipe
+    compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
+    paired = (
+        compare_tp8
+        or compare_mhc
+        or compare_compressor
+        or compare_recipe
+        or compare_sparse
+    )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
         profiles.append("mhc_fp32")
@@ -108,10 +118,19 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             for profile in base_profiles
         ]
     current_profile = [precision]
+    if compare_sparse:
+        profiles += [
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn",
+        ]
     trace_steps = dict.fromkeys(profiles, 0)
     try:
         if paired and precision != "baseline":
             raise ValueError("Paired comparison requires unpatched production math")
+        if compare_sparse and not (compare_tp8 and compare_mhc and compare_recipe):
+            raise ValueError(
+                "Sparse comparison requires TP8, mHC and compressor recipe controls"
+            )
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
@@ -188,6 +207,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
+                recipe = "compressor_recipe" in profile
+                sparse = "sparse_sink_div_rn" in profile
+                sparse_decode = sparse and not profile.endswith("_prefill")
                 tracing = (
                     bool(trace_directory) and rank == 0 and trace_steps[profile] < 3
                 )
@@ -198,9 +220,12 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 ), mhc_fp32(
                     "mhc_fp32" in profile
                 ), compressor_bf16(
-                    profile.endswith(("compressor_bf16", "compressor_recipe")),
-                    fused=profile.endswith("compressor_recipe"),
-                    hca_projection=profile.endswith("compressor_recipe"),
+                    profile.endswith("compressor_bf16") or recipe,
+                    fused=recipe,
+                    hca_projection=recipe,
+                ), sparse_sink_div_rn(
+                    sparse,
+                    decode=sparse_decode,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -227,10 +252,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             "input_ids": request.input_ids.tolist(),
                             "cache_spans": request.v41_cache_spans.tolist(),
                             "precision_profile": profile,
-                            "compressor_fused": profile.endswith("compressor_recipe"),
-                            "hca_bf16_projection": profile.endswith(
-                                "compressor_recipe"
-                            ),
+                            "compressor_fused": recipe,
+                            "hca_bf16_projection": recipe,
+                            "sparse_sink_div_rn_prefill": sparse,
+                            "sparse_sink_div_rn_decode": sparse_decode,
                         },
                     )
                     trace_steps[profile] += 1

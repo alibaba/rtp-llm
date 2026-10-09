@@ -189,6 +189,7 @@ py_test(
         "v41_compressor_precision.py",
         "v41_mhc_precision.py",
         "v41_reference_precision.py",
+        "v41_sparse_precision.py",
         "v41_tp8_projection.py",
         "test_v41_loader_worker_sm120.py",
         "test_v41_worker_sm120.py",
