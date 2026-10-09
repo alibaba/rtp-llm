@@ -71,5 +71,22 @@ TEST(TransferStageStateTest, PreservesFirstFailure) {
     EXPECT_EQ(result, ErrorCode::INVALID_PARAMS);
 }
 
+TEST(TransferStageStateTest, FailureStillDrainsAllBatches) {
+    size_t             calls = 0;
+    TransferStageState state([&](ErrorInfo error) {
+        ++calls;
+        EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
+    });
+    state.addBatch();
+    state.addBatch();
+    state.addBatch();
+    state.finishSubmitting();
+    state.completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "ordinary failure"));
+    state.completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"));
+    EXPECT_EQ(calls, 0u);
+    state.completeBatch(ErrorInfo::OkStatus());
+    EXPECT_EQ(calls, 1u);
+}
+
 }  // namespace
 }  // namespace rtp_llm

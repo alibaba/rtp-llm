@@ -23,7 +23,8 @@ public:
                                         size_t                   max_descriptors_per_batch                  = 8,
                                         size_t                   transfer_worker_count                     = 4,
                                         size_t                   transfer_queue_max_size                   = 10000,
-                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr);
+                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                                        int64_t                                        world_rank       = 0);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 

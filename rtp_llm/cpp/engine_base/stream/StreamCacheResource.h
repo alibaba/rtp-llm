@@ -147,6 +147,8 @@ private:
     int                              malloc_failed_times_   = 0;
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
+    // A failed load retries with private blocks, including retries under KV pressure.
+    bool                             skip_cache_lookup_ = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;

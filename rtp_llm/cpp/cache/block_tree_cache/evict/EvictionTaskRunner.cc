@@ -32,6 +32,10 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                                                 false,
                                                 {},
                                                 group_sets_);
+        metrics_reporter.reportCopyError(first.source_tier,
+                                         first.target_tier,
+                                         ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid eviction transfer"),
+                                         descriptors);
         if (on_done) {
             on_done(false);
         }
@@ -50,6 +54,10 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                                                     success,
                                                     success ? task->descriptors() : std::vector<TransferDescriptor>{},
                                                     group_sets_);
+            metrics_reporter.reportCopyError(task->descriptors().front().source_tier,
+                                             task->descriptors().front().target_tier,
+                                             error,
+                                             task->descriptors());
             if (on_done) {
                 on_done(success);
             }

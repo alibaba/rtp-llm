@@ -80,6 +80,12 @@ public:
     // Discard a detached operation's source without publishing its target.
     void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
 
+    // Called after the whole copy batch has returned its references. No I/O or waiting under the cache mutex.
+    void invalidateSources(const std::vector<TransferDescriptor>& descriptors);
+    bool takePendingLoadCancellation() {
+        return std::exchange(pending_loads_invalidated_, false);
+    }
+
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
     void admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier);
@@ -145,6 +151,9 @@ private:
                                                                  size_t               pending_count,
                                                                  const TierWatermark& watermark,
                                                                  bool&                high_reached) const;
+
+    void                          dropResource(TreeNode* node, size_t group_set_id);
+    bool pending_loads_invalidated_{false};
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};

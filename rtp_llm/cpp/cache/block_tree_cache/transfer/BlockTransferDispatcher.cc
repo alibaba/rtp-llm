@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -114,28 +115,46 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
     }
 
     auto stage_state = std::make_shared<TransferStageState>(std::move(callback));
-    for (const auto& group : groups) {
-        const size_t batch_limit = max_descriptors_per_batch_;
-        for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
-            const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
-            std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin, group.descriptors.begin() + end);
-            stage_state->addBatch();
-            try {
-                auto context = executeMultiRank(task.subtask(std::move(batch)));
-                if (context == nullptr) {
+    try {
+        for (const auto& group : groups) {
+            const size_t batch_limit = max_descriptors_per_batch_;
+            for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
+                const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
+                std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin,
+                                                      group.descriptors.begin() + end);
+                stage_state->addBatch();
+                std::shared_ptr<AsyncContext> context;
+                try {
+                    context = executeMultiRank(task.subtask(std::move(batch)));
+                    if (context == nullptr) {
+                        stage_state->completeBatch(
+                            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
+                        continue;
+                    }
+                    // Callback registration can allocate after RPC submission.
+                    // Its failure must not acknowledge still-active remote writes.
+                    context->onDone([stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
+                } catch (const std::exception& error) {
+                    if (context) {
+                        context->waitDone();
+                    }
+                    stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                } catch (...) {
+                    if (context) {
+                        context->waitDone();
+                    }
                     stage_state->completeBatch(
-                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
-                    continue;
+                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"));
                 }
-                context->onDone([stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
-            } catch (const std::exception& error) {
-                stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-            } catch (...) {
-                stage_state->completeBatch(
-                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"));
             }
         }
+    } catch (const std::exception& error) {
+        // Preserve completion of batches already submitted before an allocation
+        // or later batch-construction failure.
+        stage_state->addBatch();
+        stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     }
+    // The callback may run here; its exceptions are not submission failures.
     stage_state->finishSubmitting();
 }
 

@@ -93,6 +93,8 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
+    // Finish layout initialization before handing the backing to a worker's copy stream.
+    RTP_LLM_CHECK(cudaDeviceSynchronize() == cudaSuccess);
     return pool;
 }
 
@@ -1135,6 +1137,78 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContex
     io->release();
     context->waitDone();
     EXPECT_TRUE(context->success());
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, LaterBatchPreparationFailureWaitsForSubmittedCopy) {
+    ASSERT_TRUE(torch::cuda::is_available());
+    TempDirGuard temp_dir("per_rank_partial_submission");
+    auto         owned_io    = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::READ);
+    auto*        io          = owned_io.get();
+    auto         disk_pool   = makeDiskPool(80, 2, temp_dir.path, std::move(owned_io));
+    auto         device_pool = makeDevicePool({{64, 16}}, 2, "partial_submission_device");
+    auto         group       = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto         engine      = std::make_shared<PerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 1, 1);
+    [[maybe_unused]] auto           release_guard = std::shared_ptr<void>(nullptr, [io](void*) { io->release(); });
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t i = 0; i < 2; ++i) {
+        const auto device = poolMalloc(*device_pool);
+        const auto disk   = poolMalloc(*disk_pool);
+        fillDeviceLayer(device_pool, 0, device, {0xA5, 0xA5});
+        const std::vector<uint8_t> bytes(disk_pool->strideBytes(), 0x5A);
+        ASSERT_EQ(disk_pool->write(disk, bytes.data(), bytes.size()), BlockIOStatus::OK);
+        descriptors.push_back(makeDescriptor(Tier::DISK, Tier::DEVICE, {device}, NULL_BLOCK_IDX, disk, 0));
+    }
+    engine->device_disk_executor_->before_batch_prepare_for_test_ = [](size_t begin) {
+        if (begin == 1) {
+            throw std::runtime_error("second batch preparation failed");
+        }
+    };
+    std::shared_ptr<AsyncContext> context;
+    ASSERT_NO_THROW(context = engine->execute(makeTransferTask(descriptors)));
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(io->waitUntilBlocked(std::chrono::seconds(5)));
+    EXPECT_FALSE(context->done());
+    io->release();
+    context->waitDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(readDeviceLayer(device_pool, 0, descriptors[0].target_blocks[0]), std::vector<uint8_t>(80, 0x5A));
+    EXPECT_EQ(readDeviceLayer(device_pool, 0, descriptors[1].target_blocks[0]), std::vector<uint8_t>(80, 0xA5));
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DelayedStagingSubmissionExceptionCompletesBothDirections) {
+    ASSERT_TRUE(torch::cuda::is_available());
+    for (const bool load : {true, false}) {
+        TempDirGuard temp_dir("per_rank_staging_callback_exception");
+        auto disk_pool = makeDiskPool(80, 1, temp_dir.path, std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
+        auto device_pool = makeDevicePool({{64, 16}}, 1, "staging_callback_exception_device");
+        auto group       = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+        auto engine      = std::make_shared<PerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 1, 1);
+        auto* staging      = engine->device_disk_executor_->full_staging_pool_.get();
+        auto  held_staging = staging->tryMallocBatch(1);
+        ASSERT_TRUE(held_staging.has_value());
+        engine->device_disk_executor_->before_staging_submit_for_test_ = [] {
+            throw std::runtime_error("staging callback preparation failed");
+        };
+        auto descriptor = makeDescriptor(load ? Tier::DISK : Tier::DEVICE,
+                                         load ? Tier::DEVICE : Tier::DISK,
+                                         {poolMalloc(*device_pool)},
+                                         NULL_BLOCK_IDX,
+                                         poolMalloc(*disk_pool),
+                                         0);
+        auto context = engine->execute(makeTransferTask({descriptor}));
+        ASSERT_NE(context, nullptr);
+        EXPECT_FALSE(context->done());
+        // Free dispatches the queued callback from a lease destructor. Its
+        // preparation exception must become a result, not escape destruction.
+        held_staging.reset();
+        context->waitDone();
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_TRUE(staging->tryMallocBatch(1).has_value());
+    }
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageFailureShortCircuitsAndReleasesStaging) {

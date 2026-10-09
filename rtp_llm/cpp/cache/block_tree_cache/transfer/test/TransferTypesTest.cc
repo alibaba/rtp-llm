@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
@@ -87,6 +88,38 @@ TEST(TransferTaskTest, SubtaskPreservesAbsoluteDeadline) {
     EXPECT_EQ(nested.deadline_, parent_deadline);
     ASSERT_EQ(subtask.descriptors().size(), 1u);
     EXPECT_EQ(subtask.descriptors().front().group_set_id, 1u);
+}
+
+TEST(TransferTaskTest, CorruptRecordIdentitySurvivesBatchAndStagingCopies) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 3, {1}), TransferDescriptor::hostToDevice(0, 4, {2})},
+                      std::chrono::seconds(1));
+    auto         child        = task.subtask({task.descriptors().back()});
+    auto         staging_copy = child.descriptors().front();
+    staging_copy.markCorrupted();
+    const auto failures = task.corruptedDescriptors();
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures.front().source_blocks, (std::vector<BlockIdxType>{4}));
+    EXPECT_FALSE(task.descriptors().front().corrupted());
+    EXPECT_EQ(child.deadline(), task.deadline());
+}
+
+TEST(TransferTaskTest, ConcurrentDiagnosticsSurviveBatchCopiesWithoutConfusingCorruptionAndCopyFailure) {
+    TransferTask task({TransferDescriptor::diskToDevice(0, 3, {1}), TransferDescriptor::diskToDevice(0, 4, {2})},
+                      std::chrono::seconds(1));
+    auto         child   = task.subtask({task.descriptors().front()});
+    auto         staging = child.descriptors().front();
+    std::thread  compute([staging] { staging.markCrcComputeFailed(); });
+    std::thread  rpc([staging] { staging.markCopyError(CacheCopyError::RPC_FAILED); });
+    compute.join();
+    rpc.join();
+    const auto& descriptor = task.descriptors().front();
+    EXPECT_TRUE(descriptor.crcComputeFailed());
+    EXPECT_FALSE(descriptor.corrupted());
+    EXPECT_EQ(descriptor.copyError(), CacheCopyError::CRC_COMPUTE_FAILED);
+    EXPECT_EQ(task.descriptors().back().copyError(), CacheCopyError::NONE);
+    staging.markCorrupted();
+    EXPECT_EQ(descriptor.copyError(), CacheCopyError::CRC_MISMATCH);
+    EXPECT_TRUE(descriptor.crcComputeFailed());
 }
 
 }  // namespace

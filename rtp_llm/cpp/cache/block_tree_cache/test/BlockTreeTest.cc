@@ -160,6 +160,99 @@ TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
     EXPECT_TRUE(result.empty());
 }
 
+TEST(BlockTreeTest, DetachedNodesReclaimIndependentlyAndLeaveReplacementIntact) {
+    BlockTree tree(makeGroupSets(1));
+    auto      old_path = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), true, false).path;
+    tree.insertNode({100, 250}, make2DResources(1, 2, 20), false, false);
+    old_path[2]->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
+    auto detached                                      = tree.detachSubtree(old_path[1]);
+    ASSERT_EQ(detached.size(), 2u);
+    EXPECT_EQ(tree.size(), 2u);
+    EXPECT_EQ(tree.findNode({100, 200, 300}), (std::vector<TreeNode*>{old_path[0]}));
+    EXPECT_EQ(tree.findNode({100, 250}).size(), 2u);
+    for (TreeNode* node : detached) {
+        EXPECT_TRUE(node->detached);
+        EXPECT_EQ(node->parent, nullptr);
+        EXPECT_TRUE(node->children.empty());
+    }
+    EXPECT_TRUE(tree.detachSubtree(old_path[1]).empty());
+    EXPECT_TRUE(tree.detachSubtree(old_path[2]).empty());
+    auto replacement = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 30), true, false).path;
+    ASSERT_EQ(replacement.size(), 3u);
+    EXPECT_NE(replacement[1], old_path[1]);
+    EXPECT_NE(replacement[2], old_path[2]);
+
+    // Duplicate entries must not access the parent after its first reclamation.
+    tree.reclaimDetachedNodes({old_path[1], old_path[2], old_path[1]});
+    ASSERT_EQ(tree.detached_nodes_.size(), 1u);
+    EXPECT_EQ(tree.detached_nodes_.count(old_path[2]), 1u);
+    EXPECT_EQ(old_path[2]->parent, nullptr);
+    old_path[2]->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    tree.reclaimDetachedNodes({old_path[2]});
+    EXPECT_TRUE(tree.detached_nodes_.empty());
+    EXPECT_EQ(tree.findNode({100, 200, 300}), replacement);
+    EXPECT_EQ(tree.size(), 4u);
+}
+
+TEST(BlockTreeTest, DetachChildBeforeParentKeepsIndependentRetiredNodes) {
+    BlockTree tree(makeGroupSets(1));
+    auto      path  = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), true, false).path;
+    auto      other = tree.insertNode({400, 500}, make2DResources(1, 2, 20), true, false).path;
+    auto      child = tree.detachSubtree(path[2]);
+    EXPECT_EQ(child.size(), 1u);
+    EXPECT_TRUE(path[1]->children.empty());
+    auto parent = tree.detachSubtree(path[0]);
+    EXPECT_EQ(parent.size(), 2u);
+    EXPECT_TRUE(tree.detachSubtree(path[2]).empty());
+    EXPECT_EQ(tree.findNode({400, 500}), other);
+    tree.reclaimDetachedNodes(parent);
+    EXPECT_EQ(tree.detached_nodes_.size(), 1u);
+    EXPECT_EQ(path[2]->parent, nullptr);
+    tree.reclaimDetachedNodes(child);
+    EXPECT_TRUE(tree.detached_nodes_.empty());
+    EXPECT_EQ(tree.size(), 2u);
+}
+
+class DetachTestPublisher final: public KVCacheEventPublisher {
+public:
+    bool start() noexcept override {
+        return true;
+    }
+    void            stop() noexcept override {}
+    PublisherStatus status() const noexcept override {
+        return {};
+    }
+    PublishResult tryPublish(KVCacheEvent event) noexcept override {
+        events.push_back(event);
+        return PublishResult::ACCEPTED;
+    }
+    std::vector<KVCacheEvent> events;
+};
+
+TEST(BlockTreeTest, DetachedCompletionCannotRetractReplacementPublication) {
+    auto      groups = makeGroupSets(1);
+    BlockTree tree(groups);
+    auto      publisher = std::make_shared<DetachTestPublisher>();
+    tree.setEventPublisher(publisher, {groups[0]->groupTags().front()});
+    auto old_node = tree.insertNode({100}, make2DResources(1, 1, 10), true, false).path.front();
+    EXPECT_EQ(tree.logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    auto detached = tree.detachSubtree(old_node);
+    EXPECT_TRUE(tree.logicalCacheSnapshot().block_keys.empty());
+    auto new_node = tree.insertNode({100}, make2DResources(1, 1, 20), true, false).path.front();
+    EXPECT_NE(new_node, old_node);
+    const auto   snapshot    = tree.logicalCacheSnapshot();
+    const size_t event_count = publisher->events.size();
+    old_node->group_set_resources[0].device_blocks.clear();
+    // Balance the old CACHE reference before emulating a late publication refresh.
+    groups[0]->unreferenceBlocks({0, Tier::DEVICE, {{old_node, {10}}}}, BlockTreeRefType::CACHE);
+    tree.refreshPublishedState(old_node);
+    tree.reclaimDetachedNodes(detached);
+    EXPECT_EQ(tree.logicalCacheSnapshot().version, snapshot.version);
+    EXPECT_EQ(tree.logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(publisher->events.size(), event_count);
+    EXPECT_EQ(tree.findNode({100}), (std::vector<TreeNode*>{new_node}));
+}
+
 TEST(BlockTreeTest, OwnsReusableGroupLocations) {
     auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(),
                                                                   block_transfer_engine_test::makeTestGroupBase(),

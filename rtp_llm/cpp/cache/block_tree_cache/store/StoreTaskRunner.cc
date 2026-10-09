@@ -43,12 +43,30 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                   const BlockTransferDispatcher& transfer_dispatcher,
                                   BlockTreeCacheMetricsReporter& metrics_reporter,
                                   TransferDoneCallback           callback) {
+    std::shared_ptr<TransferStageState> stage_state;
+    bool                                pending_batch_token = false;
+    const auto                          fail_submission     = [&](ErrorInfo error) {
+        if (stage_state) {
+            // An exception before addBatch needs its own failure token. If
+            // dispatcher admission threw, retire that unsubmitted batch's
+            // existing token. Earlier submissions must still finish normally.
+            if (!pending_batch_token) {
+                stage_state->addBatch();
+            }
+            pending_batch_token = false;
+            stage_state->completeBatch(std::move(error));
+            stage_state->finishSubmitting();
+        } else {
+            task->phase = Task::Phase::FINISHED;
+            callback(std::move(error));
+        }
+    };
     try {
         task->phase = Task::Phase::TRANSFERRING;
         const int64_t transfer_begin =
             metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
 
-        auto stage_state = std::make_shared<TransferStageState>(
+        stage_state = std::make_shared<TransferStageState>(
             [this, task, &metrics_reporter, transfer_begin, callback](ErrorInfo error) mutable {
                 try {
                     static const std::vector<TransferDescriptor> empty_descriptors;
@@ -60,6 +78,7 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                                             error.ok(),
                                                             error.ok() ? task->descriptors() : empty_descriptors,
                                                             group_sets_);
+                    metrics_reporter.reportCopyError(Tier::DEVICE, task->target_tier, error, task->descriptors());
                     task->phase = Task::Phase::FINISHED;
                     callback(std::move(error));
                 } catch (const std::exception& exception) {
@@ -71,26 +90,37 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                 }
             });
 
+        size_t     batch_index  = 0;
         const auto submit_batch = [&](const std::vector<TransferDescriptor>& descriptors) {
             stage_state->addBatch();
+            pending_batch_token = true;
+            if (before_batch_for_test_) {
+                before_batch_for_test_(batch_index, true);
+            }
             transfer_dispatcher.runTransfer(task->transfer_task.subtask(descriptors), [stage_state](ErrorInfo error) {
                 stage_state->completeBatch(std::move(error));
             });
+            pending_batch_token = false;
         };
         if (task->target_tier == Tier::DISK) {
             for (const auto& descriptor : task->descriptors()) {
+                if (before_batch_for_test_) {
+                    before_batch_for_test_(batch_index, false);
+                }
                 submit_batch({descriptor});
+                ++batch_index;
             }
         } else if (!task->descriptors().empty()) {
+            if (before_batch_for_test_) {
+                before_batch_for_test_(batch_index, false);
+            }
             submit_batch(task->descriptors());
         }
         stage_state->finishSubmitting();
     } catch (const std::exception& error) {
-        task->phase = Task::Phase::FINISHED;
-        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+        fail_submission(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
-        task->phase = Task::Phase::FINISHED;
-        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store submission exception"));
+        fail_submission(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store submission exception"));
     }
 }
 

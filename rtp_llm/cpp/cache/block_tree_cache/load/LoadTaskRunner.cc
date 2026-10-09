@@ -33,11 +33,12 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         return nullptr;
     }
 
-    return std::make_shared<Task>(
+    auto task = std::make_shared<Task>(
         std::move(task_load_descs),
         TransferTask(std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_)),
         TransferTask(std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_)),
         context);
+    return task;
 }
 
 void LoadTaskRunner::runTransfer(TaskPtr                        task,
@@ -64,6 +65,8 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
                                         task->host_to_device_task.descriptors(),
                                         transfer_begin,
                                         error.ok());
+                    metrics_reporter.reportCopyError(
+                        Tier::HOST, Tier::DEVICE, error, task->host_to_device_task.descriptors());
                     if (!error.ok()) {
                         task->phase = Task::Phase::FINISHED;
                         callback(std::move(error));
@@ -110,6 +113,8 @@ void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,
                                     task->disk_to_device_task.descriptors(),
                                     transfer_begin,
                                     error.ok());
+                metrics_reporter.reportCopyError(
+                    Tier::DISK, Tier::DEVICE, error, task->disk_to_device_task.descriptors());
                 task->phase = Task::Phase::FINISHED;
                 callback(std::move(error));
             } catch (const std::exception& exception) {

@@ -119,6 +119,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Reject pending loads and wait for allocator callbacks before its members are destroyed.
+    void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
@@ -144,7 +146,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    ErrorInfo executeTransfer(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {

@@ -26,6 +26,8 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
         case TransferStatus::DISK_IO_ERROR:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
+        case TransferStatus::CRC_MISMATCH:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache integrity verification failed");
         case TransferStatus::RESOURCE_EXHAUSTED:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device-disk staging pool exhausted");
     }
@@ -85,6 +87,7 @@ std::shared_ptr<AsyncContext> TransferExecutor::execute(TransferTask            
                                                                       group_sets.begin() + end);
                     const TransferStatus status = executeBatch(sub_hosts, sub_descriptors, sub_group_sets);
                     if (status != TransferStatus::OK) {
+                        recordTransferError(sub_descriptors, status);
                         for (size_t index = begin; index < end; ++index) {
                             RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
                                                 index,

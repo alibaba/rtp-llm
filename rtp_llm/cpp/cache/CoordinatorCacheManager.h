@@ -63,7 +63,7 @@ public:
         reserve_block_ratio_(reserve_block_ratio),
         role_type_(role_type) {}
 
-    virtual ~CoordinatorCacheManager() = default;
+    virtual ~CoordinatorCacheManager();
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);

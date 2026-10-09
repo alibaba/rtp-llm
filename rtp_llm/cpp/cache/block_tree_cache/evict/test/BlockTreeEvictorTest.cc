@@ -778,6 +778,44 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
 }
 
+TEST(BlockTreeEvictorAsyncTest, FullCorruptionDetachesWhileAnotherGroupIsDemoting) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    const auto path = environment.insertParentDeviceChildHost();
+    ASSERT_EQ(path.size(), 2u);
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, 1).madeProgress());
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::HOST, 1).madeProgress());
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(2, std::chrono::seconds(2)));
+    const auto full  = environment.transfer_engine_->descriptorForGroupSet(0);
+    const auto other = environment.transfer_engine_->descriptorForGroupSet(1);
+    ASSERT_TRUE(full.has_value());
+    ASSERT_TRUE(other.has_value());
+    full->markCorrupted();
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, false));
+    ASSERT_TRUE(environment.waitForSettledCount(1));
+    {
+        std::lock_guard<std::mutex> lock(environment.cache_mutex_);
+        EXPECT_EQ(environment.tree_->findNode({100, 200}), (std::vector<TreeNode*>{path[0]}));
+        EXPECT_EQ(environment.tree_->detached_nodes_.size(), 1u);
+        EXPECT_EQ(path[1]->parent, nullptr);
+        EXPECT_TRUE(path[1]->group_set_resources[1].transfer_detached);
+        EXPECT_FALSE(environment.host_pools_[0]->isAllocated(environment.host_sources_[0]));
+        EXPECT_TRUE(environment.host_pools_[1]->isAllocated(environment.host_sources_[1]));
+        EXPECT_EQ(environment.evictor_->candidateCount(0, Tier::DEVICE), 1u);
+    }
+    // Even a successful late copy must release its target instead of installing it.
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(1, true));
+    environment.task_pool_->waitForIdle();
+    EXPECT_TRUE(environment.tree_->detached_nodes_.empty());
+    EXPECT_EQ(environment.tree_->findNode({100, 200}), (std::vector<TreeNode*>{path[0]}));
+    for (size_t group = 0; group < environment.groups_.size(); ++group) {
+        EXPECT_FALSE(environment.host_pools_[group]->isAllocated(environment.host_sources_[group]));
+    }
+    EXPECT_FALSE(environment.disk_pools_[0]->isAllocated(full->target_blocks.front()));
+    EXPECT_FALSE(environment.disk_pools_[1]->isAllocated(other->target_blocks.front()));
+    EXPECT_EQ(environment.pendingReleaseCount(), 0u);
+}
+
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     const std::string suffix      = transfer_success ? "success" : "failure";
     auto              device_pool = makeTestDevicePool(3, "mixed_batch_settlement_" + suffix + "_device");
@@ -3355,6 +3393,45 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     insertedNode(first)->group_set_resources[0].evictFromTier(Tier::DEVICE);
     insertedNode(second)->group_set_resources[0].evictFromTier(Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*group, device_set, BlockTreeRefType::CACHE);
+}
+
+TEST(BlockTreeEvictorAsyncTest, HostExecutionFailurePreservesSourceForRetry) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    const auto& group = environment.groups_[0];
+    group->initialize(group->groupSetId(),
+                      group->topologyPtr(),
+                      group->groupTags(),
+                      block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
+    const auto path = environment.insertParentDeviceChildHost();
+    ASSERT_EQ(path.size(), 2u);
+    TreeNode* child = path[1];
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, 1).async_submitted);
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, false));
+    environment.task_pool_->waitForIdle();
+    EXPECT_TRUE(child->group_set_resources[0].isMatchUsable());
+    EXPECT_TRUE(child->group_set_resources[0].hasTier(Tier::HOST));
+    EXPECT_EQ(environment.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(environment.host_pools_[0]->isAllocated(environment.host_sources_[0]));
+}
+
+TEST(BlockTreeEvictorAsyncTest, DeviceStoreFailurePreservesDeviceSource) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    const auto& group = environment.groups_[0];
+    group->initialize(group->groupSetId(),
+                      group->topologyPtr(),
+                      group->groupTags(),
+                      block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
+    TreeNode* node = environment.insertDeviceNode();
+    ASSERT_NE(node, nullptr);
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, 1).async_submitted);
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, false));
+    environment.task_pool_->waitForIdle();
+    EXPECT_TRUE(node->group_set_resources[0].isMatchUsable());
+    EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::DEVICE));
 }
 
 }  // namespace
