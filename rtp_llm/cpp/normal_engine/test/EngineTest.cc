@@ -171,6 +171,57 @@ TEST_F(NormalEngineTest, realStreamsHaveExecutableContextWithFastGen) {
     }
 }
 
+TEST_F(NormalEngineTest, speculativePipelineInitializesFullFastGenContext) {
+    CustomConfig config;
+    config.enable_fast_gen = true;
+    auto engine            = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    // Isolate admission from distributed execution: retain the mock executor
+    // and stop its loop before varying the engine's PP/speculative policy.
+    engine->runtime_config.fifo_scheduler_config.fast_gen_max_context_len = 4;
+    const auto make_input                                                 = [] {
+        auto input                             = std::make_shared<GenerateInput>();
+        input->input_ids                       = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = 1;
+        input->generate_config->is_streaming   = false;
+        return input;
+    };
+    for (const int pp_size : {1, 2}) {
+        engine->parallelism_config.pp_size = pp_size;
+        for (const auto sp_type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+            SCOPED_TRACE(testing::Message() << "pp_size=" << pp_size << " sp_type=" << sp_type);
+            engine->sp_config.type   = sp_type;
+            const bool full_context  = pp_size == 1 || sp_type != SP_TYPE_NONE;
+            const auto check_context = [&](const GenerateStreamPtr& stream) {
+                EXPECT_TRUE(stream->isContextStream());
+                EXPECT_TRUE(stream->enableFastGen());
+                EXPECT_EQ(stream->contextLength(), full_context ? 7 : 0);
+                EXPECT_EQ(stream->isChunkStream(), !full_context);
+                EXPECT_EQ(stream->currentExecuteTokens(),
+                          full_context ? std::vector<int>({1, 2, 3, 4, 5, 6, 7}) : std::vector<int>{});
+            };
+            check_context(engine->makeStream(make_input()));
+            auto external = std::make_shared<NormalGenerateStream>(
+                make_input(), engine->model_config_, engine->runtime_config, engine->resource_context_, nullptr);
+            ASSERT_EQ(external->contextLength(), 0);
+            std::shared_ptr<GenerateStream> external_base = external;
+            engine->enqueue(external_base);
+            check_context(external_base);
+            const auto batch = engine->enqueueMultiple({make_input(), make_input()});
+            ASSERT_EQ(batch.second.size(), 2);
+            for (const auto& stream : batch.second) {
+                check_context(stream);
+            }
+            if (full_context) {
+                auto warmup = engine->preRun(make_input(), preRunMode::prefill_warm_up);
+                ASSERT_TRUE(warmup.ok()) << warmup.status().ToString();
+                EXPECT_EQ(warmup.value()->currentChunkLen(), 7);
+            }
+        }
+    }
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;

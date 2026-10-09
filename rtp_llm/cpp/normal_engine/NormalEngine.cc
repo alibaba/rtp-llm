@@ -292,7 +292,8 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
-    if (parallelism_config.pp_size == 1 && mode != preRunMode::decode_warm_up && stream->isChunkStream()) {
+    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && mode != preRunMode::decode_warm_up
+        && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     stream->setReserveStep(reserve_step_);
@@ -797,17 +798,18 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    // Fast-gen chunk windows belong to PPScheduler/PPExecutor. Non-pipeline
-    // schedulers have no intermediate-chunk result protocol and need the full
-    // context before their admission accounting or model-input gathering.
-    if (parallelism_config.pp_size == 1 && stream->isChunkStream()) {
+    // Only non-speculative PPScheduler/PPExecutor rounds advance fast-gen
+    // chunks. Other execution paths need the full context before admission
+    // accounting and model-input gathering.
+    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    if (parallelism_config.pp_size == 1 && stream->isContextStream() && stream->isChunkStream()) {
+    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && stream->isContextStream()
+        && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     stream->setReserveStep(reserve_step_);
