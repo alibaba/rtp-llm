@@ -136,6 +136,14 @@ private:
 private:
     kmonitor::MetricsReporterPtr reporter_;
 };
+void ensureRuntimeInitialized() {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() {
+        if (!isRuntimeInitialized()) {
+            initRuntime(0, false, false, MlaOpsType::AUTO);
+        }
+    });
+}
 
 struct TestCacheSpec: public KVCacheSpec {
     TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
@@ -651,6 +659,21 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
+    if (name == "cuda_lengths_host_prefix" || name == "cuda_lengths_host_prefix_micro") {
+        auto config = makeCacheConfig({{"full", 128, 256}});
+        auto layout = makeLayout(config);
+        auto inputs = makeInputs(
+            {1, 3, 4}, {501, 502, 503}, std::vector<int64_t>(24, 0), 8, std::vector<int32_t>(24, 1), {"full"}, 8, 128, 256);
+        inputs.input_lengths  = inputs.input_lengths.cuda();
+        inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
+        inputs.pd_separation  = false;
+        Scenario scenario{
+            std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+        if (name == "cuda_lengths_host_prefix_micro") {
+            scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+        }
+        return scenario;
+    }
     if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
         || name == "single_model_extra_payload") {
         const bool single_group = name == "single_model_extra_payload";
@@ -1066,13 +1089,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
                                              bool               skip_first_deferred_error_take) {
-    static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
-    });
+    ensureRuntimeInitialized();
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
@@ -1139,7 +1156,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               SpeculativeExecutionConfig{},
                               scenario.device_resources,
                               MlaOpsType::AUTO,
-                              /*max_seq_len=*/64,
+                              /*max_seq_len=*/scenario_name.find("cuda_lengths_host_prefix") == 0 ? 1024 : 64,
                               scenario.hidden_size,
                               manager,
                               scenario.mtp_cache_config_index,
@@ -1224,6 +1241,12 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             } else {
                 forward_hidden_states.emplace_back();
             }
+        }
+        if (scenario_name.find("cuda_lengths_host_prefix") == 0) {
+            scenario.inputs.prefix_lengths = pinnedTensor({256, 128, 384}, {3});
+            (void)model.forward(scenario.inputs);
+            scenario.inputs.prefix_lengths = pinnedTensor({0, 0, 0}, {3});
+            (void)model.forward(scenario.inputs);
         }
         capture_stats = model.hiddenStateCaptureStats();
         if (test_cp_processor != nullptr) {

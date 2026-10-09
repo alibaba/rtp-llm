@@ -548,6 +548,26 @@ class CacheStoreForwardModel:
         return [self._forward_one(model_inputs) for model_inputs in inputs]
 
 
+class MixedDeviceMetadataModel(CacheStoreForwardModel):
+    def __init__(self):
+        super().__init__()
+        self.metadata = []
+
+    def _forward_one(self, inputs):
+        attn = inputs.attention_inputs
+        if isinstance(attn, dict):
+            attn = next(iter(attn.values()))
+        assert attn.input_lengths.is_cuda
+        assert not attn.prefix_lengths.is_cuda
+        self.metadata.append(
+            (
+                attn.cu_seqlens_device.cpu().tolist(),
+                attn.cu_kv_seqlens_device.cpu().tolist(),
+            )
+        )
+        return super()._forward_one(inputs)
+
+
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
 
@@ -1016,6 +1036,49 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_cuda_lengths_host_prefix_metadata_updates_on_current_stream(self):
+        for custom_stream in (False, True):
+            with self.subTest(custom_stream=custom_stream):
+                stream = (
+                    torch.cuda.Stream()
+                    if custom_stream
+                    else torch.cuda.default_stream()
+                )
+                model = MixedDeviceMetadataModel()
+                with torch.cuda.stream(stream):
+                    result = run_scenario(model, "cuda_lengths_host_prefix")
+                stream.synchronize()
+                self.assertEqual(
+                    model.metadata,
+                    [
+                        ([0, 1, 4, 8], [0, 129, 388, 904]),
+                        ([0, 1, 4, 8], [0, 257, 388, 776]),
+                        ([0, 1, 4, 8], [0, 1, 4, 8]),
+                    ],
+                )
+                self.assertEqual(result["records"], [])
+
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_micro_batch_cuda_lengths_host_prefix_metadata(self):
+        model = MixedDeviceMetadataModel()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            run_scenario(model, "cuda_lengths_host_prefix_micro")
+        stream.synchronize()
+        lengths, visible = [], []
+        for cu, cu_kv in model.metadata:
+            lengths.extend(b - a for a, b in zip(cu, cu[1:]))
+            visible.extend(b - a for a, b in zip(cu_kv, cu_kv[1:]))
+        self.assertEqual(lengths, [1, 3, 4] * 3)
+        self.assertEqual(visible, [129, 259, 516, 257, 131, 388, 1, 3, 4])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
