@@ -1,4 +1,4 @@
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu", "torch_deps")
 load("//:def.bzl", "copts")
 load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
 
@@ -28,7 +28,7 @@ load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
         },
         {
             "config": "//:using_cuda13_x86",
-            "gpu": "L20D_TEST",
+            "gpu": cuda13_x86_test_gpu(),
             "suffix": "x86",
         },
     ]

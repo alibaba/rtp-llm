@@ -138,6 +138,14 @@ def platform_deps():
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
+def cuda13_x86_test_gpu():
+    """Pool label for CUDA 13 x86 test execution.
+
+    Returned through @arch_config so builds can resolve their own pool
+    label; the default value names the SM103 machine class only.
+    """
+    return "SM103_TEST"
+
 def torch_deps():
     deps = select({
         "@rtp_llm//:using_rocm": [

@@ -1,4 +1,5 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 
 def cuda13_suites():
     # ============================================================================
@@ -14,14 +15,15 @@ def cuda13_suites():
     # Split by executor pool, because the two arches need different CUDA 13
     # configs and different Aone runners:
     #   smoke_cuda13_arm  SM100_ARM_CU13  GB200        --config=cuda13_arm
-    #   smoke_cuda13_x86  L20D_TEST       L20D/SM103   --config=cuda13 (SM 10.3)
+    #   smoke_cuda13_x86  SM103 pool      SM103        --config=cuda13 (SM 10.3)
     #
     # SM103 capacity is the scarce one — a single dedicated node — so x86 carries
     # the two capacity-sensitive cases that GB200 cannot host.
     #
-    # The x86 cases target L20D_TEST rather than L20D_DEV: L20D_DEV is shared with
-    # other users' work, which left these cases waiting hours for a slot on its one
-    # node, while L20D_TEST is dedicated to this pipeline.
+    # The x86 cases target the dedicated test pool rather than the shared dev
+    # pool: the shared pool is used by other users' work, which left these cases
+    # waiting hours for a slot on its one node, while the test pool is dedicated
+    # to this pipeline.
     # ============================================================================
 
     # ARM coverage:
@@ -286,7 +288,7 @@ def cuda13_suites():
             # staging buffer per submission, so anything slower than 30s means the
             # producer regressed rather than that the payload is simply large.
             #
-            # Both roles use the RDMA cache store: the L20D worker pods carry
+            # Both roles use the RDMA cache store: the SM103 worker pods carry
             # InfiniBand devices (``alibabacloud.com/rdma`` on the Drogo roles),
             # and over TCP this case was observed to blow the 30s decode red line
             # whenever it co-scheduled with the Pro case on one node. The
@@ -311,7 +313,7 @@ def cuda13_suites():
                     ],
                     "decode": [],
                 },
-                gpu_type=["L20D_TEST"],
+                gpu_type=[cuda13_x86_test_gpu()],
             ),
             # Only DeepSeek-V4-Pro case. Deliberately plain — no CUDA graph, no PD
             # separation, no speculative decode, no page-RR. The advanced feature
@@ -320,14 +322,14 @@ def cuda13_suites():
             # ship unnoticed.
             #
             # Single-role CP=4 + EP=4 all-gather prefill topology, 4 GPUs. Runs on
-            # L20D rather than GB200: Pro is ~865GB, so EP=4 needs ~216GB/rank,
+            # SM103 rather than GB200: Pro is ~865GB, so EP=4 needs ~216GB/rank,
             # over GB200's ~186GB but inside SM103's ~288GB.
             smoke_test(
                 name="v4_pro_cp4_ep4_basic_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_pro_cp4_sm100_arm.json",
                 smoke_args="--load_method scratch --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 4 --dp_size 1 --ep_size 4 --moe_strategy mega_moe_se --world_size 4 --seq_size_per_block 256 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --concurrency_limit 1 --max_context_batch_size 1 --reserver_runtime_mem_mb 20480",
                 envs=["DG_JIT_CPP_STANDARD=20"],
-                gpu_type=["L20D_TEST"],
+                gpu_type=[cuda13_x86_test_gpu()],
             ),
         ],
         tags = ["manual"],
