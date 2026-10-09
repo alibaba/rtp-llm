@@ -14,9 +14,9 @@ def cuda13_suites():
     # Split by executor pool, because the two arches need different CUDA 13
     # configs and different Aone runners:
     #   smoke_cuda13_arm  SM100_ARM_CU13  GB200        --config=cuda13_arm
-    #   smoke_cuda13_x86  L20D_TEST       L20D / B300  --config=cuda13 (SM 10.3)
+    #   smoke_cuda13_x86  L20D_TEST       L20D/SM103   --config=cuda13 (SM 10.3)
     #
-    # B300 capacity is the scarce one — a single dedicated node — so x86 carries
+    # SM103 capacity is the scarce one — a single dedicated node — so x86 carries
     # the two capacity-sensitive cases that GB200 cannot host.
     #
     # The x86 cases target L20D_TEST rather than L20D_DEV: L20D_DEV is shared with
@@ -232,7 +232,7 @@ def cuda13_suites():
     #   *_1m                               1M-token prefill: chunked Mega MoE buffer,
     #                                      indexer chunked score, int64 row indexing.
     #                                      Block counts and reserved memory are tuned
-    #                                      against the B300 node it was recorded on.
+    #                                      against the SM103 node it was recorded on.
     #   v4_pro_cp4_ep4_basic               DeepSeek-V4-Pro, all advanced features
     #                                      off — Pro checkpoint regression only.
     #                                      ~216GB/rank at EP=4, over GB200's ~186GB.
@@ -252,7 +252,7 @@ def cuda13_suites():
             # score in this branch to keep decode within a single GPU's HBM.
             #
             # CP=2 rather than CP=4: at CP=4 the case wanted 4+1=5 GPUs, which on
-            # an 8-GPU B300 cannot pack alongside the 4-GPU v4_pro case below, so
+            # an 8-GPU SM103 cannot pack alongside the 4-GPU v4_pro case below, so
             # the two serialized and the job outgrew its timeout. At CP=2 it needs
             # 2+1=3 and the pair fits one node. The roles cannot share GPUs
             # (SMOKE_PD_SHARE_GPU=1): decode is world_size=1 and holds the whole
@@ -314,7 +314,7 @@ def cuda13_suites():
             #
             # Single-role CP=4 + EP=4 all-gather prefill topology, 4 GPUs. Runs on
             # L20D rather than GB200: Pro is ~865GB, so EP=4 needs ~216GB/rank,
-            # over GB200's ~186GB but inside B300's ~288GB.
+            # over GB200's ~186GB but inside SM103's ~288GB.
             smoke_test(
                 name="v4_pro_cp4_ep4_basic_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_pro_cp4_sm100_arm.json",
