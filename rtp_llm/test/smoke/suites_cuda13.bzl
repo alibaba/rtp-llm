@@ -285,12 +285,19 @@ def cuda13_suites():
             # purpose: publishing this ~24GB of KV cache batches into one pinned
             # staging buffer per submission, so anything slower than 30s means the
             # producer regressed rather than that the payload is simply large.
+            #
+            # Both roles use the RDMA cache store: the L20D worker pods carry
+            # InfiniBand devices (``alibabacloud.com/rdma`` on the Drogo roles),
+            # and over TCP this case was observed to blow the 30s decode red line
+            # whenever it co-scheduled with the Pro case on one node. The
+            # framework enables the ACCL/IB registration settings itself when
+            # ``cache_store_rdma_mode=1``.
             smoke_test(
                 name="v4_flash_pd_cp2ep2_tp1ep1dp1_1m_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_tp1ep1dp1_1m_sm100_arm.json",
                 smoke_args={
-                    "prefill": "--load_method scratch --force_cpu_load_weights 1 --max_seq_len 1100000 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --test_block_num 6000 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 49152 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --warm_up 1 --reserver_runtime_mem_mb 65536",
-                    "decode": "--load_method fastsafetensors --max_seq_len 1100000 --enable_cuda_graph 0 --decode_capture_config '1,2,4,8' --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 256 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 16384 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 49152",
+                    "prefill": "--load_method scratch --force_cpu_load_weights 1 --max_seq_len 1100000 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --test_block_num 6000 --role_type PREFILL --cache_store_rdma_mode 1 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 49152 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --warm_up 1 --reserver_runtime_mem_mb 65536",
+                    "decode": "--load_method fastsafetensors --max_seq_len 1100000 --enable_cuda_graph 0 --decode_capture_config '1,2,4,8' --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 256 --role_type DECODE --cache_store_rdma_mode 1 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 16384 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 49152",
                 },
                 # The FP8 indexer's prefill score buffer is a dense
                 # ``[chunk_rows, T] fp32`` block; at 1M context with CP=2 the
