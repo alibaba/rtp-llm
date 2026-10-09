@@ -112,7 +112,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
     def test_frontend_identity_refreshes_without_publishing_loopback(self):
         configs = NS(
             server_config=object(),
-            distribute_config=object(),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -129,7 +129,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         ), patch(
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
-            _BackendVisitorTemplateHook(visitor, configs).restore_fixup(
+            _BackendVisitorTemplateHook(visitor, configs, self.world).restore_fixup(
                 RestoreContext("generation-2", "192.0.2.20")
             )
         self.assertEqual(visitor.source_ip, "192.0.2.20")
@@ -157,7 +157,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         configs = NS(
             server_config=NS(ip="192.0.2.1"),
-            distribute_config=NS(),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -169,7 +169,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "server-config", scr._ServerConfigTemplateHook(configs)
         )
         lifecycle.register_fixup(
-            "visitor", scr._BackendVisitorTemplateHook(visitor, configs)
+            "visitor", scr._BackendVisitorTemplateHook(visitor, configs, world)
         )
         lifecycle.register(
             "kv",

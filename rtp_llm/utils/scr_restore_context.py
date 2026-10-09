@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
+from rtp_llm.utils.gang_info import GangInfoReader
+
 
 @dataclass(frozen=True)
 class RestoreContext:
@@ -20,12 +22,22 @@ class RestoreContext:
 
         return read_restore_manifest(self.generation)
 
-    def resolve_world_info(self, current, parallelism_config):
+    def resolve_world_info(
+        self, current, parallelism_config, gang_info: GangInfoReader
+    ):
         """Apply the same endpoint/readiness policy in backend and frontend."""
+        from rtp_llm.utils import scr_vip
         from rtp_llm.utils.scr_endpoint_provider import (
             is_restore_phase,
             resolve_world_info,
         )
+
+        if scr_vip.enabled(parallelism_config):
+            if self.endpoint_manifest is not None:
+                raise RuntimeError(
+                    "SCR VIP and endpoint manifest modes are mutually exclusive"
+                )
+            return scr_vip.validate_world_info(current, parallelism_config, gang_info)
 
         manifest = self.endpoint_manifest
         # Single-Pod control channels use loopback; CacheStore and P/D RPC

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
@@ -14,7 +15,10 @@ from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
 
 class ScrRuntimeFixupTest(unittest.TestCase):
     def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
         for context in (
+            patch.object(runtime, "RESTORE_ENV_FILE", temp.name + "/absent-envs.json"),
             patch.object(runtime, "_runtime_identity", None),
             patch.object(runtime, "_restore_env_provider", None),
             patch.dict(
@@ -307,7 +311,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         visitor = Mock(source_ip="192.0.2.10")
         configs = NS(
             server_config=NS(),
-            distribute_config=NS(),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=NS(world_size=2, local_world_size=1),
             role_config=NS(role_type="PREFILL"),
         )
@@ -322,10 +326,17 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         )
         lifecycle = TemplateLifecycle()
         lifecycle.register_fixup(
-            "visitor", scr._BackendVisitorTemplateHook(visitor, configs)
+            "visitor",
+            scr._BackendVisitorTemplateHook(
+                visitor, configs, distributed_module.get_world_info.return_value
+            ),
         )
         lifecycle.prepare_for_template("g1", "restore")
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.dict(
+        # This test exercises the legacy endpoint-manifest path; VIP restore
+        # has separate topology and checkpointed-route tests.
+        with patch("rtp_llm.utils.scr_vip.enabled", return_value=False), patch.dict(
+            os.environ, {"SCR_PHASE": "restore"}
+        ), patch.dict(
             sys.modules,
             {
                 "rtp_llm.distribute.distributed_server": distributed_module,

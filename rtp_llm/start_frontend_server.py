@@ -59,7 +59,7 @@ def start_frontend_server(
     # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
     set_parallelism_config(
         py_env_configs.parallelism_config,
-        rank_id,
+        py_env_configs.parallelism_config.world_rank + rank_id,
         py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )

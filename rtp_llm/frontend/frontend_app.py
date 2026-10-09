@@ -27,7 +27,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
-    get_world_info,
+    get_frontend_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -293,7 +293,7 @@ class FrontendApp(object):
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-        world_info = get_world_info(
+        world_info = get_frontend_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
             parallelism_config=py_env_configs.parallelism_config,

@@ -21,7 +21,7 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.distribute.distributed_server import (
     WorldInfo,
     get_dp_addrs_from_world_info,
-    get_world_info,
+    get_frontend_world_info,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
@@ -82,7 +82,7 @@ class FrontendWorker:
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
 
         # Get world_info from config
-        world_info = get_world_info(
+        world_info = get_frontend_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
             parallelism_config=py_env_configs.parallelism_config,
@@ -118,7 +118,9 @@ class FrontendWorker:
         self._py_env_configs = py_env_configs
         # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
         register_server_config_template_hook(py_env_configs)
-        register_backend_visitor_template_hook(self.backend_rpc_server_visitor, py_env_configs)
+        register_backend_visitor_template_hook(
+            self.backend_rpc_server_visitor, py_env_configs, world_info
+        )
         self.generate_env_config = py_env_configs.generate_env_config
         self.server_config = py_env_configs.server_config
 
