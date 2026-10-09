@@ -651,6 +651,18 @@ py_test(
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
 
+py_test(
+    name = "test_mhc_prenorm_dg_cpu",
+    srcs = ["test_mhc_prenorm_dg_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = [
+        "//rtp_llm/models_py:prefill_optimization_source_data",
+        ":cpu_test_support",
+        "//rtp_llm:device_type_source",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
 filegroup(
     name = "cpu_test_support",
     srcs = ["cpu_test_utils.py"],

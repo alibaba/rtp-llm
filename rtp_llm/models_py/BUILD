@@ -189,7 +189,17 @@ filegroup(
 
 filegroup(
     name = "prefill_optimization_source_data",
-    srcs = glob(["modules/dsv4/**/*.py", "modules/dsv4/*.py"]),
+    srcs = glob(
+        [
+            "modules/dsv4/**/*.py",
+            "modules/dsv4/*.py",
+            # Prenorm tests load the kernel dispatch source directly.
+            "3rdparty/tile_kernels/modeling/mhc/**/*.py",
+            # Include the shared backend resolver and wrapper for CPU tests.
+            "utils/arch.py",
+            "kernels/cuda/deepgemm_wrapper.py",
+        ],
+    ),
     visibility = ["//visibility:public"],
 )
 

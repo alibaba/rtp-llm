@@ -59,7 +59,9 @@ def get_num_device_sms() -> int:
         raise NotImplementedError("Only cuda is supported get_num_device_sms yet")
 
 
-def get_sm(device_id: Optional[Union[int, str, torch.device]] = None) -> Tuple[int, int]:
+def get_sm(
+    device_id: Optional[Union[int, str, torch.device]] = None
+) -> Tuple[int, int]:
     device_id = _canonical_cuda_device(device_id)
     return _get_sm_for_device(device_id)
 
@@ -78,7 +80,21 @@ def is_sm120(device_id: Optional[Union[int, str, torch.device]] = None) -> bool:
     return get_sm(device_id) == (12, 0)
 
 
-def mhc_pre_gemm_backend(device_id: Optional[Union[int, str, torch.device]] = None) -> str:
+def mhc_prenorm_dg_forced() -> bool:
+    """Opt into split-K DeepGEMM prenorm with the existing epilogue.
+
+    Default off: TF32 accumulation order can change model numerics.
+    Unknown flag values raise rather than silently selecting a backend.
+    """
+    value = os.environ.get("DSV4_MHC_PRENORM_DEEPGEMM", "0").strip().lower()
+    if value not in ("0", "1"):
+        raise ValueError(f"DSV4_MHC_PRENORM_DEEPGEMM must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+def mhc_pre_gemm_backend(
+    device_id: Optional[Union[int, str, torch.device]] = None
+) -> str:
     """Resolve the mHC prenorm GEMM backend for an explicit device."""
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     aliases = {
@@ -87,8 +103,14 @@ def mhc_pre_gemm_backend(device_id: Optional[Union[int, str, torch.device]] = No
         "single": "tilelang_single",
     }
     if requested not in ("", "auto"):
-        return aliases.get(requested, requested)
-    return "tilelang_single" if is_sm12x(device_id) else "deepgemm"
+        base = aliases.get(requested, requested)
+    else:
+        base = "tilelang_single" if is_sm12x(device_id) else "deepgemm"
+    # Apply the opt-in override last so runtime
+    # dispatch and the JIT warmup resolver cannot drift apart.
+    if mhc_prenorm_dg_forced():
+        return "deepgemm"
+    return base
 
 
 def is_blackwell(device_id: Optional[Union[int, str, torch.device]] = None) -> bool:
