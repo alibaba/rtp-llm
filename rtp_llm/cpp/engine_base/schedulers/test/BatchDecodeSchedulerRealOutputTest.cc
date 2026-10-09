@@ -1,3 +1,5 @@
+#include <chrono>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -81,19 +83,23 @@ TEST_F(BatchDecodeSchedulerRealOutputTest, LegacyConstructorDefaultsToPerfAndDec
     EXPECT_FALSE(stream->hasError());
 }
 
-TEST_F(BatchDecodeSchedulerRealOutputTest, CoordinatedSchedulerDoesNotAdmitIncompleteBatch) {
-    BatchDecodeScheduler scheduler(runtime_config_, nullptr, nullptr, 0, true);
+TEST_F(BatchDecodeSchedulerRealOutputTest, IncompleteBatchWaitsUntilStopped) {
+    BatchDecodeScheduler scheduler(runtime_config_, nullptr, nullptr);
     scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"prefill","real_output":true})");
     auto       stream     = makeStream();
     const auto old_length = stream->seqLength();
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    auto scheduled = scheduler.schedule();
-    ASSERT_TRUE(scheduled.ok());
-    EXPECT_TRUE(scheduled.value().empty());
+    auto scheduled = std::async(std::launch::async, [&scheduler] { return scheduler.schedule(); });
+    EXPECT_EQ(scheduled.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
     EXPECT_EQ(scheduler.onflightStreams(), 1);
     EXPECT_EQ(stream->seqLength(), old_length);
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
     EXPECT_TRUE(stream->isContextStream());
+    EXPECT_TRUE(scheduler.stop().ok());
+    ASSERT_EQ(scheduled.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = scheduled.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.value().empty());
 }
 
 TEST_F(BatchDecodeSchedulerRealOutputTest, PrefillRealOutputClearsPerfWithoutSkippingPrefill) {

@@ -632,10 +632,6 @@ def destroy_distributed_environment():
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
 
-    from rtp_llm.models_py.distributed.cpu_phase import destroy_cpu_phase_group
-
-    destroy_cpu_phase_group()
-
     from rtp_llm.models_py.utils.arch import is_cuda
 
     if is_cuda():

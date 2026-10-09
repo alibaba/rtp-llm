@@ -117,13 +117,6 @@ class BackendManager(object):
             model_args=self.py_env_configs.model_args,
         )
 
-        if propose_model_config is not None:
-            from rtp_llm.models_py.distributed.cpu_phase import init_cpu_phase_group
-
-            init_cpu_phase_group(
-                engine_config, self.py_env_configs.distribute_config.dist_comm_timeout
-            )
-
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,
@@ -170,11 +163,6 @@ class BackendManager(object):
             try:
                 logging.info("stopping backend engine before unmounting nfs paths")
                 engine.stop()
-                from rtp_llm.models_py.distributed.cpu_phase import (
-                    destroy_cpu_phase_group,
-                )
-
-                destroy_cpu_phase_group()
                 logging.info("backend engine stopped")
             finally:
                 _nfs_manager.unmount_all()

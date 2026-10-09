@@ -186,11 +186,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 
 void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
-                                                  resource_context_.cache_manager,
-                                                  metrics_reporter_,
-                                                  parallelism_config.dp_rank,
-                                                  needsBatchPhaseAgreement()));
+        scheduler_.reset(new BatchDecodeScheduler(
+            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (runtime_config.use_gather_batch_scheduler) {
         scheduler_.reset(new GatherBatchScheduler(runtime_config,
@@ -665,32 +662,9 @@ absl::Status NormalEngine::step() {
         if (!running_ || stop_started_) {
             return absl::OkStatus();
         }
-    }
-
-    bool batch_prefill_required = false;
-    if (needsBatchPhaseAgreement()) {
-        RTP_LLM_PROFILE_SCOPE("engine.normal.cpu_phase_agreement");
-        bool local_prefill = false;
-        bool local_decode  = false;
-        for (const auto& stream : streams) {
-            (stream->isContextStream() ? local_prefill : local_decode) = true;
-        }
-        // TP peers also join the world control group; only TP0 owns streams.
-        const int phases =
-            execCpuPhaseMask(local_prefill, local_decode, batch_phase_epoch_, parallelism_config.world_size);
-        ++batch_phase_epoch_;
-        if (phases == 0) {
-            // All ranks agreed idle: avoid replaying fake GPU work in a tight loop.
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            return absl::OkStatus();
-        }
-        batch_prefill_required = (phases & 1) != 0;
-        schedule_latency_us    = autil::TimeUtility::currentTimeInMicroSeconds() - tps_schedule_time_us;
-    }
-    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            mayAddFakeStream(streams, batch_prefill_required);
+            mayAddFakeStream(streams);
         }
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
@@ -756,12 +730,7 @@ bool NormalEngine::isDSpark() {
     return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
-bool NormalEngine::needsBatchPhaseAgreement() {
-    return runtime_config.use_batch_decode_scheduler && pd_sep_config.role_type == RoleType::PDFUSION
-           && parallelism_config.dp_size > 1 && isMTPEagle();
-}
-
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool batch_prefill_required) {
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (!running_ || stop_started_) {
         return;
     }
@@ -796,7 +765,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool 
                         has_decode = true;
                     }
                 }
-                if (!has_prefill && (!runtime_config.use_batch_decode_scheduler || batch_prefill_required)) {
+                if (!has_prefill && !runtime_config.use_batch_decode_scheduler) {
                     streams.emplace_back(
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }

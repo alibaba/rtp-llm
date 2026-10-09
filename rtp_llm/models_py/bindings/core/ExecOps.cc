@@ -32,7 +32,6 @@
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
 #include <pybind11/functional.h>
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #if USING_CUDA
 using DeviceGuard = at::cuda::CUDAGuard;
@@ -92,9 +91,6 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
-
-std::mutex                             g_cpu_phase_mutex;
-c10::intrusive_ptr<c10d::ProcessGroup> g_cpu_phase_group;
 
 thread_local int g_cuda_graph_warmup_forward_depth  = 0;
 thread_local int g_cuda_graph_capture_forward_depth = 0;
@@ -937,30 +933,6 @@ void clearCommOpsUnlocked() {
 }
 }  // anonymous namespace
 
-int execCpuPhaseMask(bool local_prefill, bool local_decode, int64_t epoch, int world_size) {
-    c10::intrusive_ptr<c10d::ProcessGroup> group;
-    {
-        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
-        group = g_cpu_phase_group;
-    }
-    TORCH_CHECK(group && group->getSize() == world_size, "batch PDFUSION requires a registered world CPU phase group");
-    TORCH_CHECK(epoch >= 0, "invalid CPU phase epoch");
-    auto  state  = torch::empty({4}, torch::dtype(torch::kInt64).device(torch::kCPU));
-    auto* values = state.data_ptr<int64_t>();
-    values[0]    = local_prefill ? 1 : 0;
-    values[1]    = local_decode ? 1 : 0;
-    values[2]    = epoch;
-    values[3]    = -epoch;
-    std::vector<at::Tensor> tensors{state};
-    c10d::AllreduceOptions  options;
-    options.reduceOp = c10d::ReduceOp::MAX;
-    // Gloo's configured finite timeout bounds peer loss. Do not call the
-    // Python comm callbacks (they promote CPU tensors to the model NCCL stream).
-    group->allreduce(tensors, options)->wait();
-    TORCH_CHECK(values[2] == -values[3], "CPU phase epoch mismatch across ranks");
-    return (values[0] ? 1 : 0) | (values[1] ? 2 : 0);
-}
-
 void execBroadcast(const BroadcastParams& params) {
     py::function           fn;
     py::gil_scoped_acquire gil;
@@ -1148,18 +1120,6 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 // ============================================================
 
 void registerExecCtxOps(pybind11::module& m) {
-    m.def("register_cpu_phase_group", [](c10::intrusive_ptr<c10d::ProcessGroup> group) {
-        TORCH_CHECK(group && group->getBackendName() == "gloo", "CPU phase group must use Gloo");
-        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
-        TORCH_CHECK(!g_cpu_phase_group, "CPU phase group already registered");
-        g_cpu_phase_group = std::move(group);
-    });
-    m.def("clear_cpu_phase_group", []() {
-        py::gil_scoped_release      release;
-        std::lock_guard<std::mutex> lock(g_cpu_phase_mutex);
-        g_cpu_phase_group.reset();
-    });
-    m.def("cpu_phase_mask", &execCpuPhaseMask, py::call_guard<py::gil_scoped_release>());
     m.def("get_device_id", &getDeviceId);
     m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     m.def("cuda_graph_capture_forward_enabled", &cudaGraphCaptureForwardEnabled);

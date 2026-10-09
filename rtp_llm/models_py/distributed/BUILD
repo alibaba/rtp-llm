@@ -10,17 +10,6 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
-        ":cpu_phase",
-        "//rtp_llm:torch",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-py_library(
-    name = "cpu_phase",
-    srcs = ["cpu_phase.py"],
-    deps = [
-        "//rtp_llm:ops",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],

@@ -124,15 +124,6 @@ void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
 
-// Dedicated CPU control plane; never promotes metadata to CUDA. All world
-// members must participate once per engine iteration with the same epoch.
-// Returned mask: bit0 Prefill present, bit1 Decode present; zero means all idle.
-int execCpuPhaseMask(bool local_prefill, bool local_decode, int64_t epoch, int world_size);
-
-// Candidate replacement for the above control call, NOT an additional or
-// locally optional collective. Engine integration must switch every world rank
-// together. Currently exposed for CPU multiprocess validation only.
-
 // ===================================================================
 // MOE / EPLB
 // ===================================================================

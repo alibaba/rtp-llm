@@ -31,14 +31,12 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank            = 0,
-                         bool                                   coordinated_phases = false) {
-        cache_manager_      = cache_manager;
-        metrics_reporter_   = metrics_reporter;
-        batch_size_         = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_     = SchedulerType::kBatchDecode;
-        dp_rank_            = dp_rank;
-        coordinated_phases_ = coordinated_phases;
+                         int                                    dp_rank = 0) {
+        cache_manager_    = cache_manager;
+        metrics_reporter_ = metrics_reporter;
+        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        scheduler_type_   = SchedulerType::kBatchDecode;
+        dp_rank_          = dp_rank;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -179,12 +177,10 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        if (!coordinated_phases_) {
-            cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-                return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                       || !loading_cache_streams_.empty();
-            });
-        }
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+            return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                   || !loading_cache_streams_.empty();
+        });
         if (stop_) {
             return std::list<GenerateStreamPtr>{};
         }
@@ -245,9 +241,8 @@ private:
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     SchedulerType                   scheduler_type_;
-    int                             dp_rank_            = 0;
-    bool                            coordinated_phases_ = false;
-    bool                            real_output_        = false;
+    int                             dp_rank_     = 0;
+    bool                            real_output_ = false;
 };
 
 }  // namespace rtp_llm
