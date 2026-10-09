@@ -304,8 +304,10 @@ TEST(LocalRpcServerSleepAbortTest, ProductionHooksDoNotKeepTheirEngineOwnerAlive
 
 TEST(LocalRpcServerSleepAbortTest, DirectSleepRpcRejectsNonEmptyTags) {
     auto           controller = std::make_shared<BoundSleepLifecycleController>(true);
+    int            destructions = 0;
     LocalRpcServer server;
     server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "test_instance");
+    server.engine_         = std::make_shared<HookTestEngine>(destructions);
 
     grpc::ServerContext context;
     SleepRequestPB      request;
