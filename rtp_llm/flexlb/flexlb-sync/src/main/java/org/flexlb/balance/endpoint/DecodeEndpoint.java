@@ -379,7 +379,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
-        boolean admissionReopened = ws.isAdmissionClosed() && !prepared.observation().engine().admissionClosed();
         if (!prepared.observation().alive()) { beginRetirement(); }
         DecodeState.CalibrationResult result;
         try {
@@ -389,7 +388,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             throw failure;
         }
         notifyEngineDispatchCapacityListeners();
-        if (result.capacityImproved() || admissionReopened) { signalPlacementCapacityChanged(); }
+        if (result.capacityImproved()) { signalPlacementCapacityChanged(); }
         return () -> endpointEvents.onDecodeStatus(this, result.facts());
     }
 

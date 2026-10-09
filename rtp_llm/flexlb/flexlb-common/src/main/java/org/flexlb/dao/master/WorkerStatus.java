@@ -116,8 +116,7 @@ public class WorkerStatus {
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
-            long waitingQueryLen,
-            boolean admissionClosed) {
+            long waitingQueryLen) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
@@ -344,8 +343,7 @@ public class WorkerStatus {
                         0L,
                         0L,
                         0L,
-                        0L,
-                        false));
+                        0L));
     }
 
     @JsonIgnore
@@ -394,8 +392,7 @@ public class WorkerStatus {
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
-                response.getWaitingQueryLen(),
-                response.isAdmissionClosed());
+                response.getWaitingQueryLen());
         return new StatusObservation(
                 this,
                 engine,
@@ -566,10 +563,6 @@ public class WorkerStatus {
 
     public RoleType getRole() {
         return committedStatus.get().fields().role();
-    }
-
-    public boolean isAdmissionClosed() {
-        return committedStatus.get().fields().admissionClosed();
     }
 
     public String getGroup() {

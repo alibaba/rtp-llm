@@ -18,7 +18,6 @@ struct WorkerStatusInfo {
     int64_t            status_version;
     int64_t            latest_finished_version;
     bool               alive;
-    bool               admission_closed = false;
     int32_t            dp_size;
     int32_t            tp_size;
     int32_t            dp_rank;

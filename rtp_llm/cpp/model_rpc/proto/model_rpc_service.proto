@@ -624,9 +624,6 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
-    // Temporarily stop new placement without retiring this live worker's
-    // generation or its in-flight requests. Absent on legacy workers: false.
-    bool admission_closed = 23;
 }
 
 message EmbeddingInputPB {

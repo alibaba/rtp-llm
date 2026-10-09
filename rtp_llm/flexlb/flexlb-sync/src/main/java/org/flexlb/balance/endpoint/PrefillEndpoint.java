@@ -361,7 +361,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        boolean admissionReopened = ws.isAdmissionClosed() && !observation.engine().admissionClosed();
         PrefillState.StatusReconciliation reconciliation =
                 prefillState.reconcileWorkerStatus(
                         observation,
@@ -378,12 +377,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         rethrowPublicationFailure(reconciliation.publicationFailure());
         List<PrefillState.WorkerStatusFact> facts =
                 reconciliation.schedulerFacts();
-        return () -> {
-            endpointEvents.onPrefillStatus(this, observation.role(), facts);
-            if (admissionReopened) {
-                signalPlacementCapacityChanged();
-            }
-        };
+        return () -> endpointEvents.onPrefillStatus(
+                this, observation.role(), facts);
     }
 
     @Override
