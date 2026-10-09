@@ -1,0 +1,1234 @@
+"""DeepSeek-V4 integration into RTP-LLM's `GptModelBase` framework.
+
+Shape mirrors `qwen3.py`: the Model owns weights (via ``self.v4``, which
+holds embed/layers/norm/head) and dispatches prefill / decode. The
+per-layer loops themselves live in sibling packages:
+
+  * :mod:`rtp_llm.models_py.modules.dsv41.prefill` — prefill forward,
+    block-table builder, CP metadata binding, PD cache_store writer
+  * :mod:`rtp_llm.models_py.modules.dsv41.decode.forward` — decode
+    forward, eager metadata builder, paged pool spec derivation
+
+``DeepSeekV4Model`` is a thin orchestrator: ``forward`` dispatches
+prefill/decode and handles the per-request split; everything else is
+a free-function call into one of those two packages.
+
+  - `forward(PyModelInputs) -> PyModelOutputs` returns [total_tokens, hidden_dim]
+    pre-lm-head hidden states; engine applies lm_head + sampling externally.
+  - KV pools are the framework BlockPools (``self.kv_cache``). The handle is
+    read on every forward and threaded as ``kv_cache=`` to each layer; per-
+    request block tables come from ``attention_inputs[tag].kv_cache_kernel_block_id_device``
+    via ``kv_cache_utils.build_block_tables``.
+
+Weight loading: `_initialize_impl` reads `self.weight` (a `ModelWeights`
+populated by the framework's fastsafetensors loader via
+`DeepSeekV4Weight._get_hf_layer_weight_info`) and hands it directly to
+`V4Transformer(args, mw=self.weight)`. Each dsv4 sub-module's factory
+mode reads tensors from `mw.global_weights[W.*]` and
+`mw.weights[layer_id][W.v4_*]` (W tag enum, no string keys).
+"""
+
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbeddingInjector,
+)
+from rtp_llm.models_py.modules.dsv41.chunk_env import (
+    DSV4_CHUNK_TOKENS_ENV,
+    dsv4_global_chunk_tokens_configured,
+)
+from rtp_llm.models_py.modules.dsv41.decode.forward import (
+    build_paged_pool_specs,
+    decode_metadata_compress_ratios,
+    forward_decode,
+)
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
+from rtp_llm.models_py.modules.dsv41.moe.moe_layer import (
+    chunked_moe_enabled,
+    cp_padded_batch_tokens_per_rank_bound,
+    cp_padded_tokens_per_rank_bound,
+    moe_chunk_tokens_from_env,
+    resolve_moe_max_tokens_per_rank,
+)
+from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
+from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
+
+
+def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
+    """Walk the module tree and replace any meta-device buffer with a
+    zeroed real-device tensor of the same shape/dtype. Factory-mode
+    construction builds V4Transformer under `torch.device("meta")` to
+    skip placeholder allocations; this pass re-materializes the
+    non-parameter buffers (kv_cache, kv_state, score_state, etc.) so
+    forward() can read and write them."""
+    count = 0
+    for mod in module.modules():
+        for name, buf in list(mod._buffers.items()):
+            if buf is None:
+                continue
+            if buf.device.type == "meta":
+                mod._buffers[name] = torch.zeros(
+                    buf.shape, dtype=buf.dtype, device=device
+                )
+                count += 1
+    return count
+
+
+from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
+
+
+def _is_decode_fmha(fmha_impl: Any) -> bool:
+    """True when ``fmha_impl`` is one of the dsv4 captured decode impls.
+    Imports are lazy so missing FP8 builds don't bring the module down."""
+    if fmha_impl is None:
+        return False
+    from rtp_llm.models_py.modules.dsv41.decode.decode_fmha_impl import (
+        DSv4DecodeFmhaImpl,
+    )
+
+    decode_types: tuple = (DSv4DecodeFmhaImpl,)
+    try:
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        decode_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
+    except ImportError:
+        pass
+    return isinstance(fmha_impl, decode_types)
+
+
+@dataclass(frozen=True)
+class Dsv4MtpHiddenBufferSpec:
+    token_capacity: int
+    hc_dim: int
+
+
+class Dsv4SharedRuntimeBufferStore:
+    _instance: Optional["Dsv4SharedRuntimeBufferStore"] = None
+    _mtp_hidden_requested = False
+
+    def __init__(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        mtp_hidden_enabled: bool,
+        mtp_hidden: Optional[Dsv4MtpHiddenBufferSpec],
+    ) -> None:
+        device = torch.device(device)
+        self._mtp_hidden_enabled = bool(mtp_hidden_enabled)
+        self._mtp_hidden_token_capacity = (
+            int(mtp_hidden.token_capacity) if mtp_hidden is not None else 0
+        )
+        self._mtp_hidden_hc_dim = (
+            int(mtp_hidden.hc_dim) if mtp_hidden is not None else 0
+        )
+        self._mtp_hidden_storage = (
+            torch.empty(
+                self._mtp_hidden_token_capacity,
+                self._mtp_hidden_hc_dim,
+                dtype=dtype,
+                device=device,
+            )
+            if self._mtp_hidden_enabled
+            else None
+        )
+        self._subscribers: list[torch.nn.Module] = []
+
+    @classmethod
+    def instance(cls) -> "Dsv4SharedRuntimeBufferStore":
+        instance: Dsv4SharedRuntimeBufferStore = cls._instance
+        return instance
+
+    @classmethod
+    def _reset_for_test(cls) -> None:
+        cls._instance = None
+        cls._mtp_hidden_requested = False
+
+    @classmethod
+    def mtp_hidden_requested(cls) -> bool:
+        return cls._mtp_hidden_requested or (
+            cls._instance is not None and cls._instance.mtp_hidden_enabled
+        )
+
+    @classmethod
+    def enable_mtp_hidden(cls) -> None:
+        if cls._instance is not None and (not cls._instance.mtp_hidden_enabled):
+            raise RuntimeError(
+                "Dsv4SharedRuntimeBufferStore: cannot enable MTP hidden buffer after shared storage has been allocated"
+            )
+        cls._mtp_hidden_requested = True
+
+    @classmethod
+    def get_or_create(
+        cls,
+        device: torch.device,
+        dtype: torch.dtype,
+        mtp_hidden: Optional[Dsv4MtpHiddenBufferSpec] = None,
+    ) -> "Dsv4SharedRuntimeBufferStore":
+        if cls._instance is None:
+            cls._instance = cls(
+                device=device,
+                dtype=dtype,
+                mtp_hidden_enabled=cls._mtp_hidden_requested,
+                mtp_hidden=mtp_hidden,
+            )
+        else:
+            cls._instance._validate_request(
+                mtp_hidden_token_capacity=(
+                    int(mtp_hidden.token_capacity) if mtp_hidden is not None else 0
+                )
+            )
+        return cls._instance
+
+    @property
+    def mtp_hidden_enabled(self) -> bool:
+        return self._mtp_hidden_enabled
+
+    def bind(self, module: torch.nn.Module) -> Optional[torch.Tensor]:
+        if not any((existing is module for existing in self._subscribers)):
+            self._subscribers.append(module)
+        self._sync_subscribers()
+        return self._views()
+
+    def _validate_request(self, *, mtp_hidden_token_capacity: int) -> None:
+        if mtp_hidden_token_capacity > self._mtp_hidden_token_capacity:
+            raise RuntimeError(
+                f"Dsv4SharedRuntimeBufferStore: cannot grow MTP hidden capacity from {self._mtp_hidden_token_capacity} to {mtp_hidden_token_capacity} after first bind"
+            )
+
+    def _views(self) -> Optional[torch.Tensor]:
+        return self._mtp_hidden_storage
+
+    def _sync_subscribers(self) -> None:
+        mtp_hidden_buffer = self._views()
+        for module in self._subscribers:
+            module._bind_runtime_buffers(mtp_hidden_buffer)
+
+
+def _args_from_model_config(
+    model_config: ModelConfig, max_generate_batch_size: int = 4
+) -> V4Args:
+    from rtp_llm.ops import KvCacheDataType, RoleType
+
+    attn_config = model_config.attn_config
+    rope_config = attn_config.rope_config
+    fp8_kv_cache = attn_config.kv_cache_dtype == KvCacheDataType.FP8
+    return V4Args(
+        vocab_size=model_config.vocab_size,
+        dim=model_config.hidden_size,
+        n_heads=attn_config.head_num,
+        n_layers=model_config.num_layers,
+        n_mtp_layers=0,
+        q_lora_rank=attn_config.q_lora_rank,
+        head_dim=attn_config.size_per_head,
+        rope_head_dim=attn_config.rope_head_dim,
+        o_groups=attn_config.o_groups,
+        o_lora_rank=attn_config.o_lora_rank,
+        window_size=attn_config.sliding_window,
+        compress_ratios=list(attn_config.layer_compress_ratios)[
+            : model_config.num_layers
+        ],
+        rope_theta=float(rope_config.base),
+        compress_rope_theta=float(attn_config.compress_rope_theta),
+        rope_factor=float(rope_config.scale) if rope_config.scale else 1.0,
+        beta_fast=int(rope_config.factor2) if rope_config.factor2 else 32,
+        beta_slow=int(rope_config.factor1) if rope_config.factor1 else 1,
+        original_seq_len=int(rope_config.max_pos) if rope_config.max_pos else 0,
+        index_n_heads=attn_config.indexer_head_num,
+        index_head_dim=attn_config.indexer_head_dim,
+        index_topk=attn_config.indexer_topk,
+        moe_inter_dim=int(model_config.moe_inter_size),
+        n_routed_experts=model_config.expert_num,
+        n_shared_experts=int(model_config.n_shared_experts),
+        n_activated_experts=model_config.moe_k,
+        score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
+            model_config.scoring_func
+        ],
+        route_scale=float(model_config.routed_scaling_factor),
+        swiglu_limit=float(model_config.swiglu_limit),
+        n_hash_layers=int(model_config.num_hash_layers),
+        hc_mult=int(model_config.hc_mult),
+        hc_sinkhorn_iters=int(model_config.hc_sinkhorn_iters),
+        hc_eps=float(model_config.hc_eps),
+        norm_eps=float(model_config.layernorm_eps),
+        max_batch_size=max_generate_batch_size,
+        max_seq_len=int(model_config.max_seq_len) or 4096,
+        max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
+        fp8_kv_cache=fp8_kv_cache,
+    )
+
+
+class DeepSeekV4Model(GptModelBase):
+    """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
+
+    _captures_aux_hidden = True
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config,
+        weights: ModelWeights,
+        moe_config,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
+        super().__init__(
+            model_config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
+        )
+        args = _args_from_model_config(model_config, max_generate_batch_size)
+        self._max_generate_batch_size = int(max_generate_batch_size)
+        self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
+        self._capture_aux_hidden_layer_ids = tuple(
+            (
+                int(layer_id)
+                for layer_id in getattr(
+                    model_config, "capture_aux_hidden_layer_ids", None
+                )
+                or ()
+            )
+        )
+        if self._capture_aux_hidden_layer_ids:
+            Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
+        if (
+            moe_config is not None
+            and getattr(moe_config, "moe_inter_padding_size", 0) > 0
+        ):
+            args.moe_inter_dim = int(moe_config.moe_inter_padding_size)
+        else:
+            args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
+        if parallelism_config is not None:
+            if hasattr(parallelism_config, "get_attn_tp_size"):
+                args.tp_size = int(parallelism_config.get_attn_tp_size() or 1)
+                args.tp_rank = int(parallelism_config.get_attn_tp_rank() or 0)
+            else:
+                args.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+                args.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
+            args.ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
+            args.ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
+            args.dp_size = int(getattr(parallelism_config, "dp_size", 1) or 1)
+            args.dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0)
+            args.world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+            args.world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+        if args.world_size > 1:
+            logging.info(
+                "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d (scaffold only — V4 sharding not yet implemented; see docs/dsv4/parallel_design.md)",
+                args.world_size,
+                args.tp_rank,
+                args.tp_size,
+                args.ep_rank,
+                args.ep_size,
+                args.dp_rank,
+                args.dp_size,
+            )
+        cp_size = 1
+        if (
+            parallelism_config is not None
+            and getattr(parallelism_config, "prefill_cp_config", None) is not None
+        ):
+            try:
+                if parallelism_config.prefill_cp_config.is_enabled():
+                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            except Exception:
+                pass
+        if cp_size > 1:
+            cp_tokens_per_rank_bound = min(
+                args.max_tokens_per_rank,
+                max(cp_padded_tokens_per_rank_bound(args.max_seq_len, cp_size), 4096),
+            )
+            if cp_tokens_per_rank_bound != args.max_tokens_per_rank:
+                logging.info(
+                    "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d (Mega MoE per-rank symm-mem buffer)",
+                    cp_size,
+                    args.max_tokens_per_rank,
+                    cp_tokens_per_rank_bound,
+                )
+                args.max_tokens_per_rank = cp_tokens_per_rank_bound
+        self._prefill_cp_size = int(cp_size)
+        self._is_speculative = False
+        self._is_decode_role = False
+        self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
+        logging.info(
+            "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g",
+            args.n_layers,
+            args.n_heads,
+            args.head_dim,
+            args.q_lora_rank,
+            args.o_groups,
+            args.n_routed_experts,
+            args.n_activated_experts,
+            args.moe_inter_dim,
+            args.window_size,
+            args.hc_mult,
+            list(args.compress_ratios)[:8],
+            args.score_func,
+            args.route_scale,
+            args.swiglu_limit,
+        )
+        self._v4_args = args
+        self.fp8_kv_cache = bool(args.fp8_kv_cache)
+        self.v4: Optional[V4Transformer] = None
+        self._materialized = False
+        self._ckpt_path: str = model_config.ckpt_path
+        self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
+        self._profile_trigger = "/tmp/dsv4_profile_trigger"
+        self._profile_done = False
+        if self._profile_path:
+            logging.info(
+                "[DeepSeekV4Model] timeline trigger: `touch %s` — next forward captures to %s",
+                self._profile_trigger,
+                self._profile_path,
+            )
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        try:
+            return self._initialize_impl(init_resource)
+        except BaseException as e:
+            import traceback
+
+            logging.error(
+                "[DeepSeekV4Model] initialize() raised %s: %s\nTraceback:\n%s",
+                type(e).__name__,
+                e,
+                traceback.format_exc(),
+            )
+            raise
+
+    def _resolve_shared_token_capacity(self) -> int:
+        if self._is_decode_role:
+            return resolve_moe_max_tokens_per_rank(
+                max_seq_len=int(self._v4_args.max_seq_len),
+                current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+                cp_size=1,
+                max_generate_batch_size=int(self._max_generate_batch_size),
+                is_decode_role=True,
+                is_speculative=self._is_speculative,
+                gen_num_per_cycle=self._gen_num_per_cycle,
+            )
+        cp_size = int(self._prefill_cp_size)
+        warmup_capacity = (
+            cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
+            * self._max_context_batch_size
+        )
+        if self._v4_args.v41_config is not None:
+            scheduler_capacity = cp_padded_batch_tokens_per_rank_bound(
+                self._max_prefill_batch_tokens, cp_size, self._max_generate_batch_size
+            )
+            return max(warmup_capacity, scheduler_capacity)
+        return warmup_capacity
+
+    def _resolve_mtp_hidden_token_capacity(self) -> int:
+        return self._resolve_shared_token_capacity()
+
+    def _resolve_prefill_q_token_capacity(self) -> int:
+        return self._resolve_shared_token_capacity()
+
+    def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
+        return None
+
+    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int]:
+        """Per-row element counts for the concurrent compressor CP gather roles.
+
+        Main CSA/HCA compressor and nested indexer compressor widths are sized
+        off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
+
+        Widths are the protocol-level UPPER BOUND for each role, independent
+        of how many CSA/HCA layers the current model happens to instantiate:
+          * main: ``2 * 2 * args.head_dim`` (the widest fused projection from
+            ``CompressorFP8.start_prefill`` — CSA uses ``coff=2``, HCA uses
+            ``coff=1``; we always pre-reserve the CSA size). fp32 elements
+            (compressor uses fp32 fused gather).
+          * indexer: ``2 * 2 * args.index_head_dim`` (nested indexer
+            compressor is CSA-only → ``coff=2``). fp32 elements.
+
+        Whether a model actually USES a role on some layer is irrelevant for
+        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx)`` and q
+        dominates in practice, so over-reserving costs nothing while keeping the
+        union BYTE-IDENTICAL across the main forward and the MTP draft forward.
+        That identity is what lets the caching allocator hand the same block
+        back to the draft at the main→draft boundary — the whole reason the
+        per-forward workspace exists. Doing it any other way would re-introduce
+        the allocator fragmentation we built this to avoid.
+        """
+        head_dim = int(self._v4_args.head_dim)
+        index_head_dim = int(self._v4_args.index_head_dim)
+        main_w = 2 * 2 * head_dim
+        idx_w = 2 * 2 * index_head_dim
+        return (main_w, idx_w)
+
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize the DSpARK prefill commit-only transformer.
+
+        A dedicated prefill worker executes no ordinary V4 forward and has no
+        reason to construct the embedding, mHC/FFN blocks, final norm, or
+        speculative head.  ``V4Transformer`` switches to its lightweight
+        attention-only construction when ``V4Args.commit_only`` is set.  Keep
+        this path beside the regular initializer so decode/PDFUSION behavior
+        and all existing warmup/JIT policy remain unchanged.
+        """
+        logging.info(
+            "[DeepSeekV4Model] building DSpARK commit-only transformer (layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                if self.v4.embed is not None:
+                    from rtp_llm.models_py.modules.dsv41.utils import V41Embedding
+
+                    self.v4.embed = V41Embedding(
+                        self.config, self.parallelism_config, self.v4.embed.weight
+                    )
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        for layer in self.v4.layers:
+            layer.attn.init_rope_cache(device=device_str)
+        self._load_scoped_extra_weights(self.weight)
+        del self.weight
+        self._bind_runtime_buffers(torch.device(device_str))
+        if self._v4_args.v41_config is not None:
+            from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
+                warmup_v41_prefill_jit,
+            )
+
+            warmup_v41_prefill_jit(self, device=torch.device(device_str))
+        logging.info(
+            "[DeepSeekV4Model] commit-only runtime buffers bound: prefill_ws_q_tokens=%d",
+            self._resolve_prefill_q_token_capacity(),
+        )
+        self._materialized = True
+        return True
+
+    def _bind_runtime_buffers(self, device: torch.device) -> None:
+        v4: V4Transformer = self.v4
+        mtp_hidden = None
+        mtp_last_hidden_capacity = None
+        if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
+            hc_dim = (
+                len(self._capture_aux_hidden_layer_ids) * int(self._v4_args.dim)
+                if self._capture_aux_hidden_layer_ids
+                else int(self._v4_args.hc_mult) * int(self._v4_args.dim)
+            )
+            mtp_hidden = Dsv4MtpHiddenBufferSpec(
+                token_capacity=self._resolve_mtp_hidden_token_capacity(), hc_dim=hc_dim
+            )
+            if self._is_speculative:
+                mtp_last_hidden_capacity = (
+                    self._resolve_mtp_last_hidden_token_capacity()
+                )
+        cp_size = int(self._prefill_cp_size)
+        q_rows = int(self._resolve_prefill_q_token_capacity())
+        q_dim = int(v4.layers[0].attn.n_heads) * int(self._v4_args.head_dim)
+        if cp_size > 1:
+            full_rows = q_rows * cp_size
+            main_w, idx_w = self._resolve_prefill_ws_gather_widths()
+        else:
+            full_rows = 0
+            main_w = 0
+            idx_w = 0
+        v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
+        self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
+            device=device, dtype=torch.bfloat16, mtp_hidden=mtp_hidden
+        )
+        self._shared_runtime_buffers.bind(v4)
+        if mtp_last_hidden_capacity is not None:
+            v4._allocate_mtp_last_hidden_buffer(device, mtp_last_hidden_capacity)
+
+    def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
+        super().initialize(init_resource)
+        self._max_prefill_batch_tokens = int(
+            getattr(init_resource, "max_batch_tokens_size", 0)
+        )
+        if self._materialized:
+            if self._v4_args.v41_config is not None:
+                from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
+                    warmup_v41_decode_jit,
+                    warmup_v41_prefill_jit,
+                )
+
+                warmup_device = (
+                    self.main_proj.weight.device
+                    if getattr(self._v4_args, "commit_only", False)
+                    else self.v4.embed.weight.device
+                )
+                if self._is_decode_role:
+                    warmup_v41_decode_jit(self, device=warmup_device)
+                else:
+                    warmup_v41_prefill_jit(self, device=warmup_device)
+            return True
+        device = (
+            next(iter(self.weight.global_weights.values())).device
+            if self.weight.global_weights
+            else "cuda:0"
+        )
+        device_str = str(device)
+        self._is_speculative = bool(init_resource.is_speculative)
+        self._is_decode_role = bool(init_resource.is_decode_role)
+        self._max_context_batch_size = init_resource.max_context_batch_size
+        self._v4_args.is_decode_role = self._is_decode_role
+        moe_budget = int(self._v4_args.max_tokens_per_rank)
+        if (
+            self._v4_args.v41_config is not None
+            and (not self._is_decode_role)
+            and (self._max_prefill_batch_tokens > 0)
+        ):
+            moe_budget = cp_padded_batch_tokens_per_rank_bound(
+                self._max_prefill_batch_tokens,
+                self._prefill_cp_size,
+                self._max_generate_batch_size,
+            )
+        runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
+            max_seq_len=int(self._v4_args.max_seq_len),
+            current_max_tokens_per_rank=moe_budget,
+            cp_size=1,
+            max_generate_batch_size=int(self._max_generate_batch_size),
+            is_decode_role=self._is_decode_role,
+            is_speculative=self._is_speculative,
+            gen_num_per_cycle=self._gen_num_per_cycle,
+        )
+        if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
+            chunk_tokens_env_for_log = (
+                DSV4_CHUNK_TOKENS_ENV
+                if dsv4_global_chunk_tokens_configured()
+                else "DSV4_MOE_CHUNK_TOKENS"
+            )
+            chunk_tokens_for_log = -1
+            if not self._is_decode_role and (
+                dsv4_global_chunk_tokens_configured()
+                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+            ):
+                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+            logging.info(
+                "[DeepSeekV4Model] runtime MoE token budget: max_tokens_per_rank %d -> %d (%s=%d, role=%s, speculative=%s, gen_num_per_cycle=%d)",
+                self._v4_args.max_tokens_per_rank,
+                runtime_resolved_max_tokens_per_rank,
+                chunk_tokens_env_for_log,
+                chunk_tokens_for_log,
+                "DECODE" if self._is_decode_role else "PREFILL",
+                self._is_speculative,
+                self._gen_num_per_cycle,
+            )
+            self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            return self._initialize_commit_only(init_resource, device_str)
+        logging.info(
+            "[DeepSeekV4Model] building V4Transformer via factory (layers=%d, globals=%d) ...",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                if self.v4.embed is not None:
+                    from rtp_llm.models_py.modules.dsv41.utils import V41Embedding
+
+                    self.v4.embed = V41Embedding(
+                        self.config, self.parallelism_config, self.v4.embed.weight
+                    )
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        if self._captures_aux_hidden:
+            self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
+        for layer in self.v4.layers:
+            layer.attn.init_rope_cache(device=device_str)
+        self._load_scoped_extra_weights(self.weight)
+        del self.weight
+        if torch.cuda.is_available() and device_str.startswith("cuda"):
+            gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
+            logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
+        model_warm_up = model_warm_up_enabled()
+        if (
+            device_str.startswith("cuda")
+            and model_warm_up
+            and (self._v4_args.v41_config is None)
+        ):
+            from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
+
+            first_attn = self.v4.layers[0].attn
+            _tl_kernels.prewarm(
+                first_attn.n_heads,
+                first_attn.head_dim,
+                first_attn.softmax_scale,
+                device_str,
+            )
+            import torch as _torch
+
+            from rtp_llm.models_py.modules.dsv41._indexer_score_triton import (
+                v4_indexer_score as _v4_idx,
+            )
+            from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
+                _run_triton_warmup_launch_with_retry,
+            )
+
+            if len(self.v4.layers) > 2 and self.v4.layers[2].attn.indexer is not None:
+                _idx = self.v4.layers[2].attn.indexer
+                _H = int(_idx.n_heads)
+                _D = int(_idx.head_dim)
+                _ratio = max(int(_idx.compress_ratio), 1)
+                _T_dec = int(self._v4_args.max_seq_len) // _ratio
+                _q_dec = _torch.zeros(
+                    (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _kv_dec = _torch.zeros(
+                    (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _w_dec = _torch.zeros(
+                    (1, 1, _H), dtype=_torch.bfloat16, device=device_str
+                )
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"decode shape S=1 T={_T_dec} H={_H} D={_D}",
+                    lambda: _v4_idx(
+                        _q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1
+                    ),
+                    device=_torch.device(device_str),
+                )
+                _q_pos_dec = _torch.zeros((1, 1), dtype=_torch.int32, device=device_str)
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"prefill-mask shape S=1 T={_T_dec} H={_H} D={_D} ratio={_ratio}",
+                    lambda: _v4_idx(
+                        _q_dec, _kv_dec, _w_dec, q_pos=_q_pos_dec, compress_ratio=_ratio
+                    ),
+                    device=_torch.device(device_str),
+                )
+            try:
+                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+
+                _swa_attn = self.v4.layers[0].attn
+                _H_swa = int(_swa_attn.n_heads)
+                _D_swa = int(_swa_attn.head_dim)
+                _W_swa = int(_swa_attn.window_size)
+                _q_swa = _torch.zeros(
+                    (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                )
+                _kv_swa = _torch.zeros(
+                    (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                )
+                _idx_swa = _torch.full(
+                    (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                )
+                _cp_rank_swa = 0
+                try:
+                    import torch.distributed as _dist
+
+                    if _dist.is_available() and _dist.is_initialized():
+                        _cp_rank_swa = int(_dist.get_rank())
+                except Exception:
+                    _cp_rank_swa = 0
+                _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                    _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                )
+                _idx_swa[1, 0, :5] = _torch.arange(
+                    5, dtype=_torch.int32, device=device_str
+                )
+                _topk_len_swa = _torch.tensor(
+                    [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                )
+                _flash_mla_sparse_fwd(
+                    q=_q_swa,
+                    kv=_kv_swa,
+                    indices=_idx_swa,
+                    sm_scale=float(_swa_attn.softmax_scale),
+                    attn_sink=_swa_attn.attn_sink,
+                    topk_length=_topk_len_swa,
+                )
+                logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+            except Exception:
+                logging.exception(
+                    "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
+                )
+                raise
+            try:
+                import torch.distributed as _dist
+
+                _strategy = self.v4.layers[0].ffn._strategy
+                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
+                    if _dist.is_available() and _dist.is_initialized():
+                        _dist.barrier()
+                    _cfg = _strategy.cfg
+                    _x_moe = _torch.zeros(
+                        (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _w_moe = _torch.zeros(
+                        (1, int(_cfg.n_activated_experts)),
+                        dtype=_torch.float32,
+                        device=device_str,
+                    )
+                    _w_moe[:, 0] = 1.0
+                    _start = int(_cfg.local_expert_start)
+                    _end = max(int(_cfg.local_expert_end), _start + 1)
+                    _idx_vals = (
+                        _torch.arange(
+                            int(_cfg.n_activated_experts),
+                            dtype=_torch.int64,
+                            device=device_str,
+                        )
+                        % (_end - _start)
+                        + _start
+                    )
+                    _idx_moe = _idx_vals.unsqueeze(0).contiguous()
+                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _torch.cuda.synchronize()
+                    if _dist.is_available() and _dist.is_initialized():
+                        _dist.barrier()
+                    logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+            except Exception:
+                logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
+                raise
+            try:
+                from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
+                    _collect_dsv4_batched_fp8_einsum_shapes,
+                    _collect_dsv4_dense_gemm_shapes,
+                    _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_mhc_head_fused_shapes,
+                    _collect_dsv4_mhc_prenorm_shapes,
+                    resolve_cp_metadata_warmup_max_batch_size,
+                    resolve_dense_gemm_warmup_max_m,
+                    warmup_batched_fp8_einsum_jit,
+                    warmup_compressor_combine_branch_kernels,
+                    warmup_dense_gemm_jit,
+                    warmup_dsv4_fp8_swa_slot_dequant_jit,
+                    warmup_fp8_mqa_logits_jit,
+                    warmup_mhc_head_fused_jit,
+                    warmup_mhc_prenorm_gemm_jit,
+                    warmup_prefill_cp_metadata_jit,
+                )
+
+                _jit_device = _torch.device(device_str)
+                _fixed_region_cp_size = 1
+                _fixed_region_prefill_sliced = False
+                _fixed_region_cp_config = getattr(
+                    self.parallelism_config, "prefill_cp_config", None
+                )
+                if _fixed_region_cp_config is not None and bool(
+                    getattr(_fixed_region_cp_config, "kv_cache_sharded", False)
+                ):
+                    if self._is_decode_role:
+                        try:
+                            _decode_prefill_cp = bool(
+                                _fixed_region_cp_config.is_prefill_enabled()
+                            )
+                        except Exception:
+                            _decode_prefill_cp = False
+                        if _decode_prefill_cp:
+                            _fixed_region_cp_size = max(
+                                int(
+                                    getattr(
+                                        _fixed_region_cp_config, "prefill_cp_size", 0
+                                    )
+                                    or 1
+                                ),
+                                1,
+                            )
+                    else:
+                        _fixed_region_cp_size = max(
+                            int(getattr(self.parallelism_config, "tp_size", 1) or 1), 1
+                        )
+                        _fixed_region_prefill_sliced = _fixed_region_cp_size > 1
+                warmup_compressor_combine_branch_kernels(
+                    v4=self.v4,
+                    v4_args=self._v4_args,
+                    device=_jit_device,
+                    gen_num_per_cycle=self._gen_num_per_cycle,
+                    fixed_region_cp_size=_fixed_region_cp_size,
+                    fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
+                )
+                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
+                _dense_gemm_prefill_chunk_size = 0
+                if not self._is_decode_role and chunked_moe_enabled():
+                    _dense_gemm_prefill_chunk_size = max(
+                        int(moe_chunk_tokens_from_env()), 0
+                    )
+                _prefill_cp_config = getattr(
+                    self.parallelism_config, "prefill_cp_config", None
+                )
+                _prefill_cp_enabled = False
+                if _prefill_cp_config is not None:
+                    try:
+                        _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
+                    except Exception:
+                        _prefill_cp_enabled = False
+                _prefill_kv_cache_sharded = bool(
+                    getattr(_prefill_cp_config, "kv_cache_sharded", False)
+                )
+                _prefill_cp_size = (
+                    int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+                    if _prefill_cp_enabled
+                    else 1
+                )
+                warmup_prefill_cp_metadata_jit(
+                    is_decode_role=self._is_decode_role,
+                    cp_enabled=_prefill_cp_enabled,
+                    cp_size=_prefill_cp_size,
+                    max_batch_size=resolve_cp_metadata_warmup_max_batch_size(
+                        self._max_context_batch_size, self._max_generate_batch_size
+                    ),
+                    fp8_kv_cache=self.fp8_kv_cache,
+                    kv_cache_sharded=_prefill_kv_cache_sharded,
+                    device=_jit_device,
+                )
+                _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
+                    max_seq_len=int(self._v4_args.max_seq_len),
+                    max_batch_size=int(self._v4_args.max_batch_size),
+                    role_type_name=(
+                        RoleType.DECODE if self._is_decode_role else RoleType.PREFILL
+                    ),
+                    prefill_chunk_size=_dense_gemm_prefill_chunk_size,
+                    max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+                    is_speculative=self._is_speculative,
+                    gen_num_per_cycle=self._gen_num_per_cycle,
+                    cp_size=_prefill_cp_size,
+                    cp_enabled=_prefill_cp_enabled,
+                )
+                logging.info(
+                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d prefill_chunk_size=%d max_tokens_per_rank=%d role=%s cp_enabled=%s cp_size=%d",
+                    _dense_gemm_max_m,
+                    _dense_gemm_prefill_chunk_size,
+                    int(self._v4_args.max_tokens_per_rank),
+                    "DECODE" if self._is_decode_role else "PREFILL",
+                    _prefill_cp_enabled,
+                    _prefill_cp_size,
+                )
+                warmup_dense_gemm_jit(
+                    _dense_shapes, max_m=_dense_gemm_max_m, device=_jit_device
+                )
+                _batched_fp8_einsum_shapes = _collect_dsv4_batched_fp8_einsum_shapes(
+                    self.v4
+                )
+                warmup_batched_fp8_einsum_jit(
+                    _batched_fp8_einsum_shapes,
+                    max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
+                warmup_mhc_prenorm_gemm_jit(
+                    _mhc_prenorm_shapes, max_m=_dense_gemm_max_m, device=_jit_device
+                )
+                _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
+                warmup_mhc_head_fused_jit(_mhc_head_fused_shapes, device=_jit_device)
+                if (
+                    self.fp8_kv_cache
+                    and (not self._is_decode_role)
+                    and _prefill_cp_enabled
+                    and (_prefill_cp_size > 1)
+                    and _prefill_kv_cache_sharded
+                ):
+                    warmup_dsv4_fp8_swa_slot_dequant_jit(
+                        kv_cache=self.kv_cache,
+                        cp_size=_prefill_cp_size,
+                        device=_jit_device,
+                    )
+                _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
+                warmup_fp8_mqa_logits_jit(_fp8_mqa_logits_shapes, device=_jit_device)
+                logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
+            except Exception:
+                logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")
+                raise
+            _torch.cuda.synchronize()
+        if (
+            device_str.startswith("cuda")
+            and model_warm_up
+            and (self._v4_args.v41_config is not None)
+        ):
+            from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
+                warmup_v41_decode_jit,
+                warmup_v41_prefill_jit,
+            )
+
+            if self._is_decode_role:
+                warmup_v41_decode_jit(self, device=torch.device(device_str))
+            else:
+                warmup_v41_prefill_jit(self, device=torch.device(device_str))
+        self._bind_runtime_buffers(torch.device(device_str))
+        logging.info(
+            "[DeepSeekV4Model] bound runtime buffers: prefill_ws_q_tokens=%d (per-forward) mtp_hidden_enabled=%s",
+            self._resolve_prefill_q_token_capacity(),
+            self._shared_runtime_buffers.mtp_hidden_enabled,
+        )
+        self._materialized = True
+        return True
+
+    def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
+        """Default: capture decode + verify, skip plain prefill.  MTP
+        overrides to capture all cudagraph requests because the draft's
+        post-verify multi-token batch arrives with ``is_prefill=True``
+        but is functionally a multi-token decode."""
+        return not (bool(attn.is_prefill) and (not is_target_verify))
+
+    def _load_scoped_extra_weights(self, weights: ModelWeights) -> None:
+        self._load_extra_weights(weights)
+
+    def _load_extra_weights(self, weights: ModelWeights) -> None:
+        """Subclass hook for loading model-level (non-Block) tensors off
+        the framework's ``ModelWeights`` before it gets dropped.  Default
+        no-op; ``DeepSeekV4MtpModel`` overrides to bind enorm/hnorm/
+        e_proj/h_proj from the MTP-only globals."""
+        return None
+
+    def _prepare_decode_hidden(
+        self, input_ids: torch.Tensor, meta: Any
+    ) -> torch.Tensor:
+        """Build the per-token ``[B, q_len, hc, dim]`` hidden tensor that
+        feeds the layer loop on the decode path.  Default impl is the
+        regular embed+repeat that the main model uses; ``DeepSeekV4MtpModel``
+        overrides with the e_proj/h_proj fusion stage."""
+        B = meta.batch_size
+        q_len = meta.q_len_per_req
+        h = self.v4.embed(input_ids).view(B, q_len, -1)
+        return h.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
+
+    def _prepare_prefill_hidden(
+        self, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Build the flat ``[T_total, hc, dim]`` hidden tensor that feeds
+        the layer loop on the prefill path.  Default = embed+repeat."""
+        h = self.v4.embed(input_ids)
+        return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
+
+    def _prepare_multimodal_prefill_hidden(
+        self, inputs: PyModelInputs, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        if not inputs.multimodal_inputs.multimodal_features:
+            return self._prepare_prefill_hidden(input_ids, positions)
+        hidden = self._embed_multimodal_tokens(inputs, input_ids)
+        return hidden.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
+
+    def _embed_multimodal_tokens(
+        self, inputs: PyModelInputs, input_ids: torch.Tensor
+    ) -> torch.Tensor:
+        features = inputs.multimodal_inputs.multimodal_features
+        locations_tensor = inputs.multimodal_inputs.mm_features_locs.reshape(-1)
+        cp_info = getattr(
+            as_tagged_attention_inputs(inputs.attention_inputs),
+            "context_parallel_info",
+            None,
+        )
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask.reshape(-1).to(
+            device=input_ids.device, dtype=torch.bool
+        )
+        valid_rows = torch.ones_like(text_tokens_mask)
+        if cp_info is not None:
+            valid_rows = (
+                cp_info.prefill_shuffle_indices.to(
+                    device=input_ids.device, dtype=torch.long
+                )
+                >= 0
+            )
+        image_mask = text_tokens_mask.logical_not() & valid_rows
+        safe_ids = torch.where(text_tokens_mask, input_ids, 0).clamp(
+            min=0, max=self._v4_args.vocab_size - 1
+        )
+        hidden = self.v4.embed(safe_ids)
+        MultimodalEmbeddingInjector()(hidden, features, locations_tensor)
+        self.v4._image_token_mask = image_mask
+        return hidden
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        """Return a ``DSv4DecodeFmhaImpl`` for decode CUDA-graph capture; None otherwise.
+
+        Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
+        attention; the impl owns persistent metadata buffers updated in place
+        by ``prepare_cuda_graph`` between replays."""
+        if not is_cuda_graph:
+            return None
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        if attn is None:
+            return None
+        is_target_verify = bool(getattr(attn, "is_target_verify", False))
+        if not self._should_capture_cuda_graph(attn, is_target_verify):
+            return None
+        if self.kv_cache is None:
+            logging.warning(
+                "[DeepSeekV4Model] prepare_fmha_impl: kv_cache not yet allocated (warmup phase); skipping CUDA-graph impl creation."
+            )
+            return None
+        if is_target_verify and (not self.fp8_kv_cache):
+            return None
+        if self.fp8_kv_cache:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplConfigFP8 as _DecodeFmhaImplConfig,
+            )
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplFP8 as _DecodeFmhaImpl,
+            )
+        else:
+            from rtp_llm.models_py.modules.dsv41.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImpl as _DecodeFmhaImpl,
+            )
+            from rtp_llm.models_py.modules.dsv41.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplConfig as _DecodeFmhaImplConfig,
+            )
+        batch_size = (
+            int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
+        )
+        q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
+        device = self.v4.embed.weight.device
+        paged_pool_specs = build_paged_pool_specs(
+            self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
+        )
+        group_tags_snapshot = (
+            [str(t) for t in self.kv_cache.group_tags or []]
+            if self.kv_cache is not None
+            else []
+        )
+        cfg_kwargs = dict(
+            max_batch_size=batch_size,
+            q_len=q_len,
+            window_size=int(self._v4_args.window_size),
+            head_dim=int(self._v4_args.head_dim),
+            max_seq_len=int(self._v4_args.max_seq_len),
+            compress_ratios=decode_metadata_compress_ratios(self._v4_args),
+            index_topk=int(self._v4_args.index_topk),
+            paged_pool_specs=paged_pool_specs,
+            group_tags=group_tags_snapshot,
+        )
+        cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
+        impl = _DecodeFmhaImpl(cfg, device=device, attn_inputs=attn)
+        return impl
+
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        """
+        num_tokens >= 0: return the explicit row count without reading
+            _mtp_hidden_valid_tokens. This is CUDA-graph safe because replay does
+            not update Python attributes.
+        num_tokens < 0: return the last non-graph-written row count. This is only
+            for CP prefill, where the C++ global token count has been restored
+            but the buffer intentionally stores rank-local rows.
+        """
+        buf = self.v4._mtp_hidden_buffer
+        if buf is None:
+            return None
+        requested = int(num_tokens)
+        if requested < 0:
+            requested = int(self.v4._mtp_hidden_valid_tokens)
+        return buf[:requested]
+
+    def has_mtp_hidden_buffer(self) -> bool:
+        """Whether the DeepSeek MTP hand-off already stores CP-local rows."""
+        return self.v4 is not None and self.v4._mtp_hidden_buffer is not None
+
+    def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        buf = self.v4._mtp_last_hidden_buffer
+        if buf is None:
+            return None
+        requested = int(num_tokens)
+        if requested < 0:
+            requested = int(self.v4._mtp_last_hidden_valid_tokens)
+        return buf[:requested]
+
+    def _forward_impl(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        """qwen3-style dispatcher — per-arm orchestration lives in the
+        prefill / decode runtime modules.
+
+        ``self.kv_cache`` may be None during warmup (NormalExecutor builds
+        the PyWrappedModel with cache_manager==nullptr); only the prefill
+        path needs to tolerate this — warmup never enters decode.
+        """
+        if self.kv_cache is None:
+            logging.warning(
+                "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
+            )
+            T = max(inputs.input_ids.numel(), 1)
+            device = self.v4.embed.weight.device
+            hidden = torch.zeros(
+                T, self._v4_args.dim, dtype=torch.bfloat16, device=device
+            )
+            return PyModelOutputs(hidden)
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        self.v4._image_token_mask = None
+        has_visual_tokens = bool(inputs.multimodal_inputs.multimodal_features) and (
+            not getattr(self._v4_args, "v41_config", None)
+        )
+        if getattr(self.v4, "_has_visual_tokens", None) != has_visual_tokens:
+            self.v4._has_visual_tokens = has_visual_tokens
+            for layer in self.v4.layers:
+                layer.ffn._has_visual_tokens = has_visual_tokens
+                layer.ffn.gate._has_visual_tokens = has_visual_tokens
+        cls = type(self)
+        prep_decode = (
+            self._prepare_decode_hidden
+            if cls._prepare_decode_hidden is not DeepSeekV4Model._prepare_decode_hidden
+            else None
+        )
+        prep_prefill = (
+            self._prepare_prefill_hidden
+            if cls._prepare_prefill_hidden
+            is not DeepSeekV4Model._prepare_prefill_hidden
+            else None
+        )
+        if has_visual_tokens:
+            prep_prefill = (
+                lambda input_ids, positions: self._prepare_multimodal_prefill_hidden(
+                    inputs, input_ids, positions
+                )
+            )
+        if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
+            return forward_decode(
+                self.v4,
+                self.kv_cache,
+                self._v4_args,
+                inputs,
+                fmha_impl,
+                prepare_hidden_fn=prep_decode,
+            )
+        elif attn.is_prefill:
+            return forward_prefill(
+                self.v4,
+                self.kv_cache,
+                self.parallelism_config,
+                inputs,
+                prepare_hidden_fn=prep_prefill,
+            )
+        else:
+            return forward_decode(
+                self.v4,
+                self.kv_cache,
+                self._v4_args,
+                inputs,
+                fmha_impl,
+                prepare_hidden_fn=prep_decode,
+            )
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        result = self._forward_impl(inputs, fmha_impl)
+        if (
+            self._captures_aux_hidden
+            and self.v4 is not None
+            and self.v4._mtp_hidden_buffer is not None
+        ):
+            # First-class outputs survive CUDA graph replay; Python mutable
+            # state alone cannot represent the target's current auxiliary rows.
+            aux = self.get_mtp_target_hidden_states(int(inputs.input_ids.numel()))
+            return PyModelOutputs(result.hidden_states, aux)
+        return result

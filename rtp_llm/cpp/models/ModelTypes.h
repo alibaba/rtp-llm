@@ -57,9 +57,9 @@ struct GptModelInitParams {
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
     DeviceResourceConfig                         device_resource_config;
-    MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
-    int64_t                                      max_seq_len             = 0;
-    int64_t                                      hidden_size             = 0;
+    MlaOpsType                                   mla_ops_type = MlaOpsType::AUTO;
+    int64_t                                      max_seq_len  = 0;
+    int64_t                                      hidden_size  = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -72,7 +72,7 @@ struct GptModelInitParams {
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
     // the published model topology, actual reserve, and fake caller bounds.
-    int64_t                                    kernel_block_table_width = 0;
+    int64_t kernel_block_table_width = 0;
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
@@ -130,6 +130,9 @@ enum GptModelInputIndex : size_t {
     // Keep these at the end so existing shape-hint indices remain unchanged.
     skipLmHead,
     captureHiddenStates,
+    mmFeaturesSpans,
+    engramTokenWindowRows,
+    engramTokenWindowWidth,
     gptModelInputLength,
 };
 
@@ -157,6 +160,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitComboPositionIds    = 1u << 12,
     kDeviceBitTextTokensMask      = 1u << 13,
     kDeviceBitMmFeaturesLocs      = 1u << 14,
+    kDeviceBitEngramWindows       = 1u << 15,
+    kDeviceBitMmFeaturesSpans     = 1u << 16,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -196,10 +201,10 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                          = default;
-    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual ~ModelBase()                                                     = default;
+    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    virtual void                       releaseBuffers() {}
+    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

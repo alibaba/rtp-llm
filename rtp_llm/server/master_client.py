@@ -350,6 +350,7 @@ class MasterClient:
         selected_vit: Optional[Dict[str, Any]] = None,
         seq_len: Optional[int] = None,
         vit_only: bool = False,
+        timeout_s: Optional[float] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -370,7 +371,12 @@ class MasterClient:
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        default_timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        timeout_s = (
+            min(timeout_s, default_timeout_s)
+            if timeout_s is not None and default_timeout_s is not None
+            else (timeout_s or default_timeout_s)
+        )
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -425,7 +431,8 @@ class MasterClient:
         if response is None:
             return FlexlbResponse.connection_failed_response()
 
-        self.latest_queue_length = response.queue_length
+        if not vit_only:
+            self.latest_queue_length = response.queue_length
 
         if response.code != SUCCESS_CODE:
             # Only an unadmitted stale selection can be retried with the same request id.
