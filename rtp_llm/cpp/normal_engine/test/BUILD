@@ -229,3 +229,24 @@ cc_binary(
     linkshared = 1,
     visibility = ["//rtp_llm/models_py/modules/dsv4/fp8/test:__pkg__"],
 )
+
+cc_library(
+    name = "v41_native_pp_transport_test_lib",
+    srcs = ["V41NativePPTransportTest.cc"],
+    alwayslink = True,
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    ] + torch_deps(),
+)
+
+cc_binary(
+    name = "th_v41_native_pp_transport_test",
+    deps = [":v41_native_pp_transport_test_lib"],
+    linkshared = 1,
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
