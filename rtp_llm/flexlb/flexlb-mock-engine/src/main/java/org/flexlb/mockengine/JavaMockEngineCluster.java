@@ -6051,11 +6051,7 @@ public final class JavaMockEngineCluster {
                     Map.entry("rtp_llm_context_batch_size", activePrefillRequests.get()),
                     Map.entry("rtp_llm_generate_batch_size", activeDecodeRequests.get()),
                     Map.entry("rtp_llm_kv_cache_item_num", cache.lruKeyBlocks()),
-                    Map.entry("rtp_llm_kv_cache_free_blocks", cache.freeBlocks()),
-                    Map.entry("rtp_llm_kv_cache_available_blocks", cache.availableBlocks()),
                     Map.entry("rtp_llm_kv_cache_left_seq", (long) cache.availableBlocks() * seqSizePerBlock),
-                    Map.entry("rtp_llm_kv_cache_used_ratio", cache.totalBlocks() == 0 ? 0.0
-                            : 100.0 * (cache.totalBlocks() - cache.availableBlocks()) / cache.totalBlocks()),
                     Map.entry("rtp_llm_kv_cache_pool_free_blocks", cache.freeBlocks()),
                     Map.entry("rtp_llm_kv_cache_pool_available_blocks", cache.availableBlocks()),
                     Map.entry("rtp_llm_kv_cache_pool_total_blocks", cache.totalBlocks()),

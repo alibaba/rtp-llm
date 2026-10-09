@@ -1,0 +1,138 @@
+schema_version: 2
+include:
+- workload.yaml
+sources:
+  mock:
+    running:
+      promql: rtp_llm_running_stream_size${selector}
+      mode: scrape
+      unit: requests
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    waiting:
+      promql: rtp_llm_wait_stream_size${selector}
+      mode: scrape
+      unit: requests
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    hit_tokens_total:
+      promql: mock_hit_tokens_total${selector}
+      mode: scrape
+      unit: tokens
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    context_tokens_total:
+      promql: mock_context_tokens_total${selector}
+      mode: scrape
+      unit: tokens
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    context_requests_total:
+      promql: mock_context_requests_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    cache_evictions:
+      promql: mock_engine_cache_evictions_total${selector}
+      mode: scrape
+      unit: events
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    prefill_ms_avg:
+      promql: mock_engine_prefill_ms_avg${selector}
+      mode: scrape
+      unit: ms
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    prefill_batches:
+      promql: mock_prefill_batch_size_count${selector}
+      mode: scrape
+      unit: batches
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    prefill_batch_requests:
+      promql: mock_prefill_batch_size_sum${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    cache_key_hits:
+      promql: mock_engine_cache_key_hits_total${selector}
+      mode: scrape
+      unit: keys
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    cache_keys_requested:
+      promql: mock_engine_cache_keys_requested_total${selector}
+      mode: scrape
+      unit: keys
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    admission_open:
+      promql: mock_engine_admission_open${selector}
+      mode: scrape
+      unit: boolean
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    admitted_rpcs_total:
+      promql: mock_engine_admitted_rpcs_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    rejected_rpcs_total:
+      promql: mock_engine_rejected_rpcs_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+produced:
+  derived/survivor_hit_ratio:
+    producer: cache_windows
+    source_type: derived
+    unit: ratio
+    value_kind: gauge
+    labels: []

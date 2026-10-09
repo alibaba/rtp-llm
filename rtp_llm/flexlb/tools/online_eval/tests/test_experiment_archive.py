@@ -21,7 +21,7 @@ class ArchiveTest(unittest.TestCase):
             (run / "engine.log").write_bytes(b"a" * (2 * 1024 * 1024 + 1))
             (run / "api_token.txt").write_text("do not archive")
             out = root / "run.zip"
-            manifest = create_archive(out, {"run": run}, kind="stress")
+            manifest = create_archive(out, {"run": run}, kind="case")
             with zipfile.ZipFile(out) as archive:
                 self.assertEqual(json.loads(archive.read("run/aggregate.json"))["success"], 2)
                 self.assertIn("run/engine.log.head", archive.namelist())

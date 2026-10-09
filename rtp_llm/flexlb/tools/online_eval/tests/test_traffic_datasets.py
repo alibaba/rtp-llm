@@ -72,8 +72,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 datasets.read_manifest(model)
 
     def test_new_file_is_selectable_without_registration(self):
-        from runtime import stress
-        from traffic.traffic_source import validate_plan
+        from traffic.traffic_source import materialize, validate_plan
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)
             model = data / 'traffic_trace/custom_capture.xz'
@@ -81,9 +80,14 @@ class TrafficDatasetsTest(unittest.TestCase):
             model.write_bytes(encode([[0, 512, -1, 0], [1000, 512, 0, 1]]))
             model.with_suffix('.manifest.json').write_text(json.dumps(datasets.build_manifest(model)))
             with mock.patch.object(datasets, 'DATA', data):
-                args = stress.parse_args(['--dry-run', '--traffic-model', 'custom_capture', '--limit', '1'])
+                selected = datasets.model_path('custom_capture')
+                manifest = datasets.read_manifest(selected)
+                specification = dict(kind='trace', model=manifest['codec']['name'],
+                    version=str(manifest['codec']['version']), parameters=dict(
+                        path=selected.name, sha256=manifest['sha256'], count=manifest['count'],
+                        output_tokens=1, priority=50))
                 out = data / 'plan.jsonl'
-                stress._traffic(args, out)
+                materialize(out, specification, 'custom', selected.parent, max_requests=1)
                 self.assertEqual(1, validate_plan(out))
                 profile = data / 'synthetic_parameters/custom_shape.profile.json'
                 profile.parent.mkdir()
@@ -135,14 +139,18 @@ class TrafficDatasetsTest(unittest.TestCase):
                              semantics['calibration']['provenance'])
 
     def test_bundled_models_are_selectable_and_materialize(self):
-        from runtime import stress
-        from traffic.traffic_source import validate_plan
+        from traffic.traffic_source import materialize, validate_plan
         with tempfile.TemporaryDirectory() as directory:
             for name in datasets.trace_models():
                 with self.subTest(name=name):
-                    args = stress.parse_args(['--dry-run', '--traffic-model', name, '--limit', '8'])
+                    model = datasets.model_path(name)
+                    manifest = datasets.read_manifest(model)
+                    specification = dict(kind='trace', model=manifest['codec']['name'],
+                        version=str(manifest['codec']['version']), parameters=dict(
+                            path=model.name, sha256=manifest['sha256'], count=manifest['count'],
+                            output_tokens=1, priority=50))
                     output = Path(directory) / f'{name}.jsonl'
-                    stress._traffic(args, output)
+                    materialize(output, specification, name, model.parent, max_requests=8)
                     self.assertEqual(8, validate_plan(output))
 
 

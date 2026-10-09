@@ -11,9 +11,10 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.actions import master
+from cases.master_ha_failover import actions as ha
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
-from runtime.ha import HaMasterStateSampler, HaTrafficRunner
+from cases.master_ha_failover.runtime import HaMasterStateSampler, HaTrafficRunner
 
 
 class MasterActionsTest(unittest.TestCase):
@@ -27,7 +28,7 @@ class MasterActionsTest(unittest.TestCase):
         manager.master_instance_target.side_effect = lambda _env, name: {
             "A": "127.0.0.1:18082", "B": "127.0.0.1:18085"
         }[name]
-        with patch("runtime.ha.ClientOps"):
+        with patch("cases.master_ha_failover.runtime.ClientOps"):
             runner = HaTrafficRunner(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
             ])
@@ -36,6 +37,11 @@ class MasterActionsTest(unittest.TestCase):
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
             {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
         ]}, json.loads(path.read_text()))
+        frozen = json.loads((runner.out_dir / "flow-input.json").read_text())
+        from traffic.traffic_source import sha256_file
+        self.assertEqual(sha256_file(Path(runner._overrides["TRACE_FILE"])), frozen["trace"]["sha256"])
+        self.assertEqual(runner._overrides, frozen["environment"])
+        self.assertEqual(runner.flow_identity["run_id"], frozen["run_id"])
         self.assertEqual("false", runner._overrides["LOOP"])
         self.assertEqual("false", runner._overrides["REPLAY_UNIQUE_PREFIX"])
         runner.stop_sending()
@@ -68,7 +74,7 @@ class MasterActionsTest(unittest.TestCase):
             path.write_text('{"ts":0}\n{"ts":1000}\n')
             return path
 
-        with patch("runtime.ha.ClientOps"), patch(
+        with patch("cases.master_ha_failover.runtime.ClientOps"), patch(
             "traffic.traffic_source.materialize", side_effect=short_trace
         ), self.assertRaisesRegex(ValueError, "one-pass HA trace ends"):
             HaTrafficRunner(manager, env, root, "flow", [
@@ -91,7 +97,7 @@ class MasterActionsTest(unittest.TestCase):
             sampler._stop.set()
             return None
 
-        with patch("runtime.ha.http_get_json", side_effect=fetch):
+        with patch("cases.master_ha_failover.runtime.http_get_json", side_effect=fetch):
             sampler._run()
         rows = [json.loads(line) for line in sampler.path.read_text().splitlines()]
         self.assertEqual(["A", "B"], [row["master"] for row in rows])
@@ -118,6 +124,8 @@ class MasterActionsTest(unittest.TestCase):
             time.monotonic,
             time.sleep,
         )
+        from monitoring.session import PrometheusSession
+        self.ctx.monitor = PrometheusSession(self.tmp.name, {"mock": "http://unused/metrics"}, query_plan="master_ha_failover.yaml")
         self.ctx.ops = Mock()
         self.ctx.ops.master_target.return_value = "master"
         self.ctx.env_epoch = 1
@@ -289,37 +297,34 @@ class MasterActionsTest(unittest.TestCase):
             with self.assertRaises((ValueError, KeyError)):
                 master._endpoint_loads({**data, "decode_endpoints": rows})
 
-    def test_ha_and_coldstart_fail_compilation_for_wrong_environment(self):
+    def test_ha_fails_compilation_for_wrong_environment(self):
         plan = SimpleNamespace(path="stage", environment={})
         with self.assertRaisesRegex(ValueError, "dual_standalone"):
-            master._ha_validate({}, plan)
-        with self.assertRaisesRegex(ValueError, "zero master"):
-            master._batch_validate({"coldstart": True}, plan)
+            ha._ha_validate({}, plan)
         plan.environment = {
             "master_layout": "dual_standalone",
             "master_stable_window_s": 0,
         }
-        self.assertEqual(["A", "B"], master._ha_validate({}, plan)["targets"])
-        plan.environment["master_layout"] = "single"
-        self.assertTrue(master._batch_validate({"coldstart": True}, plan)["coldstart"])
+        self.assertEqual(["A", "B"], ha._ha_validate({}, plan)["targets"])
 
     def test_empty_client_rows_fail_even_zero_error_assertion(self):
         handle = self.ctx.register_resource("ha_rows", [])
-        result = master._client_check(
+        result = ha._client_check(
             self.ctx,
             dict(
-                rows=handle, metric="failed_count", op="eq", expected=0, min_samples=1
+                rows=handle, metric="ha_gate/failed_count", op="eq", expected=0, min_samples=1
             ),
             self.deadline,
         )
-        self.assertEqual("FAIL", result.checks[0].status)
+        self.assertEqual("ERROR", result.checks[0].status)
+        self.assertEqual("INVALID", result.checks[0].actual["validity"])
 
     def test_schedule_only_rows_are_not_successful_streams(self):
         handle = self.ctx.register_resource("ha_rows", [{"status": "scheduled"}])
-        result = master._client_check(
+        result = ha._client_check(
             self.ctx,
             dict(
-                rows=handle, metric="success_rate", op="eq", expected=1, min_samples=1
+                rows=handle, metric="ha_gate/success_rate", op="eq", expected=1, min_samples=1
             ),
             self.deadline,
         )
@@ -332,9 +337,9 @@ class MasterActionsTest(unittest.TestCase):
             {"status": "exception", "route_path": "failed"},
             {"status": "schedule_error", "route_path": "master"},
         ])
-        result = master._client_check(
+        result = ha._client_check(
             self.ctx,
-            dict(rows=rows, metric="non_ok_count", op="eq", expected=0,
+            dict(rows=rows, metric="ha_gate/non_ok_count", op="eq", expected=0,
                  min_samples=3),
             self.deadline,
         )
@@ -344,7 +349,7 @@ class MasterActionsTest(unittest.TestCase):
     def test_client_nonzero_exit_and_malformed_rows_are_errors(self):
         root = Path(self.tmp.name)
         process = SimpleNamespace(proc=Mock())
-        client = master.OwnedHaClient(SimpleNamespace(proc=process, out_dir=root))
+        client = ha.OwnedHaClient(SimpleNamespace(proc=process, out_dir=root))
         process.proc.wait.return_value = 7
         with self.assertRaisesRegex(RuntimeError, "exit code 7"):
             client.finish(self.deadline)
@@ -359,129 +364,11 @@ class MasterActionsTest(unittest.TestCase):
         for row in rows:
             row["wall_clock_ts"] = 1000
         handle = self.ctx.register_resource("ha_rows", rows)
-        out = master._window(
+        out = ha._window(
             self.ctx, {"rows": handle, "from": 2, "until": 3}, self.deadline
         )
         self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
 
-    def test_finite_cold_batch_keeps_every_request_and_validates_distribution(self):
-        from scenario.actions.elastic import RecordedRequests
-
-        self.ctx.env.spec.master_stable_window_s = 0
-        self.ctx.ops = SimpleNamespace(next_request_id=Mock(side_effect=range(1, 21)))
-
-        def run(records, row, shape, timeout_s):
-            records.update(
-                row,
-                schedule={"status": "OK"},
-                stream={"status": "OK"},
-                prefill_addr="p" + str(row["wire_request_id"] % 2),
-                business_finished=row["wire_request_id"] <= 16,
-                consumer_exit_s=time.monotonic(),
-                transport_terminal_s=time.monotonic(),
-            )
-
-        info = {
-            "worker_summary": {
-                "PREFILL": {"discovered": 2, "alive": 2},
-                "DECODE": {"discovered": 4, "alive": 4},
-            }
-        }
-        with patch.object(RecordedRequests, "run", run), patch.object(
-            master, "_master_json", return_value=info
-        ):
-            out = master._batch(
-                self.ctx,
-                dict(
-                    target="single",
-                    count=20,
-                    concurrency=10,
-                    request_timeout_s=15,
-                    sample_after_s=0,
-                    coldstart=True,
-                ),
-                self.deadline,
-            )
-        self.assertEqual(0.8, out.output["success_rate"])
-        verdict = master._cold_check(
-            self.ctx, {"snapshot": out.output["snapshot"]}, self.deadline
-        )
-        self.assertTrue(all(c.status == "PASS" for c in verdict.checks))
-        artifact = json.loads(Path(out.artifacts[0]).read_text())
-        self.assertEqual(20, len(artifact["records"]))
-        self.assertTrue(all(row["consumer_exit_s"] for row in artifact["records"]))
-        self.assertTrue(all(row["status"] == "PASS" for row in self.ctx.cleanup(5)))
-
-    def test_successive_dual_probes_share_environment_request_ids(self):
-        from scenario.actions.elastic import RecordedRequests
-
-        self.ctx.env.spec.master_stable_window_s = 0
-        self.ctx.env.master_specs = {
-            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080)
-        }
-        self.ctx.ops = SimpleNamespace(next_request_id=Mock(side_effect=range(1, 41)))
-
-        def run(records, row, shape, timeout_s):
-            records.update(
-                row,
-                schedule={"status": "OK"},
-                stream={"status": "OK"},
-                prefill_addr="p0",
-                business_finished=True,
-                consumer_exit_s=time.monotonic(),
-                transport_terminal_s=time.monotonic(),
-            )
-
-        params = dict(
-            target="A",
-            count=20,
-            concurrency=10,
-            request_timeout_s=15,
-            sample_after_s=0,
-            sample_topology=False,
-            coldstart=False,
-        )
-        self.ctx.env.mock_http_port = 19000
-        fresh_ops = [Mock(), Mock()]
-        with patch.object(master, "_process"), patch.object(
-            RecordedRequests, "run", run
-        ), patch("runtime.engine_ops.EngineOps", side_effect=fresh_ops):
-            results = [master._batch(self.ctx, params, self.deadline) for _ in range(2)]
-        ids = [json.loads(Path(x.artifacts[0]).read_text())["records"] for x in results]
-        self.assertEqual(
-            list(range(1, 41)), [r["wire_request_id"] for group in ids for r in group]
-        )
-        for ops in fresh_ops:
-            ops.next_request_id.assert_not_called()
-        self.ctx.cleanup(5)
-
-    def test_scheduler_missing_response_cannot_satisfy_ttl_zero(self):
-        with patch.object(master, "_master_json", return_value={}):
-            with self.assertRaises(KeyError):
-                master._inflight(
-                    self.ctx, dict(target="single", op="eq", value=0), self.deadline
-                )
-
-    def test_finished_future_without_consumer_terminal_evidence_fails_cleanup(self):
-        from concurrent.futures import Future
-
-        records = Mock()
-        records.snapshot_records.return_value = [{"consumer_started": True}]
-        batch = master.FiniteMasterBatch(records, 1)
-        future = Future()
-        future.set_result(None)
-        batch.futures = [future]
-        batch.rows = [
-            {
-                "consumer_started": True,
-                "consumer_exit_s": None,
-                "transport_terminal_s": None,
-            }
-        ]
-        batch.artifact = Path(self.tmp.name) / "incomplete.json"
-        with self.assertRaises(RuntimeError):
-            batch.cleanup(self.deadline)
-        self.assertTrue(batch.artifact.exists())
 
     def test_negative_windows_filter_actual_error_rows_and_reject_empty_success(self):
         rows = [
@@ -492,18 +379,18 @@ class MasterActionsTest(unittest.TestCase):
         for row in rows:
             row["wall_clock_ts"] = 1000
         handle = self.ctx.register_resource("ha_rows", rows)
-        out = master._window(
+        out = ha._window(
             self.ctx,
             {"rows": handle, "status": "schedule_error", "error_kind": "business"},
             self.deadline,
         )
         self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
         empty = self.ctx.register_resource("ha_rows", [])
-        verdict = master._client_check(
+        verdict = ha._client_check(
             self.ctx,
             {
                 "rows": empty,
-                "metric": "wrong_error_code",
+                "metric": "ha_gate/wrong_error_code",
                 "op": "eq",
                 "expected": 0,
                 "code": 8431,
@@ -511,38 +398,18 @@ class MasterActionsTest(unittest.TestCase):
             },
             self.deadline,
         )
-        self.assertEqual("FAIL", verdict.checks[0].status)
+        self.assertEqual("ERROR", verdict.checks[0].status)
 
-    def test_tail_inflight_tolerance_uses_actual_count(self):
-        with patch.object(
-            master, "_master_json", return_value={"scheduler_inflight": 8}
-        ):
-            out = master._inflight(
-                self.ctx, {"target": "single", "op": "le", "value": 8}, self.deadline
-            )
-        self.assertEqual(8, out.output["count"])
-
-    def test_quota_fill_requires_every_schedule_to_be_accepted(self):
-        records = Mock()
-        records.snapshot_records.return_value = [{"schedule": {"status": "OK"}}] * 3 + [
-            {"schedule": {"status": "REJECTED"}}
-        ]
-        handle = self.ctx.register_resource("requests", records)
-        verdict = master._admission(
-            self.ctx, {"requests": handle, "count": 4}, self.deadline
-        )
-        self.assertEqual("FAIL", verdict.checks[0].status)
-        self.assertEqual(3, verdict.output["admitted"])
 
     def test_one_switched_request_is_not_replaced_by_one_percent_threshold(self):
         self.manager.master_instance_target.return_value = "B"
         rows = [{"master_target": "A"}] * 999 + [{"master_target": "B"}]
         handle = self.ctx.register_resource("ha_rows", rows)
-        verdict = master._client_check(
+        verdict = ha._client_check(
             self.ctx,
             {
                 "rows": handle,
-                "metric": "target_count",
+                "metric": "ha_gate/target_count",
                 "target": "B",
                 "op": "ge",
                 "expected": 1,
@@ -558,7 +425,7 @@ class MasterActionsTest(unittest.TestCase):
             {"wall_clock_ts": 1000, "failover": True, "master_target": "A"},
         ]
         handle = self.ctx.register_resource("ha_rows", rows)
-        out = master._window(
+        out = ha._window(
             self.ctx, {"rows": handle, "failover": False}, self.deadline
         )
         self.assertEqual([rows[0]], self.ctx.resource(out.output["rows"], "ha_rows"))
@@ -571,16 +438,13 @@ class MasterActionsTest(unittest.TestCase):
         from scenario.actions.engine_fault import (
             HANDLERS as faults,
         )
-        from scenario.actions.master_observation import (
-            HANDLERS as observations,
-        )
 
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
         with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(root / "master_ha_failover.yaml"),
                 handlers={
-                    h.name: h for h in master.HANDLERS + observations + controls + faults
+                    h.name: h for h in master.HANDLERS + ha.HANDLERS + controls + faults
                 },
             )
         self.assertEqual(4, len(plans))
@@ -642,17 +506,17 @@ class MasterActionsTest(unittest.TestCase):
             {"status": "ok", "prefill": "P1"},
             {"status": "schedule_error", "prefill": None},
         ])
-        params = dict(rows=rows, metric="prefill_max_share", op="le",
+        params = dict(rows=rows, metric="ha_gate/prefill_max_share", op="le",
                       expected=0.75, min_samples=3)
-        with patch("scenario.actions.master_observation._pools",
+        with patch("runtime.mock_control.topology_pools",
                    return_value={"prefill": ["P0", "P1"]}):
-            result = master._client_check(self.ctx, params, self.deadline)
+            result = ha._client_check(self.ctx, params, self.deadline)
         self.assertEqual("PASS", result.checks[0].status)
         self.assertEqual(0.5, result.output["actual"])
-        with patch("scenario.actions.master_observation._pools",
+        with patch("runtime.mock_control.topology_pools",
                    return_value={"prefill": ["P1", "P2"]}), self.assertRaisesRegex(
                        ValueError, "known Prefill"):
-            master._client_check(self.ctx, params, self.deadline)
+            ha._client_check(self.ctx, params, self.deadline)
 
     def test_ha_handover_peak_balance_counts_failed_assigned_requests(self):
         rows = self.ctx.register_resource("ha_rows", [
@@ -661,15 +525,16 @@ class MasterActionsTest(unittest.TestCase):
              "prefill": "P0" if i < 6 else "P1"}
             for i in range(8)
         ] + [{"send_start_epoch_ms": 11_020, "status": "schedule_error", "prefill": None}])
-        params = dict(rows=rows, metric="prefill_peak_skew", op="le",
+        params = dict(rows=rows, metric="ha_gate/prefill_peak_skew", op="le",
                       expected=2.0, min_samples=5)
-        with patch("scenario.actions.master_observation._pools",
+        with patch("runtime.mock_control.topology_pools",
                    return_value={"prefill": ["P0", "P1", "P2", "P3"]}):
-            result = master._client_check(self.ctx, params, self.deadline)
+            result = ha._client_check(self.ctx, params, self.deadline)
             self.assertEqual("FAIL", result.checks[0].status)
             self.assertEqual(3.0, result.output["actual"])
-            with self.assertRaisesRegex(ValueError, "enough assigned"):
-                master._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
+            missing = ha._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
+            self.assertEqual("ERROR", missing.checks[0].status)
+            self.assertEqual("INVALID", missing.checks[0].actual["validity"])
 
     def test_ha_handover_balance_uses_five_seconds_at_lower_qps(self):
         pool = [f"P{i}" for i in range(125)]
@@ -678,86 +543,14 @@ class MasterActionsTest(unittest.TestCase):
              "status": "ok", "prefill": pool[i % len(pool)]}
             for i in range(300)
         ])
-        params = dict(rows=rows, metric="prefill_peak_skew", op="le",
+        params = dict(rows=rows, metric="ha_gate/prefill_peak_skew", op="le",
                       expected=4.0, min_samples=200)
-        with patch("scenario.actions.master_observation._pools",
+        with patch("runtime.mock_control.topology_pools",
                    return_value={"prefill": pool}):
-            result = master._client_check(self.ctx, params, self.deadline)
+            result = ha._client_check(self.ctx, params, self.deadline)
         self.assertEqual("PASS", result.checks[0].status)
         self.assertEqual(1.25, result.output["actual"])
 
-    def test_short_hang_empty_send_window_still_requires_real_recovery_burst(self):
-        self.manager.master_instance_target.return_value = "B:18085"
-        good = [{"status": "ok", "master_target": "B:18085"}] * 3
-        empty = self.ctx.register_resource("ha_rows", [])
-        burst = self.ctx.register_resource("ha_rows", good)
-        self.assertEqual(
-            "PASS",
-            master._short(
-                self.ctx,
-                dict(hang=empty, burst=burst, post=burst, target="B"),
-                self.deadline,
-            )
-            .checks[0]
-            .status,
-        )
-        self.assertEqual(
-            "FAIL",
-            master._short(
-                self.ctx,
-                dict(hang=empty, burst=empty, post=empty, target="B"),
-                self.deadline,
-            )
-            .checks[0]
-            .status,
-        )
-
-    def test_direct_request_bypasses_schedule_and_records_actual_grpc_error(self):
-        class RpcError(Exception):
-            def code(self):
-                return SimpleNamespace(name="UNKNOWN")
-
-        class Call:
-            def __iter__(self):
-                raise RpcError("injected")
-
-            def cancel(self):
-                return True
-
-        self.ctx.ops = SimpleNamespace(
-            next_request_id=lambda: 42,
-            _channel=lambda target: target,
-            build_generate_input=lambda *args, **kw: object(),
-            pb2_grpc=SimpleNamespace(
-                RpcServiceStub=lambda channel: SimpleNamespace(
-                    GenerateStreamCall=lambda *args, **kw: Call()
-                )
-            ),
-        )
-        snapshot = {
-            "engines": [
-                {
-                    "name": "prefill-0",
-                    "role": "prefill",
-                    "grpc_addr": "127.0.0.1:55151",
-                    "stopped": False,
-                }
-            ]
-        }
-        with patch.dict(
-            sys.modules, {"grpc": SimpleNamespace(RpcError=RpcError)}
-        ), patch(
-            "scenario.actions.engine_control._http",
-            return_value=snapshot,
-        ):
-            out = master._direct(self.ctx, {"engine": "prefill-0"}, self.deadline)
-        self.assertTrue(out.output["error"])
-        self.assertFalse(out.output["finished"])
-        record = self.ctx.resource(out.output["result"], "direct_request")
-        self.assertEqual("GenerateStreamCall", record["method"])
-        self.assertEqual("direct", record["route"])
-        self.assertTrue(record["consumer_done"])
-        self.assertIsNotNone(record["consumer_exit_s"])
 
     def test_strict_parameters_and_typed_prior_fault(self):
         plan = PlanContext("fault", {})

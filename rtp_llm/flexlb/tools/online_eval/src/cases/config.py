@@ -29,6 +29,7 @@ class CaseBuilder:
         self.parameter_schema = copy.deepcopy(parameter_schema or {})
         self.steps = []
         self.read_parameters = set()
+        self.metric_dependencies = {}
 
     def value(self, path):
         """Read required YAML data; programs provide no hidden fallback values."""
@@ -39,6 +40,16 @@ class CaseBuilder:
                 raise ScenarioError(f"missing YAML parameter {path!r}")
             value = value[part]
         return copy.deepcopy(value)
+
+    def metric(self, identity, *, unit=None, labels=(), mode=None):
+        """Declare a numeric dependency; compilation binds it to the selected plan."""
+        if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", identity):
+            raise ScenarioError("invalid metric id: " + str(identity))
+        requirement = dict(unit=unit, labels=tuple(labels), mode=mode)
+        if identity in self.metric_dependencies and self.metric_dependencies[identity] != requirement:
+            raise ScenarioError("conflicting metric dependency: " + identity)
+        self.metric_dependencies[identity] = requirement
+        return identity
 
     def params(self, path, dynamic):
         values = self.value(path)
@@ -149,7 +160,7 @@ def _merge_environment(base, patch):
 
 
 def program_module(name, source):
-    from cases.programs import PROGRAMS
+    from cases.registry import PROGRAMS
 
     if not isinstance(name, str) or name not in PROGRAMS:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
@@ -207,8 +218,10 @@ def configure_program(config, source):
     parameters = config.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ScenarioError(f"{source}.parameters: expected mapping")
-    variants = config.get("variants", [{"id": "default"}])
-    if not isinstance(variants, list) or not variants:
+    if config.get("program") != "default":
+        raise ScenarioError(f"{source}: every case must declare program: default")
+    variants = config.get("variants", [])
+    if "variants" in config and (not isinstance(variants, list) or not variants):
         raise ScenarioError(f"{source}.variants: expected a nonempty list")
     axis = config.get("variant_axis")
     if "variants" in config:
@@ -233,8 +246,6 @@ def configure_program(config, source):
                 raise ScenarioError(f"{source}: field {field!r} does not belong to declared variant dimension")
     elif axis is not None:
         raise ScenarioError(f"{source}: variant_axis requires variants")
-    if getattr(module, "FLOW_PROGRAMS", ()) and (axis is None or axis["kind"] != "flow" or "program" in config):
-        raise ScenarioError(f"{source}: flow programs require explicit flow variants")
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
@@ -255,7 +266,8 @@ def configure_program(config, source):
         for profile in selected_profiles:
             validate_environment(environment, source + ".environment", profile)
     seen = set()
-    for row in variants:
+    # The root program is always built first; variants only append isolated points.
+    for index, row in enumerate([{"id": "default"}, *variants]):
         _mapping(
             row,
             {
@@ -272,7 +284,7 @@ def configure_program(config, source):
             },
             source + ".variants",
         )
-        if axis is not None:
+        if index and axis is not None:
             for field in _leaf_paths({k: v for k, v in row.items() if k != "id"}):
                 if not any(field == f or field.startswith(f + ".") for f in axis_fields):
                     raise ScenarioError(f"{source}: variant field {field!r} outside declared dimension")
@@ -283,7 +295,7 @@ def configure_program(config, source):
             )
         seen.add(identity)
         program = row.get("program", config.get("program"))
-        if axis is not None and axis["kind"] == "flow":
+        if index and axis is not None and axis["kind"] == "flow":
             if program != identity or program not in getattr(module, "FLOW_PROGRAMS", ()):
                 raise ScenarioError(f"{source}: flow identity must equal a registered flow program")
         build = vars(module).get(program) if isinstance(program, str) else None
@@ -322,6 +334,19 @@ def configure_program(config, source):
         if not isinstance(config.get("test", {}), dict):
             raise ScenarioError(f"{source}.test: expected mapping")
         variant["test"] = normalize_test(copy.deepcopy(config.get("test", {})))
+        if builder.metric_dependencies:
+            from monitoring.query_plan import load_plan, definitions
+            declared = definitions(load_plan(variant["test"]["monitoring"].get("query_plan", "workload.yaml")))
+            missing = set(builder.metric_dependencies) - set(declared)
+            if missing:
+                raise ScenarioError("undeclared metric ids: " + ", ".join(sorted(missing)))
+            for metric_id, requirement in builder.metric_dependencies.items():
+                definition = declared[metric_id]
+                if ((requirement["unit"] is not None and definition["unit"] != requirement["unit"])
+                        or (requirement["mode"] is not None and definition.get("mode") != requirement["mode"])
+                        or not set(requirement["labels"]) <= set(definition["labels"])):
+                    raise ScenarioError("metric dependency unit, mode or identity labels mismatch: " + metric_id)
+
         from reporting.view_config import declaration
 
         reports = config.get("reports") if variant["test"]["kind"] == "workload" else None
@@ -329,6 +354,14 @@ def configure_program(config, source):
             variant["test"]["reports"] = declaration(
                 reports, kind=variant["test"]["kind"], path=source + ".reports"
             )
+            from reporting.view_config import view
+
+            for report_name in reports:
+                required_plan = view(report_name).get("monitoring_query_plan")
+                if required_plan and required_plan != variant["test"]["monitoring"].get("query_plan"):
+                    raise ScenarioError(
+                        f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"
+                    )
         variant.update(
             id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
         )
@@ -348,4 +381,14 @@ def configure_program(config, source):
             ).encode()
         ).hexdigest(),
     }
+    query_plan = config.get("test", {}).get("monitoring", {}).get("query_plan")
+    if query_plan is not None:
+        from monitoring.query_plan import load_plan, plan_hash
+
+        metric_plan = load_plan(query_plan)
+        document.implementation["monitoring_query_plan"] = {
+            "name": query_plan,
+            "sha256": plan_hash(metric_plan),
+            "definition": metric_plan,
+        }
     return document

@@ -110,6 +110,17 @@ def load_performance_bundle(path):
         for key in ("schema_version", "id", "model", "hardware", "status", "source", "prefill_expression"):
             document.pop(key)
         document["calibration"] = Path(path).name
+    prefill = document.get("prefill", {})
+    if isinstance(prefill, dict):
+        if prefill.get("fifo") is not None and {
+            "direct_batch_size_max", "max_batch_requests", "max_batch_tokens"
+        }.intersection(prefill):
+            raise ValueError("prefill.fifo cannot be combined with legacy prefill batch limits")
+        memory = prefill.get("memory_cache", {})
+        if isinstance(memory, dict):
+            obsolete = {"read_ms_per_block", "write_ms_per_block", "copy_lifecycle"}.intersection(memory)
+            if obsolete:
+                raise ValueError(f"unsupported prefill.memory_cache fields: {sorted(obsolete)}")
     capture = document.pop("capture", None)
     if capture is not None:
         if not isinstance(capture, dict) or capture.get("status") not in (
@@ -178,5 +189,4 @@ def load_preset(name):
         runtime["mock_extra_args"] = capture["mock_extra_args"]
     if master:
         runtime["paired_master"] = PairedMasterSettings.from_record(master)
-        runtime["master_provenance"] = master["provenance"]
     return performance, runtime

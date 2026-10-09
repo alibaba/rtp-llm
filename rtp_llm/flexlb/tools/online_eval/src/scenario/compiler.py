@@ -400,7 +400,7 @@ def reference(value, path, outputs, expected=None):
     return kind
 
 
-def stages(values, path, default_timeout, handlers, env=None, profiles=()):
+def stages(values, path, default_timeout, handlers, env=None, profiles=(), case=None):
     if not isinstance(values, list) or not values:
         fail(path, "expected nonempty stage list")
     outputs, compiled = {}, []
@@ -436,6 +436,8 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
         params = copy.deepcopy(value.get("params", {}))
         if action in handlers:
             descriptor = handlers[action]
+            if descriptor.owners and case not in descriptor.owners:
+                fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
             params = descriptor.validate(
                 params,
                 PlanContext(
@@ -744,6 +746,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 handlers,
                 env,
                 selected,
+                getattr(doc, "implementation", {}).get("program"),
             )
             check_ids = set()
             action_requires = set(variant_requires)

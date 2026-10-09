@@ -1,44 +1,32 @@
 schema_version: 2
 case: master_ha_failover
+program: default
+metadata:
+  description: One real frontend prefix-lineage replay across a selectable dual-master restart cycle.
+  category: master
+test:
+  kind: workload
+  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master restart cycle
+  collection: request
+  monitoring:
+    query_plan: master_ha_failover.yaml
 profiles:
 - batch-window
 - single-nonbatch
 environment:
   backend: java_mock
+  perf_preset: glm_5_3_l20d
   master_layout: dual_standalone
   discovery: discovery_file
-  perf_preset: glm_5_3_l20d
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_,flexlb_app_request_network_delay_ms,flexlb_app_grpc_server_process_ms,flexlb_app_routing_queue_wait_time_ms
 execution:
   timeout_s: 2400
   stage_timeout_s: 180
   cleanup_timeout_s: 300
-variant_axis:
-  kind: flow
-  fields: [program]
-variants:
-- id: rolling
-  program: rolling
-- id: non_rolling
-  program: non_rolling
-metadata:
-  description: One real frontend prefix-lineage replay across a selectable dual-master restart cycle.
-  category: master
 parameters:
   dual_master_cycle:
     setup_timeout_s: 600
     flow:
-      targets: [A, B]
-      duration_s: 240
-      timeout_ms: 120000
-      # The long trace is played once. The first 20 minutes at 5x average
-      # about 68 QPS; looping a 15-minute trace either breaks cross-lap cache
-      # reuse when relabeled or invents repeated users when labels are kept.
-      replay_speed: 5
-      loop: false
-      max_concurrency: 4096
-      max_requests: 20000
-      fallback: false
       source:
         kind: trace
         model: prefix_lineage
@@ -53,6 +41,17 @@ parameters:
             mean_tokens: 420
             seed: 20260913
           priority: 50
+      targets: [A, B]
+      duration_s: 240
+      timeout_ms: 120000
+      # The long trace is played once. The first 20 minutes at 5x average
+      # about 68 QPS; looping a 15-minute trace either breaks cross-lap cache
+      # reuse when relabeled or invents repeated users when labels are kept.
+      replay_speed: 5
+      loop: false
+      max_concurrency: 4096
+      max_requests: 20000
+      fallback: false
     baseline_wait: {wait_s: 20}
     settle: {wait_s: 5}
     survivor_wait: {wait_s: 20}
@@ -65,26 +64,27 @@ parameters:
     restart_timeout_s: 300
     finish_timeout_s: 150
     checks:
-      baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
-      b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
-      b_route: {metric: target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
-      b_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      outage_failures: {metric: failed_count, op: ge, expected: 1, min_samples: 50}
-      outage_no_master: {metric: route_count, route: master, op: eq, expected: 0, min_samples: 50}
-      outage_terminal: {metric: visible_terminal_share, op: eq, expected: 1, min_samples: 50}
-      a_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
-      a_route: {metric: target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
-      a_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
-      both_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      handover_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-      late_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
-      rolling_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-      unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
-test:
-  kind: workload
-  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master restart cycle
-  collection: request
+      baseline_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_route: {metric: ha_gate/target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
+      b_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      outage_failures: {metric: ha_gate/failed_count, op: ge, expected: 1, min_samples: 50}
+      outage_no_master: {metric: ha_gate/route_count, route: master, op: eq, expected: 0, min_samples: 50}
+      outage_terminal: {metric: ha_gate/visible_terminal_share, op: eq, expected: 1, min_samples: 50}
+      a_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+      a_route: {metric: ha_gate/target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
+      a_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      both_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+      both_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      handover_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
+      late_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100}
+      rolling_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
+      unique_requests: {metric: ha_gate/duplicate_ids, op: eq, expected: 0, min_samples: 1}
+variant_axis:
+  kind: flow
+  fields: [program]
+variants:
+- id: non_rolling
+  program: non_rolling
 reports:
-- workload.yaml
 - master_ha_core.yaml

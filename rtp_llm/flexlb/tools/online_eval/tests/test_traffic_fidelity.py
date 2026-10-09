@@ -13,7 +13,7 @@ from traffic.derive_synthetic_parameters import derive_parameters
 from traffic.realistic import resolve,iter_requests
 from traffic.datasets import profile_path,trace_models
 from analysis.traffic_fidelity import audit,load_capture,run,compare,grade,ks,thresholds
-from analysis.traffic_fidelity_report import render,markdown
+from reporting.traffic_fidelity import render,markdown
 
 
 def fixture():

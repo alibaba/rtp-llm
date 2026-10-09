@@ -11,9 +11,10 @@ from runtime.load_client import LOAD_CLIENT_ENV_VARS
 from traffic.traffic_source import materialize
 from traffic.playback_config import normalize
 
-from runtime.harness import ClientOps
+from runtime.java_client import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
-from scenario.actions.elastic import _snapshot, _validate
+from scenario.parameters import validate_fields
+from runtime.mock_control import engine_snapshot
 
 
 def _start_validate(params, plan):
@@ -27,7 +28,7 @@ def _start_validate(params, plan):
         "jvm_xms",
         "jvm_xmx",
     }
-    p = _validate(params, plan, fields, fields - {"source", "trace"})
+    p = validate_fields(params, plan, fields, fields - {"source", "trace"})
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")
     if "trace" in p:
@@ -141,7 +142,7 @@ def _start(ctx, p, deadline):
 
 
 def _flow_validate(params, plan):
-    p = _validate(params, plan, {"flow"}, {"flow"})
+    p = validate_fields(params, plan, {"flow"}, {"flow"})
     plan.reference(p["flow"], "java_flow")
     return p
 
@@ -164,7 +165,7 @@ def _drain(ctx, p, deadline):
 
 def _checkpoint_validate(params, plan):
     fields = {"flow", "min_started", "min_terminal", "min_decode_inflight", "engine"}
-    p = _validate(params, plan, fields, fields - {"engine"})
+    p = validate_fields(params, plan, fields, fields - {"engine"})
     plan.reference(p["flow"], "java_flow")
     for k in fields - {"flow", "engine"}:
         if type(p[k]) is not int or p[k] < 0:
@@ -182,7 +183,7 @@ def _checkpoint(ctx, p, deadline):
         while True:
             deadline.check()
             state = flow.status()
-            engines = _snapshot(ctx, deadline)
+            engines = engine_snapshot(ctx, deadline)
             inflight = sum(
                 e["running"] + e["waiting"]
                 for e in engines.values()
@@ -219,7 +220,7 @@ def _checkpoint(ctx, p, deadline):
 
 
 def _check_validate(params, plan):
-    p = _validate(
+    p = validate_fields(
         params, plan, {"flow", "min_success_rate"}, {"flow", "min_success_rate"}
     )
     plan.reference(p["flow"], "java_flow")

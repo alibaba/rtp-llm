@@ -1,0 +1,219 @@
+schema_version: 2
+include:
+- workload.yaml
+produced:
+  ha/sent:
+    producer: ha_evidence
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/success:
+    producer: ha_evidence
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/failed:
+    producer: ha_evidence
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_peak_qps:
+    producer: ha_evidence
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_mean_qps:
+    producer: ha_evidence
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_skew:
+    producer: ha_evidence
+    source_type: derived
+    unit: ratio
+    value_kind: gauge
+    labels: []
+  ha/http_up:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: boolean
+    value_kind: gauge
+    labels:
+    - master
+  ha/scheduler_inflight:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/prefill_inflight_requests:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/decode_master_queued:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/decode_confirmed_running:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha_gate/business_rate_above_one:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/duplicate_ids:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/error_kind_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/failed_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/failed_rate_above_one:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/failover_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/non_ok_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/prefill_max_share:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/prefill_peak_skew:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/route_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/route_share:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/sample_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/success_rate:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/target_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/target_share:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/visible_terminal_count:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/visible_terminal_share:
+    producer: ha_gates
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/wrong_error_code:
+    producer: ha_gates
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection

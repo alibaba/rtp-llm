@@ -5,5 +5,5 @@ ci_suites:
   - request_completion::default
   workload_manual:
   - cache_scale_in::default
-  - master_ha_failover::rolling
+  - master_ha_failover::default
   - master_performance::default

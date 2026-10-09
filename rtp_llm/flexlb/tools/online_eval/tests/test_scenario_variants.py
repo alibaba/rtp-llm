@@ -44,7 +44,7 @@ class VariantProgramsTest(unittest.TestCase):
             compile_scenarios([("dual.yaml", doc)])
 
     def test_startup_prefill_budget_preserves_disabled_zero_and_variant_values(self):
-        from runtime.harness import default_perf
+        from runtime.environment_config import default_perf
 
         doc = scenario()
         disabled = dict(

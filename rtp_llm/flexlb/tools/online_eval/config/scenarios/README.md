@@ -1,25 +1,7 @@
-# Python case 配置目录
+# 场景配置
 
-每份 YAML 声明环境、profile、Python 变体选择、参数和测试元数据，格式版本为 `schema_version: 2`。
-编排与断言位于 [`case_programs/`](../../src/cases/programs)；
-公共 action 位于 `src/scenario/actions/`。
+本目录按 case 名平铺 schema v2 YAML。每个 case 声明 `program: default`；`variants` 只增加额外测试点。运行清单由 `profiles`、变体和 `config/suites.yaml` 决定，以 `list_cases.py` 输出为准。
 
-先读 [框架结构](../../docs/architecture/framework.md) 了解执行和资源模型；
-新增用例按 [如何添加新 case](../../docs/development/adding-cases.md) 操作。
+字段顺序、配置覆盖和新增流程见[新增 case](../../docs/development/adding-cases.md)。执行方式见[运行测试](../../docs/development/running.md)。
 
-从仓库根目录列出当前 CI 必跑实例：
-
-```sh
-python3 rtp_llm/flexlb/tools/online_eval/scripts/commands/list_cases.py \
-  --source rtp_llm/flexlb/tools/online_eval/config/scenarios \
-  --profile batch-window --suite core --list-json
-```
-
-`run_cases.py` 默认读取 `config/suites.yaml` 的 `default_suite`；当前 `core` 在每个 profile 下包含 2 个实例。
-`--suite functional` / `workload` 按实例自己的 `test.kind` 筛选，`--suite all` 选择全部实例。
-文件顶层 `test` 提供公共的 kind、description、collection 和 monitoring。三层合并、profile 键控覆盖与变体维度见 [配置和身份规范](../../docs/development/adding-cases.md#配置层次与-profile-身份)。
-workload case 的 `reports` 列出 `config/report_views/` 下的视图文件；运行前查看这个列表即可知道会生成哪些报告。每个列表都包含 `workload.yaml` 默认全量视图，复杂场景可追加专属视图；functional variant 不生成报告。
-
-所有 YAML 直接放在本目录，文件名采用稳定的 case 名；目录不参与分类或 CI 选例。`perf_preset` 选择模型采集档案。与采集值不同的时延、内存树容量、KV 池容量、PD 规模或公式必须作为测试派生覆盖，使用 `environment.model_override: {baseline: <perf_preset>, reason: <原因>}` 标明基线与原因。合成基线上的参数属于测试输入，不得当成真实部署观测值。块数口径见 [数据规则](../../data/README.md)。
-
-更多配置及资源语义见 [执行器说明](../../src/scenario/README.md)。
+`test.monitoring.query_plan` 选择[指标集合](../monitoring/README.md)，`reports` 选择报告视图。未声明 workload 视图时生成精简门禁报告；全量视图 `workload.yaml` 需显式选择。运行后遍历 `result.json → workload.reports` 取齐 HTML，见[结果与指标](../../docs/development/results.md#收取产物)。

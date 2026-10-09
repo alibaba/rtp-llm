@@ -4,8 +4,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from scenario.actions.master import OwnedHaClient
-from workload.evidence_analysis import analyze_report
+from cases.master_ha_failover.actions import OwnedHaClient
+from workload.evidence_analysis import analyze_report as read_analysis
+
+def analyze_report(directory, result, evidence):
+    from monitoring.metric_store import export_metrics
+    export_metrics(directory)
+    return read_analysis(directory, result, evidence)
 
 
 class EvidenceIntegrityTest(unittest.TestCase):
@@ -281,31 +286,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertEqual(expected, {"1/master-A/x": [3]})
         self.assertEqual(unexpected, {"1/master-A/x": [1, 5], "1/master-B/x": [3]})
 
-    def test_stress_aggregator_never_promotes_unknown_terminal_status(self):
-        import ast
-
-        source = Path(__file__).resolve().parents[1] / "src/analysis/aggregate.py"
-        tree = ast.parse(source.read_text())
-        fn = next(
-            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_ok"
-        )
-        scope = {}
-        exec(
-            compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), scope
-        )
-        predicate = scope["is_ok"]
-        self.assertTrue(predicate(dict(status="ok", error="")))
-        for status in [
-            None,
-            "unknown",
-            "cancelled",
-            "incomplete_response",
-            "empty_response",
-            "engine_error",
-            "schedule_error",
-        ]:
-            self.assertFalse(predicate(dict(status=status, error="")), status)
-        self.assertFalse(predicate(dict(status="ok", error="business failure")))
 
     def test_raw_samples_without_matching_rounds_are_incomplete(self):
         from workload.evidence_analysis import audit_journals

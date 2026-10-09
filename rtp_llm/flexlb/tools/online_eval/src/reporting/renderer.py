@@ -65,78 +65,104 @@ def _present(value):
     return None if value is None or value == "" else value
 
 
+def _text(value):
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, indent=2)
+    return html.escape(str(value), quote=True)
+
+
+def _brief(value, depth=0):
+    if isinstance(value, list):
+        if not value:
+            return "0 项"
+        if all(type(item) in (int, float) for item in value):
+            return f"{len(value)} 项；min={min(value)}，max={max(value)}"
+        return f"{len(value)} 项"
+    if isinstance(value, dict):
+        if depth >= 2:
+            return f"{len(value)} 个字段"
+        return "；".join(str(key) + "=" + _brief(item, depth + 1)
+                        for key, item in list(value.items())[:5]) + ("；…" if len(value) > 5 else "")
+    return str(value)[:180]
+
+
+def _cell(value):
+    if value is None:
+        return "—"
+    encoded = _text(value)
+    if len(encoded) <= 240:
+        return encoded
+    return '<details class="cell-detail"><summary>' + _text(_brief(value)[:260]) + '</summary><pre>' + encoded + '</pre></details>'
+
+
 def render_context(spec):
-    """Show actual run metadata, including every side of a comparison."""
-    meta = spec.get("run_meta")
-    if meta:
-        runs = meta.get("runs") if isinstance(meta, dict) else None
-        cards = runs.items() if isinstance(runs, dict) and runs else [("本次运行", meta)]
-    else:
-        legacy = dict(spec.get("meta") or {})
-        legacy.pop("timeAxis", None)
-        cards = [("本次运行", legacy)]
+    """Grouped key/value cards, with long configuration values expanded on demand."""
+    meta = spec.get("run_meta") or spec.get("meta") or {}
+    runs = meta.get("runs") if isinstance(meta, dict) else None
+    cards = runs.items() if isinstance(runs, dict) and runs else [(None, meta)]
+    names = {"implementation": "代码与制品", "configuration": "配置与模型", "environment": "运行环境与拓扑",
+             "workload": "流量与播放", "evidence": "证据来源"}
     rendered = []
     for label, value in cards:
         value = _present(value)
         if not value:
             continue
-        title = html.escape(str(label), quote=True)
-        data = html.escape(json.dumps(value, ensure_ascii=False, indent=2), quote=True)
-        rendered.append(f'<article class="context-card"><h3>{title}</h3><pre>{data}</pre></article>')
+        groups = []
+        for key, fields in value.items():
+            if key in {"identity", "clock", "timeAxis", "runs"}:
+                continue
+            leaves = []
+            def walk(item, path, depth):
+                if isinstance(item, dict) and depth < (4 if key == "environment" else 2):
+                    for child, entry in item.items():
+                        walk(entry, path + "." + child if path else child, depth + 1)
+                else:
+                    leaves.append('<div class="context-field"><dt>' + _text(path) + '</dt><dd>' + _cell(item) + '</dd></div>')
+            walk(fields, "", 0)
+            groups.append('<article class="context-card"><h3>' + _text(names.get(key, key)) + '</h3><dl>' + ''.join(leaves) + '</dl></article>')
+        if groups:
+            heading = '<h3>' + _text(label) + '</h3>' if label else ''
+            rendered.append(heading + '<div class="context-grid">' + ''.join(groups) + '</div>')
     if not rendered:
         return ""
-    return '<details class="report-context"><summary>运行信息（制品与配置）</summary><div class="context-grid">' + "".join(rendered) + "</div></details>"
+    return '<details class="report-block report-context" open><summary>运行信息（制品与配置）</summary><div class="block-body">' + ''.join(rendered) + '</div></details>'
 
 
 def render_sections(sections):
-    """The only HTML construction boundary for report tables and evidence blocks."""
-
-    def text(value):
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value, ensure_ascii=False, indent=2)
-        return html.escape(str(value), quote=True)
-
+    """All report sections use one collapsible container; tables share cell handling."""
     out = []
     for section in sections:
-        title = text(section.get("title", ""))
+        title = _text(section.get("title", ""))
         kind = section["type"]
         if kind == "details":
-            out.append(
-                f'<details class="attachment"><summary>{title}</summary><pre>{text(section["value"])}</pre></details>'
-            )
+            body = '<pre>' + _text(section["value"]) + '</pre>'
         elif kind == "table":
-            heads = "".join("<th>" + text(c) + "</th>" for c in section["columns"])
-            rows = "".join(
-                "<tr>" + "".join("<td>" + text(v) + "</td>" for v in row) + "</tr>"
-                for row in section["rows"]
-            )
-            out.append(
-                f"<section><h2>{title}</h2><table><thead><tr>{heads}</tr></thead><tbody>{rows}</tbody></table></section>"
-            )
+            heads = ''.join('<th>' + _text(c) + '</th>' for c in section["columns"])
+            rows = ''.join('<tr>' + ''.join('<td>' + _cell(v) + '</td>' for v in row) + '</tr>' for row in section["rows"])
+            body = '<div class="table-scroll"><table><thead><tr>' + heads + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
         elif kind == "links":
             items = []
             for item in section["items"]:
                 href = item["href"]
                 if ":" in href or href.startswith("//"):
                     raise ValueError("report links must be relative artifact paths")
-                items.append(
-                    '<li><a href="'
-                    + text(href)
-                    + '">'
-                    + text(item["label"])
-                    + "</a></li>"
-                )
-            out.append(f'<section><h2>{title}</h2><ul>{"".join(items)}</ul></section>')
+                items.append('<li><a href="' + _text(href) + '">' + _text(item["label"]) + '</a></li>')
+            body = '<ul>' + ''.join(items) + '</ul>'
         else:
             raise ValueError("unsupported report section: " + kind)
-    return '<div class="report-sections">' + "".join(out) + "</div>"
+        opened = section.get("opened", kind == "table")
+        if type(opened) is not bool:
+            raise ValueError("section opened must be boolean")
+        out.append('<details class="report-block attachment"' + (' open' if opened else '') + '><summary>' + title + '</summary><div class="block-body">' + body + '</div></details>')
+    return '<div class="report-sections">' + ''.join(out) + '</div>'
 
 
-def render(spec):
+def render(spec, *, _normalized=False):
     """spec: 见模块 docstring。返回完整 HTML 字符串。"""
     from reporting.assembly import normalize_spec
 
-    spec = normalize_spec(spec)
+    if not _normalized:
+        spec = normalize_spec(spec)
     run_id = spec.get("run_id", "")
     title = spec.get("title") or ("FlexLB 压测报告 · run " + run_id)
     subtitle = spec.get("subtitle") or ""
@@ -183,6 +209,9 @@ def render(spec):
                 "unit": p.get("unit", "") or "",
                 "series": [
                     {
+                        "metric_id": s.get("metric_id"),
+                        "statistics_points": s.get("statistics_points"),
+                        "provenance": s.get("provenance"),
                         "name": s.get("name", ""),
                         "data": s.get("data", []),
                         "points": s.get("points"),
@@ -202,10 +231,6 @@ def render(spec):
     }
 
     sections = list(spec.get("sections", []))
-    if spec.get("run_meta") is not None:
-        sections.append(
-            dict(type="details", title="Run provenance", value=spec["run_meta"])
-        )
     page_title = html.escape(title)
     resource_dir = Path(__file__).resolve().parent / "assets"
     chartjs = (resource_dir / "chart.umd.min.js").read_text(encoding="utf-8")
@@ -235,7 +260,7 @@ _TEMPLATE = r"""<!doctype html>
 <script>__MULTI_CURVE_JS__</script>
 <script>__LEGEND_INTERACTION_JS__</script>
 <style>
-.report-sections{padding:24px}.report-sections table{width:100%;border-collapse:collapse}.report-sections td,.report-sections th{border:1px solid __REPORT_LIGHT_BORDER__;padding:6px;text-align:left}.report-sections pre{white-space:pre-wrap;overflow-wrap:anywhere}.report-sections details{margin:16px 0}
+.report-sections{padding:16px 0}.report-sections table{width:100%;border-collapse:collapse}.report-sections td,.report-sections th{border:1px solid __REPORT_LIGHT_BORDER__;padding:6px;text-align:left}.report-sections pre{white-space:pre-wrap;overflow-wrap:anywhere}.report-sections details{margin:16px 0}
 :root{
   --bg:__REPORT_BACKGROUND__; --card:__REPORT_CARD__; --fg:rgba(0,0,0,0.85); --sub:rgba(0,0,0,0.55);
   --border:rgba(0,0,0,0.08); --danger:__REPORT_DANGER__; --success:__REPORT_SUCCESS__; --warn:__REPORT_WARNING__;
@@ -276,20 +301,29 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .kpi .v{font-size:22px;font-weight:600}
 .kpi .l{color:var(--sub);font-size:12px;margin-top:4px}
 .kpi.success .v{color:var(--success)} .kpi.danger .v{color:var(--danger)} .kpi.warn .v{color:var(--warn)}
-.report-context{margin:0 0 16px}
+.report-block{margin:12px 0;border:1px solid var(--border);border-radius:10px;background:var(--card);overflow:hidden}
+.report-block>summary{list-style:none;cursor:pointer;padding:14px 18px;font-size:15px;font-weight:650;display:flex;align-items:center;gap:10px;background:var(--card)}
+.report-block>summary::before{content:'›';font-size:22px;line-height:1;transition:transform .15s}.report-block[open]>summary::before{transform:rotate(90deg)}
+.report-block>summary:hover{background:var(--bg)}.block-body{padding:0 16px 16px}.table-scroll{overflow:auto;max-height:480px}
+.report-block pre,.cell-detail pre{max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:var(--bg);padding:12px;border-radius:6px}
+.cell-detail summary{cursor:pointer;overflow-wrap:anywhere;color:var(--sub)}
+.report-context{margin:0 0 18px}.context-card dl{margin:0;max-height:360px;overflow:auto;padding-right:6px}.context-field{padding:7px 0;border-top:1px solid var(--border)}
+.context-field dt{font-size:12px;color:var(--sub);overflow-wrap:anywhere}.context-field dd{margin:3px 0 0;font-size:13px;overflow-wrap:anywhere}
+
 .report-context h2{font-size:15px;margin:0 0 8px}
 .context-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
 .context-card{min-width:0;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
 .context-card h3{font-size:13px;margin:0 0 8px}
-.context-card pre,.report-sections .attachment pre{max-height:280px;overflow:auto;margin:0;padding:10px 12px;background:__REPORT_CODE_BACKGROUND__;border:1px solid var(--border);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+.context-card pre,.report-sections .attachment pre{max-height:280px;overflow:auto;margin:0;padding:10px 12px;background:__REPORT_CODE_BACKGROUND__;border:1px solid var(--border);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 .report-sections .attachment{margin:10px 0;border:1px solid var(--border);border-radius:8px;background:var(--card)}
-.report-sections .attachment summary{cursor:pointer;padding:10px 14px;font-weight:600}
+.report-sections .attachment>summary{cursor:pointer;padding:10px 14px;font-weight:600}
 .report-sections .attachment pre{margin:0 12px 12px}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
 .panel h3{margin:0 0 4px;font-size:15px;overflow-wrap:anywhere}
 .panel .cap{color:var(--sub);font-size:12px;margin-bottom:8px}
 .panel .box{height:280px;position:relative}
+@media(max-width:700px){body{padding:12px}.context-grid{grid-template-columns:1fr}.multi-range{margin-left:0}.multi-plot{height:380px!important}.multi-hover-row{min-width:0!important}}
 </style></head><body>
 <header>
   <h1 id="title"></h1><div class="sub" id="subtitle"></div>
@@ -353,7 +387,7 @@ const TIME_AXIS = (SPEC.timeAxis
 const TA_MIN = TIME_AXIS ? TIME_AXIS.min : undefined;
 const TA_MAX = TIME_AXIS ? TIME_AXIS.max : undefined;
 SPEC.panels.forEach(p=>{
-  if (p.representation === 'multi') { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:SPEC.events || []}); return; }
+  if (p.representation === 'multi') { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:p.events || SPEC.events || []}); return; }
   const wrap=document.createElement('div'); wrap.className='panel';
   wrap.innerHTML='<h3></h3><div class="cap"></div><div class="box"><canvas></canvas></div>';
   wrap.querySelector('h3').textContent=p.title;

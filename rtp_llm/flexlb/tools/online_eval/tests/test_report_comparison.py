@@ -9,8 +9,10 @@ from unittest import mock
 
 from reporting import load_analysis, read_bundle, run_meta, write_bundle
 from reporting.comparison import compare, main
-from workload.performance_gate import report
-from workload.cache_gate import analyze as analyze_cache, write_report
+from cases.master_performance.publication import publish_performance as report
+from cases.master_performance.analysis import analyze as analyze_performance
+from cases.cache_scale_in.analysis import analyze as analyze_cache
+from cases.cache_scale_in.publication import publish_cache as write_report
 from test_performance_gate import evidence
 import test_cache_scale_gate as cache_fixtures
 
@@ -50,8 +52,8 @@ class ReportComparisonTest(unittest.TestCase):
         paths = [self.bundle('a'), self.bundle('b', verdict='FAIL', value=30),
                  self.bundle('c', verdict='INVALID', value=None)]
         before = [{p.name: p.read_bytes() for p in d.iterdir()} for d in paths]
-        with mock.patch('workload.performance_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.cache_gate.analyze', side_effect=AssertionError('reanalysis')):
+        with mock.patch('cases.master_performance.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.cache_scale_in.analysis.analyze', side_effect=AssertionError('reanalysis')):
             result = compare(paths, self.output())
         self.assertEqual({k: v['verdict'] for k, v in result['runs'].items()},
                          dict(A='PASS', B='FAIL', C='INVALID'))
@@ -161,11 +163,11 @@ class ReportComparisonTest(unittest.TestCase):
         a, b = evidence(), evidence()
         b['criteria']['min_output_tps'] = 10000
         b['provenance']['actual_master_config']['dispatcher']['type'] = 'NON_BATCH'
-        paths = [report(self.root/name, e) for name, e in (('a', a), ('b', b))]
+        paths = [report(self.root/name, e, analyze_performance(e)) for name, e in (('a', a), ('b', b))]
         expected = [load_analysis(p) for p in paths]
         a['criteria']['min_output_tps'] = 10000
-        with mock.patch('workload.performance_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.performance_gate.report', side_effect=AssertionError('rebuild')):
+        with mock.patch('cases.master_performance.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.master_performance.report.write_report', side_effect=AssertionError('rebuild')):
             result = compare(paths, self.output())
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['PASS', 'FAIL'])
@@ -187,8 +189,8 @@ class ReportComparisonTest(unittest.TestCase):
             root = self.root/name
             write_report(root, e, result)
             paths.append(root/'reports/run/cache-scale-in')
-        with mock.patch('workload.cache_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.cache_gate.prepare_report', side_effect=AssertionError('rebuild')):
+        with mock.patch('cases.cache_scale_in.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.cache_scale_in.report.prepare_report', side_effect=AssertionError('rebuild')):
             result = compare(paths, self.output(), alignment_event='checkpoint')
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['FAIL', 'PASS'])

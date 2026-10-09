@@ -1,7 +1,8 @@
 """Shared extension contracts for scenario adapters and child-runner integration.
 
-Adapters live in scenario/actions and export HANDLERS, without mutating the
-registry at import time. The core explicitly collects those descriptors.
+Foundations export HANDLERS from scenario/actions. Case programs declare
+ACTION_HANDLERS from cases/<case>/actions.py. The catalog collects descriptors explicitly;
+modules do not mutate a registry at import time.
 """
 
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ class StageHandler:
     # Callable receives normalized params and the selected profile.
     max_environment_workers: object = 0
     next_environment: object = None  # normalized params -> next raw environment
+    owners: frozenset[str] = frozenset()  # empty means foundational
 
 
 @dataclass(frozen=True)

@@ -92,7 +92,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         w = {p["id"] for p in classify(plans, "workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
-        self.assertIn("master_ha_failover::rolling::batch-window", w)
+        self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]

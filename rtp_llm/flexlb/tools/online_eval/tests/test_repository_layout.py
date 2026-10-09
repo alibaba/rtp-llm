@@ -44,11 +44,9 @@ class RepositoryLayoutTest(unittest.TestCase):
 
     def test_commands_work_outside_repository(self):
         commands = [
-            ("scripts/commands/run_stress.py", ["--help"]),
             ("scripts/commands/run_cases.py", ["--help"]),
             ("scripts/commands/list_cases.py", ["--help"]),
             ("scripts/commands/compare_runs.py", ["--help"]),
-            ("scripts/commands/render_stress_report.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:
             for command, arguments in commands:
@@ -82,6 +80,14 @@ class RepositoryLayoutTest(unittest.TestCase):
             "flexlb_functional_tests.py",
             "paired_case_runner.py",
             "legacy_paired_runner.py",
+            "scripts/commands/run_stress.py",
+            "scripts/commands/render_stress_report.py",
+            "scripts/pipeline/calculate_metrics.py",
+            "scripts/pipeline/organize_evidence.py",
+            "src/runtime/stress.py",
+            "src/analysis/aggregate.py",
+            "src/analysis/consolidate.py",
+            "src/reporting/stress_report.py",
         ]:
             self.assertFalse((ROOT / path).exists(), path)
         self.assertFalse(
@@ -98,15 +104,6 @@ class RepositoryLayoutTest(unittest.TestCase):
             self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
         self.assertFalse((ROOT / "scenarios").exists())
         self.assertTrue((ROOT / "config/scenarios").is_dir())
-
-    def test_stress_entry_resolves_roots_outside_repository(self):
-        with tempfile.TemporaryDirectory() as cwd:
-            result = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/commands/run_stress.py"), "--dry-run"],
-                cwd=cwd, text=True, capture_output=True, timeout=10,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout)["mode"]["runtime"], "stress")
 
 
 if __name__ == "__main__":

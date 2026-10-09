@@ -59,7 +59,7 @@ class EngineFaultTests(unittest.TestCase):
         self.assertEqual(ef.validate_inject(valid, self.plan), valid)
 
     def test_ack_is_not_effect_and_clear_is_idempotent(self):
-        with patch.object(ef, "_http", side_effect=self.http):
+        with patch.object(ef, "control_json", side_effect=self.http):
             output = ef.inject(self.ctx, self.params, self.deadline)
             fault = self.ctx.resource(output.output["fault"], "engine_fault")
             self.assertTrue(fault.evidence["control_acknowledged"])
@@ -82,7 +82,7 @@ class EngineFaultTests(unittest.TestCase):
                 raise TimeoutError("ack lost after mutation")
             return self.http(ops, endpoint, deadline, body)
 
-        with patch.object(ef, "_http", side_effect=lost):
+        with patch.object(ef, "control_json", side_effect=lost):
             with self.assertRaises(TimeoutError):
                 ef.inject(self.ctx, self.params, self.deadline)
             self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
@@ -95,7 +95,7 @@ class EngineFaultTests(unittest.TestCase):
         self.assertEqual(data["pending_clear"], [])
 
     def test_clear_failure_attempts_other_targets_and_retries_failed_only(self):
-        with patch.object(ef, "_http", side_effect=self.http):
+        with patch.object(ef, "control_json", side_effect=self.http):
             output = ef.inject(self.ctx, self.params, self.deadline)
         fault = self.ctx.resource(output.output["fault"], "engine_fault")
 
@@ -104,17 +104,17 @@ class EngineFaultTests(unittest.TestCase):
                 raise RuntimeError("control unavailable")
             return self.http(ops, endpoint, deadline, body)
 
-        with patch.object(ef, "_http", side_effect=bad), self.assertRaises(
+        with patch.object(ef, "control_json", side_effect=bad), self.assertRaises(
             RuntimeError
         ):
             fault.cleanup(self.deadline)
         self.assertEqual(fault.pending, {"p0"})
-        with patch.object(ef, "_http", side_effect=self.http):
+        with patch.object(ef, "control_json", side_effect=self.http):
             self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
         self.assertEqual(fault.pending, set())
 
     def test_overlap_rejected_and_clear_releases_ownership(self):
-        with patch.object(ef, "_http", side_effect=self.http):
+        with patch.object(ef, "control_json", side_effect=self.http):
             output = ef.inject(self.ctx, self.params, self.deadline)
             with self.assertRaisesRegex(ValueError, "overlapping"):
                 ef.inject(self.ctx, self.params, self.deadline)
@@ -126,7 +126,7 @@ class EngineFaultTests(unittest.TestCase):
         for state in (None, True):
             snap = self.http(None, "snapshot", None)
             snap["engines"][0]["inject_config"]["generate_error"] = state
-            with patch.object(ef, "_http", return_value=snap) as http:
+            with patch.object(ef, "control_json", return_value=snap) as http:
                 with self.assertRaises(ValueError):
                     ef.inject(self.ctx, self.params, self.deadline)
                 self.assertEqual(http.call_count, 1)
@@ -139,7 +139,7 @@ class EngineFaultTests(unittest.TestCase):
                 result["type"] = "enqueue_error"
             return result
 
-        with patch.object(ef, "_http", side_effect=wrong):
+        with patch.object(ef, "control_json", side_effect=wrong):
             with self.assertRaises(ValueError):
                 ef.inject(self.ctx, self.params, self.deadline)
             self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
@@ -151,7 +151,7 @@ class EngineFaultTests(unittest.TestCase):
                 result["port"] = 2
             return result
 
-        with patch.object(ef, "_http", side_effect=wrong):
+        with patch.object(ef, "control_json", side_effect=wrong):
             with self.assertRaises(ValueError):
                 ef.inject(self.ctx, self.params, self.deadline)
             self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
@@ -160,7 +160,7 @@ class EngineFaultTests(unittest.TestCase):
         self.ctx.outputs["add"] = {"engine": "p0"}
         params = dict(self.params, targets=[{"$ref": "stages.add.output.engine"}])
         params = ef.validate_inject(params, self.plan)
-        with patch.object(ef, "_http", side_effect=self.http) as http:
+        with patch.object(ef, "control_json", side_effect=self.http) as http:
             output = ef.inject(self.ctx, params, self.deadline)
             self.ctx.env_epoch += 1
             with self.assertRaisesRegex(ValueError, "stale"):

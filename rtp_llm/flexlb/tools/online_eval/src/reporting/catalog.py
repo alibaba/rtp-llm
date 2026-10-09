@@ -87,40 +87,6 @@ def series_color(tone, index):
     return TONE_TO_COLOR.get(tone, PALETTE[index % len(PALETTE)])
 
 
-CACHE_METRICS = {
-        ("mock", "running_avg"): ("P Running / engine", "队列", "queue", "streams", "#1677ff", False),
-        ("mock", "running_max"): ("P Running max", "队列", "queue", "streams", "#69b1ff", True),
-        ("mock", "waiting_avg"): ("P Waiting / engine", "队列", "queue", "streams", "#f5222d", False),
-        ("mock", "waiting_max"): ("P Waiting max", "队列", "queue", "streams", "#ff7875", True),
-        ("mock", "engine_count"): ("P engine count", "规模", "count", "engines", "#722ed1", False),
-        ("mock", "cache_hit_ratio"): ("P cache hit ratio", "缓存", "ratio", "", "#13c2c2", False),
-        ("mock", "context_wall_tps"): ("P compute token throughput", "性能", "tokens", "tokens/s", "#52c41a", True),
-        ("mock", "context_execution_tps_avg"): ("P model forward TPS", "性能", "tokens", "tokens/s", "#389e0d", False),
-        ("mock", "context_execution_tps_with_cache_avg"): ("P model forward TPS incl. cache", "性能", "tokens", "tokens/s", "#95de64", True),
-        ("mock", "simulated_prefill_ms_avg"): ("P simulated model forward", "性能", "ms", "ms", "#fa8c16", True),
-        ("mock", "context_completed_qps"): ("P completed QPS", "流量", "qps", "req/s", "#08979c", False),
-        ("mock", "accepted_qps"): ("P accepted QPS", "流量", "qps", "req/s", "#36cfc9", True),
-        ("mock", "rtp_llm_kv_cache_pool_total_blocks"): ("P KV total blocks", "KV", "blocks", "blocks", "#531dab", True),
-        ("mock", "rtp_llm_kv_cache_pool_available_blocks"): ("P KV available blocks", "KV", "blocks", "blocks", "#b37feb", True),
-        ("mock", "mock_engine_held_blocks"): ("P held blocks", "KV", "blocks", "blocks", "#ad6800", True),
-        ("mock", "mock_engine_referenced_blocks"): ("P referenced blocks", "KV", "blocks", "blocks", "#d48806", True),
-        ("client", "actual_send_qps"): ("Client sent QPS", "流量", "qps", "req/s", "#2f54eb", False),
-        ("client", "success_qps"): ("Client success QPS", "流量", "qps", "req/s", "#52c41a", False),
-        ("client", "error_qps"): ("Client error QPS", "流量", "qps", "req/s", "#cf1322", False),
-        ("client", "completed_qps"): ("Client completed QPS", "流量", "qps", "req/s", "#597ef7", True),
-        ("client", "ttft_p99_seconds"): ("TTFT p99", "延迟", "seconds", "s", "#fa541c", True),
-        ("client", "total_p99_seconds"): ("Total latency p99", "延迟", "seconds", "s", "#faad14", True),
-        ("client", "schedule_p99_seconds"): ("Schedule latency p99", "延迟", "seconds", "s", "#d4b106", True),
-        ("master", "arrivals_qps"): ("Master arrival QPS", "流量", "qps", "req/s", "#1d39c4", True),
-        ("master", "completions_qps"): ("Master legacy schedule response QPS", "流量", "qps", "req/s", "#237804", True),
-        ("master", "schedule_responses_qps"): ("Master schedule response QPS", "流量", "qps", "req/s", "#237804", True),
-        ("master", "flexlb_app_flexlb_batcher_queue_size"): ("Master batcher queue", "Master", "count", "requests", "#c41d7f", True),
-        ("master", "flexlb_app_flexlb_scheduler_inflight_size"): ("Master scheduler inflight", "Master", "count", "requests", "#eb2f96", True),
-        ("master", "flexlb_app_flexlb_inflight_request_count"): ("Master inflight requests", "Master", "count", "requests", "#9e1068", False),
-        ("master", "flexlb_auto_tpm_decode_reserved_count"): ("Master decode reserved", "Master", "count", "requests", "#7cb305", True),
-        ("master", "flexlb_auto_tpm_decode_running_count"): ("Master decode running", "Master", "count", "requests", "#a0d911", True),
-    }
-
 FIDELITY_THEME = {
     "BACKGROUND": "#F5F6FA", "CARD": "#fff", "REAL": "#2563eb",
     "INDEPENDENT": "#d97706", "JOINT": "#059669",

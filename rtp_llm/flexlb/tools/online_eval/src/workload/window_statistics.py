@@ -2,7 +2,7 @@
 
 import math
 
-from reporting.statistics import percentile_nr
+from analysis.statistics import percentile_nr
 
 FIELDS = {
     "ttft_ms": "ms",
@@ -78,5 +78,5 @@ def measure(report, selection, lower, upper):
         status="AVAILABLE",
         value=value,
         samples=len(selected),
-        semantics="half-open window; explicit send/completion cohort; pooled nearest-rank percentile (reporting.statistics.percentile_nr)",
+        semantics="half-open window; explicit send/completion cohort; pooled nearest-rank percentile (analysis.statistics.percentile_nr)",
     )

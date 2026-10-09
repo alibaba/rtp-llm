@@ -1,49 +1,286 @@
 kind: produced
-report: master-performance
-producer: performance-gate
 title: Master 性能绝对门禁
 subtitle: '{verdict}'
+monitoring_query_plan: master_performance.yaml
+report: master-performance
+producer: performance-gate
+curves:
+  mock/rtp_llm_context_tps_engine_mean/P:
+    metric_id: mock/rtp_llm_context_tps_engine_mean
+    labels:
+      role: prefill
+    name: P context TPS
+    group: Prefill TPS
+    axis: forward
+    primary: true
+  mock/rtp_llm_context_tps_with_cache_engine_mean/P:
+    metric_id: mock/rtp_llm_context_tps_with_cache_engine_mean
+    labels:
+      role: prefill
+    name: P context TPS（含缓存）
+    group: Prefill TPS
+    axis: forward
+    primary: true
+  mock/rtp_llm_generate_tps_engine_mean/D:
+    metric_id: mock/rtp_llm_generate_tps_engine_mean
+    labels:
+      role: decode
+    name: D generate TPS
+    group: Decode TPS
+    axis: forward
+    primary: true
+  mock/cache_hit_ratio/P:
+    metric_id: mock/cache_hit_ratio
+    labels:
+      role: prefill
+    name: P 实际 token 命中率
+    group: 缓存命中率
+    unit: '%'
+    axis: hit_pct
+    scale: 100
+    primary: false
+    source_unit: ratio
+  mock/simulated_prefill_ms_avg/P:
+    metric_id: mock/simulated_prefill_ms_avg
+    labels:
+      role: prefill
+    name: P model forward 均值
+    group: 延迟
+    axis: ms
+    primary: false
+  mock/prefill_batch_size_mean/P:
+    metric_id: mock/prefill_batch_size_mean
+    labels:
+      role: prefill
+    name: P batch size 均值
+    group: Prefill Batch
+    axis: batch
+    primary: false
+  mock/prefill_batch_size_p50/P:
+    metric_id: mock/prefill_batch_size_p50
+    labels:
+      role: prefill
+    name: P batch size P50
+    group: Prefill Batch
+    axis: batch
+    primary: false
+  mock/prefill_batch_size_p90/P:
+    metric_id: mock/prefill_batch_size_p90
+    labels:
+      role: prefill
+    name: P batch size P90
+    group: Prefill Batch
+    axis: batch
+    primary: false
+  mock/prefill_batch_size_p99/P:
+    metric_id: mock/prefill_batch_size_p99
+    labels:
+      role: prefill
+    name: P batch size P99
+    group: Prefill Batch
+    axis: batch
+    primary: false
+  mock/running_avg/P:
+    metric_id: mock/running_avg
+    labels:
+      role: prefill
+    name: P Running / engine
+    group: Prefill 状态
+    axis: count
+    primary: false
+  mock/running_max/P:
+    metric_id: mock/running_max
+    labels:
+      role: prefill
+    name: P Running max
+    group: Prefill 状态
+    axis: count
+    primary: false
+  mock/waiting_avg/P:
+    metric_id: mock/waiting_avg
+    labels:
+      role: prefill
+    name: P Waiting / engine
+    group: Prefill 状态
+    axis: count
+    primary: false
+  mock/waiting_max/P:
+    metric_id: mock/waiting_max
+    labels:
+      role: prefill
+    name: P Waiting max
+    group: Prefill 状态
+    axis: count
+    primary: false
+  client/schedule_p99_seconds:
+    metric_id: client/schedule_p99_seconds
+    labels: {}
+    name: 调度等待 p99
+    group: 延迟
+    unit: ms
+    axis: ms
+    scale: 1000
+    primary: false
+    source_unit: s
+  request/sent_qps:
+    metric_id: request/sent_qps
+    labels: {}
+    name: 发送 QPS
+    group: 流量
+    axis: qps
+  request/success_qps:
+    metric_id: request/success_qps
+    labels: {}
+    name: 成功 QPS
+    group: 流量
+    axis: qps
+  request/error_qps:
+    metric_id: request/error_qps
+    labels: {}
+    name: 错误 QPS
+    group: 流量
+    axis: qps
+  request/ttft_p99_ms:
+    metric_id: request/ttft_p99_ms
+    labels: {}
+    name: TTFT p99
+    group: 延迟
+    axis: ms
+  request/input_tps:
+    metric_id: request/input_tps
+    labels: {}
+    name: 完成输入 TPS
+    group: 客户端吞吐
+    unit: tokens/s
+    axis: input
+  request/output_tps:
+    metric_id: request/output_tps
+    labels: {}
+    name: 完成输出 TPS
+    group: 客户端吞吐
+    unit: tokens/s
+    axis: output
+  request/inflight:
+    metric_id: request/inflight
+    labels: {}
+    name: Client inflight
+    group: 队列
+    unit: requests
+    axis: count
+  request/completed_qps:
+    metric_id: request/completed_qps
+    labels: {}
+    name: 完成 QPS
+    group: 流量
+    unit: requests/s
+    axis: qps
+  request/arrival_success_ratio:
+    metric_id: request/arrival_success_ratio
+    labels: {}
+    name: 到达 cohort 成功率
+    group: 流量
+    unit: ratio
+    axis: ratio
+  request/e2e_p99_ms:
+    metric_id: request/e2e_p99_ms
+    labels: {}
+    name: E2E p99
+    group: 延迟
+    unit: ms
+    axis: ms
+  request/tpot_p99_ms:
+    metric_id: request/tpot_p99_ms
+    labels: {}
+    name: TPOT p99
+    group: 延迟
+    unit: ms
+    axis: ms
+  request/input_tokens_mean:
+    metric_id: request/input_tokens_mean
+    labels: {}
+    name: 输入长度均值
+    group: 流量
+    unit: tokens
+    axis: tokens
+  request/output_tokens_mean:
+    metric_id: request/output_tokens_mean
+    labels: {}
+    name: 实际输出长度均值
+    group: 流量
+    unit: tokens
+    axis: tokens
 panels:
 - id: engine-tps
   title: 三项引擎 TPS 与门禁线
-  names: [P context TPS, P context TPS（含缓存）, D generate TPS]
+  curve_ids:
+  - mock/rtp_llm_context_tps_engine_mean/P
+  - mock/rtp_llm_context_tps_with_cache_engine_mean/P
+  - mock/rtp_llm_generate_tps_engine_mean/D
   axes:
-    forward: {title: 单引擎平均 tokens/s, position: left}
+    forward:
+      title: 单引擎平均 tokens/s
+      position: left
   caption: 三项均为同一采样点按引擎等权平均的执行 TPS；虚线为各自的绝对下界，不是集群 TPS。
   empty_caption: 缺少引擎 TPS 采样；门禁结果仍以原始证据判定。
 - id: client-qps
   title: 发送 / 成功 / 失败 QPS
-  names: [发送 QPS, 成功 QPS, 错误 QPS]
+  curve_ids:
+  - request/sent_qps
+  - request/success_qps
+  - request/error_qps
   axes:
-    qps: {title: 请求 / 秒, position: left}
+    qps:
+      title: 请求 / 秒
+      position: left
   caption: 发送按请求发出时间分桶，成功和失败按终态时间分桶，均为每秒请求数。
   empty_caption: 缺少逐请求终态证据，无法绘制 QPS。
 - id: latency
   title: TTFT / 调度等待 / Model forward
-  names: [TTFT p99, 调度等待 p99, P model forward 均值]
+  curve_ids:
+  - request/ttft_p99_ms
+  - client/schedule_p99_seconds
+  - mock/simulated_prefill_ms_avg/P
   axes:
-    ms: {title: 毫秒, position: left}
-  caption: TTFT 为 1 秒到达 cohort 的逐请求 p99；调度等待为客户端 schedule 直方图的 10 秒窗口 p99，包含调度处理；Model forward 为 Mock Prefill 引擎均值。三条曲线采样口径不同，不能相减。
+    ms:
+      title: 毫秒
+      position: left
+  caption: TTFT 为 1 秒到达 cohort 的逐请求 p99；调度等待为客户端 schedule 直方图的 10 秒窗口 p99，包含调度处理；Model
+    forward 为 Mock Prefill 引擎均值。三条曲线采样口径不同，不能相减。
   empty_caption: 缺少延迟采样，无法绘制延迟曲线。
 - id: cache-hit
   title: Prefill 实际 token 命中率
-  names: [P 实际 token 命中率]
+  curve_ids:
+  - mock/cache_hit_ratio/P
   axes:
-    hit_pct: {title: 命中率 %, position: left}
+    hit_pct:
+      title: 命中率 %
+      position: left
   caption: Prefill 的 mock_hit_tokens_total 与 mock_context_tokens_total 在同一 10 秒窗口的速率之比；分母为零或缺采时断线。
   empty_caption: 缺少有效的 Prefill token 命中率采样；不补零，也不使用理论路由命中率替代。
 - id: prefill-batch
   title: Prefill 实际执行 batch size 分布
-  names: [P batch size 均值, P batch size P50, P batch size P90, P batch size P99]
+  curve_ids:
+  - mock/prefill_batch_size_mean/P
+  - mock/prefill_batch_size_p50/P
+  - mock/prefill_batch_size_p90/P
+  - mock/prefill_batch_size_p99/P
   axes:
-    batch: {title: 请求 / 执行批, position: left}
+    batch:
+      title: 请求 / 执行批
+      position: left
   caption: 每个 P 执行批更新正式 Prometheus 直方图；均值为 10 秒窗口 sum/count，P50/P90/P99 由同一窗口的直方图桶估算。无执行批或缺采时断线。
   empty_caption: 缺少 Prefill 执行批直方图，无法绘制 batch size 分布。
 - id: prefill-state
   title: Prefill Waiting / Running
-  names: [P Waiting / engine, P Waiting max, P Running / engine, P Running max]
+  curve_ids:
+  - mock/waiting_avg/P
+  - mock/waiting_max/P
+  - mock/running_avg/P
+  - mock/running_max/P
   axes:
-    count: {title: 请求数 / P 引擎, position: left}
+    count:
+      title: 请求数 / P 引擎
+      position: left
   caption: 每个采样点分别展示 P 引擎等待和执行中请求数的引擎均值与单引擎最大值；不含 Decode 预约。
   empty_caption: 缺少 Prefill Waiting / Running 监控采样。
 sections:
@@ -51,4 +288,9 @@ sections:
   monitoring: 监控曲线来源与缺采
   validity: 有效性
   metrics: 指标
-criteria_columns: [指标, 实际值, 标准, 结果]
+criteria_columns:
+- 指标
+- 实际值
+- 标准
+- 结果
+unlisted: heuristic_diagnostic

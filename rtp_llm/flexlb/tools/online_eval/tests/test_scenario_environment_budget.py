@@ -132,7 +132,7 @@ class EnvironmentBudgetTest(unittest.TestCase):
             mock_base=55000,
         )[0].to_manifest()
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "runtime.harness.EnvManager.ensure"
+            "runtime.environment.EnvManager.ensure"
         ) as ensure:
             ctx = RuntimeContext(instance, None, tmp, time.monotonic, time.sleep)
             ctx.env_epoch = 1

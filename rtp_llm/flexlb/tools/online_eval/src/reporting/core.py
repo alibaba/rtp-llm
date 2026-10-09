@@ -6,12 +6,12 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 
 
-def details(title, value):
-    return dict(type="details", title=title, value=value)
+def details(title, value, *, opened=False):
+    return dict(type="details", title=title, value=value, opened=opened)
 
 
-def table(title, columns, rows):
-    return dict(type="table", title=title, columns=list(columns), rows=list(rows))
+def table(title, columns, rows, *, opened=True):
+    return dict(type="table", title=title, columns=list(columns), rows=list(rows), opened=opened)
 
 
 def links(title, items):
@@ -113,7 +113,7 @@ def bundle_path(root, kind, identity):
     return Path(root) / "reports" / kind / _slug(identity)
 
 
-def render(spec):
+def render(spec, *, _normalized=False):
     if spec.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
         raise ValueError("unsupported report spec version")
     ids = set()
@@ -123,9 +123,20 @@ def render(spec):
         if panel["id"] in ids:
             raise ValueError("duplicate panel id: " + panel["id"])
         ids.add(panel["id"])
+        axes = panel.get("axes", {})
+        if panel.get("overlay") and not axes:
+            raise ValueError("overlay panel lacks axes: " + panel["id"])
+        if axes:
+            for series in panel.get("series", []):
+                axis = series.get("axis", "y")
+                if axis not in axes:
+                    raise ValueError(
+                        f"panel {panel['id']} series {series.get('name', '')!r} "
+                        f"uses undeclared axis {axis!r}"
+                    )
     from reporting.renderer import render as render_html
 
-    return render_html(spec)
+    return render_html(spec, _normalized=_normalized)
 
 
 def _json(value):
@@ -166,7 +177,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     outputs = {
         "analysis.json": _json(result),
         "report-spec.json": _json(spec),
-        "report.html": render(spec),
+        "report.html": render(spec, _normalized=True),
     }
     # Layout adapters emit links relative to this final bundle directory.
     for name, content in outputs.items():

@@ -1,16 +1,15 @@
 # 配置目录
 
-配置是测试输入，不是运行结果。根目录历史兼容文件 `mode_profiles.yaml` 与这里的同名软链接指向同一份模式表。
+配置保存手写测试输入，运行结果写入 `run/`。
 
-| 位置 | 内容与用途 |
+| 位置 | 内容 |
 |---|---|
-| `scenarios/` | 按 case 名扁平存放 YAML；实例性质、说明和采集档位由文件内的 `test` 声明，variant 可覆盖。 |
-| `suites.yaml` | CI 必跑 `case::variant` 清单及默认 suite；不定义实例性质或监控参数。 |
-| `report_views/` | 默认与场景专属报告视图，由 case 的 `reports` 列表引用。 |
-| `performance_presets.json` | 性能预设登记表，指向 `data/performance/` 的采集档案；只登记选择关系与不属于采集档案的运行参数。 |
-| `load_client_env.txt` | Java load client 的环境变量清单。 |
-| `mode_profiles.yaml` | 指向根目录同名表的链接，供模式配置统一管理。 |
+| `scenarios/` | case 的身份、环境、参数、变体和视图选择，见[场景配置](scenarios/README.md) |
+| `suites.yaml` | 默认 suite 与 CI 的 `case::variant` 清单 |
+| `monitoring/` | 指标集合、PromQL 与 Python 输出声明，见[指标配置](monitoring/README.md) |
+| `report_views/` | 指标绑定、面板和展示属性 |
+| `performance_presets.json` | 引用 `data/performance/` 采集档案的登记表 |
+| `load_client_env.txt` | Java 客户端环境参数 |
+| `mode_profiles.yaml` | 链接到根目录的运行模式表 |
 
-用例结构及实例列表见 [scenarios/README.md](scenarios/README.md)。
-
-模型/硬件档中照抄自部署的时延、容量、规模与块口径只在一份采集档案定义；preset 和 scenario 引用它。新档必须有可核验的部署身份、采集窗口、完整性信息；`legacy_unverified` 仅供兼容既有输入，不能作为新权威。测试专用偏离须在 scenario 的 `model_override` 声明基线与原因，不能用平行真值覆盖档案。各类块数的具体口径见 [数据规则](../data/README.md)。
+字段顺序及覆盖见[新增 case](../docs/development/adding-cases.md)。采集档案的身份、完整性、块数口径与测试派生规则见[数据规则](../data/README.md)，不在配置登记表重复维护观测真值。

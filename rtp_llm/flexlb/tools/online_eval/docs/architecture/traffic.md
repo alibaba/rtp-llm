@@ -20,7 +20,7 @@
 | `trace/prefix_lineage/2` | SHA 固定的 XZ 列式模型 | 原始相对毫秒 | 实测前缀结构；token 长度块对齐有损 |
 | `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
 
-压测入口通过注册表将匿名模型或 `TRAFFIC_SOURCE_SPEC` 指定的参数化源物化到运行目录。
+场景通过 YAML 声明的 source specification，使用注册表将匿名模型或参数化源物化到运行目录。
 `TRACE_FILE` 只作为生成后的 Java 发送器输入，不能指定原始日志。未知版本直接拒绝。
 
 ### Lineage v3

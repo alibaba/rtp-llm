@@ -22,7 +22,6 @@ from flexlb_cfg import (  # noqa: E402
     PROFILES,
     STRESS_PROFILE,
     ConfigOverride,
-    parse_overrides,
     render_env,
     render_process_config,
 )
@@ -244,8 +243,6 @@ class StressOverrideTest(unittest.TestCase):
         ):
             with self.assertRaises(TypeError):
                 ConfigOverride(**{key: 1})
-            with self.assertRaises(ValueError):
-                parse_overrides(f"{key}=1")
 
     def test_decision_single_drops_window_keys(self) -> None:
         doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(decision="single")))
@@ -289,33 +286,6 @@ class ProcessConfigTest(unittest.TestCase):
         ]["process_info"]["envs"]
         self.assertEqual(raw, envs[0][1])
         self.assertEqual("32g", envs[1][1])
-
-
-class OverrideParsingTest(unittest.TestCase):
-    """FLEXLB_CONFIG_OVERRIDE shell knob parsing."""
-
-    def test_empty(self) -> None:
-        self.assertIsNone(parse_overrides(""))
-        self.assertIsNone(parse_overrides(None))
-        self.assertIsNone(parse_overrides("   "))
-
-    def test_int_and_flag(self) -> None:
-        ov = parse_overrides("request_timeout_ms=30000,strip_preemption")
-        self.assertEqual(30000, ov.request_timeout_ms)
-        self.assertTrue(ov.strip_preemption)
-
-    def test_str_and_bool(self) -> None:
-        ov = parse_overrides("ordering=priority,strip_preemption=false")
-        self.assertEqual("priority", ov.ordering)
-        self.assertFalse(ov.strip_preemption)
-
-    def test_unknown_key_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_overrides("bogus=1")
-
-    def test_bad_int_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_overrides("request_timeout_ms=abc")
 
 
 class VocabTest(unittest.TestCase):

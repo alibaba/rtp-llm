@@ -1,8 +1,445 @@
 kind: produced
-report: cache-scale-in
-producer: cache-gate
 title: P scale-in cache-collapse gate
 subtitle: '{verdict} · monitoring {monitoring_status}'
+monitoring_query_plan: cache_scale_in.yaml
+report: cache-scale-in
+producer: cache-gate
+curves:
+  mock/running_avg:
+    metric_id: mock/running_avg
+    labels: {}
+    name: P Running / engine
+    group: 队列
+    unit: streams
+    axis: queue
+    color: '#1677ff'
+    hidden: false
+  mock/running_max:
+    metric_id: mock/running_max
+    labels: {}
+    name: P Running max
+    group: 队列
+    unit: streams
+    axis: queue
+    color: '#69b1ff'
+    hidden: true
+  mock/waiting_avg:
+    metric_id: mock/waiting_avg
+    labels: {}
+    name: P Waiting / engine
+    group: 队列
+    unit: streams
+    axis: queue
+    color: '#f5222d'
+    hidden: false
+  mock/waiting_max:
+    metric_id: mock/waiting_max
+    labels: {}
+    name: P Waiting max
+    group: 队列
+    unit: streams
+    axis: queue
+    color: '#ff7875'
+    hidden: true
+  mock/engine_count:
+    metric_id: mock/engine_count
+    labels: {}
+    name: P engine count
+    group: 规模
+    unit: engines
+    axis: count
+    color: '#722ed1'
+    hidden: false
+  mock/cache_hit_ratio:
+    metric_id: mock/cache_hit_ratio
+    labels: {}
+    name: P cache hit ratio
+    group: 缓存
+    unit: ''
+    axis: ratio
+    color: '#13c2c2'
+    hidden: false
+  mock/context_wall_tps:
+    metric_id: mock/context_wall_tps
+    labels: {}
+    name: P compute token throughput
+    group: 性能
+    unit: tokens/s
+    axis: tokens
+    color: '#52c41a'
+    hidden: true
+  mock/context_execution_tps_avg:
+    metric_id: mock/context_execution_tps_avg
+    labels: {}
+    name: P model forward TPS
+    group: 性能
+    unit: tokens/s
+    axis: tokens
+    color: '#389e0d'
+    hidden: false
+  mock/context_execution_tps_with_cache_avg:
+    metric_id: mock/context_execution_tps_with_cache_avg
+    labels: {}
+    name: P model forward TPS incl. cache
+    group: 性能
+    unit: tokens/s
+    axis: tokens
+    color: '#95de64'
+    hidden: true
+  mock/simulated_prefill_ms_avg:
+    metric_id: mock/simulated_prefill_ms_avg
+    labels: {}
+    name: P simulated model forward
+    group: 性能
+    unit: ms
+    axis: ms
+    color: '#fa8c16'
+    hidden: true
+  mock/context_completed_qps:
+    metric_id: mock/context_completed_qps
+    labels: {}
+    name: P completed QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#08979c'
+    hidden: false
+  mock/accepted_qps:
+    metric_id: mock/accepted_qps
+    labels: {}
+    name: P accepted QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#36cfc9'
+    hidden: true
+  mock/rtp_llm_kv_cache_pool_total_blocks:
+    metric_id: mock/rtp_llm_kv_cache_pool_total_blocks
+    labels: {}
+    name: P KV total blocks
+    group: KV
+    unit: blocks
+    axis: blocks
+    color: '#531dab'
+    hidden: true
+  mock/rtp_llm_kv_cache_pool_available_blocks:
+    metric_id: mock/rtp_llm_kv_cache_pool_available_blocks
+    labels: {}
+    name: P KV available blocks
+    group: KV
+    unit: blocks
+    axis: blocks
+    color: '#b37feb'
+    hidden: true
+  mock/mock_engine_held_blocks:
+    metric_id: mock/mock_engine_held_blocks
+    labels: {}
+    name: P held blocks
+    group: KV
+    unit: blocks
+    axis: blocks
+    color: '#ad6800'
+    hidden: true
+  mock/mock_engine_referenced_blocks:
+    metric_id: mock/mock_engine_referenced_blocks
+    labels: {}
+    name: P referenced blocks
+    group: KV
+    unit: blocks
+    axis: blocks
+    color: '#d48806'
+    hidden: true
+  client/actual_send_qps:
+    metric_id: client/actual_send_qps
+    labels: {}
+    name: Client sent QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#2f54eb'
+    hidden: false
+  client/success_qps:
+    metric_id: client/success_qps
+    labels: {}
+    name: Client success QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#52c41a'
+    hidden: false
+  client/error_qps:
+    metric_id: client/error_qps
+    labels: {}
+    name: Client error QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#cf1322'
+    hidden: false
+  client/completed_qps:
+    metric_id: client/completed_qps
+    labels: {}
+    name: Client completed QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#597ef7'
+    hidden: true
+  client/ttft_p99_seconds:
+    metric_id: client/ttft_p99_seconds
+    labels: {}
+    name: TTFT p99
+    group: 延迟
+    unit: s
+    axis: seconds
+    color: '#fa541c'
+    hidden: true
+  client/total_p99_seconds:
+    metric_id: client/total_p99_seconds
+    labels: {}
+    name: Total latency p99
+    group: 延迟
+    unit: s
+    axis: seconds
+    color: '#faad14'
+    hidden: true
+  client/schedule_p99_seconds:
+    metric_id: client/schedule_p99_seconds
+    labels: {}
+    name: Schedule latency p99
+    group: 延迟
+    unit: s
+    axis: seconds
+    color: '#d4b106'
+    hidden: true
+  master/arrivals_qps:
+    metric_id: master/arrivals_qps
+    labels: {}
+    name: Master arrival QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#1d39c4'
+    hidden: true
+  master/schedule_responses_qps:
+    metric_id: master/schedule_responses_qps
+    labels: {}
+    name: Master schedule response QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#237804'
+    hidden: true
+  master/flexlb_app_flexlb_batcher_queue_size:
+    metric_id: master/flexlb_app_flexlb_batcher_queue_size
+    labels: {}
+    name: Master batcher queue
+    group: Master
+    unit: requests
+    axis: count
+    color: '#c41d7f'
+    hidden: true
+  master/flexlb_app_flexlb_scheduler_inflight_size:
+    metric_id: master/flexlb_app_flexlb_scheduler_inflight_size
+    labels: {}
+    name: Master scheduler inflight
+    group: Master
+    unit: requests
+    axis: count
+    color: '#eb2f96'
+    hidden: true
+  master/flexlb_app_flexlb_inflight_request_count:
+    metric_id: master/flexlb_app_flexlb_inflight_request_count
+    labels: {}
+    name: Master inflight requests
+    group: Master
+    unit: requests
+    axis: count
+    color: '#9e1068'
+    hidden: false
+  master/flexlb_auto_tpm_decode_reserved_count:
+    metric_id: master/flexlb_auto_tpm_decode_reserved_count
+    labels: {}
+    name: Master decode reserved
+    group: Master
+    unit: requests
+    axis: count
+    color: '#7cb305'
+    hidden: true
+  master/flexlb_auto_tpm_decode_running_count:
+    metric_id: master/flexlb_auto_tpm_decode_running_count
+    labels: {}
+    name: Master decode running
+    group: Master
+    unit: requests
+    axis: count
+    color: '#a0d911'
+    hidden: true
+  master/dispatch_qps:
+    metric_id: master/dispatch_qps
+    labels: {}
+    name: Master dispatch QPS
+    group: 流量
+    unit: req/s
+    axis: qps
+    color: '#52c41a'
+    hidden: true
+  derived/survivor_hit_ratio:
+    metric_id: derived/survivor_hit_ratio
+    labels: {}
+    name: Survivor window hit ratio
+    group: 缓存
+    unit: ''
+    axis: ratio
+    color: '#1677ff'
+    hidden: false
+panels:
+- id: cache-hit
+  title: Prefill 缓存命中率 · P 数量
+  curve_ids:
+  - derived/survivor_hit_ratio
+  - mock/cache_hit_ratio
+  - mock/engine_count
+  axes:
+    ratio:
+      title: 命中率（0–1）
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: Survivor window hit ratio 是幸存者门禁窗口命中率，点位在窗口结束时刻；P cache hit ratio 是全局监控。右轴为仍上报监控的
+    P 数量，可能包含拒新后排空的被摘机。过渡期不判定，缺采不补零。
+  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
+- id: client-qps
+  title: 请求发出 / 成功 / 失败 QPS · P 数量
+  curve_ids:
+  - client/actual_send_qps
+  - client/success_qps
+  - client/error_qps
+  - mock/engine_count
+  axes:
+    qps:
+      title: 请求 / 秒
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: 左轴是全局客户端发出、成功和失败 QPS，不等于幸存者成功 QPS；各请求归属见下方证据。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
+- id: prefill-queue
+  title: Prefill 排队 / 运行 · P 数量
+  axes:
+    queue:
+      title: 每个 P 的请求数
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: Waiting / Running 来自归档 Prometheus 的 Prefill 原始时间序列；平均值和单 P 最大值按当时仍上报的 P
+    计算。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 gate 窗口、snapshot、日志或请求文件补算曲线。
+  curve_ids:
+  - mock/waiting_avg
+  - mock/waiting_max
+  - mock/running_avg
+  - mock/engine_count
+- id: prefill-forward
+  title: Prefill model forward 耗时 · P 数量
+  axes:
+    ms:
+      title: Mock Prefill 平均执行时间 / ms
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: Mock 最近完成的 Prefill 执行时间在各 P 间取平均；这是模拟执行耗时，空闲期可能维持上一个值。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+  curve_ids:
+  - mock/simulated_prefill_ms_avg
+  - mock/engine_count
+- id: prefill-tps
+  title: Prefill model forward TPS · P 数量
+  axes:
+    tokens:
+      title: 平均每 P tokens / 秒
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: 左轴为各 P 上报的 model forward TPS 平均值；incl. cache 曲线包含缓存复用口径。两条曲线用于观察处理速度，不能替代完成请求
+    QPS。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+  curve_ids:
+  - mock/context_execution_tps_avg
+  - mock/context_execution_tps_with_cache_avg
+  - mock/engine_count
+- id: prefill-qps
+  title: Prefill 接收 / 完成 QPS · 客户端发出 QPS
+  axes:
+    qps:
+      title: 请求 / 秒
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: P accepted / completed 来自 Mock Prefill 计数器，Client sent 来自客户端发出计数器；曲线按各自
+    10 秒速率窗口计算，差值反映队列与处理延迟。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
+  curve_ids:
+  - mock/accepted_qps
+  - mock/context_completed_qps
+  - client/actual_send_qps
+  - mock/engine_count
+- id: client-latency
+  title: TTFT / 调度 / 总延迟 p99 · P 数量
+  axes:
+    seconds:
+      title: 客户端 p99 / 秒
+      position: left
+    count:
+      title: 上报 P 数量
+      position: right
+  caption: 客户端监控的 10 秒速率窗口直方图 p99。无完成样本或监控缺采时断线；三个延迟指标可用图例单独查看。右轴为 P 数量。
+  empty_caption: 缺少监控数据；不从请求日志或门禁窗口补算曲线。
+  curve_ids:
+  - client/ttft_p99_seconds
+  - client/schedule_p99_seconds
+  - client/total_p99_seconds
+  - mock/engine_count
+sections:
+  audit: 监控曲线审计
+  monitoring: 监控与请求诊断（不参与门禁）
+  verdict: 专用门禁判据（非监控曲线）
+  sources: 监控来源与缺采
+diagnostic_only:
+- mock/running_sum
+- mock/waiting_sum
+- mock/prefill_batch_size_mean
+- mock/prefill_batch_size_p50
+- mock/prefill_batch_size_p90
+- mock/prefill_batch_size_p99
+- mock/rtp_llm_context_tps_per_engine
+- mock/rtp_llm_context_tps_engine_mean
+- mock/rtp_llm_context_tps_with_cache_per_engine
+- mock/rtp_llm_context_tps_with_cache_engine_mean
+- mock/rtp_llm_generate_tps_engine_mean
+- mock/simulated_decode_ms_avg
+- mock/completed_qps
+- mock/output_wall_tps
+- mock/running
+- mock/waiting
+- mock/hit_tokens_total
+- mock/context_tokens_total
+- mock/context_requests_total
+- mock/cache_evictions
+- mock/prefill_ms_avg
+- mock/prefill_batches
+- mock/prefill_batch_requests
+- mock/cache_key_hits
+- mock/cache_keys_requested
+- mock/admission_open
+- mock/admitted_rpcs_total
+- mock/rejected_rpcs_total
 time_origin: Seconds since observation began
 meta:
   sampling: Archived Prometheus curves and frozen gate windows
@@ -11,66 +448,8 @@ meta:
 kpis:
   verdict: Gate verdict
   monitoring: 监控与请求诊断
-panels:
-- id: cache-hit
-  title: Prefill 缓存命中率 · P 数量
-  names: [Survivor window hit ratio, P cache hit ratio, P engine count]
-  axes:
-    ratio: {title: 命中率（0–1）, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: Survivor window hit ratio 是幸存者门禁窗口命中率，点位在窗口结束时刻；P cache hit ratio 是全局监控。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。过渡期不判定，缺采不补零。
-  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
-- id: client-qps
-  title: 请求发出 / 成功 / 失败 QPS · P 数量
-  names: [Client sent QPS, Client success QPS, Client error QPS, P engine count]
-  axes:
-    qps: {title: 请求 / 秒, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: 左轴是全局客户端发出、成功和失败 QPS，不等于幸存者成功 QPS；各请求归属见下方证据。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
-  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
-- id: prefill-queue
-  title: Prefill 排队 / 运行 · P 数量
-  names: [P Waiting / engine, P Waiting max, P Running / engine, P engine count]
-  axes:
-    queue: {title: 每个 P 的请求数, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: Waiting / Running 来自归档 Prometheus 的 Prefill 原始时间序列；平均值和单 P 最大值按当时仍上报的 P 计算。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。缺采保留断线，不补零。
-  empty_caption: 缺少监控数据；不从 gate 窗口、snapshot、日志或请求文件补算曲线。
-- id: prefill-forward
-  title: Prefill model forward 耗时 · P 数量
-  names: [P simulated model forward, P engine count]
-  axes:
-    ms: {title: Mock Prefill 平均执行时间 / ms, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: Mock 最近完成的 Prefill 执行时间在各 P 间取平均；这是模拟执行耗时，空闲期可能维持上一个值。右轴为仍上报监控的 P 数量。缺采保留断线，不补零。
-  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
-- id: prefill-tps
-  title: Prefill model forward TPS · P 数量
-  names: [P model forward TPS, P model forward TPS incl. cache, P engine count]
-  axes:
-    tokens: {title: 平均每 P tokens / 秒, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: 左轴为各 P 上报的 model forward TPS 平均值；incl. cache 曲线包含缓存复用口径。两条曲线用于观察处理速度，不能替代完成请求 QPS。右轴为 P 数量。
-  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
-- id: prefill-qps
-  title: Prefill 接收 / 完成 QPS · 客户端发出 QPS
-  names: [P accepted QPS, P completed QPS, Client sent QPS, P engine count]
-  axes:
-    qps: {title: 请求 / 秒, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: P accepted / completed 来自 Mock Prefill 计数器，Client sent 来自客户端发出计数器；曲线按各自 10 秒速率窗口计算，差值反映队列与处理延迟。右轴为 P 数量。
-  empty_caption: 缺少监控数据；不从 snapshot 或门禁窗口补算曲线。
-- id: client-latency
-  title: TTFT / 调度 / 总延迟 p99 · P 数量
-  names: [TTFT p99, Schedule latency p99, Total latency p99, P engine count]
-  axes:
-    seconds: {title: 客户端 p99 / 秒, position: left}
-    count: {title: 上报 P 数量, position: right}
-  caption: 客户端监控的 10 秒速率窗口直方图 p99。无完成样本或监控缺采时断线；三个延迟指标可用图例单独查看。右轴为 P 数量。
-  empty_caption: 缺少监控数据；不从请求日志或门禁窗口补算曲线。
-sections:
-  audit: 监控曲线审计
-  monitoring: 监控与请求诊断（不参与门禁）
-  verdict: 专用门禁判据（非监控曲线）
-  sources: 监控来源与缺采
-audit_columns: [曲线, 覆盖率, 状态, PromQL / 说明]
+audit_columns:
+- 曲线
+- 覆盖率
+- 状态
+- PromQL / 说明

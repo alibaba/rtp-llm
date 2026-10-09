@@ -16,7 +16,7 @@ The mock keeps GPU execution capacity and host prefix retention separate. Enable
 never creates a decode memory cache.
 
 ```json
-{"prefill":{"memory_cache":{"enabled":true,"capacity_blocks":32768,"read_ms_per_block":0.1}}}
+{"prefill":{"memory_cache":{"enabled":true,"capacity_blocks":32768}}}
 ```
 
 `capacity_blocks` counts complete logical cache-key blocks, using the engine's
@@ -49,8 +49,8 @@ returned. A failed or cancelled read only releases its in-flight protection and
 keeps the entries reusable. This mirrors the connector's `read_done` contract;
 the memory tier is not a permanent duplicate of device cache.
 
-`read_ms_per_block` adds a modeled host-to-device copy delay for memory-only hits,
-outside `rtp_llm_model_forward_us`. Zero means idealized instantaneous copies.
+Host-to-device and device-to-host copies are instantaneous in this metadata
+model. The performance JSON does not accept copy-delay or lifecycle knobs.
 This first model snapshots metadata atomically: it does not simulate host buffer
 pins, overlapping DMA, write queues, partial blocks, or a disk tier. These limits
 must be considered when comparing a production memory-plus-disk deployment.

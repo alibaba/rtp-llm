@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from reporting import stress_report as generator
 from reporting import renderer
 
 
@@ -15,23 +14,14 @@ class ReportSpecTest(unittest.TestCase):
         label = 'engine O\'Brien "P" & <cache> {x} 中文\\path </script><script>bad()</script>'
         categories = [label, "next\nline", "tail"]
         data = [0, None, 12.3456]
-        panel = generator.panel_spec(
-            label,
-            label,
-            generator.chart_spec(
-                "line",
-                categories,
-                [("key", label, data, "info")],
-                suffix=" tok/s",
-                y_max=20,
-            ),
-        )
+        panel = dict(title=label, caption=label, type="line", x=categories,
+                     yMax=20, unit="tok/s", series=[dict(name=label, data=data)])
         panel.update(id="p1", timeX=True, xNums=[-1, 0, 2])
         page = renderer.render(
             {
                 "run_id": label,
                 "panels": [panel],
-                "kpis": [generator.kpi_spec(label, label, "warning")],
+                "kpis": [dict(label=label, value=label, tone="warn")],
                 "timeAxis": {"min": 0, "max": 2},
             }
         )
@@ -47,14 +37,6 @@ class ReportSpecTest(unittest.TestCase):
         self.assertEqual(
             payload["summary"]["kpis"][0],
             {"label": label, "value": label, "tone": "warn"},
-        )
-
-    def test_numeric_cleanup_keeps_existing_precision(self):
-        self.assertEqual(
-            generator.num_arr(
-                [None, True, "bad", float("inf"), float("nan"), 3, 1.234567]
-            ),
-            [0, 1, 0, 0, 0, 3, 1.2346],
         )
 
 

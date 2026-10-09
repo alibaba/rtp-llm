@@ -21,7 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from reporting.view_config import DEFAULT_VIEW
+from reporting.view_config import CHECKS_VIEW
 from runtime.instance_plan import (
     InstancePlanError,
     parse_catalog,
@@ -454,7 +454,7 @@ def _print_planned_reports(instances):
             test = instance.metadata.get("test")
             names = test.get("reports") if isinstance(test, dict) else None
             if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
-                names = [DEFAULT_VIEW]
+                names = [CHECKS_VIEW]
             print(f"  planned reports {instance.id}: {', '.join(names)}")
 
 

@@ -1,18 +1,17 @@
 # FlexLB Mock 测试
 
-按目标选择[压测](docs/development/stress.md)、[功能测试](docs/development/functional.md)、[场景测试](docs/development/scenario.md)或[Whale 部署](docs/whale/README.md)。
+从[运行测试](docs/development/running.md)开始；前置依赖见[编译与运行](docs/development/build-and-runtime.md)，产物与判定见[结果与指标](docs/development/results.md)。Whale 使用独立的[部署入口](docs/whale/README.md)。
 
-## 目录
+| 目录 | 职责 |
+|---|---|
+| `config/` | 场景、指标集合、报告视图及运行配置 |
+| `src/cases/` | case 配置接口、注册表及各 case 的流程、门禁、指标与报告 |
+| `src/scenario/`、`src/runtime/` | 通用编译执行、基础 action、进程与协议操作 |
+| `src/workload/`、`src/monitoring/` | 持续负载的证据生命周期、采集与归档 |
+| `src/analysis/`、`src/reporting/` | 可复用统计、输入保真度分析、图表和 bundle |
+| `src/traffic/`、`src/artifacts/` | 输入生成、播放与制品归档 |
+| `scripts/`、`tests/` | 命令入口、内部管线与回归测试 |
+| `data/`、`run/` | 固定输入与忽略的运行输出 |
 
-- `src/`：组件源码，按 `monitoring/`、`traffic/`、`runtime/`、`cases/`、`scenario/`、`workload/`、`analysis/`、`reporting/`、`artifacts/` 组件组织。
-- `scripts/commands/`：日常入口；`scripts/pipeline/`：内部执行与证据加工；`scripts/probes/`：低频验收探针。
-- `config/`：场景 YAML、运行模式、suite、规模实验、报告视图与性能配置。
-- `data/`：受版本控制的流量样本及性能输入；输出数据写到忽略的 `run/`。
-- `docs/`：当前 runbook 与稳定的口径说明。
-- `tests/`：代码回归测试与小型 fixture。
-
-各组件直接作为 `src` 下的 Python 包导入；从项目根目录运行测试时使用 `PYTHONPATH=src:.`。旧的三个根层转发入口已经退役；使用 `scripts/commands/` 中的命令。FLEXLB_CONFIG 的 schema 校验与渲染入口在 `flexlb_cfg.py`；profile 定义、功能测试默认值、`stress-na130` 文档和 DSv4 公式的唯一运行时定义在 `flexlb_profile_data.py`。Whale 镜像沿用根目录的 `flexlb_cfg.py`、`flexlb_profile_data.py`、`mode_profiles.py` 和 `mode_profiles.yaml` 固定拷贝路径，`config/mode_profiles.yaml` 链接到同一份模式表。
-
-目录内容分别见 [config](config/README.md) 和 [data](data/README.md)。更多说明见[文档导航](docs/README.md)。
-
-合成输入与真实捕获的独立对比工具：[`compare_traffic.py` 使用与口径](docs/development/synthetic-fidelity.md)。
+从本目录运行测试：`PYTHONPATH=src:. python3 -m pytest -q tests`。
+更多说明见[文档导航](docs/README.md)、[配置目录](config/README.md)和[数据规则](data/README.md)。

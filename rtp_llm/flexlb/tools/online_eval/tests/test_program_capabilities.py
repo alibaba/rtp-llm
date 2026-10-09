@@ -11,7 +11,7 @@ from unittest import mock
 import yaml
 
 from cases.config import configure_program, validate_analysis
-from cases.programs import PROGRAMS
+from cases.registry import PROGRAMS
 from reporting import discover_reports, write_bundle
 from scenario import ScenarioError, compile_scenarios
 from scenario.catalog import handlers
@@ -30,7 +30,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             module_path = root / 'second_cache.py'
-            module_path.write_text((ROOT / 'src/cases/programs/cache_scale_in.py').read_text())
+            module_path.write_text((ROOT / 'src/cases/cache_scale_in/program.py').read_text())
             module = types.ModuleType('second_cache')
             module.__file__ = str(module_path)
             exec(compile(module_path.read_text(), str(module_path), 'exec'), module.__dict__)
@@ -53,7 +53,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
                 with self.assertRaisesRegex(ScenarioError, 'cannot orchestrate'):
                     configure_program(config, 'second')
 
-    def test_gate_discovery_and_workload_links_use_manifest_role(self):
+    def test_gate_inventory_keeps_roles_without_expanding_default_report(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             spec = dict(run_id='fixture', title='fixture', panels=[], sections=[], kpis=[])
@@ -69,8 +69,9 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             self.assertEqual(payload['gate_reports'], expected)
             self.assertEqual(payload['gate_report'], expected[0])
             report = build_spec(payload, root)
-            self.assertIn('different-cache', json.dumps(report))
-            self.assertIn('second-gate', json.dumps(report))
+            self.assertEqual([], report['panels'])
+            self.assertEqual('门禁检查', report['sections'][0]['title'])
+            self.assertNotIn('different-cache', json.dumps(report))
             Path(expected[0]).write_text('corrupt')
             with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                 discover_reports(root, role='gate')

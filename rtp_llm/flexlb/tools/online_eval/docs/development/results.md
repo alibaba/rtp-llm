@@ -1,56 +1,52 @@
 # 结果与指标
 
-## 先判运行是否有效
+## 判定结果
 
-结果解释顺序固定为：
+先核对实际代码与制品、配置、拓扑、流量 SHA、Fetch 模式和窗口，再检查启动、采样、请求终态与清理。最后解释业务检查及性能数据。退出码为零、HTML 可打开或 Schedule 成功都不能单独证明运行有效。
 
-1. 记录源码 commit、最终配置、trace、拓扑、时长和 Fetch 模式。
-2. 检查组件是否完整启动并正常收尾。
-3. 检查证据是否完整、时间窗是否覆盖。
-4. 检查业务合同与错误计数。
-5. 最后读取吞吐、延迟、队列、KV 和资源曲线。
+| 状态 | 含义 |
+|---|---|
+| `PASS` | 所选合同成立；不证明未测试的合同或生产容量 |
+| `FAIL` | 有效观察得到反例或超出预声明门槛 |
+| `ERROR` / `TIMEOUT` | 运行、证据或预算不足以完成判断 |
+| `BLOCKED` | 前置阶段失败，依赖步骤未执行 |
+| `runtime_validity=INVALID` | 证据不足以发布成功结论，即使局部检查为 PASS |
 
-退出码为零、HTML 可打开、Schedule 成功都不能单独证明一次运行有效。
+性能门禁的 `INVALID` 映射为执行器 `ERROR`。专属门禁 PASS 不能代替整轮采集与清理通过。故障窗口的预期业务错误由阶段合同解释，采集缺失仍是证据错误。
 
-## 三种结果
+## 收取产物
 
-| 类型 | 主结果 | 结论边界 |
-|---|---|---|
-| 压测 | `aggregate.json` 的 `summary.test_valid` 与 `validity_checks` | 有效后才解释性能 |
-| 功能 | 汇总状态和实例 `result.json` | PASS 只证明所选合同 |
-| 场景 | `runtime_validity`、原始检查、阶段证据 | 证据无效时不发布成功结论 |
+workload 默认交付一份主报告，专属视图包含门禁、有效性、运行信息与相关曲线；未声明视图时生成 `execution.yaml` 精简报告。只有显式选择 `workload.yaml` 才生成全量指标 HTML。运行前用 `--dry-run` 或 YAML 的 `reports` 查看视图，运行后以 `result.json → workload.report` 定位主报告，**遍历 `workload.reports`（视图文件名 → HTML 绝对路径）取齐所有报告**。stdout 也枚举该清单。功能实例读取执行结果报告。
 
-## 指标口径
+| 产物 | 用途 |
+|---|---|
+| `aggregate.json`、实例 `result.json` | 汇总、阶段与检查状态 |
+| `workload-evidence.json`、原始 journal | 请求、资源身份、进程代次与阶段证据 |
+| `telemetry/` | 查询、原始采样和采集错误 |
+| `metrics.json` | 冻结的指标定义、来源、标签和完整时间序列 |
+| `reports/run/<report-identity-slug>/` | 每个视图独立的 HTML、分析、spec 和 manifest |
 
-- QPS 使用实际完成或实际发送序列，必须注明是哪一种；名义速率只是输入。
-- 延迟必须注明端点、阶段、单位、聚合函数和时间窗。每秒 P99 的均值不是全量请求 P99。
-- counter 先按相邻采样差分并处理 reset，再除以真实采样间隔；gauge 直接按时间序列解释。
-- 集群和与单引擎平均不能混用。按引擎比较时保留 role/engine 标签和引擎数来源。
-- Schedule ACK 不等于推理完成；Fetch/Generate 流打开也不等于业务 FINISHED。
-- `FETCH_OUTPUT_STREAM=0` 的运行不能作为完整端到端 A/B。
-- 故障场景中的预期错误不等于运行无效；但缺采样、丢事件或时间线断裂属于证据问题。
+每个报告目录内都叫 `report.html`，专属 identity 带视图后缀；不能按文件名去重。省略全量 HTML 不减少原始指标和证据。已存在但校验失败的 bundle 必须报错，不能被精简报告掩盖。
 
-Mock 暴露的指标名与标签见 [`flexlb-mock-engine/METRICS.md`](../../../../flexlb-mock-engine/METRICS.md)。P/D 与 Fetch 的资源生命周期见[生命周期参考](../architecture/request-lifecycle.md)。
+## 指标与门禁口径
 
-## 人群、干预和离线重裁
+指标 ID 与来源、单位、标签、窗口一起解释。定义见[指标配置](../../config/monitoring/README.md)，请求完成含义见[生命周期](../architecture/request-lifecycle.md)。
 
-门禁保存字段口径、引擎身份、实际采样边界与 counter 来源。容量干预中，服务成员以新请求准入状态和 Master 拓扑共同确认；仍在排空的进程不等于可用容量。过渡期保留为证据，不混入收敛后的窗口。关停预算与测量收敛预算独立，排空结果可作为诊断，不自动代表缓存稳定性。
+- 发送 QPS、成功完成 QPS、名义速率是不同量，不能互换。
+- counter 先处理差分与 reset，再除以实际间隔；gauge 按采样值解释。
+- 引擎执行 TPS 保留 role、engine、priority 和 incarnation；同一引擎同一采样点归并 priority 后取引擎均值，不当作集群墙钟吞吐。
+- 客户端完成 TPS 取固定墙钟窗内成功完成的实际 token 数；目标 `output_len` 不替代终态 `observed_output_tokens`。
+- goodput 取窗口内到达、最终成功且满足 SLO 的请求数除以窗口时长。晚完成请求仍属于到达 cohort。
+- TTFT/E2E 的 p99 来自成功 cohort；逐秒 p99 或其平均值不等于整窗 p99。TPOT 是每请求 `(E2E − TTFT)/(实际输出 token − 1)`，单 token 不适用。
+- 请求闭合、发压偏差、pacing、采样间隔、引擎身份与制品来源先决定有效性。合法的零 TPS 参与阈值判定，缺指标不能补零。
+- 错误率合同覆盖所声明的流量范围；性能合同要求完整 Fetch 与全部请求成功。只有 schedule ACK 或聚合吞吐不能证明端到端 PASS。
 
-全局 offered load 用于校验发流节奏，按请求终态的 Prefill 地址分为幸存者、被摘机和未知归属，并保留各组发送、终态与失败计数。它不能当成幸存者成功 QPS。允许被摘机请求失败的实验仍须完整记账，未知归属和幸存者失败不能据此豁免。引擎完成 counter 按完成采样窗统计；客户端发送和终态各用自己的时间戳，不能互换。
+容量干预中，可用成员由新请求准入与 Master 拓扑共同确认；排空进程不等于可用容量。全局 offered load 只说明发流节奏，幸存者、被摘机与未知归属须分别记账。完成 counter 使用完成采样窗，客户端归因使用发送与终态时间，不能互换。峰值采样不能证明采样间隙不存在更高峰值。
 
-冻结报告不会随分析器变更重算。主动离线重裁需要 `--reinterpret` 和新的空输出目录；如需补充历史请求归属，可传 `--client-snapshot`，格式为完整的 `java_flow.evidence_snapshot()` JSON。新产物保存原证据与分析器 SHA、排除的排空诊断以及历史能力限制。缺少请求证据仍为 INVALID；历史拒新时刻无法凭 discovery 文件推断，重裁保留旧窗口并显式说明限制。
+## 对照与离线重判
 
-## 对比的解释边界
+`compare_runs.py` 校验并展示冻结 run bundle，不重新分析原始证据，不产生整体 verdict。对比退出码只说明报告是否生成成功。配置、负载、拓扑、窗口及模型差异逐项展示；来源缺失标 UNKNOWN，不据此认定一致。曲线单位或口径不一致时独立展示。
 
-对比展示每次运行冻结的结论、控制变量与曲线，不产生整体裁决。源码、配置、流量、拓扑、
-性能模型、Fetch 模式及采集窗口的差异都需要结合实验目的解释。控制变量缺失标为未知，
-不阻止查看报告；不同口径或单位的曲线独立展示，不自动换算、排序或推断原因。
+`analyze_performance.py` 从完整冻结请求证据显式复算，PASS/FAIL/INVALID 分别返回 0/1/2。`reinterpret_cache.py` 还要求 `--reinterpret` 与新的空输出目录；可用 `--client-snapshot` 补充完整历史请求归属。新产物记录源证据和分析器 SHA，保留历史能力限制，不能凭现有配置补造旧观察。
 
-报告保留各 run 的有效性和缺采说明。单 run 是否达到预声明 criteria，由其运行时门禁负责；
-对比命令退出码仅描述报告是否成功生成。
-
-## 报告模板输入
-
-报告 `spec.title` 是实验名称；`spec.subtitle` 可以是自由文本，也可以是任意 key-value 映射，用于放关键条件和结论。渲染器不规定副标题的字段名。
-
-运行信息优先来自 `run_meta`，旧的直出报告可继续使用 `spec.meta`。公共组件只显示已提供的字段；对比报告可在 `run_meta.runs` 中按 old/new 等名称提供多侧运行信息，各侧的版本、流量、配置、环境和证据独立展示。结构化附件使用折叠且限高滚动的代码块，完整值保留在报告中。
+对比和离线命令见[命令入口](entrypoints.md)；报告写入及交互契约见[报告装配](../architecture/reporting.md)。

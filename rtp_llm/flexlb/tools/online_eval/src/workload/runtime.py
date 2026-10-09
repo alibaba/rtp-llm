@@ -158,6 +158,11 @@ class WorkloadPolicy:
             targets,
             self.options["sample_interval_s"],
             self.options.get("max_sample_gap_s", 5),
+            query_plan=ctx.instance.get("test", {}).get("monitoring", {}).get(
+                "query_plan", "workload.yaml"
+            ),
+            target_kinds={name: "mock" if name == "mock" else "master"
+                          for name in targets},
         )
         window = dict(started_epoch_s=time.time(), ended_epoch_s=None)
         for name in targets:
@@ -184,7 +189,6 @@ class WorkloadPolicy:
         )
 
     def finalize(self, ctx, result):
-        from reporting.view_config import DEFAULT_VIEW
         from workload.report import write_views
         from workload.evidence_analysis import analyze_report
 
@@ -270,6 +274,8 @@ class WorkloadPolicy:
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = self.profile
         payload["monitor_backend"] = "prometheus"
+        from workload.run_provenance import collect
+        payload["runtime_provenance"] = collect(ctx.artifact_dir, self.environments, self.environment_metadata)
         evidence.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
         result["workload"] = dict(
             evidence=str(evidence),
@@ -288,17 +294,26 @@ class WorkloadPolicy:
         )
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"
-        analysis = analyze_report(ctx.artifact_dir, result, payload)
-        view_links = write_views(ctx.artifact_dir, analysis, self.reports)
-        result["workload"]["report"] = str(view_links[DEFAULT_VIEW])
-        result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
-        # Dedicated gate is evaluated before teardown. Refresh only its presentation
-        # once Prometheus export is complete; the original checks remain authoritative.
-        gate_evidence = ctx.artifact_dir / "performance-gate-evidence.json"
-        if gate_evidence.is_file():
-            from workload.performance_gate import report as performance_report
+        from monitoring.metric_store import export_metrics
+        from monitoring.query_plan import load_plan
+        metric_plan = load_plan(ctx.instance.get("test", {}).get("monitoring", {}).get("query_plan", "workload.yaml"))
+        metric_store = export_metrics(ctx.artifact_dir, metric_plan)
+        metric_store.document["run"] = dict(id=result["id"],
+            configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))
+        metric_store.save(ctx.artifact_dir)
+        result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
+        # A registered program may refresh charts from its frozen result.
+        program = ctx.instance.get("implementation", {}).get("program")
+        if program is not None:
+            from cases.registry import finalize_reports
 
-            performance_report(ctx.artifact_dir, json.loads(gate_evidence.read_text()))
+            finalize_reports(program, ctx.artifact_dir)
+        analysis = analyze_report(ctx.artifact_dir, result, payload)
+        from monitoring.producers import produce
+        produce(ctx.artifact_dir, analysis)
+        view_links = write_views(ctx.artifact_dir, analysis, self.reports)
+        result["workload"]["report"] = str(next(iter(view_links.values())))
+        result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
 
 
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):

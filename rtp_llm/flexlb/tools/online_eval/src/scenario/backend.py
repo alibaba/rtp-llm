@@ -1,6 +1,6 @@
 """Java mock backend: bounded owned processes and finite, recorded RPC batches.
 
-Imports of the legacy process harness happen only on setup, after lease checks.
+Environment lifecycle imports happen only on setup, after lease checks.
 """
 
 import base64
@@ -473,10 +473,7 @@ class RequestBatch(ClientRecords):
 def make_env_spec(plan, profile, lease):
     """Controlled environment rendering; no JVM is started by this function."""
     from flexlb_cfg import OMIT, ConfigOverride
-    from runtime.harness import (
-        EnvSpec,
-        MasterSpec,
-    )
+    from runtime.environment_config import EnvSpec, MasterSpec
 
     kwargs = {
         k: OMIT if v == {"omit": True} else v
@@ -538,7 +535,6 @@ def make_env_spec(plan, profile, lease):
             enabled=capacity > 0,
             capacity_blocks=capacity,
             enable_prefix_tree=cache["memory_tree"],
-            copy_lifecycle=True,
         )
     return spec
 
@@ -595,7 +591,7 @@ class JavaMockBackend:
                 "environment topology exceeds compiled or leased worker capacity"
             )
         from runtime.engine_ops import EngineOps
-        from runtime.harness import EnvManager
+        from runtime.environment import EnvManager
 
         owner = self
 
@@ -688,7 +684,7 @@ class JavaMockBackend:
             or env.master_http_port != self.lease["master_base"]
             or env.master_management_port != self.lease["master_base"] + 1
         ):
-            raise RuntimeError("harness changed a leased port")
+            raise RuntimeError("environment manager changed a leased port")
         self.raw_ops = EngineOps("127.0.0.1", env.master_http_port, env.mock_http_port)
         ops = BoundedOps(self.raw_ops, ctx.instance["resource_budget"], self.lease)
         return env, ops

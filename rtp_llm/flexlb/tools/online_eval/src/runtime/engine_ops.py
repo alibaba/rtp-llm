@@ -17,15 +17,9 @@ from typing import List, Optional
 
 import grpc
 
-from runtime.harness import (
-    DEFAULT_MASTER_MANAGEMENT_PORT,
-    encode_unique_key,
-    ensure_proto_modules,
-    ensure_schedule_proto_modules,
-    http_get_json,
-    http_post_json,
-    wait_for,
-)
+from runtime.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
+from runtime.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
+from runtime.network import http_get_json, http_post_json, wait_for
 
 DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10

@@ -1,8 +1,7 @@
-"""Both stress inputs materialize through the same registered source contract."""
+"""Case traffic inputs materialize through the registered source contract."""
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -17,20 +16,6 @@ from traffic.datasets import build_manifest
 
 
 class TrafficEntrypointTest(unittest.TestCase):
-    def test_stress_rejects_raw_trace_and_synthetic_replay(self):
-        script = ROOT / "scripts/commands/run_stress.py"
-        raw = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
-                             env=dict(os.environ, TRACE_FILE="/tmp/raw.jsonl"))
-        self.assertEqual(2, raw.returncode)
-        self.assertIn("TRACE_FILE is generated", raw.stderr)
-        with tempfile.TemporaryDirectory() as tmp:
-            spec = Path(tmp) / "source.json"
-            spec.write_text(json.dumps(dict(kind="synthetic", model="realistic", version="1",
-                parameters=dict(seed=1, count=2))))
-            replay = subprocess.run([sys.executable, str(script), "--traffic-source-spec", str(spec),
-                                     "--send-mode", "replay", "--dry-run"], capture_output=True, text=True)
-            self.assertEqual(2, replay.returncode)
-            self.assertIn("synthetic traffic has ordinal timestamps", replay.stderr)
 
     def test_pinned_dag_and_synthetic_spec(self):
         with tempfile.TemporaryDirectory() as tmp:

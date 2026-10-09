@@ -1,0 +1,249 @@
+schema_version: 2
+include:
+- workload.yaml
+sources:
+  mock:
+    rtp_llm_context_tps:
+      promql: rtp_llm_context_tps${selector}
+      mode: scrape
+      unit: tokens/s
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    rtp_llm_context_tps_with_cache:
+      promql: rtp_llm_context_tps_with_cache${selector}
+      mode: scrape
+      unit: tokens/s
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+    rtp_llm_generate_tps:
+      promql: rtp_llm_generate_tps${selector}
+      mode: scrape
+      unit: tokens/s
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+produced:
+  request/input_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: gauge
+    labels: []
+  request/output_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: gauge
+    labels: []
+  request/inflight:
+    producer: performance_requests
+    source_type: derived
+    unit: requests
+    value_kind: gauge
+    labels: []
+  request/sent_qps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  request/completed_qps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  request/success_qps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  request/error_qps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  request/arrival_success_ratio:
+    producer: performance_requests
+    source_type: derived
+    unit: ratio
+    value_kind: gauge
+    labels: []
+  request/ttft_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: gauge
+    labels: []
+  request/e2e_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: gauge
+    labels: []
+  request/tpot_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: gauge
+    labels: []
+  request/input_tokens_mean:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens
+    value_kind: gauge
+    labels: []
+  request/output_tokens_mean:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens
+    value_kind: gauge
+    labels: []
+  performance_gate/sent_qps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: scalar
+    labels: []
+  performance_gate/cohort_requests:
+    producer: performance_requests
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels: []
+  performance_gate/success_requests:
+    producer: performance_requests
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels: []
+  performance_gate/error_rate:
+    producer: performance_requests
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  performance_gate/cohort_error_rate:
+    producer: performance_requests
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  performance_gate/slo_fraction:
+    producer: performance_requests
+    source_type: derived
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  performance_gate/goodput_rps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: scalar
+    labels: []
+  performance_gate/input_goodput:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/output_goodput:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/input_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/output_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/ttft_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: scalar
+    labels: []
+  performance_gate/e2e_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: scalar
+    labels: []
+  performance_gate/tpot_p99_ms:
+    producer: performance_requests
+    source_type: derived
+    unit: ms
+    value_kind: scalar
+    labels: []
+  performance_gate/inflight_start:
+    producer: performance_requests
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels: []
+  performance_gate/inflight_end:
+    producer: performance_requests
+    source_type: derived
+    unit: requests
+    value_kind: scalar
+    labels: []
+  performance_gate/inflight_growth_rps:
+    producer: performance_requests
+    source_type: derived
+    unit: requests/s
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_context_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_context_tps_with_cache:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_generate_tps:
+    producer: performance_requests
+    source_type: derived
+    unit: tokens/s
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_context_tps_engine_count:
+    producer: performance_requests
+    source_type: derived
+    unit: engines
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_context_tps_with_cache_engine_count:
+    producer: performance_requests
+    source_type: derived
+    unit: engines
+    value_kind: scalar
+    labels: []
+  performance_gate/rtp_llm_generate_tps_engine_count:
+    producer: performance_requests
+    source_type: derived
+    unit: engines
+    value_kind: scalar
+    labels: []

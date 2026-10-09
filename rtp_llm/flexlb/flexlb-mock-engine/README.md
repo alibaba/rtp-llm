@@ -52,17 +52,19 @@ alignment does not change the master's handling of late or lost completions.
 - **HTTP control**: 14 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /cancel_request, /add_engine, /remove_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: block-pool capacity model v2 — heterogeneous prefill/decode pools, LRU-coupled admission/eviction (LACK_MEM), per-step decode KV growth, pressure simulation
-- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches` only when > 0 — default 0 = unbounded, production-aligned P-side queueing with backpressure left to the master), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full. Since #8 the prefill side additionally regroups admitted work in-engine under the dual budget `prefill.max_batch_tokens` / `prefill.max_batch_requests` (master batches are no longer executed verbatim — see the regroup section below)
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches` only when > 0 — default 0 = unbounded, matching the real engine's unbounded P-side waiting queue), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 128) with an unbounded pending queue. Without `prefill.fifo`, the prefill side regroups admitted work under `prefill.max_batch_tokens` / `prefill.max_batch_requests` (see the regroup section below).
 
 ## Quick Start
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
 cd rtp_llm/flexlb
-python3 tools/online_eval/scripts/commands/run_stress.py \
-  --mock-heap 2g --mock-base-grpc-port 62000 \
-  --n-prefill 2 --n-decode 4 --duration-s 30 --replay-speed 10
+export FLEXLB_FT_WORKER_PORT_CAPACITY=2048
+python3 tools/online_eval/scripts/commands/run_cases.py \
+  --dry-run --parallel 1 --mock-stride 2100
 ```
+
+运行前通过 dry-run 预览实例与端口规划；实际执行方式和资源前置见 [场景运行](../tools/online_eval/docs/development/scenario.md)。性能负载、拓扑和门禁在 case YAML 中声明。
 
 ## Configuration
 
@@ -74,19 +76,54 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
 | prefill.max_waiting_batches | 0 | Engine-side queued-batch cap; ≤ 0 means unbounded. A positive cap injects Engine backpressure rejection. FlexLB uses `dispatcher.maxInflightPerPrefillWorker` (default 2): batches in BATCH, requests in NON_BATCH. Waiting work remains in Master queues and expires by queue TTL. These are different failure paths. |
-| prefill.max_batch_tokens | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, production FIFOScheduler.cc:371-481 semantics; the budget is a STOP, never a mid-batch cut). Default 1_048_576 mirrors the production `max_batch_tokens_size` the mock already reports via WorkerStatus. Explicit `0` disables the token dimension |
+| prefill.max_batch_tokens | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, mock regroup semantics; the budget is a STOP, never a mid-batch cut). The mock reports this default through WorkerStatus; it is not a verified production setting. Explicit `0` disables the token dimension |
 | prefill.max_batch_requests | 32 | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Mock default 32 is independent of the master FIXED_WINDOW `maxRequests` default 8. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour) |
 | decode.scale | 1.0 | Decode-specific multiplier |
-| decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
-| decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
-| decode.tokens_per_step | 2.6 | MTP acceptance fold: tokens produced per running stream per decode step (production DSv4 accepts 2.54–2.88). Steps for output_len tokens = ceil(output_len / tokens_per_step) |
-| decode.step_ms_by_batch | null | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → linear production fit |
+| decode.step_base_ms | 19.5 | Per-step decode latency intercept of the unverified bundled calibration: step_ms = step_base_ms + step_per_running_ms × running (bundled legacy calibration). Applies when no `step_ms_by_batch` curve is declared |
+| decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (bundled legacy calibration) |
+| decode.tokens_per_step | 2.6 | MTP acceptance fold: tokens produced per running stream per decode step (bundled legacy calibration). Steps for output_len tokens = ceil(output_len / tokens_per_step) |
+| decode.step_ms_by_batch | null | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → bundled linear calibration |
 | ~~decode.per_token_ms~~ | — | REMOVED (task #69): fixed per-token latency was a V3-era no-MTP single-stream caliber that overstated low-batch decode ~5.5× and full-batch ~2.8×. Declaring it now fails fast with a migration hint |
 | jitter_pct | 0.0 | Random jitter (±%) |
 | prefill.noise | absent | Optional bounded residual noise for each execution batch. `base_std_ms`, `variance_per_unit_ms2` (per 1024 actually computed tokens), `max_std_ms`, `max_abs_ms`; all zero/absent disables it. P absolute standard deviation grows as a square root and relative noise falls as work grows. |
 | decode.noise | absent | Same fields, with variance unit = current running stream count; sampled independently for each decode step, so longer outputs accumulate greater absolute but smaller relative timing variance. |
 
+`prefill.fifo` selects the mock FIFO policy. When it is present, the legacy
+`prefill.direct_batch_size_max`, `prefill.max_batch_requests`, and
+`prefill.max_batch_tokens` keys are rejected: their regroup limits would be
+shadowed. The FIFO request cap comes only from `prefill.fifo.max_requests`.
+The memory-cache keys `read_ms_per_block`, `write_ms_per_block`, and
+`copy_lifecycle` are unsupported; copies are instantaneous in this model.
+
 Role noise is sampled from a Gaussian truncated to ±3 standard deviations and then limited by `max_abs_ms`. A nonzero model requires positive `max_std_ms` and `max_abs_ms`; it cannot be combined with legacy `jitter_pct`. Keep `sleep_scale=1` when calibrating real-time noise. Fit values from per-execution measurements, not dashboard bucket means (see `prefill-performance-fit` skill).
+
+### FIFO model boundaries
+
+The real engine's scheduler settings are defined in
+[`FIFOSchedulerConfig`](../../cpp/config/ConfigModules.h) and consumed by
+[`FIFOScheduler`](../../cpp/engine_base/schedulers/FIFOScheduler.cc). The
+`online_eval` DS/GL presets are marked `legacy_unverified`; their values are
+test inputs, not a captured production configuration. The mock FIFO model has
+these differences:
+
+| Mock `prefill.fifo` key | Real engine source | Consequence |
+|---|---|---|
+| `max_requests` | `RuntimeConfig.max_generate_batch_size` | Same role as a request/sequence cap, but a separate mock setting; the real value comes from runtime concurrency configuration. |
+| `max_batch_tokens` | `FIFOSchedulerConfig.max_batch_tokens_size` | Similar limit, but the real scheduler prices token cost with `currentBatchSize()`; multi-sequence requests can be admitted more aggressively by the mock. |
+| `max_batch_kv_len` | No scheduler counterpart | Additional mock-only budget; it can stop admission earlier than the real scheduler. |
+| `max_seq_len` | `ModelConfig.max_seq_len` | Mock uses it as a first-member admission gate; real treats it as a model property in sequence and rectangle calculations. The limits are not interchangeable. |
+| `cp_size` | Derived from prefill parallelism | Independent mock setting can diverge from the engine's derived CP width, changing padding cost in either direction. |
+| `force_single` | `cp_force_single_prefill`, true by default | The presets set false; with CP enabled, mock batches can be larger than the real default allows. |
+| `max_batch_tokens_without_cache` | Same-named real setting | Mock padding does not multiply by `currentBatchSize()`; multi-sequence work can be admitted more aggressively. |
+| `max_waiting_requests` | No scheduler counterpart | Mock-only rejection on queue depth; more conservative than the real unbounded waiting list. |
+| `max_inited_kv_streams` | `max_inited_kv_cache_streams` | Corresponding limit with a different name. |
+
+The mock FIFO model does not represent `max_context_batch_size`,
+`pdfusion_scheduler_mode`, or `decode_prefill_ratio`. Do not infer their
+behavior from a FIFO preset. In particular, a multi-sequence request's real
+token cost includes its `currentBatchSize()` width, while the mock `Budget.add`
+counts one logical input length. Changing these accounting rules or removing
+mock-only gates changes batch shape and requires a new performance run.
 
 ### Runtime HTTP API
 | Endpoint | Method | Description |
@@ -127,13 +164,13 @@ UNAVAILABLE. Existing streams can progress; status and cleanup remain available.
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
 cap, and the cap is enforced only when positive. Default `0` / absent /
-negative = unbounded queue — production-aligned: the real engine's P side
+negative = unbounded queue; the real engine's P side
 (`waiting_group_queue_` / `waiting_streams_`) enqueues unconditionally and never
 rejects on queue depth; backpressure lives in the master (inflight /
 maxEngineRequests gates), not the engine. A positive cap introduces an
 engine-side rejection surface — semantically a front-loaded simulation of the
 master gate, so rejections in capped profiles (e.g. the online_eval dsv4
-profile's explicit 4) are attributed to the engine while production attributes
+preset's explicit 256) are attributed to the engine while production attributes
 them to the master; read overload conclusions from capped tiers with that
 difference in mind. The cap can also be changed at runtime per engine via
 `POST /set_perf {"engine": ..., "max_waiting_batches": N}` (same semantics as
@@ -146,8 +183,7 @@ timeout. This gate is batch-level and independent of the request-level fault-inj
 `queue_depth_limit` check at the RPC entry; both stack.
 
 **Queue metrics — four-state naming and units**: the periodic `java_mock_stats` log
-line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
-`run_stress.py` option is `--mock-stats-interval-ms`) reports
+line (interval configurable via Java `--stats-interval-ms`, default 5000 ms) reports
 symmetric P/D queue states:
 
 | Field | Unit | Meaning |
@@ -332,7 +368,7 @@ entirely through environment variables (`Config.fromEnv`):
 | LIMIT | 0 | Max requests to replay (0 = all) |
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| FETCH_OUTPUT_STREAM | true | Client reads output streams. With `0/false`, `run_stress.py` also sets Mock `--auto-fetch true`; direct launchers must set both ends explicitly (BATCH only). |
+| FETCH_OUTPUT_STREAM | true | Client reads output streams. For BATCH without Fetch, explicitly configure Mock `--auto-fetch true` as well. |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
 | EVENT_LOOP_THREADS | 32 | Netty event-loop threads |
@@ -511,7 +547,7 @@ master-side curves are indistinguishable from production:
   from token capacity). The old names `--prefill-cache-blocks` /
   `--decode-cache-blocks` were removed outright — passing either one now fails
   fast with an unknown-argument error. The 6000/3000 defaults still
-  passed by `run_stress.py` / `harness.py` remain
+  passed by `environment.py` remain
   valid — they size the pools (6,000 blocks = 6,144,000 tokens prefill;
   3,000 = 3,072,000 decode) instead of capping key counts.
 - **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
@@ -535,7 +571,7 @@ NOT comparable across this version — re-baseline before any cross-version comp
 
 ### Decode hard-admission gate (unconditional)
 
-`decodeMaxConcurrency` (default 132, overridable via
+`decodeMaxConcurrency` (default 128, overridable via
 `--decode-max-concurrency`) is an **unconditional hard admission gate** with
 an **unbounded engine-side pending queue** — production `waiting_streams_`
 semantics: once all running slots are taken, new decode requests park in
@@ -571,7 +607,7 @@ the description above is the actual (and only) behavior:
   rejected with backpressure (`prefill waiting queue full (backpressure):
   waiting=N cap=M`);
 - `0` / absent (default `DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0`):
-  **unbounded** queue (`<= 0` disables the cap) — production-aligned, see the
+  **unbounded** queue (`<= 0` disables the cap); see the
   cap paragraph above.
 
 The opt-in default is deliberate: Auto-TPM queue-eviction E2E scenarios need
@@ -645,8 +681,8 @@ that (production reference: FIFOScheduler.cc:371-481):
   dimension, `prefill.max_batch_requests=0` the request dimension;
   both zero disable the regroup entirely — master batches execute
   verbatim, the pre-#8 behaviour (use this to reproduce legacy
-  baselines). Defaults are production-aligned (1_048_576 / 32) so
-  the stress caliber needs no extra opt-in.
+  baselines). Defaults (1_048_576 / 32) are mock regroup values; FIFO presets
+  use `prefill.fifo.max_batch_tokens` / `prefill.fifo.max_requests` instead.
 - **Observation surface**: `/snapshot` exposes `prefill_batches` /
   `prefill_batch_requests` / `max_prefill_batch_size` per prefill
   engine — the executed-batch counters the flexlb_test_framework regroup cases
@@ -707,7 +743,7 @@ Representative additions beyond the v2 baseline suite (full list under
 
 Mock Engine 和负载客户端均使用 Java 实现。Python 负责场景编排、证据归档与报告，入口见 [online_eval](../tools/online_eval/README.md)。
 
-`run_cases.py` 执行 YAML 声明的功能或持续负载实例，`run_stress.py` 执行压测。JavaLoadClient 的可用环境变量由 `tools/online_eval/config/load_client_env.txt` 统一登记。
+`run_cases.py` 执行 YAML 声明的功能、性能或故障实例。JavaLoadClient 的可用环境变量由 `tools/online_eval/config/load_client_env.txt` 统一登记。
 
 每个实例的退出状态反映其独立检查与执行完整性。运行间比较只展示冻结报告，不能用对比报告的生成成功替代单 run 判定。
 

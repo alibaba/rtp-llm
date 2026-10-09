@@ -9,12 +9,9 @@ from types import SimpleNamespace
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from runtime.harness import (
-    EnvManager,
-    EnvSpec,
-    MasterSpec,
-    build_flexlb_config,
-)
+from runtime.environment import EnvManager
+from runtime.environment_config import EnvSpec, MasterSpec
+from flexlb_cfg import build_flexlb_config
 
 
 class MasterConfigContractTest(unittest.TestCase):
@@ -44,12 +41,10 @@ class MasterConfigContractTest(unittest.TestCase):
         ):
             self.assertNotIn(key, config["router"]["roles"]["decode"])
 
-    def test_stress_and_shipped_master_use_complete_v3_contract(self):
+    def test_shipped_master_uses_complete_v3_contract(self):
         from flexlb_cfg import STRESS_PROFILE, render_env, render_process_config
-        from runtime.stress import _config, parse_args
 
         self.assert_v3(json.loads(render_env(STRESS_PROFILE)))
-        self.assert_v3(json.loads(_config(parse_args(["--dry-run"]))))
         master = json.loads(render_process_config(STRESS_PROFILE))
         env = dict(master["zone_process_setting"]["process_info"]["envs"])
         self.assert_v3(json.loads(env["FLEXLB_CONFIG"]))

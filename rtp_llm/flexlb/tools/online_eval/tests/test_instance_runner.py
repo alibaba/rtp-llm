@@ -141,7 +141,7 @@ class InstanceRunnerTest(unittest.TestCase):
 
         source = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         names = load_document(source)["reports"]
-        self.assertEqual(["workload.yaml", "master_ha_core.yaml"], names)
+        self.assertEqual(["master_ha_core.yaml"], names)
         self.data["instances"][0].update(
             test_kind="workload",
             test={"reports": names},
@@ -150,7 +150,7 @@ class InstanceRunnerTest(unittest.TestCase):
         rc, _, child = self.run_fixture(dry)
         self.assertEqual(0, rc)
         child.assert_not_called()
-        self.assertIn(f"planned reports {identity}: workload.yaml, master_ha_core.yaml", self.stdout)
+        self.assertIn(f"planned reports {identity}: master_ha_core.yaml", self.stdout)
 
         paths = {
             "workload.yaml": "/tmp/run/reports/run/default/report.html",
@@ -203,7 +203,7 @@ def evaluate(ctx, params, deadline):
     status = 'FAIL' if grade == 'strict' else 'PASS'
     return StageOutput({'observed': grade}, [CheckResult('selected', status, actual=grade)])
 child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, evaluate, {'observed': 'string'}, checks=frozenset({'selected'}))}
-from cases.programs import PROGRAMS
+from cases.registry import PROGRAMS
 fixture = ModuleType('grade_protocol_fixture')
 fixture.__file__ = __file__
 def build(case):

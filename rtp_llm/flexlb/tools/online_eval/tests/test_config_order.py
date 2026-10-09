@@ -1,0 +1,88 @@
+"""YAML reading order preserves authored data, comments and list semantics."""
+import yaml
+
+from scripts.pipeline.config_order import configurations, main, ordered_yaml
+
+
+def test_order_preserves_scalar_spelling_comments_and_lists():
+    source = '''reports:
+- custom.yaml
+parameters:
+  flow:
+    timeout_ms: 10 # budget
+    # describes the chosen source
+    source:
+      kind: trace
+      parameters:
+        quoted: 'false'
+        multiline: |
+          first
+          second
+    targets: [B, A]
+    loop: false
+schema_version: 2
+case: sample
+program: default
+variants:
+- id: later
+  parameters: {threshold: 1.0}
+- id: earlier
+  parameters: {threshold: 0}
+'''
+    result = ordered_yaml(source, 'scenarios')
+    assert yaml.safe_load(result) == yaml.safe_load(source)
+    assert list(yaml.safe_load(result)) == ['schema_version', 'case', 'program', 'parameters', 'variants', 'reports']
+    assert "quoted: 'false'" in result
+    assert 'timeout_ms: 10 # budget' in result
+    assert '# describes the chosen source\n    source:' in result
+    assert 'targets: [B, A]' in result
+    assert ordered_yaml(result, 'scenarios') == result
+
+
+def test_nested_mapping_does_not_take_fields_from_its_next_sibling():
+    source = '''schema_version: 2
+sources:
+  mock:
+    one:
+      promql: one${selector}
+      required: true
+      labels: []
+    two:
+      promql: two${selector}
+      labels: []
+'''
+    result = ordered_yaml(source, 'monitoring')
+    assert yaml.safe_load(result) == yaml.safe_load(source)
+    assert list(yaml.safe_load(result)['sources']['mock']['one']) == ['promql', 'labels', 'required']
+    assert 'required' not in yaml.safe_load(result)['sources']['mock']['two']
+    assert ordered_yaml(result, 'monitoring') == result
+
+
+def test_named_collections_keep_their_order():
+    source = '''kind: produced
+title: report
+curves:
+  second:
+    name: two
+    metric_id: mock/two
+    labels: {}
+  first:
+    name: one
+    metric_id: mock/one
+    labels: {}
+panels:
+- id: second
+  curve_ids: [second, first]
+'''
+    result = ordered_yaml(source, 'report_views')
+    parsed = yaml.safe_load(result)
+    assert parsed == yaml.safe_load(source)
+    assert list(parsed['curves']) == ['second', 'first']
+    assert parsed['panels'][0]['curve_ids'] == ['second', 'first']
+    assert list(parsed['curves']['second']) == ['metric_id', 'labels', 'name']
+
+
+def test_bundled_configs_follow_declared_order():
+    for path, kind in configurations():
+        assert path.read_text() == ordered_yaml(path.read_text(), kind), path
+    assert main(['--check']) == 0

@@ -22,6 +22,40 @@ from scenario.loader import load_document
 
 
 class CaseConfigTest(unittest.TestCase):
+    def test_cache_analysis_budget_is_explicit_and_independent_of_gate_thresholds(self):
+        config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
+        original = copy.deepcopy(config["parameters"]["gate"])
+        config["parameters"]["analysis_timeout_s"] = 400
+        plan = configure_program(config, "cache_scale_in.yaml")
+        stages = plan["variants"][0]["stages"]
+        gate = next(stage for stage in stages if stage["id"] == "gate")
+        self.assertEqual(gate["timeout_s"], 400)
+        self.assertEqual(config["parameters"]["gate"], original)
+        del config["parameters"]["analysis_timeout_s"]
+        with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
+            configure_program(config, "cache_scale_in.yaml")
+
+    def test_gate_input_bindings_are_compiled_from_case_yaml(self):
+        for name, stage, input_name in (
+            ("cache_scale_in", "cache_scale_in_observe", "engine_counters"),
+            ("master_performance", "performance_observe", "engine_tps"),
+        ):
+            config = load_document(ROOT / f"config/scenarios/{name}.yaml")
+            expected = config["parameters"]["gate_inputs"][input_name]
+            plan = configure_program(config, name + ".yaml")
+            action = next(s for s in plan["variants"][0]["stages"] if s["action"] == stage)
+            self.assertEqual(action["params"]["gate_input"], expected)
+
+        config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
+        del config["parameters"]["gate_inputs"]["engine_counters"]["fields"]["hit_tokens_total"]
+        with self.assertRaisesRegex(ValueError, "missing or invalid metric bindings"):
+            configure_program(config, "cache_scale_in.yaml")
+
+        config = load_document(ROOT / "config/scenarios/master_performance.yaml")
+        del config["parameters"]["gate_inputs"]["engine_tps"]["metric_roles"]["mock/rtp_llm_generate_tps"]
+        with self.assertRaisesRegex(ValueError, "match YAML metric_roles"):
+            configure_program(config, "master_performance.yaml")
+
     def test_core_contract_keeps_production_master_configuration(self):
         from flexlb_cfg import ConfigOverride, render_env
 
@@ -74,7 +108,9 @@ class CaseConfigTest(unittest.TestCase):
                 "environment": {"n_prefill": 4, "n_decode": 8},
             }
         ]
-        (plan,) = self.compile(config)
+        default, plan = self.compile(config)
+        self.assertEqual(default["variant_id"], "default")
+        self.assertEqual(default["environment"]["n_decode"], 2)
         self.assertEqual(plan["id"], "request_completion::large_pd::single-nonbatch")
         self.assertEqual(plan["environment"]["n_decode"], 8)
         self.assertEqual(plan["stages"][1]["params"]["input_len"], 8192)
@@ -123,7 +159,7 @@ class CaseConfigTest(unittest.TestCase):
             ):
                 (Path(directory) / name).write_text(json.dumps(data))
             plans = compile_scenarios(load_scenarios(directory), handlers=handlers())
-        self.assertEqual(len(plans), 8)
+        self.assertEqual(len(plans), 16)
         self.assertEqual(
             {p["scenario_id"] for p in plans},
             {"request_completion", "another_pd_scale"},
@@ -212,8 +248,9 @@ class CaseConfigTest(unittest.TestCase):
         config["profiles"] = ["single-nonbatch"]
         config["parameters"]["count"] = 10001
         config["parameter_schema"]["count"]["maximum"] = 10001
-        (plan,) = self.compile(config)
-        self.assertEqual(plan["stages"][1]["params"]["count"], 10001)
+        plans = self.compile(config)
+        self.assertEqual([p["variant_id"] for p in plans], ["default", "custom"])
+        self.assertTrue(all(p["stages"][1]["params"]["count"] == 10001 for p in plans))
         del config["profiles"]
         with self.assertRaisesRegex(ScenarioError, "profiles must"):
             self.compile(config)
@@ -229,7 +266,7 @@ class CaseConfigTest(unittest.TestCase):
             self.assertTrue(plan["stages"][3]["params"]["expected"])
 
     def test_programs_do_not_declare_configuration_tables_or_defaults(self):
-        for path in (ROOT / "src/cases/programs").glob("*.py"):
+        for path in (ROOT / "src/cases").glob("*/program.py"):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):
@@ -255,6 +292,8 @@ class CaseConfigTest(unittest.TestCase):
         for source, _ in documents:
             config = load_document(source)
             self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(config["program"], "default")
+            self.assertNotIn("default", [v["id"] for v in config.get("variants", [])])
             self.assertNotIn('"$ref"', json.dumps(config))
             self.assertNotIn('"stages"', json.dumps(config))
 

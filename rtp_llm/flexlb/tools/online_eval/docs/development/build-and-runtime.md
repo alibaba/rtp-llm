@@ -1,6 +1,6 @@
 # 开发机编译与运行底座
 
-压测、功能测试和场景测试共用 Java 21 的 FlexLB Master、Java Mock Engine 和同一套 Python 编排与报告代码。三个 runbook 不再重复本页内容。
+功能、性能和故障场景共用 Java 21 的 FlexLB Master、Java Mock Engine 和同一套 Python 编排与报告代码。各类测试的运行前置以本页为准。
 
 所有命令从 `rtp_llm/flexlb` 执行。`$OUT` 应指向本次测试独占的新目录。
 
@@ -8,9 +8,9 @@
 
 - JDK 21；`java -version` 与 Maven 实际使用的 JVM 都必须是 21。
 - Python 3，且安装 `PyYAML`、`grpcio`、`grpcio-tools`、`protobuf`。
-- Prometheus 可执行文件。场景和压测通过 `PROMETHEUS_BIN` 指向它；命令名为 `prometheus` 时可省略。
-- 至少一个连续的空闲端口区间。功能/场景 runner 会规划端口；压测使用 `MOCK_BASE_GRPC_PORT`、Master HTTP 和 management 端口。
-- 标准 12P/40D 压测建议预留约 60 GiB 内存；较小机器应降低 P/D 数量和 JVM heap。
+- Prometheus 可执行文件。workload 通过 `PROMETHEUS_BIN` 指向它；命令名为 `prometheus` 时可省略。
+- 至少一个连续的空闲端口区间。runner 规划 Mock、Master HTTP、management 和 gRPC 端口。
+- 按 YAML 的 P/D 拓扑和 JVM heap 预留内存；改变规模时需同步检查性能门槛。
 
 ## 编译
 
@@ -30,7 +30,7 @@ flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 
 ## 启动模型
 
-功能与场景 runner 为每个实例启动并回收 Master 和 Mock Engine；压测入口启动 Mock cluster、Master、load client 和采集器。不要在它们之前手工启动同一套进程。
+runner 为每个实例启动并回收 Master、Mock Engine、load client 和所需采集器。不要在 runner 之前手工启动同一套进程。
 
 启动参数分三层：
 
@@ -79,4 +79,18 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 - 端口占用：为本次运行换一组端口基址；不要杀死来源不明的进程。
 - 只有 `dry-run` 或 `list-json` 产物：这只是计划验证，不代表服务启动或测试通过。
 
-继续阅读对应 runbook：[压测](stress.md)、[功能测试](functional.md)、[场景测试](scenario.md)。
+继续按[运行测试](running.md)选择和执行实例。
+
+## 替换 Master 制品
+
+版本对照使用独立进程和输出目录，固定相同的 Mock、负载及采集条件。以下环境变量在启动进程前设置，身份归档由 `runtime/master_artifact.py` 生成：
+
+| 环境变量 | 契约 |
+|---|---|
+| `FLEXLB_FT_MASTER_JAR` | 目标 jar 的绝对路径，导入时读取 |
+| `FLEXLB_FT_MASTER_CONFIG_FILE` | JSON 整体替换 Master 配置，不做合并；Mock 仍使用测试配置 |
+| `FLEXLB_FT_MASTER_SOURCE_COMMIT` | 声明的完整源码 SHA；不代替 jar 的实际摘要 |
+
+外部配置按目标版本的源码或部署原文编写，由目标 jar 的解析器验证，不只替换 `schemaVersion`。发现协议、字段消费、单位与补齐默认值都须核对；不支持的组合停止测试。schema 1 的动态发现需要显式 `discovery_file` 及编入目标 jar 的 [WhaleFileDiscovery](../../../whale_mock/discovery_adapter/WhaleFileDiscovery.java)，Python 的环境桥接不会自动改造 jar。
+
+`actual-master-config.json` 是传入原文，不能当解析后回读。先验证目标制品能发现 worker 并完成完整请求，再开展版本对照。制品、适配代码和配置差异随运行归档；解释规则见[结果与指标](results.md)。

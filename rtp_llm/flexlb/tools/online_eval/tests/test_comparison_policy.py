@@ -11,7 +11,7 @@ class ComparisonPolicyTest(unittest.TestCase):
     def test_scale_in_analysis_policy_from_runnable_scenario(self):
         policy = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())["analysis"]
         self.assertEqual(policy, {"alignment_event": "withdraw_start"})
-        from workload.cache_comparison_config import validate_policy
+        from cases.cache_scale_in.comparison import validate_policy
         from cases.config import configure_program
         original = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         for field, value in (("expected_verdicts", {"old": "FAIL", "new": "PASS"}), ("mode", "strong")):

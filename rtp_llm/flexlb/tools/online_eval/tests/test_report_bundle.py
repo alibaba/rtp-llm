@@ -18,7 +18,7 @@ from reporting import (
     details,
     table,
 )
-from reporting.statistics import select_window, counter_delta
+from analysis.statistics import select_window, counter_delta
 from reporting.pairing import event_anchor, shifted_panel, pair_samples, paired_overlay
 from reporting.renderer import render_context, render_sections
 from workload.report import write_report
@@ -43,8 +43,8 @@ class ReportBundleTest(unittest.TestCase):
         rendered = render_context(spec)
         self.assertIn('>old</h3>', rendered)
         self.assertIn('>new</h3>', rendered)
-        self.assertIn('&quot;source_commit&quot;: &quot;abc&quot;', rendered)
-        self.assertIn('&quot;source_commit&quot;: &quot;def&quot;', rendered)
+        self.assertIn('>master.source_commit</dt><dd>abc</dd>', rendered)
+        self.assertIn('>master.source_commit</dt><dd>def</dd>', rendered)
         self.assertNotIn('null', rendered)
         self.assertNotIn('未提供', rendered)
         self.assertNotIn('schema_version', rendered)
@@ -56,7 +56,7 @@ class ReportBundleTest(unittest.TestCase):
         self.assertIn('"结论": "PASS"', page)
         self.assertNotIn('id="hint"', page)
         self.assertNotIn('id="meta"', page)
-        self.assertIn('class="attachment"', render_sections([details("证据", {"a": 1})]))
+        self.assertIn('class="report-block attachment"', render_sections([details("证据", {"a": 1})]))
         self.assertIn('max-height:280px;overflow:auto', page)
 
     def test_overlay_preserves_old_new_line_styles(self):
@@ -88,15 +88,19 @@ class ReportBundleTest(unittest.TestCase):
                 ],
             )
             original = copy.deepcopy(spec)
-            bundle = write_bundle(
-                root / "original",
-                "run",
-                "x",
-                data,
-                spec,
-                meta=run_meta({"id": "x"}),
-                producer="test",
-            )
+            from reporting.assembly import normalize_spec
+
+            with patch("reporting.assembly.normalize_spec", wraps=normalize_spec) as normalize:
+                bundle = write_bundle(
+                    root / "original",
+                    "run",
+                    "x",
+                    data,
+                    spec,
+                    meta=run_meta({"id": "x"}),
+                    producer="test",
+                )
+            self.assertEqual(normalize.call_count, 1)
             shutil.copytree(bundle, root / "relocated")
             shutil.rmtree(root / "original")
             moved = read_bundle(root / "relocated")
@@ -220,6 +224,15 @@ class ReportBundleTest(unittest.TestCase):
             self.assertEqual([p["representation"] for p in saved["panels"]],
                              ["standard", "multi"])
             self.assertIn("FlexMultiCurve.mount", (bundle / "report.html").read_text())
+
+    def test_overlay_rejects_undeclared_series_axis(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(ValueError, "undeclared axis"):
+                write_bundle(d, "run", "bad-axis", {}, dict(panels=[
+                    dict(id="queue", overlay=True, axes={"count": {"title": "数量"}},
+                         series=[dict(name="waiting", axis="queue",
+                                      points=[dict(x=0, y=1)])]),
+                ]))
 
 
 if __name__ == "__main__":

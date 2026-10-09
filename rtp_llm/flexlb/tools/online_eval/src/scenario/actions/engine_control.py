@@ -3,11 +3,10 @@
 import copy
 import json
 import math
-import re
-import urllib.request
 import uuid
 
 from scenario.contracts import StageHandler, StageOutput
+from runtime.mock_control import ENGINE_NAME, control_json, select_engines
 
 PERF_FIELDS = {
     "prefill_fixed_ms",
@@ -15,7 +14,6 @@ PERF_FIELDS = {
     "max_waiting_batches",
     "max_prefill_concurrency",
 }
-ENGINE_NAME = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
 def validate(params, plan):
@@ -52,51 +50,6 @@ def validate(params, plan):
     return copy.deepcopy(params)
 
 
-def _http(ops, endpoint, deadline, body=None):
-    deadline.check()
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{ops.mock_http_port}/{endpoint}",
-        data=None if body is None else json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(
-        request, timeout=min(15, deadline.remaining())
-    ) as response:
-        raw = response.read(2_000_001)
-        if len(raw) > 2_000_000:
-            raise ValueError("control response exceeds byte budget")
-        result = json.loads(raw)
-        if not isinstance(result, dict):
-            raise ValueError("control response must be a JSON object")
-        return result
-
-
-def _engines(snapshot, targets):
-    entries = snapshot.get("engines")
-    if not isinstance(entries, list):
-        raise ValueError("snapshot has no engine list")
-    selected = {}
-    for name in targets:
-        matches = [
-            entry
-            for entry in entries
-            if isinstance(entry, dict) and entry.get("name") == name
-        ]
-        if len(matches) != 1:
-            raise ValueError(f"engine {name!r} missing or ambiguous")
-        entry = matches[0]
-        if (
-            entry.get("role") not in {"prefill", "decode", "pdfusion"}
-            or not isinstance(entry.get("grpc_addr"), str)
-            or type(entry.get("stopped")) is not bool
-        ):
-            raise ValueError(
-                f"engine {name!r} snapshot lacks role/address/stopped evidence"
-            )
-        selected[name] = copy.deepcopy(entry)
-    return selected
-
-
 def execute(ctx, params, deadline):
     targets = [ctx.resolve(target) for target in params["targets"]]
     if any(
@@ -115,10 +68,10 @@ def execute(ctx, params, deadline):
     )
     path = ctx.artifact_dir / f"engine-control-{uuid.uuid4().hex}.json"
     try:
-        evidence["before"] = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+        evidence["before"] = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
         for name in targets:
             body = dict(engine=name, **params.get("perf", {}))
-            response = _http(
+            response = control_json(
                 ctx.ops,
                 "set_perf" if operation == "set_perf" else operation + "_engine",
                 deadline,
@@ -133,7 +86,7 @@ def execute(ctx, params, deadline):
                 raise ValueError(
                     f"{operation}({name}) lacks successful target acknowledgement"
                 )
-        evidence["after"] = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+        evidence["after"] = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
         for name in targets:
             before, after = evidence["before"][name], evidence["after"][name]
             if (

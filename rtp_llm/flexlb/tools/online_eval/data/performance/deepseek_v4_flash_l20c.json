@@ -5,8 +5,6 @@
   "prefill": {
     "scale": 1.23,
     "max_waiting_batches": 256,
-    "direct_batch_size_max": 1,
-    "max_batch_requests": 1,
     "fifo": {
       "max_requests": 64,
       "max_batch_tokens": 512000,
@@ -21,7 +19,6 @@
     "memory_cache": {
       "enabled": true,
       "capacity_blocks": 52295,
-      "copy_lifecycle": true,
       "enable_prefix_tree": true
     },
     "enable_gpu_prefix_tree": true,
@@ -50,7 +47,7 @@
       "deployment": null
     },
     "capture_window": null,
-    "record_sha256": "2f9faae1292b8a48f46efa724318e58222fbf053ec91eeb8f4cf09bcc3fcd99e",
+    "record_sha256": "59a80b676aef60d368b2ed91a86d2815ab8f92b2345071bcf3ca6b4666aa5a95",
     "n_prefill": 48,
     "n_decode": 192,
     "prefill_kv_pool_blocks": 21553,

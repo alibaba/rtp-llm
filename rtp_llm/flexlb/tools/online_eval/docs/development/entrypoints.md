@@ -4,20 +4,18 @@
 
 | 层级 | 命令 | 用途 |
 |---|---|---|
-| 日常 | `scripts/commands/run_stress.py` | 启动压测并采集 Prometheus 证据 |
 | 日常 | `scripts/commands/run_cases.py` | 运行功能与场景 case |
 | 日常 | `scripts/commands/list_cases.py` | 列出可运行 case |
-| 日常 | `scripts/commands/render_stress_report.py` | 从压测证据渲染 HTML |
 | 日常 | `scripts/commands/compare_runs.py` | 并排展示两份或多份冻结 run bundle |
+| 开发 | `scripts/commands/format_configs.py --check` | 检查手写 YAML 的字段阅读顺序 |
 | 管线 | `scripts/pipeline/execute_cases.py` | 按 lane 并行执行 case |
-| 管线 | `scripts/pipeline/calculate_metrics.py` | 计算派生指标 |
-| 管线 | `scripts/pipeline/organize_evidence.py` | 整理证据文件 |
 | 管线 | `scripts/pipeline/materialize_traffic.py` | 将流量源物化为请求计划 |
 | 管线 | `scripts/pipeline/derive_master_templates.py` | 从固定模型生成 Java 回归夹具 |
 | 分析 | `scripts/commands/compare_traffic.py` | 对比合成流量与真实捕获的统计结构 |
-| 离线 | `python3 -m workload.performance_gate` | 从逐请求证据重算单 run 性能结论 |
+| 离线 | `scripts/commands/analyze_performance.py` | 从逐请求证据重算单 run 性能结论 |
+| 离线 | `scripts/commands/reinterpret_cache.py` | 显式重判冻结 cache 证据，输出到新目录 |
 
-压测与 case 共用 `src/runtime/` 的 Java 进程启动和清理组件。压测独有的 Prometheus、JFR、分片负载和归档编排在 `src/runtime/stress.py`。数据输入见[数据目录](../../data/README.md)，手写配置见[配置目录](../../config/README.md)。
+性能测试使用 workload case，共用 `src/runtime/` 的 Java 进程启动、发流和清理组件；指标采集由 `src/monitoring/` 管理。数据输入见[数据目录](../../data/README.md)，手写配置见[配置目录](../../config/README.md)。
 
 对比统一使用以下入口，输入直接指向含 `manifest.json` 的单 run 报告目录：
 

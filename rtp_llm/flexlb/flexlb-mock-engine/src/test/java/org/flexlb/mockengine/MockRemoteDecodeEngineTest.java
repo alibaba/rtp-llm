@@ -97,16 +97,17 @@ class MockRemoteDecodeEngineTest {
             assertEquals(0, metrics.get("rtp_llm_loading_cache_stream_size").intValue(),
                     "the pre-GENERATE lease is not the scheduler cache-load queue");
             assertEquals(1, metrics.get("mock_decode_reserved_requests").intValue());
-            assertEquals(7, metrics.get("rtp_llm_kv_cache_available_blocks").intValue());
-            assertEquals(12.5, metrics.get("rtp_llm_kv_cache_used_ratio").doubleValue());
+            assertFalse(metrics.containsKey("rtp_llm_kv_cache_available_blocks"));
+            assertFalse(metrics.containsKey("rtp_llm_kv_cache_free_blocks"));
+            assertFalse(metrics.containsKey("rtp_llm_kv_cache_used_ratio"));
             assertEquals(8, metrics.get("rtp_llm_kv_cache_pool_total_blocks").intValue());
             assertEquals(7, metrics.get("rtp_llm_kv_cache_pool_available_blocks").intValue());
             assertEquals(12.5, metrics.get("rtp_llm_kv_cache_pool_used_ratio").doubleValue());
             assertEquals(7 * 1024L, metrics.get("rtp_llm_kv_cache_left_seq").longValue());
             stream.close();
             awaitDrain();
-            assertEquals(8, decode.whaleMetrics().get("rtp_llm_kv_cache_available_blocks").intValue());
-            assertEquals(0.0, decode.whaleMetrics().get("rtp_llm_kv_cache_used_ratio").doubleValue());
+            assertEquals(8, decode.whaleMetrics().get("rtp_llm_kv_cache_pool_available_blocks").intValue());
+            assertEquals(0.0, decode.whaleMetrics().get("rtp_llm_kv_cache_pool_used_ratio").doubleValue());
         }
     }
 

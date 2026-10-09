@@ -7,12 +7,9 @@ from unittest import mock
 
 from traffic.traffic_source import materialize
 from traffic.workload_profile import profile
-from workload.cache_gate import (
-    align_send_counters,
-    analyze,
-    build_spec,
-    write_report,
-)
+from cases.cache_scale_in.analysis import align_send_counters, analyze
+from cases.cache_scale_in.report import prepare_report as read_report
+from cases.cache_scale_in.publication import publish_cache as write_report
 from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
@@ -20,26 +17,74 @@ from scenario.catalog import handlers
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+
+def prepare_report(directory, evidence):
+    from monitoring.metric_store import export_metrics
+    from monitoring.query_plan import load_plan
+    export_metrics(directory, load_plan("cache_scale_in.yaml"))
+    return read_report(directory, evidence)
+
+
+def metric_spec(directory, evidence, result, prepared):
+    from cases.cache_scale_in.metrics import produce
+    from cases.cache_scale_in.report import build_spec
+    produce(directory, evidence, result)
+    return build_spec(directory, evidence, result, prepared)
+
+
 class CacheGateTest(unittest.TestCase):
+    def test_derived_curve_label_comes_from_yaml_presentation(self):
+        template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
+        template["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
+        prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
+                        monitoring_status="OK", monitor_warnings=[])
+        evidence = self.evidence()
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+            "cases.cache_scale_in.report.view", return_value=template
+        ):
+            spec = metric_spec(d, evidence, analyze(evidence), prepared)
+        self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
+
+    def test_dispatch_query_has_explicit_yaml_presentation(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps({
+                "missing_queries": [], "start": 1000, "end": 1001, "step": 1,
+                "targets": {}, "errors": [],
+                "queries": {"master-a/dispatch_qps": {
+                    "promql": "rate(dispatch_total[10s])",
+                    "result": [{"metric": {"reason": "cache"},
+                                "values": [[1000, "3"]]}],
+                }},
+            }))
+            result = prepare_report(d, self.evidence())
+        dispatch = [curve for curve in result["curves"]
+                    if curve["metric_id"] == "master/dispatch_qps"]
+        self.assertEqual(len(dispatch), 1)
+        self.assertEqual(dispatch[0]["name"], "Master dispatch QPS · cache")
+        self.assertEqual(dispatch[0]["points"][0]["y"], 3)
+
     def test_report_layout_follows_yaml_view(self):
         template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
         template["title"] = "YAML title"
         template["panels"][0]["title"] = "YAML panel"
-        template["panels"][0]["names"] = ["P engine count"]
+        template["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
-            curves=[dict(name="P engine count", group="规模", axis="count",
+            curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
             audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK",
             monitor_warnings=[],
         )
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "workload.cache_gate.view", return_value=template
+            "cases.cache_scale_in.report.view", return_value=template
         ):
             evidence = self.evidence()
-            spec = build_spec(d, evidence, analyze(evidence), prepared)
+            spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["title"], "YAML title")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
-        self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["P engine count"])
+        self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
             "prefill-tps", "prefill-qps", "client-latency",
@@ -47,11 +92,14 @@ class CacheGateTest(unittest.TestCase):
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
-        from workload.cache_gate import report_panels
+        from cases.cache_scale_in.report import report_panels
         names = ["P cache hit ratio", "P engine count", "Client sent QPS",
                  "Client success QPS", "Client error QPS", "P Waiting / engine"]
-        curves = [dict(name=name, points=[dict(x=5, y=None), dict(x=6, y=2)])
-                  for name in names]
+        metric_ids = ["mock/cache_hit_ratio", "mock/engine_count", "client/actual_send_qps",
+                      "client/success_qps", "client/error_qps", "mock/waiting_avg"]
+        curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
+                       points=[dict(x=5, y=None), dict(x=6, y=2)])
+                  for metric_id, name in zip(metric_ids, names)]
         panels = report_panels(curves, view("cache_scale_in_overview.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
@@ -311,7 +359,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
     def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):
-        from workload.cache_gate import MEASUREMENT_POLICY, attribute_client, topology_ready
+        from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, attribute_client, topology_ready
         evidence = self.evidence()
         evidence["measurement_policy"] = MEASUREMENT_POLICY
         for row in evidence["samples"]:
@@ -356,7 +404,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_reinterpretation_preserves_frozen_input_and_requires_new_output(self):
         import sys
-        from workload.cache_gate import main
+        from cases.cache_scale_in.replay import cache_main as main
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "evidence.json"
             source.write_text(json.dumps(self.evidence()))

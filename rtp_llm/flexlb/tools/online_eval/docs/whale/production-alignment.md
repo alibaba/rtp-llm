@@ -53,7 +53,7 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 | Output length | 成功完成请求的实际输出长度及分布 | 检查 EOS、截断和成功率造成的偏差 |
 | 实际缓存命中率 | 同窗 `sum(rtp_llm_kv_cache_reuse_length) / sum(rtp_llm_input_token_length)` | 实际复用；不是 30min key 理论命中率；分母为零时显示无样本 |
 | Device / Memory 复用 | 对应 expression，分别观察 device / memory reuse 与输入比例 | 区分复用来源，不把旧/new Memory 指标相加 |
-| KV 空间占用 | `rtp_llm_kv_cache_used_ratio`；并看 total、available、free 与 Memory total/available | 占用率与实际命中率是两项指标；可驱逐缓存与不可回收引用占用不能混算 |
+| KV 空间占用 | `rtp_llm_kv_cache_pool_used_ratio`；并看 total、available、free 与 Memory total/available | 占用率与实际命中率是两项指标；可驱逐缓存与不可回收引用占用不能混算 |
 | Batch size | query、context、generate；Master batch size 另列 | 区分调度批与实际执行批 |
 | P waiting / D waiting | 对应角色 `wait_stream_size` 面板及队列深度 | 区分 engine waiting、Master queue 和 cache loading |
 | 成功 / 失败 QPS | frontend 完成口径、Master 按 code 分组分别保留 | Master 调度成功不能代替端到端成功；所有错误码、超时与未完成请求都要计入 |

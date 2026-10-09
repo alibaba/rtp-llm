@@ -295,6 +295,7 @@ def analyze_report(directory, result, evidence):
         iterations=iterations,
         configuration=result.get("implementation", {}).get("configuration"),
         implementation=result.get("implementation", {}),
+        runtime_provenance=evidence.get("runtime_provenance"),
         id=result["id"],
         status=result["status"],
         workload=result["workload"],

@@ -14,8 +14,7 @@
 
 ## 选择数据
 
-`run_stress.py --traffic-model <文件名去掉.xz>` 直接读取 `traffic_trace/`，`--help` 列出可选文件。
-无需中央清单。参数化合成通过 `--traffic-source-spec` 选择 `synthetic/realistic/1` 源；
+case 在 YAML 的流量源声明中选择 `traffic_trace/` 下的文件。参数化合成使用 `synthetic/realistic/1` 源；
 其 `profile` 按 `synthetic_parameters/` 下去掉 `.profile.json` 的文件名选择，也可显式填写生成参数。
 场景在 YAML 中固定输入文件及 SHA，不因目录增加文件而改变默认输入。
 来源、窗口、请求数、统计值、SHA 和反推参数从对应 manifest/profile/config 读取，不在本页列清单。
@@ -109,7 +108,7 @@ DSv4 mock 测试刻度由 `data/performance/dsv4_l20_mock_calibration.json` 保�
 显式 `--model-version 2 --v2-reason '历史复拟合理由'` 才生成 v2，理由进入 provenance。
 v2 读取路径保留。现有 v2 件、SHA、画像、夹具与场景 pin 是历史工件，不能原地换代。
 唯一退役路径是“重采新窗口 → v3 文件与 manifest 入库 → 引用方换代重标定”。
-文件发现、manifest 校验、`run_stress --traffic-model` 与场景 SHA pin 同时支持 v2/v3；
+文件发现、manifest 校验、流量物化与场景 SHA pin 同时支持 v2/v3；
 不因 v3 成为默认而修改既有默认门禁数据或阈值。
 
 禁止以格式转换或尾长生成冒充实测 v3。若另行开展尾长合成实验，manifest 必须

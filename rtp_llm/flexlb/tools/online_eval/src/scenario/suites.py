@@ -28,7 +28,7 @@ def normalize_test(value):
     if value.get("collection") not in ("aggregate", "request", "diagnostic"):
         raise ScenarioError("test.collection must be aggregate, request or diagnostic")
     patch = value.get("monitoring", {})
-    if not isinstance(patch, dict) or set(patch) - set(DEFAULT_MONITORING):
+    if not isinstance(patch, dict) or set(patch) - set(DEFAULT_MONITORING) - {"query_plan"}:
         raise ScenarioError("invalid test.monitoring fields")
     monitoring = {**DEFAULT_MONITORING, **patch}
     if type(monitoring["capture_metrics"]) is not bool:
@@ -39,6 +39,12 @@ def normalize_test(value):
             raise ScenarioError("invalid test.monitoring budget: " + key)
     if monitoring["max_sample_gap_s"] < monitoring["sample_interval_s"]:
         raise ScenarioError("maximum sample gap is shorter than sampling interval")
+    if "query_plan" in monitoring:
+        if value["kind"] != "workload":
+            raise ScenarioError("test.monitoring.query_plan requires a workload case")
+        from monitoring.query_plan import load_plan
+
+        load_plan(monitoring["query_plan"])
     if "reports" in value:
         from reporting.view_config import declaration
 

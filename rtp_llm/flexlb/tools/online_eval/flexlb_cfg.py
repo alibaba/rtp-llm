@@ -7,15 +7,14 @@ every FLEXLB_CONFIG document this repo produces:
   * ``render_process_config(profile, overrides, jvm_heap)`` — the
     zone_process_setting envelope (FLEXLB_CONFIG + FLEXLB_JVM_HEAP_SIZE
     envs) consumed by the Java mock engine's ``--master-config`` and by
-    run_stress.py.  The env string inside the envelope is derived
+    deployment tooling. The env string inside the envelope is derived
     from the same render call, so the file and the env cannot drift
     apart (single render, two projections).
 
 Profiles:
 
   * four functional case-test profiles (``PROFILES``) — the schema-v3
-    decision x dispatcher axes (scheduler QUEUE + FIFO ordering), values
-    unchanged from the former harness.flexlb_config_for_profile;
+    decision x dispatcher axes (scheduler QUEUE + FIFO ordering);
   * ``stress-na130`` — the stress workload rendered using schema-v3.
     Removed capacity, selector and acknowledgement settings are not emitted.
 
@@ -303,10 +302,8 @@ def _ordering_policy(ordering, default_priority, preemption):
 # ===========================================================================
 #
 # Unified strict schema-v3 generator for the four functional profiles
-# (formerly harness.build_flexlb_config, extended with the
-# decode_max_engine_requests knob so the JSON-splice call sites could
-# migrate onto generator parameters).  The router always gets the FORMULA
-# estimator with the profile data fit injected explicitly.
+# with explicit decode_max_engine_requests. The router always gets the
+# FORMULA estimator with the profile data fit injected explicitly.
 
 
 def build_flexlb_config(
@@ -651,7 +648,7 @@ def render_process_config(
     *raw_config* bypasses the generator entirely (the EnvSpec
     negative-test channel — the atpm strict-reject variants inject
     deliberately-illegal documents).  The raw string is projected into
-    the envelope verbatim; harness._master_env injects the SAME string
+    the envelope verbatim; EnvManager._master_env injects the SAME string
     into the master env, preserving the single-source/two-projections
     invariant on the bypass path too.
     """
@@ -682,73 +679,3 @@ def render_process_config(
     # Trailing newline mirrors the retired master_fixed_window.json byte
     # layout (POSIX text file, golden-diff parity).
     return json.dumps(envelope, indent=2) + "\n"
-
-
-# ===========================================================================
-# CLI override parsing (run_stress.py FLEXLB_CONFIG_OVERRIDE)
-# ===========================================================================
-
-_INT_FIELDS = frozenset(
-    {
-        "cache_affinity_max_extra_ttft_ms",
-        "cleanup_interval_ms",
-        "status_rpc_ms",
-        "max_requests",
-        "default_priority",
-        "queue_timeout_ms",
-        "decode_max_engine_requests",
-        "decode_max_kv_usage_percent",
-        "max_predicted_execution_ms",
-        "request_timeout_ms",
-        "max_collection_wait_ms",
-        "status_stale_after_ms",
-        "max_inflight_per_prefill_worker",
-    }
-)
-_FLOAT_FIELDS = frozenset({"decision_lifetime", "cache_affinity_min_prefix_hit_percent"})
-_STR_FIELDS = frozenset({"ordering", "decision", "dispatcher", "prefill_expression"})
-_BOOL_FIELDS = frozenset({"strip_preemption"})
-
-
-def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
-    """Parse a ``"k=v,k=v"`` override string (FLEXLB_CONFIG_OVERRIDE).
-
-    Bare ``k`` (no ``=``) is a boolean flag (``k=1``).  Unknown keys raise
-    ValueError — the SSOT vocabulary is closed.  Returns None for an
-    empty/blank input.
-    """
-    if spec is None or not spec.strip():
-        return None
-    known = _INT_FIELDS | _FLOAT_FIELDS | _STR_FIELDS | _BOOL_FIELDS
-    kwargs: dict = {}
-    for item in spec.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if "=" in item:
-            key, _, raw = item.partition("=")
-            key = key.strip()
-            raw = raw.strip()
-        else:
-            key, raw = item, "1"
-        if key not in known:
-            raise ValueError(
-                f"FLEXLB_CONFIG_OVERRIDE: unknown key {key!r}; valid keys: "
-                f"{sorted(known)}"
-            )
-        if key in _INT_FIELDS:
-            try:
-                kwargs[key] = int(raw)
-            except ValueError:
-                raise ValueError(
-                    f"FLEXLB_CONFIG_OVERRIDE: {key} expects an integer, got {raw!r}"
-                ) from None
-        elif key in _FLOAT_FIELDS:
-            kwargs[key] = float(raw)
-        elif key in _BOOL_FIELDS:
-            kwargs[key] = raw.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            kwargs[key] = raw
-    if not kwargs:
-        return None
-    return ConfigOverride(**kwargs)

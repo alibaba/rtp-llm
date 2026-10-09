@@ -13,13 +13,43 @@ from unittest.mock import patch
 from monitoring.session import (
     PrometheusSession,
     archived_series,
-    engine_sample,
-    ENGINE_FIELDS,
 )
 from monitoring.telemetry import http_text, shared_samples_since
+from monitoring.query_plan import load_plan, queries_for_targets
+from scenario.loader import ScenarioError
 
 
 class ContractTest(unittest.TestCase):
+    def test_yaml_query_plan_controls_archive_and_required_series(self):
+        plan = load_plan("workload.yaml")
+        queries, required = queries_for_targets(
+            plan, {"mock": "", "client-sample": "", "master-a": ""},
+            lambda source: '{job="' + source + '"}', 1,
+        )
+        self.assertIn("master-a/dispatch_qps", queries)
+        self.assertIn("mock/running_avg", required)
+        self.assertIn("mock/waiting_avg", required)
+        self.assertIn("client-sample/up", required)
+        self.assertNotIn("master-a/dispatch_qps", required)
+        self.assertEqual(
+            queries["master-a/schedule_responses_qps"],
+            'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master-a"}[10000ms]))',
+        )
+        with self.assertRaises(ScenarioError):
+            load_plan("../workload.yaml")
+
+    def test_explicit_target_kinds_cover_dynamic_clients(self):
+        plan = load_plan("workload.yaml")
+        with self.assertRaisesRegex(ValueError, "target kinds"):
+            queries_for_targets(plan, {"mock": "", "client-flow": ""},
+                                lambda source: '{job="' + source + '"}', 1,
+                                {"mock": "mock"})
+        queries, _ = queries_for_targets(
+            plan, {"worker": ""}, lambda source: '{job="' + source + '"}', 1,
+            {"worker": "client"},
+        )
+        self.assertIn("worker/schedule_p99_seconds", queries)
+
     def test_prefill_batch_size_uses_histogram(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = PrometheusSession(tmp, {"mock": "http://unused/metrics"})
@@ -46,31 +76,44 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(queries["master/schedule_responses_qps"]["promql"],
                 'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master"}[10000ms]))')
 
-    def test_running_is_execution_not_unfinished_tasks(self):
-        values = dict.fromkeys(ENGINE_FIELDS, 10)
-        values.update(running=2, waiting=128)
-        labels = 'role="prefill",engine_name="P0",engine_ip="127.0.0.1",grpc_port="7000",engine_incarnation="one"'
-        body = "\n".join(
-            f"{metric}{{{labels}}} {values[field]}"
-            for field, metric in ENGINE_FIELDS.items()
-        )
-        body += "\nmock_engine_running{" + labels + "} 130\n"
-        with patch("monitoring.telemetry.http_text", return_value=body):
-            sample = engine_sample("http://test/metrics")["P0"]
-        self.assertEqual((sample["running"], sample["waiting"]), (2, 128))
-        with patch(
-            "monitoring.telemetry.http_text",
-            return_value=body.replace(',engine_incarnation="one"', ""),
-        ):
-            with self.assertRaisesRegex(ValueError, "incarnation"):
-                engine_sample("http://test/metrics")
+    def test_gate_snapshot_uses_declared_tsdb_metrics(self):
+        from cases.cache_scale_in.inputs import engine_snapshot
+        from unittest.mock import Mock
+        monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
+                                    query_plan="cache_scale_in.yaml")
+        labels = dict(role="prefill", engine_name="P0", engine_incarnation="one",
+                      engine_ip="127.0.0.1", grpc_port="7000")
+        monitor.instant = Mock(return_value=[
+            dict(metric=dict(labels, __name__="rtp_llm_running_stream_size"), value=[1, "2"]),
+            dict(metric=dict(labels, __name__="rtp_llm_wait_stream_size"), value=[1, "128"]),
+            dict(metric=dict(labels, __name__="mock_engine_running"), value=[1, "130"]),
+        ])
+        fields = {"running": "mock/running", "waiting": "mock/waiting"}
+        row = engine_snapshot(monitor, fields)["P0"]
+        self.assertEqual((row["running"], row["waiting"]), (2, 128))
+        monitor.instant.assert_called_once_with("mock", 5)
+        del monitor.instant.return_value[0]["metric"]["engine_incarnation"]
+        with self.assertRaisesRegex(ValueError, "labels"):
+            engine_snapshot(monitor, fields)
+
+    def test_gate_rejects_undeclared_id_and_missing_samples(self):
+        from cases.cache_scale_in.inputs import engine_snapshot
+        from unittest.mock import Mock
+        monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
+                                    query_plan="cache_scale_in.yaml")
+        monitor.instant = Mock(return_value=[])
+        with self.assertRaisesRegex(ValueError, "undeclared"):
+            engine_snapshot(monitor, {"running": "mock/unknown"})
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            engine_snapshot(monitor, {"running": "mock/running"})
 
     def test_snapshot_files_never_supply_curves(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "cache-gate-evidence.json").write_text(
                 json.dumps({"samples": [{"waiting": 999, "running": 999}]})
             )
-            self.assertEqual(archived_series(tmp, 0), ({}, {}, {}, []))
+            with self.assertRaises(FileNotFoundError):
+                archived_series(tmp, 0)
 
     def test_missing_query_is_reported_as_monitor_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,6 +124,8 @@ class ContractTest(unittest.TestCase):
                 "start": 1, "end": 2, "step": 1,
                 "targets": {}, "queries": {}, "errors": [],
             }))
+            from monitoring.metric_store import export_metrics
+            export_metrics(tmp)
             _, _, _, errors = archived_series(tmp, 0)
             self.assertEqual(errors, [{
                 "source": "1", "query": "master/completions_qps",
@@ -112,7 +157,7 @@ class RealPrometheusTest(unittest.TestCase):
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
                 self.end_headers()
                 self.wfile.write(
-                    b'rtp_llm_running_stream_size{engine_name="P0",role="prefill"} 2\nrtp_llm_wait_stream_size{engine_name="P0",role="prefill"} 128\n'
+                    b'rtp_llm_running_stream_size{engine_name="P0",role="prefill"} 2\nrtp_llm_wait_stream_size{engine_name="P0",role="prefill"} 128\nrtp_llm_context_tps{engine_name="P0",role="prefill",engine_incarnation="one"} 9\n'
                 )
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Exporter)
@@ -130,6 +175,16 @@ class RealPrometheusTest(unittest.TestCase):
                     self.assertIn("rtp_llm_running_stream_size", http_text(url))
                     samples = shared_samples_since(url, 0)
                     self.assertTrue(samples)
+                    session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
+                        promql="rtp_llm_context_tps${selector}", mode="scrape", unit="tokens/s",
+                        value_kind="gauge", labels=["role", "engine_name", "engine_incarnation"])
+                    from monitoring.query_plan import plan_hash
+                    session.query_plan_sha256 = plan_hash(session.query_plan)
+                    raw = session.metric_rows("mock/raw_context_tps", source="mock",
+                                              start=session.started, end=time.time())
+                    self.assertTrue(raw)
+                    self.assertTrue(all(float(value) == 9 for row in raw for _, value in row["values"]))
+                    self.assertTrue(session.metric_snapshot(["mock/raw_context_tps"], source="mock"))
                     self.assertEqual(
                         len({x["sequence"] for x in samples}), len(samples)
                     )
@@ -150,7 +205,7 @@ class RealPrometheusTest(unittest.TestCase):
                         tmp, session.started
                     )
                     self.assertTrue(gaps)
-                    self.assertFalse(errors)
+                    self.assertTrue(all(error["severity"] == "diagnostic" for error in errors))
                     self.assertTrue(
                         any(v is None for points in series.values() for t, v in points)
                     )

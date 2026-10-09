@@ -1,15 +1,13 @@
-# Case 框架
+# 运行底座
 
-执行关系：YAML 配置 → Python case → 编译计划 → 公共执行器 → Java Master / Mock。
-入口见 [工具导航](../../README.md)，定义见 [框架结构](../../docs/architecture/framework.md)。
+本包负责实例与端口规划、Master / Mock 生命周期、进程回收、HTTP/gRPC 和 Java 客户端。case 流程与判定位于 `../cases/`。
 
-| 位置 | 职责 |
+| 模块 | 职责 |
 |---|---|
-| `../cases/config.py`、`../cases/programs/` | 配置校验、参数注入、业务流程和断言 |
-| `../scenario/` | 编译、action、执行、证据与资源清理 |
-| `instance_runner.py`、`instance_plan.py`、`resource_plan.py` | 实例选择、并行计划、端口与资源预算 |
-| `harness.py`、`engine_ops.py` | 环境、进程与 RPC 操作 |
-| `grade.py`、`debug_client.py` | 判定档位与 Java debug 客户端 |
-| `ha.py` | HA 流量生成和观测窗口 |
+| `instance_runner.py`、`instance_plan.py`、`resource_plan.py` | 选例、并行计划与资源预算 |
+| `environment_config.py`、`environment.py` | 环境输入、复用身份、启动和清理 |
+| `process.py`、`network.py` | 进程句柄、定向信号、HTTP 和端口探测 |
+| `paths.py`、`java_runtime.py`、`zk_helper.py` | 制品、Java 21 与 ZooKeeper helper |
+| `java_client.py`、`engine_ops.py`、`proto_utils.py` | 发流客户端、RPC 与 protobuf |
 
-新增业务流程写入 `../cases/programs/`，配置放在顶层 `config/scenarios/`。
+运行前置见[编译与运行](../../docs/development/build-and-runtime.md)，资源和执行契约见[框架结构](../../docs/architecture/framework.md)。
