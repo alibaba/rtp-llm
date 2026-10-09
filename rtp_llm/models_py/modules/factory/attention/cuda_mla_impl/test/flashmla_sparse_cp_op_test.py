@@ -18,7 +18,7 @@ import threading
 from datetime import timedelta
 from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main, skipIf
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -595,6 +595,108 @@ class SparseMlaFp8CPOpTest(TestCase):
             )
         torch.cuda.synchronize()
         self.assertEqual(out.shape, (total_q_len, num_heads, kv_lora_rank))
+
+    def test_chunk_tail_positions_and_empty_rank_collectives(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+        from rtp_llm.ops import ParallelismConfig
+
+        cpu = torch.device("cpu")
+        pc = ParallelismConfig()
+        pc.tp_size = 4
+        for rank in (0, 3):
+            pc.tp_rank = rank
+            op = cp_impl.SparseMlaFp8CPOp(64, 512, 64, 512, 64, 1.0, 128, pc)
+            for prefix, grant in ((64, 64), (128, 2), (128, 1)):
+                with self.subTest(rank=rank, prefix=prefix, grant=grant):
+                    padded = math.ceil(grant / (2 * pc.tp_size)) * 2 * pc.tp_size
+                    local = padded // pc.tp_size
+                    # CP4 gives ranks pairs (0,7), (1,6), (2,5), (3,4).
+                    rank_positions = (
+                        torch.arange(padded)
+                        .reshape(8, -1)[[0, 7, 1, 6, 2, 5, 3, 4]]
+                        .reshape(pc.tp_size, local)
+                    )
+                    cp = PyContextParallelParams()
+                    cp.prefill_cp_chunk_lengths = torch.tensor(
+                        [local], dtype=torch.int32
+                    )
+                    cp.prefill_qkv_restore_indice = rank_positions.flatten().argsort()
+                    cp.prefill_qkv_padding_mask = (torch.arange(padded) < grant).to(
+                        torch.int32
+                    )
+                    cp.prefill_actual_input_lengths_cpu = torch.tensor(
+                        [grant], dtype=torch.int32, device=cpu
+                    )
+                    ai = PyAttentionInputs()
+                    ai.is_prefill = True
+                    ai.input_lengths = cp.prefill_actual_input_lengths_cpu
+                    ai.sequence_lengths = torch.empty(0, dtype=torch.int32, device=cpu)
+                    ai.prefix_lengths = torch.tensor(
+                        [prefix], dtype=torch.int32, device=cpu
+                    )
+                    ai.context_parallel_info = cp
+                    ai.kv_cache_kernel_block_id = _make_block_table(
+                        1, prefix + grant, 64, cpu
+                    )
+                    block_table = ai.kv_cache_kernel_block_id.to(self.device)
+                    mla = rtp_llm_ops.SparseMlaParams()
+                    mla.fill_params(ai, 64)
+                    positions = rank_positions[rank].tolist()
+                    valid = [i for i, pos in enumerate(positions) if pos < grant]
+                    with patch.object(
+                        cp_impl, "get_mla_metadata", return_value=(None, None)
+                    ) as metadata:
+                        op.plan(mla, block_table, ai)
+                        self.assertEqual(metadata.call_count, int(bool(valid)))
+                    self.assertEqual(op.total_local_ids.tolist(), valid)
+                    self.assertEqual(
+                        op.full_rope_pos_ids.tolist(),
+                        [prefix + pos if pos < grant else 0 for pos in positions],
+                    )
+                    self.assertEqual(
+                        op.cu_kv_seqlens_global.tolist(), [0, prefix + grant]
+                    )
+                    if valid:
+                        continue
+
+                    events = []
+                    op.kv_cache_write_op = Mock()
+                    op.kv_cache_write_op.forward.side_effect = (
+                        lambda *args: events.append("write")
+                    )
+                    op.write_cache_store_impl = None
+                    q = torch.zeros(local, 64, 576)
+                    ckv = torch.zeros(local, 512)
+                    k_pe = torch.zeros(local, 64)
+                    gathered = [torch.randn(padded, 512), torch.randn(padded, 64)]
+
+                    def gather(tensor, group):
+                        result = gathered[len(events)]
+                        events.append("gather")
+                        return result
+
+                    with patch.object(
+                        cp_impl, "all_gather", side_effect=gather
+                    ), patch.object(
+                        cp_impl.common,
+                        "apply_write_cache_store",
+                        side_effect=lambda *args: events.append("publish"),
+                    ), patch.object(
+                        cp_impl, "flash_mla_with_kvcache"
+                    ) as attention:
+                        out = op.forward(
+                            q, ckv, k_pe, None, mla.batch_indice_d, object()
+                        )
+                        attention.assert_not_called()
+                    self.assertEqual(events, ["gather", "gather", "write", "publish"])
+                    written = op.kv_cache_write_op.forward.call_args.args
+                    restore = cp.prefill_qkv_restore_indice[:grant].long()
+                    self.assertTrue(torch.equal(written[0], gathered[0][restore]))
+                    self.assertTrue(torch.equal(written[1], gathered[1][restore]))
+                    self.assertEqual(out.shape, (local, 64, 512))
+                    self.assertEqual(torch.count_nonzero(out).item(), 0)
 
     @skipIf(torch.cuda.device_count() < 2, "need 2 CUDA devices")
     def test_cp_tp2_matches_non_cp(self):

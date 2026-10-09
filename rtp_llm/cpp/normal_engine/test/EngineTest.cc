@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -155,11 +156,11 @@ TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
 
 TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     CustomConfig config;
+    config.warm_up = true;
 
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    runtime_config.warm_up         = true;
     auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.pd_sep_config.role_type = RoleType::DECODE;
 
@@ -309,11 +310,11 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
 
 TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     CustomConfig config;
+    config.warm_up = true;
 
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    runtime_config.warm_up = true;
     auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
@@ -469,6 +470,58 @@ TEST_F(NormalEngineTest, testParallelDispatchMultipleRequests) {
     }
 
     engine.reset();
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
+    CustomConfig config;
+    config.warm_up                  = true;
+    config.prefill_chunk_size       = 4;
+    config.forward_shapes           = std::make_shared<std::vector<ForwardShape>>();
+    config.multi_task_prompt_tokens = {{"system", {1, 2, 3, 4, 5, 6, 7}}};
+    auto engine                     = createMockEngine(config);
+
+    // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
+    // each execute one final token after a block-aligned 18-token synthetic prefix. The 7-token
+    // whole-segment shape runs once during warmup and once while constructing the system prompt.
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {4, 18, 4},
+                  {7, 0, 1},
+                  {7, 0, 1}}));
+    const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
+    ASSERT_EQ(cache_config.groups().size(), 1u);
+    ASSERT_EQ(cache_config.groups().front().block_num, 100u);
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
+    CustomConfig config;
+    config.warm_up                = true;
+    config.prefill_chunk_size     = std::numeric_limits<int>::max();
+    config.max_context_batch_size = 8;
+    config.forward_shapes         = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {19, 0, 1},
+                  {8, 18, 8},
+              }));
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
+    CustomConfig config;
+    config.warm_up             = true;
+    config.warm_up_with_loss   = true;
+    config.prefill_chunk_size  = 4;
+    config.forward_shapes      = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    ASSERT_EQ(*config.forward_shapes, (std::vector<ForwardShape>{{19 * 128, 0, 128}}));
 }
 
 TEST_F(NormalEngineTest, testSystemPrompt) {

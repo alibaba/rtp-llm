@@ -1262,6 +1262,43 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
             sampled_d = sampled_d.to(torch::kInt32);
         }
         sampled_d      = sampled_d.contiguous();
+
+        std::vector<int64_t> middle_rows;
+        std::vector<int32_t> middle_tokens;
+        std::vector<int32_t> middle_positions;
+        int64_t row_idx = 0;
+        for (const auto& stream : stream_groups.allStreams()) {
+            const int rows = stream->nextBatchSize();
+            if (stream->isMiddleChunk()) {
+                const int32_t token = stream->nextChunkBoundaryToken();
+                int32_t position = 0;
+                if (shift_default_positions) {
+                    const int boundary = stream->prefixLength() + stream->contextLength();
+                    position = stream->generateContextPositionIds().data_ptr<int32_t>()[boundary];
+                }
+                for (int row = 0; row < rows; ++row) {
+                    middle_rows.push_back(row_idx + row);
+                    middle_tokens.push_back(token);
+                    middle_positions.push_back(position);
+                }
+            }
+            row_idx += rows;
+        }
+        RTP_LLM_CHECK_WITH_INFO(row_idx == sampled_d.size(0),
+                                "prefill draft input stream rows %ld != sampler rows %ld",
+                                row_idx, sampled_d.size(0));
+
+        torch::Tensor middle_rows_d;
+        if (!middle_rows.empty()) {
+            auto rows_h = torch::tensor(middle_rows, torch::kInt64).pin_memory();
+            host_holder.hold_host(rows_h);
+            middle_rows_d = rows_h.to(torch::kCUDA, /*non_blocking=*/true);
+            auto tokens_d = toCudaInt32(torch::tensor(middle_tokens, torch::kInt32).pin_memory(), host_holder);
+            // The CUDA shift consumes the last column as its tail. Preserve the
+            // sampler output while replacing only middle-chunk rows with real prompt tokens.
+            sampled_d = sampled_d.clone();
+            sampled_d.select(1, token_stride - 1).index_copy_(0, middle_rows_d, tokens_d);
+        }
         auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
         auto shifted_d = torch::empty_like(combo_tokens_d);
 #if USING_CUDA
@@ -1277,6 +1314,14 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                         shifted_positions_d,
                                         static_cast<int32_t>(token_stride),
                                         cuda_graph::graphGetCurrentStream().stream());
+            if (middle_rows_d.defined()) {
+                auto positions_d =
+                    toCudaInt32(torch::tensor(middle_positions, torch::kInt32).pin_memory(), host_holder);
+                auto tail_offsets = offsets_d.index_select(0, middle_rows_d).to(torch::kInt64) - 1;
+                // A prompt continuation uses its exact next position, while the
+                // final chunk retains the existing sampled-token position policy.
+                shifted_positions_d.index_copy_(0, tail_offsets, positions_d);
+            }
             model_input.combo_position_ids = shifted_positions_d;
         } else {
             invokeMtpPrefillShiftAppend(combo_tokens_d,
@@ -1313,37 +1358,55 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
             shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0);
         shiftMtpMultimodalLocations(model_input, input_lengths_cpu);
     }
-    int* input_lengths = input_lengths_cpu.data_ptr<int>();
-    int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
-
-    int  offset = 0;
+    const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
+    int*       input_lengths  = input_lengths_cpu.data_ptr<int>();
+    int*       combo_tokens   = combo_tokens_cpu.data_ptr<int>();
     int* combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
-    auto         stream_it              = all_streams.begin();
-    // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
-    for (int i = 0; i < batch_size; i++) {
-        // should shift one token for combo_tokens
-        int input_length = input_lengths[i];
-        memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+    const size_t stream_row_count = std::accumulate(
+        all_streams.begin(), all_streams.end(), size_t{0}, [](size_t count, const GenerateStreamPtr& stream) {
+            return count + static_cast<size_t>(stream->nextBatchSize());
+        });
+    RTP_LLM_CHECK_WITH_INFO(stream_row_count == batch_size,
+                            "prefill draft input stream rows %zu != sampler rows %zu",
+                            stream_row_count, batch_size);
 
-        // set new token id
-        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
-        combo_tokens[offset + input_length - 1] = new_token_id;
+    size_t row_idx = 0;
+    int    offset  = 0;
+    for (const auto& stream : all_streams) {
+        const int  stream_rows  = stream->nextBatchSize();
+        const bool middle_chunk = stream->isMiddleChunk();
+        for (int row = 0; row < stream_rows; ++row, ++row_idx) {
+            int input_length = input_lengths[row_idx];
+            std::memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
 
-        if (combo_position_ids != nullptr) {
-            int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
-            memmove(stream_position_ids,
-                    stream_position_ids + position_id_len_factor,
-                    (input_length - 1) * position_id_len_factor * sizeof(int));
-            int* new_position_ids = stream_position_ids + (input_length - 1) * position_id_len_factor;
-            if (!shift_default_positions) {
-                (*stream_it)->generateNextPositionId(new_position_ids);
+            // Middle chunk tail is the next prompt token; other prefill tails use sampled token.
+            // Using sampled token at a chunk boundary would build draft KV from the wrong input.
+            const int tail_token = middle_chunk ? stream->nextChunkBoundaryToken() :
+                                                  sampled_tokens[row_idx * token_stride + token_stride - 1];
+            combo_tokens[offset + input_length - 1] = tail_token;
+
+            if (combo_position_ids != nullptr) {
+                int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
+                std::memmove(stream_position_ids,
+                             stream_position_ids + position_id_len_factor,
+                             (input_length - 1) * position_id_len_factor * sizeof(int));
+                int* new_position_ids = stream_position_ids + (input_length - 1) * position_id_len_factor;
+                if (middle_chunk) {
+                    // The appended token is the next real prompt token, so reuse its exact position id.
+                    const int  boundary_pos        = stream->prefixLength() + stream->contextLength();
+                    const auto prompt_position_ids = stream->generateContextPositionIds();
+                    std::memcpy(new_position_ids,
+                                prompt_position_ids.data_ptr<int>() + boundary_pos * position_id_len_factor,
+                                position_id_len_factor * sizeof(int));
+                } else if (!shift_default_positions) {
+                    stream->generateNextPositionId(new_position_ids);
+                }
             }
+            offset += input_length;
         }
-        offset += input_length;
-        ++stream_it;
     }
 
     model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
