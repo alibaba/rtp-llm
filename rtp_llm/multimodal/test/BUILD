@@ -136,6 +136,30 @@ py_library(
 )
 
 py_test(
+    name = "mm_remote_embedding_cache_test",
+    srcs = ["mm_remote_embedding_cache_test.py"],
+    deps = [":process_engine_test_helpers"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_test",
+    srcs = ["mm_kvcm_emb_client_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_config_test",
+    srcs = ["mm_kvcm_emb_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_tensor_object_test",
+    srcs = ["mm_kvcm_tensor_object_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "mm_cancellation_test",
     srcs = ["mm_cancellation_test.py"],
     deps = [":process_engine_test_helpers"],
