@@ -4,7 +4,10 @@ import unittest
 
 import torch
 
-from rtp_llm.tools.dsv41_attention_history_replay import validate_native_recipe
+from rtp_llm.tools.dsv41_attention_history_replay import (
+    official_history_control,
+    validate_native_recipe,
+)
 from rtp_llm.tools.dsv41_attention_replay import (
     aligned_sparse_inputs,
     history_identities,
@@ -156,6 +159,119 @@ class AttentionReplayHistoryTest(unittest.TestCase):
                 ):
                     validate_native_recipe(traces)
                 traces[1]["metadata"][field] = recipe[field]
+
+    def down_recipe_traces(self, *, sparse=False, routed=False):
+        profile = "tp8_projection_mhc_fp32_compressor_recipe"
+        if sparse:
+            profile += "_sparse_sink_div_rn_prefill"
+        profile += "_expert_down_reference" if routed else "_shared_down_reference"
+        metadata = {
+            "precision_profile": profile,
+            "compressor_fused": True,
+            "hca_bf16_projection": True,
+            "sparse_sink_div_rn_prefill": sparse,
+            "sparse_sink_div_rn_decode": False,
+            "shared_down_reference": True,
+            "routed_down_reference": routed,
+            "down_reference_kernel_sha256": "a" * 64,
+        }
+        traces = self.traces()
+        for trace in traces:
+            trace["metadata"].update(metadata)
+        return traces
+
+    def test_output_gemm_recipes_select_the_matching_attention_control(self):
+        for sparse in (False, True):
+            for routed in (False, True):
+                with self.subTest(sparse=sparse, routed=routed):
+                    traces = self.down_recipe_traces(sparse=sparse, routed=routed)
+                    recipe = validate_native_recipe(
+                        traces, reference_kernel_sha256="a" * 64
+                    )
+                    for field in (
+                        "precision_profile",
+                        "sparse_sink_div_rn_prefill",
+                        "sparse_sink_div_rn_decode",
+                        "shared_down_reference",
+                        "routed_down_reference",
+                        "down_reference_kernel_sha256",
+                    ):
+                        self.assertEqual(recipe[field], traces[0]["metadata"][field])
+                    control = "tp8_projection_compressor_recipe"
+                    if sparse:
+                        control += "_sparse_sink_div_rn_prefill"
+                    self.assertEqual(official_history_control(recipe), control)
+
+    def test_output_gemm_recipe_requires_explicit_and_exact_flags(self):
+        for field in (
+            "compressor_fused",
+            "hca_bf16_projection",
+            "sparse_sink_div_rn_prefill",
+            "sparse_sink_div_rn_decode",
+            "shared_down_reference",
+            "routed_down_reference",
+        ):
+            for invalid in (None, "true", 1, "flip", "missing"):
+                with self.subTest(field=field, invalid=invalid):
+                    traces = self.down_recipe_traces(sparse=True, routed=True)
+                    expected = traces[1]["metadata"][field]
+                    if invalid == "missing":
+                        del traces[1]["metadata"][field]
+                    else:
+                        traces[1]["metadata"][field] = (
+                            not expected if invalid == "flip" else invalid
+                        )
+                    with self.assertRaises(ValueError):
+                        validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+
+    def test_output_gemm_recipe_checks_released_kernel_identity(self):
+        for digest in (None, "a" * 63, "g" * 64, "b" * 64):
+            with self.subTest(reference_digest=digest):
+                with self.assertRaisesRegex(ValueError, "kernel hash differs"):
+                    validate_native_recipe(
+                        self.down_recipe_traces(), reference_kernel_sha256=digest
+                    )
+        for digest in (None, "b" * 64):
+            traces = self.down_recipe_traces()
+            traces[1]["metadata"]["down_reference_kernel_sha256"] = digest
+            with self.subTest(trace_digest=digest):
+                with self.assertRaisesRegex(ValueError, "kernel hash differs"):
+                    validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+
+    def test_history_cannot_combine_individually_valid_recipes(self):
+        traces = self.down_recipe_traces()
+        traces[-1] = self.down_recipe_traces(sparse=True, routed=True)[-1]
+        with self.assertRaisesRegex(ValueError, "mix recipes across steps"):
+            validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+        with self.assertRaisesRegex(ValueError, "nonempty recipe"):
+            validate_native_recipe([])
+
+    def test_legacy_recipe_rejects_unrecorded_sparse_or_down_substitutions(self):
+        traces = self.traces()
+        for trace in traces:
+            trace["metadata"].update(
+                precision_profile="tp8_projection_mhc_fp32_compressor_recipe",
+                compressor_fused=True,
+                hca_bf16_projection=True,
+            )
+        recipe = validate_native_recipe(traces)
+        self.assertEqual(
+            official_history_control(recipe), "tp8_projection_compressor_recipe"
+        )
+        for field in (
+            "sparse_sink_div_rn_prefill",
+            "sparse_sink_div_rn_decode",
+            "shared_down_reference",
+            "routed_down_reference",
+        ):
+            with self.subTest(field=field):
+                traces[1]["metadata"][field] = True
+                with self.assertRaisesRegex(ValueError, "recipe flag differs"):
+                    validate_native_recipe(traces)
+                del traces[1]["metadata"][field]
+        traces[1]["metadata"]["down_reference_kernel_sha256"] = "a" * 64
+        with self.assertRaisesRegex(ValueError, "unexpected down-reference hash"):
+            validate_native_recipe(traces)
 
 
 if __name__ == "__main__":

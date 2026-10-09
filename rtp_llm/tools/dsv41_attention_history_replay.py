@@ -45,18 +45,80 @@ def cpu_snapshot(values):
     return {key: value.cpu() for key, value in values.items() if torch.is_tensor(value)}
 
 
-def validate_native_recipe(traces):
+def validate_native_recipe(traces, *, reference_kernel_sha256=None):
+    base = "tp8_projection_mhc_fp32_compressor_recipe"
+    recipes = {
+        base: (False, False, False),
+        f"{base}_shared_down_reference": (False, True, False),
+        f"{base}_expert_down_reference": (False, True, True),
+        f"{base}_sparse_sink_div_rn_prefill_shared_down_reference": (
+            True,
+            True,
+            False,
+        ),
+        f"{base}_sparse_sink_div_rn_prefill_expert_down_reference": (True, True, True),
+    }
+    if not traces:
+        raise ValueError("Native history requires nonempty recipe traces")
+    selected = None
     for trace in traces:
         metadata = trace["metadata"]
+        profile = metadata.get("precision_profile")
         if (
-            metadata.get("precision_profile")
-            != "tp8_projection_mhc_fp32_compressor_recipe"
+            profile not in recipes
             or metadata.get("compressor_fused") is not True
             or metadata.get("hca_bf16_projection") is not True
         ):
             raise ValueError(
                 "Native history requires the composed TP8/mHC/compressor recipe"
             )
+        sparse, shared, routed = recipes[profile]
+        expected = {
+            "precision_profile": profile,
+            "compressor_fused": True,
+            "hca_bf16_projection": True,
+            "sparse_sink_div_rn_prefill": sparse,
+            "sparse_sink_div_rn_decode": False,
+            "shared_down_reference": shared,
+            "routed_down_reference": routed,
+        }
+        for field in (
+            "sparse_sink_div_rn_prefill",
+            "sparse_sink_div_rn_decode",
+            "shared_down_reference",
+            "routed_down_reference",
+        ):
+            # The original frozen recipe predates the optional diagnostic flags.
+            actual = (
+                metadata.get(field, False) if profile == base else metadata.get(field)
+            )
+            if actual is not expected[field]:
+                raise ValueError(f"Native history recipe flag differs: {field}")
+        digest = metadata.get("down_reference_kernel_sha256")
+        if shared:
+            if (
+                not isinstance(reference_kernel_sha256, str)
+                or len(reference_kernel_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in reference_kernel_sha256)
+                or digest != reference_kernel_sha256
+            ):
+                raise ValueError("Native history down-reference kernel hash differs")
+            expected["down_reference_kernel_sha256"] = digest
+        elif digest is not None:
+            raise ValueError(
+                "Native history recipe has an unexpected down-reference hash"
+            )
+        if selected is not None and expected != selected:
+            raise ValueError("Native history cannot mix recipes across steps")
+        selected = expected
+    return selected
+
+
+def official_history_control(recipe):
+    name = "tp8_projection_compressor_recipe"
+    if recipe and recipe["sparse_sink_div_rn_prefill"]:
+        name += "_sparse_sink_div_rn_prefill"
+    return name
 
 
 def prepared_engram(module, args, layout, reader, layer, ids):
@@ -86,6 +148,12 @@ def reconstruct_official(
         hc_eps=args.hc_eps,
     )
     steps, boundaries, rows_by_step = [], {}, []
+    split, raw_mixes = module.hc_split_sinkhorn, []
+
+    def record_split(mixes, *args, **kwargs):
+        raw_mixes.append(mixes.clone())
+        return split(mixes, *args, **kwargs)
+
     for step, (trace, identity, step_hashes) in enumerate(
         zip(traces, identities, hashes)
     ):
@@ -97,14 +165,19 @@ def reconstruct_official(
             .repeat(1, 1, args.hc_mult, 1)
         )
         pre_mix = module.make_identity_pre_mix(hidden, args.hc_mult)
-        inputs, references, selected = [], [], {}
+        inputs, references, selected, mhc = [], [], {}, []
         for layer in range(3):
+            captured = {"layer_input": hidden.clone()}
             if layer in layout.layer_ids:
                 ids = step_hashes[:, :, layout.layer_ids.index(layer), :]
                 engram, rows = prepared_engram(module, args, layout, reader, layer, ids)
                 hidden = engram(hidden, ids.cuda())
                 selected[layer] = rows
-            with torch.device("cuda"):
+            captured["attention_residual"] = hidden.clone()
+            captured["attn_read_mix"] = pre_mix.clone()
+            with torch.device("cuda"), patch.object(
+                module, "hc_split_sinkhorn", record_split
+            ):
                 attn_pre, attn_post, attn_comb = module.Block.hc_mixes(
                     block,
                     hidden,
@@ -112,14 +185,28 @@ def reconstruct_official(
                     reader.load(f"layers.{layer}.hc_attn_scale").float(),
                     reader.load(f"layers.{layer}.hc_attn_base").float(),
                 )
+                captured.update(
+                    attn_raw_mixes=raw_mixes.pop(),
+                    attn_pre_mix=attn_pre.clone(),
+                    attn_post_mix=attn_post.clone(),
+                    attn_comb_mix=attn_comb.clone(),
+                )
                 norm = module.RMSNorm(args.dim, args.norm_eps)
                 norm.weight.copy_(reader.load(f"layers.{layer}.attn_norm.weight"))
-                x = norm(module.Block.hc_pre(block, hidden, pre_mix))
+                collapsed = module.Block.hc_pre(block, hidden, pre_mix)
+                captured["attn_collapsed"] = collapsed.clone()
+                x = norm(collapsed)
+                captured["attn_norm"] = x.clone()
                 reference = run_official_attention(
                     module, shards[layer], x, identity["start_pos"], history=True
                 )
                 mixed = module.Block.hc_post(
                     block, reference["output"], hidden, attn_post, attn_comb
+                )
+                captured.update(
+                    attention_output=reference["output"].clone(),
+                    attn_post=mixed.clone(),
+                    ffn_read_mix=attn_pre.clone(),
                 )
                 ffn_pre, ffn_post, ffn_comb = module.Block.hc_mixes(
                     block,
@@ -128,8 +215,17 @@ def reconstruct_official(
                     reader.load(f"layers.{layer}.hc_ffn_scale").float(),
                     reader.load(f"layers.{layer}.hc_ffn_base").float(),
                 )
+                captured.update(
+                    ffn_raw_mixes=raw_mixes.pop(),
+                    ffn_pre_mix=ffn_pre.clone(),
+                    ffn_post_mix=ffn_post.clone(),
+                    ffn_comb_mix=ffn_comb.clone(),
+                )
                 norm.weight.copy_(reader.load(f"layers.{layer}.ffn_norm.weight"))
-                ffn_input = norm(module.Block.hc_pre(block, mixed, attn_pre))
+                collapsed = module.Block.hc_pre(block, mixed, attn_pre)
+                captured["ffn_collapsed"] = collapsed.clone()
+                ffn_input = norm(collapsed)
+                captured["ffn_norm"] = ffn_input.clone()
             label = f"step{step}.layer{layer:02d}.ffn.input"
             boundaries[label] = require_exact(
                 trace["tensors"][f"layer{layer:02d}.ffn.input"], ffn_input, label
@@ -145,8 +241,10 @@ def reconstruct_official(
                 hidden = module.Block.hc_post(
                     block, ffn_output, mixed, ffn_post, ffn_comb
                 )
+                captured.update(ffn_output=ffn_output.clone(), ffn_post=hidden.clone())
                 pre_mix = ffn_pre
-        steps.append({"inputs": inputs, "reference": references})
+            mhc.append(captured)
+        steps.append({"inputs": inputs, "reference": references, "mhc": mhc})
         rows_by_step.append(selected)
     return steps, boundaries, rows_by_step
 
@@ -338,12 +436,15 @@ def fresh_cache(owner):
     return cache, tables
 
 
-def compare_official_history(args, config, reader, steps, identities):
+def compare_official_history(args, config, reader, steps, identities, recipe=None):
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
         compressor_bf16,
     )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
         tp8_projection,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
+        sparse_sink_div_rn,
     )
 
     profiles = [
@@ -354,8 +455,13 @@ def compare_official_history(args, config, reader, steps, identities):
         ("tp8_recipe_official_q", True, True, True, True, False),
         ("tp8_recipe_official_attention", True, True, True, False, True),
     ]
+    profiles = [(*profile, False) for profile in profiles]
+    if recipe and recipe["sparse_sink_div_rn_prefill"]:
+        profiles.append(
+            (official_history_control(recipe), True, True, True, False, False, True)
+        )
     results, snapshots = {}, {}
-    for name, tp8, rounded, fused, fixed_q, fixed_attention in profiles:
+    for name, tp8, rounded, fused, fixed_q, fixed_attention, sparse in profiles:
         results[name], snapshots[name] = {}, {}
         for layer in range(3):
             owner = native_attention(args, config, reader, layer)
@@ -363,7 +469,7 @@ def compare_official_history(args, config, reader, steps, identities):
             records, saved = [], []
             with tp8_projection(tp8), compressor_bf16(
                 rounded, fused=fused, hca_projection=fused
-            ):
+            ), sparse_sink_div_rn(sparse, decode=False):
                 for step, (data, identity) in enumerate(zip(steps, identities)):
                     reference = data["reference"][layer]
                     _, captured = execute_native(
@@ -429,9 +535,17 @@ def main():
         torch.load(path, map_location="cpu", weights_only=True) for path in native_paths
     ]
     identities = history_identities(traces, native_traces if native_paths else None)
-    if native_paths:
-        validate_native_recipe(native_traces)
     root = cli.checkpoint.resolve()
+    reference_kernel_sha256 = hashlib.sha256(
+        (root / "inference/kernel.py").read_bytes()
+    ).hexdigest()
+    native_recipe = (
+        validate_native_recipe(
+            native_traces, reference_kernel_sha256=reference_kernel_sha256
+        )
+        if native_paths
+        else None
+    )
     sys.path.insert(0, str(root / "inference"))
     official, converter = [
         importlib.import_module(name) for name in ("model", "convert")
@@ -460,10 +574,17 @@ def main():
     )
     config = json.loads((root / "config.json").read_text())["text_config"]
     results, snapshots = compare_official_history(
-        args, config, reader, steps, identities
+        args, config, reader, steps, identities, native_recipe
     )
-    native_reconstruction, native_results, native_snapshots, native_inputs = (
+    (
+        native_reconstruction,
+        native_results,
+        native_snapshots,
+        native_inputs,
+        native_mhc,
+    ) = (
         {},
+        [],
         [],
         [],
         [],
@@ -475,18 +596,23 @@ def main():
             reconstruct_native,
         )
 
-        native_reconstruction, native_results, native_snapshots, native_inputs = (
-            reconstruct_native(
-                args,
-                config,
-                reader,
-                steps,
-                native_traces,
-                identities,
-                hashes,
-                prepared_rows,
-                hash_state.token_map.tolist(),
-            )
+        (
+            native_reconstruction,
+            native_results,
+            native_snapshots,
+            native_inputs,
+            native_mhc,
+        ) = reconstruct_native(
+            args,
+            config,
+            reader,
+            steps,
+            native_traces,
+            identities,
+            hashes,
+            prepared_rows,
+            hash_state.token_map.tolist(),
+            native_recipe,
         )
         input_causality, causality_snapshots = compare_prefix_current_histories(
             args,
@@ -497,6 +623,7 @@ def main():
             native_inputs,
             snapshots,
             native_snapshots,
+            native_recipe,
         )
     with cli.input_artifact.open("xb") as handle:
         torch.save(
@@ -509,11 +636,18 @@ def main():
                     [cpu_snapshot(value) for value in step["reference"]]
                     for step in steps
                 ],
+                "official_mhc": [
+                    [cpu_snapshot(value) for value in step["mhc"]] for step in steps
+                ],
                 "official_input_history": snapshots,
                 "native_inputs": [
                     [value.cpu() for value in step] for step in native_inputs
                 ],
                 "native_input_history": native_snapshots,
+                "native_mhc": [
+                    [cpu_snapshot(value) for value in step] for step in native_mhc
+                ],
+                "native_recipe": native_recipe,
                 "prefix_current_substitutions": causality_snapshots,
             },
             handle,
@@ -536,6 +670,7 @@ def main():
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_compressor_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_tp8_projection.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_mhc_precision.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/v41_sparse_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_attention_owner_sm120.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_decode_owner_sm120.py",
         "rtp_llm/models_py/modules/dsv4/v41_attention.py",
@@ -544,6 +679,7 @@ def main():
     )
     report = {
         "identities": identities,
+        "native_recipe": native_recipe,
         "official_reconstruction": reconstruction,
         "official_input_history": results,
         "native_reconstruction": native_reconstruction,
@@ -592,7 +728,7 @@ def main():
         "limitations": [
             "One short L0-L2 request: retained caches use exact official attention inputs.",
             "Saved FFN outputs are substituted from each experiment's own trace; experts are not re-executed.",
-            "Native-input history is limited to the composed diagnostic recipe and optional saved traces.",
+            "Native-input history uses the validated composed recipe and its optional sparse-prefill/output-GEMM diagnostics.",
             "TP8 output partials are simulated serially, without live collectives.",
             "Serving, distributed topology, graphs, full-model accuracy and latency remain separate.",
         ],
