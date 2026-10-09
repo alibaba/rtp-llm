@@ -26,144 +26,40 @@ def cuda13_suites():
     # to this pipeline.
     # ============================================================================
 
-    # ARM coverage:
-    #   *_reuse_memory_cache   PD sep + prefill CP2 + decode DP2/EP2 + decode CUDA
-    #                          graph + in-memory prefix reuse + routed-only Mega MoE.
-    #                          Also the cp_rr=OFF half of the required CP
-    #                          page-RR coverage (no --prefill_cp_kv_cache_sharded)
-    #                          — keep it that way.
-    #   *_xgrammar_json        legacy json_format + OpenAI response_format
-    #                          json_object / json_schema over PD
-    #   *_mega_moe_se          MTP + CP page-RR + Mega MoE with the FP8 shared
-    #                          expert fused in-kernel, under long generation.
+    # ARM coverage — one consolidated case:
     #   *_dspark_cprr_async_xgrammar_json
-    #                          DSpark speculative decode + CP page-RR + CP overlap
-    #                          + think mode + Mega MoE — closest match to the
-    #                          production config.
+    #                          DSpark speculative decode + CP page-RR ON + CP
+    #                          overlap + think mode + Mega MoE SE + PD prefill
+    #                          CP2/EP2 + decode DP2/EP2 — closest match to the
+    #                          production config. Its fixture already carries
+    #                          the json prompt styles (legacy json_format,
+    #                          OpenAI response_format json_object / json_schema),
+    #                          so the standalone xgrammar case retired without
+    #                          porting anything.
+    # Coverage intentionally dropped on ARM with the retired cases:
+    #   - 65k-context run + sequential in-memory cache-hit assertions
+    #     (reuse case; the consolidated case runs 8k context)
+    #   - the cp_rr=OFF half of the CP page-RR pair (the x86 *_1m case
+    #     still gates it)
+    #   - the non-SE mega_moe long-generation form
+    #   - MTP speculative decode (DSpark remains)
     native.test_suite(
         name = "smoke_cuda13_arm",
         tests = [
-            ###
-            # Comprehensive PD reuse-cache smoke: prefill CP=2×EP=2 (2 GPUs) +
-            # decode DP=2×EP=2 (2 GPUs) = 4 GPUs total.
-            #
-            # What this exercises in one server start:
-            #   - fastsafetensors weight loader (new-path V4Weight descriptors)
-            #   - KV-prefix reuse cache (--reuse_cache 1)
-            #   - In-memory cache layer on top (--enable_memory_cache 1)
-            #   - Context Parallel prefill (CP=2, ALL_GATHER rotate)
-            #   - Routed-only Mega MoE on both sides (--moe_strategy mega_moe)
-            #   - Decode CUDA graph (--enable_cuda_graph 1, BS captures 1/2/4/8)
-            #   - max_seq_len=65600 — handles 64k-token prefill context
-            #
-            # 5 sequential requests spanning short / medium / long contexts:
-            #   Q0: "What is the capital of France?" (11 tok, cold)
-            #   Q1: same short prompt (cache hit — verifies short-prefix reuse)
-            #   Q2: 15k AI-history doc (cold — fills the KV cache)
-            #   Q3: same 15k prefix, max_tokens=10 (memory cache hit)
-            #   Q4: 64k summary prompt (cold — exercises CP=2 all-gather at max context)
-            #
-            # GPU allocation: PD runner slices (0,1) → prefill, (2,3) → decode.
-            # Decode capture includes 32 because this topology's startup warmup
-            # reaches batch size 32.
-            #
-            # Cache writes publish asynchronously. Wait between sequential queries
-            # so reuse assertions observe completed publication. This host-cache
-            # case does not cover DISK; disk transfer and PD handoff deadlines need
-            # separate coverage.
-            #
-            # Q2/Q4 goldens record cached_tokens even though both prompts are cold:
-            # in PD the decode only recomputes the trailing partial block and takes
-            # the block-aligned prefix from the prefill over the cache store, and
-            # that transferred prefix is what reuse accounting reports. Q3 is the
-            # real reuse assertion and compares the memory-cache hit instead.
-            smoke_test(
-                name="v4_flash_pd_cp2ep2_dp2ep2_reuse_memory_cache_sm100",
-                task_info="data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_reuse_cache_sm100_arm.json",
-                sleep_time_qr=10,
-                smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 65600 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1",
-                    "decode": "--load_method fastsafetensors --max_seq_len 65600 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,32' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1",
-                },
-                gpu_type=["SM100_ARM_CU13"],
-            ),
-            # Short xgrammar regression fixture for DeepSeek-V4-Flash PD 1P1D.
-            # Covers legacy json_format, OpenAI response_format=json_object, and
-            # response_format=json_schema without paying the 1M-context cost.
-            # Both roles are single-card (tp1/ep1/dp1/world1), which leaves only
-            # ~24.8 GiB of HBM after weights, so the runtime reservation has to stay
-            # well under that or MemoryEvaluationHelper rejects it outright.
-            #
-            # The fixture only asserts what the comparer can actually assert: the
-            # dash_sc_grpc queries and the "expect a 400" negative queries are gone,
-            # because a rejected request surfaces as VISIT_FAILED / OTHERS rather
-            # than as a matched expectation. Free-form generations keep
-            # json_content + required_json_keys and drop expected_json — the schema
-            # is the invariant, the prose behind it is not. Under
-            # response_format=json_object the model also picks its own key names
-            # ("condition" vs "weather"), so those queries assert only that the
-            # content parses as a JSON object; key names are asserted where a
-            # json_schema pins them.
-            smoke_test(
-                name="v4_flash_pd_cp4_tp1ep1dp1_xgrammar_json_sm100",
-                task_info="data/model/deepseek_v4/q_r_v4_flash_pd_cp4_tp1ep1dp1_xgrammar_json_sm100_arm.json",
-                smoke_args={
-                    "prefill": "--load_method scratch --force_cpu_load_weights 1 --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --warm_up 1 --reserver_runtime_mem_mb 10240",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --concurrency_limit 4 --reserver_runtime_mem_mb 10240",
-                },
-                envs={
-                    "prefill": [
-                        "RTP_LLM_STREAM_ASYNC=1",
-                        "RTP_LLM_DROP_BROAD_SYNC=1",
-                        "RTP_LLM_DEVICE_INPUT=1",
-                    ],
-                    "decode": [
-                        "RTP_LLM_STREAM_ASYNC=1",
-                        "RTP_LLM_DROP_BROAD_SYNC=1",
-                        "RTP_LLM_DEVICE_INPUT=1",
-                    ],
-                },
-                gpu_type=["SM100_ARM_CU13"],
-            ),
-            # Dedicated coverage for the routed-only Mega MoE strategy.
-            smoke_test(
-                name="v4_flash_mega_moe_sm100",
-                task_info="data/model/deepseek_v4/q_r_v4_flash_mega_moe_sm100.json",
-                sleep_time_qr=10,
-                smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 0 --use_deepep_low_latency 0 --moe_strategy mega_moe --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 0 --use_deepep_low_latency 0 --moe_strategy mega_moe --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                gpu_type=["SM100_ARM_CU13"],
-            ),
-            # Mega MoE with the FP8 shared expert fused into the routed kernel, on
-            # the same Flash CP2/DP2 page-RR + MTP topology as the x86 logits case
-            # (2 prefill + 2 decode GPUs = GB200's 4 cards). This is the SE path,
-            # not the old standalone fused path: deep_gemm 2.6.1 exports only
-            # ``fp8_fp4_mega_moe`` with optional shared-expert arguments, and
-            # dropped the ``*_mega_moe_fused`` family entirely, so
-            # DSV4_USE_MEGA_MOE_FUSED=1 can no longer pass strict strategy
-            # selection on any platform.
-            smoke_test(
-                name="v4_flash_mega_moe_se_sm100",
-                task_info="data/model/deepseek_v4/q_r_v4_flash_mega_moe_se_sm100.json",
-                sleep_time_qr=10,
-                smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 0 --use_deepep_low_latency 0 --moe_strategy mega_moe_se --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 0 --use_deepep_low_latency 0 --moe_strategy mega_moe_se --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                gpu_type=["SM100_ARM_CU13"],
-            ),
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.
+            # Both roles pin --moe_strategy mega_moe_se (FP8 shared expert fused
+            # into the routed kernel, the only mega-moe form deep_gemm 2.6.1
+            # exports), taking over the SE coverage from the retired dedicated
+            # mega_moe_se case on this same CP2/DP2 page-RR topology.
             smoke_test(
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_async_xgrammar_json_sm100_arm.json",
                 sleep_time_qr=10,
                 smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 69632 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 1 --enable_fp32_lm_head 0",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,16' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 10240 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --think_mode 1 --enable_fp32_lm_head 0",
+                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 69632 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 1 --enable_fp32_lm_head 0",
+                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,16' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 10240 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --think_mode 1 --enable_fp32_lm_head 0",
                 },
                 envs={
                     "prefill": [
@@ -240,9 +136,10 @@ def cuda13_suites():
     #                                      ~216GB/rank at EP=4, over GB200's ~186GB.
     #
     # CP page-RR (--prefill_cp_kv_cache_sharded) is covered both ways:
-    #   ON   *_mega_moe_se and *_dspark_cprr_async_xgrammar_json on ARM
-    #   OFF  *_reuse_memory_cache
-    # The x86 *_1m case runs cp_rr off as well, but ARM already gates that half.
+    #   ON   *_dspark_cprr_async_xgrammar_json on ARM
+    #   OFF  the x86 *_1m case
+    # The ARM cp_rr=OFF half retired with the reuse-cache case, so the x86 *_1m
+    # case is the only remaining gate for the OFF configuration.
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
