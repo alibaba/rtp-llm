@@ -988,6 +988,67 @@ class BatchedBoundedSWA(unittest.TestCase):
                 self.assertIs(common.swa_meta.slot_mapping, slots)
                 self.assertIs(common.swa_meta.slot_compaction, compaction)
 
+    def test_replay_write_plan_reuses_gathers_and_rebuilds_for_new_metadata(self):
+        Compaction = namedtuple("Compaction", "compact_slots unique_blocks")
+        for has_compaction in (False, True):
+            with self.subTest(compaction=has_compaction):
+                owner = self.owner()
+                common, _ = self.common((2048, 7, 133), (30720, 0, 17))
+                slots = torch.arange(2188, dtype=torch.long) + 8000
+                slots[2047] = -1
+                compaction = (
+                    Compaction(slots - 8000, torch.tensor([4, 6, 9]))
+                    if has_compaction
+                    else None
+                )
+                common.swa_meta = types.SimpleNamespace(
+                    slot_mapping=slots, slot_compaction=compaction
+                )
+                rows = common.cp_ctx.gather_restore_positions
+                kv = torch.zeros(rows.numel(), 2, dtype=torch.bfloat16)
+                writer = self.codec.quantize_and_insert_k_cache_cp_byte_sliced
+                owner._prefill_write_swa_fp8_paged(common, kv)
+                first_slots = writer.call_args.args[2]
+                first_compaction = writer.call_args.kwargs["compaction"]
+                # A later layer consumes the same metadata and different KV.
+                consumer = self.owner()
+                consumer._shared_attention = owner._shared_attention
+                with patch.object(
+                    torch.Tensor,
+                    "index_select",
+                    side_effect=AssertionError("repeated replay metadata gather"),
+                ):
+                    consumer._prefill_write_swa_fp8_paged(common, kv + 1)
+                self.assertIs(writer.call_args.args[2], first_slots)
+                self.assertIs(writer.call_args.kwargs["compaction"], first_compaction)
+                torch.testing.assert_close(first_slots, slots[rows], rtol=0, atol=0)
+                # New pool slots and a new CP restore map must not reuse an
+                # old result, even when all tensor shapes remain identical.
+                common.swa_meta.slot_mapping = slots + 100
+                owner._prefill_write_swa_fp8_paged(common, kv)
+                torch.testing.assert_close(
+                    writer.call_args.args[2], (slots + 100)[rows], rtol=0, atol=0
+                )
+                common.cp_ctx.gather_restore_positions = rows.flip(0)
+                owner._prefill_write_swa_fp8_paged(common, kv)
+                torch.testing.assert_close(
+                    writer.call_args.args[2],
+                    (slots + 100)[rows.flip(0)],
+                    rtol=0,
+                    atol=0,
+                )
+                if has_compaction:
+                    torch.testing.assert_close(
+                        writer.call_args.kwargs["compaction"].compact_slots,
+                        compaction.compact_slots[rows.flip(0)],
+                        rtol=0,
+                        atol=0,
+                    )
+                # The ordinary forward cleanup discards this enclosing cache.
+                owner._shared_attention.pop("prefill_meta_common")
+                owner._prefill_write_swa_fp8_paged(common, kv)
+                self.assertIsNot(writer.call_args.args[2], first_slots)
+
     def test_single_request_write_keeps_zero_copy_tail_views(self):
         Compaction = namedtuple("Compaction", "compact_slots unique_blocks")
         for length in (128, 129, 2048):

@@ -758,11 +758,34 @@ class AttentionV41FP8(AttentionFP8):
                 )
         elif cp_swa_replay_starts(common.cp_ctx) is not None:
             positions = common.cp_ctx.gather_restore_positions
-            slots = slots.index_select(0, positions)
-            if compaction is not None:
-                compaction = compaction._replace(
-                    compact_slots=compaction.compact_slots.index_select(0, positions)
+            # CED consumers share the immutable write plan. Select its replay
+            # rows once, rather than launching two gathers on every layer.
+            # Keep the inputs alive so tensor-id reuse cannot alias the entry.
+            # The enclosing cache is cleared at forward/CED boundaries.
+            cache = self._shared_attention.setdefault("prefill_meta_common", {})
+            replay_slots = cache.setdefault("replay_slots", {})
+            key = (id(slots), id(compaction), id(positions))
+            entry = replay_slots.get(key)
+            if entry is None:
+                selected_slots = slots.index_select(0, positions)
+                selected_compaction = (
+                    None
+                    if compaction is None
+                    else compaction._replace(
+                        compact_slots=compaction.compact_slots.index_select(
+                            0, positions
+                        )
+                    )
                 )
+                entry = (
+                    slots,
+                    compaction,
+                    positions,
+                    selected_slots,
+                    selected_compaction,
+                )
+                replay_slots[key] = entry
+            slots, compaction = entry[3:]
         if self._swa_cp_byte_sliced():
             raw = self._pool_raw_u8(SWA_KV)
             if raw is not None:
