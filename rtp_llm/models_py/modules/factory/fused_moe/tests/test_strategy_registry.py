@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import CompressedW8A8Int8PerChannelQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -71,6 +70,17 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
 
 
 class StrategyRegistryDiagnosticsTest(unittest.TestCase):
+    def test_strategy_conditions_precede_optional_executor_import(self):
+        class RejectedStrategy(MoeStrategy):
+            @classmethod
+            def check_conditions(cls, checker, config):
+                checker.check(False)
+
+            def get_attributes(self):
+                raise AssertionError("unmatched strategy imported its executor")
+
+        self.assertFalse(RejectedStrategy().can_handle(_config("auto")))
+
     def test_no_quant_cpp_runtime_conditions_run_in_regular_ci(self):
         def conditions_pass(quant_config) -> bool:
             checker = ConditionChecker("CudaNoQuantCppStrategy.check_conditions()")

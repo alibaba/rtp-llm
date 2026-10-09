@@ -6,7 +6,6 @@ import unittest
 from typing import Optional
 
 import torch
-
 from rtp_llm.config.cuda_graph import GenerationPrefillCudaGraphUnsupportedBackend
 
 
@@ -596,9 +595,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         ]
         single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
         for scenario, on_cuda, two_dimensional, tags, tables in (
-            ("micro_batch_split_pinned", False, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_cuda", True, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_single_group", False, False, ["default"], single_group_tables),
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
             ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
         ):
             with self.subTest(scenario=scenario):
@@ -624,7 +641,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         self.assertEqual(tensor.device, source.device)
                         self.assertEqual(tensor.is_pinned(), not on_cuda)
                         self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(tensor.cpu(), expected.narrow(batch_axis, start, count))
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
                 self.assertEqual(
                     [batch["input_lengths"].tolist() for batch in result["batches"]],
                     [[2, 4], [2]],
@@ -685,6 +704,45 @@ class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
 
     def forward(self, inputs, fmha_impl=None):
         return PyModelOutputs(rms_norm(self.hidden(inputs)))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class FinalLogitSoftcapTest(unittest.TestCase):
+    def test_softcap_precedes_tp_gather_and_vocab_narrow(self):
+        hidden = torch.tensor(
+            [[-60.0, -15.0, 6.0, 45.0], [1.5, 30.0, -9.0, 90.0]],
+            dtype=torch.float32,
+            device="cuda",
+        )
+
+        for cap in (0.0, 30.0):
+            with self.subTest(cap=cap):
+                expected = hidden if cap == 0 else cap * torch.tanh(hidden / cap)
+                gathered_inputs = []
+
+                def unused_comm(*_args):
+                    self.fail("unexpected broadcast or all-reduce")
+
+                def all_gather(recv_buffers, _mode, send_buffers, _inplace):
+                    self.assertEqual(len(recv_buffers), 1)
+                    self.assertEqual(len(send_buffers), 0)
+                    packed = recv_buffers[0].view(2, hidden.size(0), 2)
+                    gathered_inputs.append(packed[0].clone())
+                    packed[1].copy_(expected[:, 2:])
+
+                _extension.register_comm_ops(unused_comm, unused_comm, all_gather)
+                try:
+                    logits = _extension.run_final_logit_softcap(
+                        ForwardModel(), hidden, cap
+                    )
+                finally:
+                    _extension.clear_comm_ops()
+
+                self.assertEqual(len(gathered_inputs), 1)
+                torch.testing.assert_close(
+                    gathered_inputs[0], expected[:, :2], rtol=0, atol=0
+                )
+                torch.testing.assert_close(logits, expected[:, :3], rtol=0, atol=0)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")

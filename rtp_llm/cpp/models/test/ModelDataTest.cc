@@ -1,12 +1,13 @@
+
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
-#include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/engine_base/Executor.h"
 
 #include <functional>
 #include <algorithm>
@@ -421,9 +422,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
-    invalid.kv_cache_group_tags      = {"first", "second"};
-    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
-    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    invalid.kv_cache_group_tags     = {"first", "second"};
+    invalid.kv_cache_block_id       = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     broadcaster.reset();
     ::alarm(0);

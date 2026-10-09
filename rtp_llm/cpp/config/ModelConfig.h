@@ -117,9 +117,11 @@ public:
     bool   add_bias_linear            = false;
     bool   has_moe_norm               = false;
     double logit_scale                = 1.0;
+    // Final logit softcapping (Gemma2/Gemma4 style): logits = cap * tanh(logits / cap).
+    // 0 disables the transform.
     double final_logit_softcapping = 0.0;
-    bool shares_target_kv = false;
-    bool   use_kvcache                = true;
+    bool   use_kvcache             = true;
+    bool   shares_target_kv        = false;
 
     int64_t pre_seq_len       = 0;
     bool    prefix_projection = false;

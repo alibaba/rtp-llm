@@ -110,10 +110,10 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     // Compact context rows prepared once by input gathering.
-    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
-    void                            initializeCustomOutput();
-    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
-    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
+    void          initializeCustomOutput();
+    torch::Tensor runCustomOutput(const torch::Tensor& rows);
+    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -333,10 +333,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
-    init_resources.speculative_target_embedding = params.speculative_target_embedding;
+    init_resources.speculative_target_embedding        = params.speculative_target_embedding;
     init_resources.speculative_target_embedding_scalar = params.speculative_target_embedding_scalar;
-    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.is_speculative                      = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role                      = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
@@ -353,10 +353,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

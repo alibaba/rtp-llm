@@ -14,6 +14,15 @@ from rtp_llm.ops import TaskType
 
 class MultimodalMixinFactory:
     @staticmethod
+    def create_multimodal_prompt_expander(model_config: ModelConfig):
+        if not model_config.mm_model_config.is_multimodal:
+            return None
+        multimodal_mixin_cls = get_multimodal_mixin_cls(model_config.model_type)
+        return multimodal_mixin_cls.create_prompt_expander(
+            model_config.mm_related_params
+        )
+
+    @staticmethod
     def _create_multimodal_mixin(
         model_config: ModelConfig,
         engine_config: EngineConfig,

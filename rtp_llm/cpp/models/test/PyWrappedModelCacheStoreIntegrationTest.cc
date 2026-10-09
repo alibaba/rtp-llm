@@ -25,6 +25,10 @@
 
 namespace py = pybind11;
 
+namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
+}
+
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
@@ -39,6 +43,21 @@ struct PyWrappedModelTestPeer {
 
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
+    }
+
+    static GptModelOutputs forwardPostLayers(PyWrappedModel&       model,
+                                             torch::Tensor         hidden,
+                                             const torch::Tensor&  lm_output_indexes,
+                                             const GptModelInputs& inputs) {
+        return model.forwardPostLayers(std::move(hidden),
+                                       /*has_context_request=*/false,
+                                       /*need_all_logits=*/false,
+                                       lm_output_indexes,
+                                       /*enable_sp=*/false,
+                                       static_cast<size_t>(lm_output_indexes.numel()),
+                                       inputs,
+                                       torch::Tensor(),
+                                       /*skip_final_layernorm=*/true);
     }
 };
 
@@ -293,9 +312,9 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+                                              {static_cast<int64_t>(group_tags.size()),
+                                               static_cast<int64_t>(batch_size),
+                                               static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -937,12 +956,55 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+torch::Tensor runFinalLogitSoftcap(py::object py_model, torch::Tensor hidden, double cap) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+
+    constexpr int64_t hidden_size       = 4;
+    constexpr size_t  output_vocab_size = 3;
+    constexpr size_t  padded_vocab_size = 4;
+    constexpr int64_t tp_size           = 2;
+    TORCH_CHECK(hidden.is_cuda(), "softcap test hidden must be on CUDA");
+    TORCH_CHECK(hidden.scalar_type() == torch::kFloat32, "softcap test hidden must be float32");
+    TORCH_CHECK(hidden.dim() == 2 && hidden.size(1) == hidden_size, "softcap test hidden must have shape [rows, 4]");
+
+    Weights weights;
+    weights.layers.resize(1);
+    auto lm_head    = std::make_shared<DenseWeights>();
+    lm_head->kernel = torch::eye(hidden_size, hidden.options()).narrow(0, 0, padded_vocab_size / tp_size).contiguous();
+    weights.lm_head = lm_head;
+
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_FP32;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = hidden_size;
+    description.vocab_size                   = output_vocab_size;
+    description.output_vocab_size            = output_vocab_size;
+    description.output_vocab_padded_size     = padded_vocab_size;
+    description.final_logit_softcapping      = cap;
+
+    GptModelInitParams params{weights, description, std::nullopt};
+    params.parallelism_config.tp_size = tp_size;
+    params.parallelism_config.tp_rank = 0;
+    params.max_seq_len                = hidden.size(0);
+    params.hidden_size                = hidden_size;
+
+    PyWrappedModel model(params, std::move(py_model));
+    auto indexes = torch::arange(hidden.size(0), torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+    GptModelInputs inputs;
+    return PyWrappedModelTestPeer::forwardPostLayers(model, std::move(hidden), indexes, inputs).logits;
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+    rtp_llm::registerExecCtxOps(m);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_final_logit_softcap", &rtp_llm::test::runFinalLogitSoftcap);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

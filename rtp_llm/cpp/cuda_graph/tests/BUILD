@@ -204,6 +204,7 @@ py_test(
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
+        "PYTHONNOUSERSITE": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {"gpu": "L20_CU13"},

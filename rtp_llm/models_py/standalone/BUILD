@@ -5,7 +5,10 @@ requirement(["fast-safetensors", "fastsafetensors"])
 
 py_library(
     name = "auto_model",
-    srcs = ["auto_model.py"],
+    srcs = [
+        "auto_model.py",
+        "gemma4_grouped_model.py",
+    ],
     deps = [
         ":py_standalone_testlib",
 

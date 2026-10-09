@@ -57,6 +57,17 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
 
 inline void validateActiveMTPCacheLayout(const ModelConfig& active_module_config) {
     const auto& expected = active_module_config;
+    if (expected.model_type == "gemma4_assistant") {
+        RTP_LLM_CHECK_WITH_INFO(expected.num_layers > 0, "Gemma4 Assistant must have at least one layer");
+        RTP_LLM_CHECK_WITH_INFO(expected.kv_cache_spec_descs.size() == static_cast<size_t>(expected.num_layers),
+                                "Gemma4 Assistant descriptor rows %zu != layers %ld",
+                                expected.kv_cache_spec_descs.size(),
+                                expected.num_layers);
+        for (const auto& descriptors : expected.kv_cache_spec_descs) {
+            RTP_LLM_CHECK_WITH_INFO(!descriptors.empty(), "Gemma4 Assistant cache descriptor rows must be non-empty");
+        }
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         expected.num_layers == 1, "MTP module 0 must be a one-layer config, got %ld layers", expected.num_layers);
     RTP_LLM_CHECK_WITH_INFO(expected.kv_cache_spec_descs.size() == 1,
@@ -71,6 +82,18 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
                                                     size_t             gen_num_per_cycle,
                                                     SpeculativeType    sp_type) {
     RTP_LLM_CHECK_WITH_INFO(weight_count > 0, "MTP module config plan requires at least one layer weight");
+    if (model_config.model_type == "gemma4_assistant") {
+        RTP_LLM_CHECK_WITH_INFO(sp_type == SP_TYPE_MTP, "Gemma4 Assistant only supports MTP speculative mode");
+        RTP_LLM_CHECK_WITH_INFO(weight_count == static_cast<size_t>(model_config.num_layers),
+                                "Gemma4 Assistant weight count %zu != layer count %ld",
+                                weight_count,
+                                model_config.num_layers);
+        validateActiveMTPCacheLayout(model_config);
+        MTPModuleConfigPlan plan;
+        plan.source_layer_indices = {0};
+        plan.module_configs       = {model_config};
+        return plan;
+    }
 
     size_t model_num = weight_count;
     if (gen_num_per_cycle > 1 && weight_count == 1) {

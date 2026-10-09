@@ -63,6 +63,10 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto         py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     const size_t weight_count          = py_layers_weights_vec.size();
     size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+    auto         mtp_hw_kernel_config  = base_params.hw_kernel_config;
+    if (model_config.model_type == "gemma4_assistant") {
+        mtp_hw_kernel_config.enable_cuda_graph = false;
+    }
 
     // Get py_eplb if available (from model)
     py::object py_eplb = py::none();
@@ -70,34 +74,41 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    if (sp_type == SP_TYPE_DSPARK) {
-        // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
-        // width of its draft block, not the number of one-layer MTP modules, so
-        // it keeps the full checkpoint config instead of an MTP module plan.
+    if (model_config.model_type == "gemma4_assistant") {
+        RTP_LLM_CHECK_WITH_INFO(sp_type == SP_TYPE_MTP, "Gemma4 Assistant only supports MTP speculative mode");
+        RTP_LLM_CHECK_WITH_INFO(weight_count == static_cast<size_t>(model_config.num_layers),
+                                "Gemma4 Assistant weight count %zu != layer count %ld",
+                                weight_count,
+                                model_config.num_layers);
+        validateActiveMTPCacheLayout(model_config);
+    }
+    if (sp_type == SP_TYPE_DSPARK || model_config.model_type == "gemma4_assistant") {
+        // DSpARK and Gemma4 Assistant are one multi-layer draft model:
+        // gen_num_per_cycle controls proposal width, not physical module count.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                          model_config,
-                                                                          base_params.parallelism_config,
-                                                                          base_params.runtime_config,
-                                                                          base_params.pd_sep_config,
-                                                                          base_params.concurrency_config,
-                                                                          base_params.fmha_config,
-                                                                          base_params.kv_cache_config,
-                                                                          base_params.profiling_debug_logging_config,
-                                                                          base_params.hw_kernel_config,
-                                                                          base_params.device_resource_config,
-                                                                          base_params.moe_config,
-                                                                          base_params.model_specific_config,
-                                                                          base_params.sp_config,
-                                                                          base_params.cache_store_config,
-                                                                          base_params.misc_config,
-                                                                          base_params.arpc_config,
-                                                                          base_params.grpc_config,
-                                                                          base_params.ffn_disaggregate_config,
-                                                                          base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           mtp_hw_kernel_config,
+                                                                           base_params.device_resource_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.model_specific_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.ffn_disaggregate_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -132,7 +143,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.fmha_config,
                                                                            base_params.kv_cache_config,
                                                                            base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
+                                                                           mtp_hw_kernel_config,
                                                                            base_params.device_resource_config,
                                                                            base_params.moe_config,
                                                                            base_params.model_specific_config,
@@ -516,6 +527,7 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
+
         // The factory owns a process-wide compiler. Release it before Python
         // finalization can unload the native runtime that its destructor uses.
         {

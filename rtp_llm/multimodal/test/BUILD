@@ -89,6 +89,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    env = {"PYTHONNOUSERSITE": "1"},
 )
 
 py_test(

@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as tldevice
 
 
 @triton.jit
@@ -64,6 +65,47 @@ def silu_and_mul(
         input_tensor.stride(0),
         output_tensor.stride(0),
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+    return output_tensor
+
+
+@triton.jit
+def _gelu_tanh_and_mul_kernel(
+    output_ptr,
+    input_ptr,
+    N: tl.int32,
+    input_row_stride: tl.int32,
+    output_row_stride: tl.int32,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    pid_b = tl.program_id(axis=0)
+    pid_n_block = tl.program_id(axis=1)
+    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    mask = n_offsets < N
+    input_row = input_ptr + pid_b * input_row_stride
+    gate = tl.load(input_row + n_offsets, mask=mask).to(tl.float32)
+    value = tl.load(input_row + N + n_offsets, mask=mask)
+    inner = 0.7978845608028654 * (gate + 0.044715 * gate * gate * gate)
+    activated = 0.5 * gate * (1.0 + tldevice.tanh(inner))
+    output_row = output_ptr + pid_b * output_row_stride
+    tl.store(output_row + n_offsets, activated * value, mask=mask)
+
+
+def gelu_tanh_and_mul(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor
+) -> torch.Tensor:
+    B, D = input_tensor.shape
+    assert D % 2 == 0, "Last dimension must be even (2*N)"
+    N = D // 2
+    grid = lambda meta: (B, triton.cdiv(N, meta["BLOCK_SIZE_N"]))
+    block_size = 1024 if N > 1024 else triton.next_power_of_2(N)
+    _gelu_tanh_and_mul_kernel[grid](
+        output_tensor,
+        input_tensor,
+        N,
+        input_tensor.stride(0),
+        output_tensor.stride(0),
+        BLOCK_SIZE_N=block_size,
     )
     return output_tensor
 

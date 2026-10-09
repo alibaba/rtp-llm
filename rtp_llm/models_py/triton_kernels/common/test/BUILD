@@ -29,6 +29,16 @@ py_test(
 )
 
 py_test(
+    name = "gelu_tanh_and_mul_test",
+    srcs = ["gelu_tanh_and_mul_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_moe_gating",
     srcs = ["test_moe_gating.py"],
     deps = [

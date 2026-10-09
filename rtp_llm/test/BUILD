@@ -99,6 +99,16 @@ py_test(
 )
 
 py_test(
+    name = "gemma4_renderer_test",
+    srcs = ["gemma4_renderer_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    env = {"PYTHONNOUSERSITE": "1"},
+    tags = ["manual"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

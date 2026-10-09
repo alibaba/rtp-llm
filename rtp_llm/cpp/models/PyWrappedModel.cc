@@ -683,7 +683,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+    const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
         cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -954,7 +954,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
             }
         }
-        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
             cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -1004,12 +1004,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
             py::gil_scoped_acquire gil;
+            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
@@ -1207,7 +1207,17 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+#if USING_CUDA
+            if (description_.final_logit_softcapping == 30.0 && hidden.is_cuda()
+                && hidden.scalar_type() == torch::kBFloat16 && hidden.is_contiguous() && hidden.dim() == 2
+                && hidden.size(1) == 2816 && lm_output_indexes_device.is_cuda()
+                && lm_output_indexes_device.scalar_type() == torch::kInt && lm_output_indexes_device.is_contiguous()) {
+                last_hidden = torch_ext::gemma4_gather_rows_bf16(hidden, lm_output_indexes_device);
+            } else
+#endif
+            {
+                last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            }
         } else {
             last_hidden = hidden;
         }
@@ -1228,8 +1238,23 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
 
         if (description_.final_logit_softcapping > 0.0) {
+            // Final logit softcapping (Gemma2/Gemma4 style):
+            //   logits = cap * tanh(logits / cap)
+            // Matches the HF reference, which applies tanh directly on the logits
+            // dtype without extra casts; the local logits are already FP32 here.
+            // Softcapping precedes the TP all-gather and the output-vocab narrow,
+            // both elementwise-safe wrt this transform.
+            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(final_logit_softcapping)");
             const auto cap = description_.final_logit_softcapping;
-            logits = torch::tanh(logits / cap) * cap;
+#if USING_CUDA
+            if (cap == 30.0 && logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.is_contiguous()
+                && hidden.dim() == 2 && hidden.size(1) == 2816) {
+                logits = torch_ext::gemma4_logit_softcap_fp32(logits, cap);
+            } else
+#endif
+            {
+                logits = torch::tanh(logits / cap) * cap;
+            }
         }
 
         GptModelOutputs outputs;
@@ -1406,11 +1431,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

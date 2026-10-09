@@ -1054,8 +1054,6 @@ class KVCacheSpecDesc:
 
 
 class ModelConfig:
-    final_logit_softcapping: float
-    shares_target_kv: bool
     add_bias_linear: bool
     attn_config: AttentionConfigs
     ckpt_path: str
@@ -1066,6 +1064,8 @@ class ModelConfig:
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
+    final_logit_softcapping: float
+    shares_target_kv: bool
     has_lm_head: bool
     has_moe_norm: bool
     has_positional_encoding: bool

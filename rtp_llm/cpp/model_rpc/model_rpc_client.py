@@ -1014,7 +1014,17 @@ class ModelRpcClient(object):
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
                 if (
-                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                    # decode-entrance clients dispatch on both sides: a prefill
+                    # worker forwards the decode phase to the DECODE address,
+                    # while the decode entrance itself dispatches the prefill
+                    # phase to the PREFILL address. Without the PREFILL arm the
+                    # entrance falls back to the DP self-address, which lands
+                    # generate traffic on the peer's disaggregation-control
+                    # port (RemoteRpcServer: "not implement GenerateStreamCall").
+                    (
+                        self._decode_entrance
+                        and role_addr.role in (RoleType.DECODE, RoleType.PREFILL)
+                    )
                     or role_addr.role == RoleType.PDFUSION
                     or (
                         not self._decode_entrance and role_addr.role == RoleType.PREFILL

@@ -24,7 +24,11 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.device.device_type import is_hip
-from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
+from rtp_llm.model_factory_register import (
+    ModelDict,
+    _model_factory,
+    ensure_model_registered,
+)
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     SpeculativeType,
@@ -183,6 +187,12 @@ class ModelFactory:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
             propose_hw_kernel_config = engine_config.hw_kernel_config
+            if propose_model_config.model_type == "gemma4_assistant":
+                propose_hw_kernel_config = copy.deepcopy(propose_hw_kernel_config)
+                propose_hw_kernel_config.enable_cuda_graph = False
+                logging.info(
+                    "Gemma4 Assistant remains eager while the target model uses CUDA graph"
+                )
             if (
                 sp_type == SpeculativeType.DSPARK
                 and propose_model_config.model_type == "qwen_3_dspark"
@@ -472,6 +482,21 @@ class ModelFactory:
                 % sp_config.type.name
             )
 
+        if not sp_config.model_type:
+            checkpoint_config = ModelFactory.get_config_json(sp_config.checkpoint_path)
+            sp_config.model_type = ModelDict.get_ft_model_type_by_config(
+                checkpoint_config
+            )
+            if not sp_config.model_type:
+                raise ValueError(
+                    "cannot infer speculative model type from checkpoint architectures"
+                )
+            logging.info(
+                "inferred speculative model type %s from %s",
+                sp_config.model_type,
+                sp_config.checkpoint_path,
+            )
+
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
         propose_model_args.ckpt_path = sp_config.checkpoint_path
@@ -508,12 +533,122 @@ class ModelFactory:
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 
-        if sp_config.type == SpeculativeType.DSPARK:
+        if propose_model_config.model_type == "gemma4_assistant":
+            ModelFactory._setup_gemma4_assistant_configs(
+                engine_config, model_config, propose_model_config
+            )
+        elif sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(
                 sp_config, model_config, propose_model_config
             )
 
         return propose_model_config
+
+    @staticmethod
+    def _setup_gemma4_assistant_configs(
+        engine_config: EngineConfig,
+        target_config: ModelConfig,
+        assistant_config: ModelConfig,
+    ) -> None:
+        sp_config = engine_config.sp_config
+        if sp_config.type != SpeculativeType.MTP:
+            raise ValueError("Gemma4 Assistant requires sp_type=mtp")
+        if target_config.model_type != "gemma4":
+            raise ValueError(
+                "Gemma4 Assistant requires a gemma4 target model, got "
+                f"{target_config.model_type!r}"
+            )
+        tp_size = int(engine_config.parallelism_config.tp_size)
+        if tp_size <= 0:
+            raise ValueError("Gemma4 Assistant requires a positive TP size")
+        for name, width in (
+            ("assistant attention heads", assistant_config.attn_config.head_num),
+            ("assistant intermediate size", assistant_config.inter_size),
+            ("target hidden size", target_config.hidden_size),
+        ):
+            if int(width) % tp_size != 0:
+                raise ValueError(
+                    f"Gemma4 Assistant {name} {width} is not divisible by TP {tp_size}"
+                )
+        assistant_metadata = assistant_config.mm_related_params.config
+        backbone_hidden_size = int(assistant_metadata["assistant_backbone_hidden_size"])
+        if target_config.hidden_size != backbone_hidden_size:
+            raise ValueError(
+                "Gemma4 Assistant backbone width mismatch: target "
+                f"{target_config.hidden_size}, assistant {backbone_hidden_size}"
+            )
+        if target_config.vocab_size != assistant_config.vocab_size:
+            raise ValueError(
+                "Gemma4 Assistant vocabulary mismatch: target "
+                f"{target_config.vocab_size}, assistant {assistant_config.vocab_size}"
+            )
+        if not assistant_metadata.get("assistant_all_kv_shared", False):
+            raise ValueError(
+                "Gemma4 Assistant must share all KV layers with the target"
+            )
+
+        geometry_pairs = (
+            (
+                "SWA KV heads",
+                target_config.attn_config.kv_head_num,
+                assistant_config.attn_config.kv_head_num,
+            ),
+            (
+                "SWA head dim",
+                target_config.attn_config.size_per_head,
+                assistant_config.attn_config.size_per_head,
+            ),
+            (
+                "SWA window",
+                target_config.attn_config.sliding_window,
+                assistant_config.attn_config.sliding_window,
+            ),
+            (
+                "full KV heads",
+                target_config.mm_related_params.config.get("full_layer_kv_head_num"),
+                assistant_metadata.get("full_layer_kv_head_num"),
+            ),
+            (
+                "full head dim",
+                target_config.mm_related_params.config.get("full_layer_size_per_head"),
+                assistant_metadata.get("full_layer_size_per_head"),
+            ),
+        )
+        for name, target_value, assistant_value in geometry_pairs:
+            if target_value != assistant_value:
+                raise ValueError(
+                    f"Gemma4 Assistant {name} mismatch: target {target_value}, "
+                    f"assistant {assistant_value}"
+                )
+        assistant_tags = [
+            descriptors[0].tag for descriptors in assistant_config.kv_cache_spec_descs
+        ]
+        if assistant_tags != ["swa", "swa", "swa", "full"]:
+            raise ValueError(
+                "Gemma4 Assistant requires cache tags [swa, swa, swa, full], "
+                f"got {assistant_tags}"
+            )
+
+        checkpoint_width = int(assistant_config.gen_num_per_cycle)
+        if checkpoint_width != 6:
+            raise ValueError(
+                "Gemma4 Assistant checkpoint must declare exactly 6 assistant tokens, "
+                f"got {checkpoint_width}"
+            )
+        configured_width = int(sp_config.gen_num_per_cycle)
+        if configured_width not in (1, checkpoint_width):
+            raise ValueError(
+                "Gemma4 Assistant requires gen_num_per_cycle=6, got "
+                f"{configured_width}"
+            )
+        if configured_width == 1:
+            logging.info(
+                "promoting Gemma4 Assistant configured proposal width 1 to checkpoint width %d; configuration source is not retained",
+                checkpoint_width,
+            )
+        sp_config.gen_num_per_cycle = checkpoint_width
+        target_config.gen_num_per_cycle = checkpoint_width
+        assistant_config.gen_num_per_cycle = checkpoint_width
 
     @staticmethod
     def _setup_dspark_configs(

@@ -1,7 +1,6 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_wrapper import (
     DeepEPMode,
@@ -110,10 +109,19 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         )
 
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
-            torch.int64
-        )
-        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        if slice_size == 0:
+            route_shape = (0, topk_ids.size(1))
+            tp_expert_ids = torch.empty(
+                route_shape, dtype=torch.int64, device=topk_ids.device
+            )
+            tp_expert_scales = torch.empty(
+                route_shape, dtype=topk_weights.dtype, device=topk_weights.device
+            )
+        else:
+            tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
+                torch.int64
+            )
+            tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
         (
             num_tokens_per_rank,
@@ -154,9 +162,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             if use_fp8:
-                raise ValueError(
-                    "FP8 DeepEP dispatch must return (activation, scale)"
-                )
+                raise ValueError("FP8 DeepEP dispatch must return (activation, scale)")
             expert_x = output
 
         expert_num_tokens = torch.tensor(

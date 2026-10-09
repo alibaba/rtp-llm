@@ -2,7 +2,6 @@ from typing import Any, Dict, Optional
 
 import torch
 import triton.language as tl
-
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -18,7 +17,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    gelu_tanh_and_mul,
+    silu_and_mul,
+)
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
@@ -136,11 +138,15 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
         intermediate2 = torch.empty(
             M * top_k, self.inter_size, device=device, dtype=dtype
         )
-        silu_and_mul(intermediate2, intermediate1)
+        if activation in ("silu", "SiGLU"):
+            silu_and_mul(intermediate2, intermediate1)
+        elif activation in ("gelu", "GeGLU", "gelu_tanh"):
+            gelu_tanh_and_mul(intermediate2, intermediate1)
+        else:
+            raise ValueError(f"unsupported Triton MoE activation: {activation}")
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)

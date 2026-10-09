@@ -110,6 +110,7 @@ def _register_builtin_lazy_renderers() -> None:
     register_lazy_renderer(
         ["deepseek_v4"], "rtp_llm.openai.renderers.deepseekv4_renderer"
     )
+    register_lazy_renderer(["gemma4"], "rtp_llm.openai.renderers.gemma4_renderer")
     register_lazy_renderer(
         ["kimi_k2", "kimi_linear"], "rtp_llm.openai.renderers.kimik2_renderer"
     )
@@ -141,7 +142,14 @@ def _register_builtin_lazy_renderers() -> None:
         ["qwen_v2_audio"], "rtp_llm.openai.renderers.qwen_v2_audio_renderer"
     )
     register_lazy_renderer(
-        ["qwen_vl", "qwen_vl_1b8", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"],
+        [
+            "qwen_vl",
+            "qwen_vl_1b8",
+            "qwen2_vl",
+            "qwen2_5_vl",
+            "qwen3_vl",
+            "qwen3_vl_moe",
+        ],
         "rtp_llm.openai.renderers.qwen_vl_renderer",
     )
 

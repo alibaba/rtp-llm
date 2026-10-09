@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
-
 from rtp_llm.utils.util import check_with_info
 
 
@@ -1172,6 +1171,9 @@ class W:
     multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta"
     multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
     multi_tokens_predict_t2d_map = "multi_tokens_predict_t2d_map"
+    gemma4_assistant_pre_proj = "gemma4_assistant.pre_projection.weight"
+    gemma4_assistant_post_proj = "gemma4_assistant.post_projection.weight"
+    gemma4_assistant_q_proj = "gemma4_assistant.q_proj.weight"
 
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
@@ -1491,6 +1493,19 @@ class W:
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
 
+    # ---- Gemma4 ----
+    # Sandwich layernorms around the dense-MLP + MoE block (all consumed
+    # without the +1 shift Gemma1-3 applied).
+    pre_ffn_ln_gamma = "pre_ffn_layernorm_weights.gamma"
+    pre_ffn2_ln_gamma = "pre_ffn_layernorm_weights_2.gamma"
+    post_ffn1_ln_gamma = "post_ffn_layernorm_weights_1.gamma"
+    post_ffn2_ln_gamma = "post_ffn_layernorm_weights_2.gamma"
+    # router.scale [hidden] and router.per_expert_scale [expert_num]
+    moe_router_scale = "partial_moe_weights.router.scale"
+    moe_router_expert_scale = "partial_moe_weights.router.per_expert_scale"
+    # per-layer output scalar ([1])
+    layer_scalar = "layer_scalar"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1511,6 +1526,9 @@ class W:
         multi_tokens_predict_final_ln_beta: sp_id,
         multi_tokens_predict_d2t_map: sp_id,
         multi_tokens_predict_t2d_map: sp_id,
+        gemma4_assistant_pre_proj: sp_id,
+        gemma4_assistant_post_proj: sp_id,
+        gemma4_assistant_q_proj: sp_neg1,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
@@ -1680,6 +1698,14 @@ class W:
         dspark_hidden_norm_gamma: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
+        # ---- Gemma4 (TP=1 today; replicated placeholders for future TP>1) ----
+        pre_ffn_ln_gamma: sp_id,
+        pre_ffn2_ln_gamma: sp_id,
+        post_ffn1_ln_gamma: sp_id,
+        post_ffn2_ln_gamma: sp_id,
+        moe_router_scale: sp_id,
+        moe_router_expert_scale: sp_id,
+        layer_scalar: sp_id,
     }
 
     weights_list = [

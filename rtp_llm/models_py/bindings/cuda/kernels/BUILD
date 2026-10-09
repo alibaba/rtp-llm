@@ -163,6 +163,76 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "gemma4_softmax_8192",
+    srcs = ["gemma4_softmax_8192.cu"],
+    hdrs = ["gemma4_softmax_8192.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_add_scale",
+    srcs = ["gemma4_add_scale.cu"],
+    hdrs = ["gemma4_add_scale.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_expand_kv",    srcs = ["gemma4_expand_kv.cu"],
+    hdrs = ["gemma4_expand_kv.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_kv_cache",
+    srcs = ["gemma4_kv_cache.cu"],
+    hdrs = ["gemma4_kv_cache.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_geglu",    srcs = ["gemma4_geglu.cu"],
+    hdrs = ["gemma4_geglu.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_rmsnorm_parts",
+    srcs = ["gemma4_rmsnorm_parts.cu"],
+    hdrs = ["gemma4_rmsnorm_parts.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_rope",
+    srcs = ["gemma4_rope.cu"],
+    hdrs = ["gemma4_rope.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gemma4_moe",
+    srcs = ["gemma4_moe.cu"],
+    hdrs = ["gemma4_moe.h"],
+    deps = cuda_deps + torch_deps(),
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
 # Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
 # Replaces torch.topk on the DSv4 indexer decode hot path:
 #   K=512 / T_max=2048: torch.topk ~30us → this kernel ~5-10us.

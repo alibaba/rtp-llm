@@ -1,3 +1,5 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -130,3 +132,40 @@ py_test(
         "gpu_count": "1",
     },
 )
+
+py_test(
+    name = "gemma4_desc_test",
+    srcs = ["gemma4_desc_test.py"],
+    main = "gemma4_desc_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm/model_loader:loader",
+    ],
+    env = {
+        "GPU_COUNT": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    # fp32 reference-math comparison against the inline HF translation; any
+    # CUDA worker works (librtp_compute_ops + flashinfer append kernel).
+    exec_properties = {'gpu': 'A10', 'gpu_count': '1'},
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+exports_files(["gemma4_desc_test.py", "gemma4_split_d_attention_test.py"])

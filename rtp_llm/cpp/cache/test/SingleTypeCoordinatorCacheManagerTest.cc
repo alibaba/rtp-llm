@@ -1417,6 +1417,26 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ActiveMtpCacheLayoutValidationOnly
     EXPECT_NO_THROW(buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP));
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, Gemma4AssistantKeepsMonolithicMtpConfig) {
+    auto config                                            = makeTestModelConfig(/*num_layers=*/4);
+    config.model_type                                      = "gemma4_assistant";
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::SLIDING_WINDOW,
+        HybridAttentionType::SLIDING_WINDOW,
+        HybridAttentionType::SLIDING_WINDOW,
+        HybridAttentionType::NONE,
+    };
+
+    const auto plan = buildMTPModuleConfigPlan(config, /*weight_count=*/4, /*gen_num_per_cycle=*/6, SP_TYPE_MTP);
+
+    EXPECT_EQ(plan.source_layer_indices, (std::vector<size_t>{0}));
+    ASSERT_EQ(plan.module_configs.size(), 1u);
+    EXPECT_EQ(plan.module_configs[0].num_layers, 4);
+    EXPECT_EQ(plan.module_configs[0].kv_cache_spec_descs.size(), 4u);
+    EXPECT_NO_THROW(validateActiveMTPCacheLayout(plan.module_configs[0]));
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, MtpModuleConfigPlanKeepsWeightsAndCopiesActiveCacheLayout) {
     auto config                                 = makeTestModelConfig(/*num_layers=*/2);
     config.kv_cache_spec_descs[0][0].tag        = "active";

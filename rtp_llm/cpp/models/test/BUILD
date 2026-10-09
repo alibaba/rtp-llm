@@ -38,7 +38,10 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/distribute:cpu_tp_broadcaster"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "//rtp_llm/cpp/engine_base:executor",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

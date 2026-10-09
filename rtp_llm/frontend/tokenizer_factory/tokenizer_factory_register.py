@@ -127,6 +127,7 @@ def _register_builtin_lazy_tokenizers() -> None:
             "baichuan",
             "baichuan2",
             "gemma",
+            "gemma4",
             "cohere",
         ],
         "rtp_llm.frontend.tokenizer_factory.tokenizers.llama_tokenizer",

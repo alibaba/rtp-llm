@@ -220,8 +220,13 @@ class BackendRPCServerVisitor:
             role_list.append(RoleType.DECODE)
             logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
+            # The decode entrance dispatches the prefill phase to the PREFILL
+            # role, and the request must carry the DECODE address as well so
+            # the prefill can resolve its decode handoff/pull host
+            # (PrefillRpcServer: GET_HOST_FAILED without a DECODE role_addr).
             role_list.append(RoleType.PREFILL)
-            logging.info("Added PREFILL role for DECODE type")
+            role_list.append(RoleType.DECODE)
+            logging.info("Added PREFILL and DECODE roles for DECODE entrance")
         elif config_role_type == RoleType.FRONTEND:
             logging.info(
                 f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"

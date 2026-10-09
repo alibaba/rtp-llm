@@ -940,6 +940,111 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testGemma4AssistantPrefillUsesOneRowPerRequest) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len             = 4096;
+    sp_config.type                       = SP_TYPE_MTP;
+    sp_config.model_type                 = "gemma4_assistant";
+    sp_config.gen_num_per_cycle          = 6;
+    auto                    cache_config = makeProcessorCacheConfig();
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {4, 5}, 2);
+    StreamGroups    groups({stream1, stream2});
+    GptModelInputs  input;
+    input.combo_tokens   = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    input.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
+    input.prefix_lengths = torch::tensor({0, 0}, torch::kInt32);
+    GptModelOutputs target_output;
+    target_output.all_hidden_states =
+        torch::arange(10, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({5, 2});
+    SamplerOutput sampled;
+    sampled.token_ids = torch::tensor({{100}, {200}}, torch::kInt32).to(torch::kCUDA);
+    TensorHolder holder;
+
+    processor.updatePrefillPostDraftModelInput(groups, input, target_output, sampled, holder);
+
+    EXPECT_EQ((vector<int>{100, 200}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{1, 1}), toVec<int>(input.input_lengths));
+    EXPECT_EQ((vector<int>{2, 1}), toVec<int>(input.sequence_lengths));
+    EXPECT_EQ(0, input.prefix_lengths.numel());
+    EXPECT_EQ((vector<float>{4, 5, 8, 9}), toVec<float>(input.last_hidden_states));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGemma4AssistantDraftLoopKeepsSharedKvPosition) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len             = 4096;
+    sp_config.type                       = SP_TYPE_MTP;
+    sp_config.model_type                 = "gemma4_assistant";
+    sp_config.gen_num_per_cycle          = 6;
+    auto                    cache_config = makeProcessorCacheConfig();
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+
+    GptModelInputs input;
+    input.combo_tokens       = torch::tensor({3}, torch::kInt32).to(torch::kCUDA);
+    input.sequence_lengths   = torch::tensor({12}, torch::kInt32).to(torch::kCUDA);
+    input.prefix_lengths     = torch::tensor({12}, torch::kInt32).to(torch::kCUDA);
+    input.combo_position_ids = torch::tensor({11}, torch::kInt32).to(torch::kCUDA);
+    GptModelOutputs output;
+    output.all_hidden_states = torch::zeros({1, 2}, torch::TensorOptions().device(torch::kCUDA));
+    TensorHolder holder;
+
+    processor.updateDecodeDraftModelInput(input, output, torch::tensor({{4}}, torch::kInt32), holder);
+
+    EXPECT_EQ((vector<int>{4}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{12}), toVec<int>(input.sequence_lengths));
+    EXPECT_EQ((vector<int>{12}), toVec<int>(input.prefix_lengths));
+    EXPECT_EQ((vector<int>{11}), toVec<int>(input.combo_position_ids));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGemma4AssistantPostRejectReseedsAcceptedFrontier) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len             = 4096;
+    sp_config.type                       = SP_TYPE_MTP;
+    sp_config.model_type                 = "gemma4_assistant";
+    sp_config.gen_num_per_cycle          = 6;
+    auto                    cache_config = makeProcessorCacheConfig();
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+
+    GptModelInputs input;
+    input.prefix_lengths     = torch::tensor({10, 20, 30}, torch::kInt32);
+    input.input_lengths      = torch::tensor({7, 7, 7}, torch::kInt32);
+    input.combo_position_ids = torch::arange(21, torch::TensorOptions().dtype(torch::kInt32));
+    speculative::SpeculativeSamplerOutput rejection;
+    rejection.accept_len    = torch::tensor({1, 4, 7}, torch::kInt32).to(torch::kCUDA);
+    rejection.accept_tokens = torch::tensor({{100, 101, 102, 103, 104, 105, 106},
+                                             {200, 201, 202, 203, 204, 205, 206},
+                                             {300, 301, 302, 303, 304, 305, 306}},
+                                            torch::kInt32)
+                                  .to(torch::kCUDA);
+    GptModelOutputs verified;
+    verified.all_hidden_states =
+        torch::arange(42, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({21, 2});
+    torch::Tensor selected_hidden;
+    TensorHolder  holder;
+
+    processor.updateDecodePostDraftModelInput(input, verified, rejection, 3, selected_hidden, holder);
+
+    EXPECT_EQ((vector<int>{100, 203, 306}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{1, 1, 1}), toVec<int>(input.input_lengths));
+    EXPECT_EQ((vector<int>{10, 23, 36}), toVec<int>(input.sequence_lengths));
+    EXPECT_EQ(0, input.prefix_lengths.numel());
+    EXPECT_EQ((vector<int>{0, 10, 20}), toVec<int>(input.combo_position_ids));
+    EXPECT_EQ((vector<float>{0, 1, 20, 21, 40, 41}), toVec<float>(selected_hidden));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShapes) {
     constexpr int32_t gamma   = 3;
     constexpr int32_t mask_id = 12345;

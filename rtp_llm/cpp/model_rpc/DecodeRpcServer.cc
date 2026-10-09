@@ -837,10 +837,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1295,8 +1295,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     const size_t            mtp_model_id           = module_plan.module_index;
                     const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
 
-                    const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
-                    const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
+                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
+                    if (mtp_cache_cfg.shares_target_kv) {
+                        continue;
+                    }
+                    const size_t layer_num = mtp_engine_init_params->model_config_.num_layers;
 
                     RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
@@ -1498,9 +1501,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1672,7 +1675,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

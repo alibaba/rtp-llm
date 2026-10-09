@@ -228,6 +228,16 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model("baichuan", "rtp_llm.models.llama", ["BaichuanForCausalLM"])
     register_lazy_model("baichuan2", "rtp_llm.models.llama")
     register_lazy_model("gemma", "rtp_llm.models.llama", ["GemmaForCausalLM"])
+    register_lazy_model(
+        "gemma4",
+        "rtp_llm.models.gemma4",
+        ["Gemma4ForCausalLM", "Gemma4ForConditionalGeneration"],
+    )
+    register_lazy_model(
+        "gemma4_assistant",
+        "rtp_llm.models.gemma4_assistant",
+        ["Gemma4AssistantForCausalLM"],
+    )
     register_lazy_model("cohere", "rtp_llm.models.llama", ["CohereForCausalLM"])
     register_lazy_model("mpt", "rtp_llm.models.mpt")
     register_lazy_model("phi", "rtp_llm.models.phi")
