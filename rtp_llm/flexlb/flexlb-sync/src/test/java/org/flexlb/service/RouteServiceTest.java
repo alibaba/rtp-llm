@@ -1,12 +1,14 @@
 package org.flexlb.service;
 
 import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -27,14 +29,13 @@ class RouteServiceTest {
         BalanceContext context = context(true);
         Response response = new Response();
         response.setSuccess(true);
-        CompletableFuture<Response> future = CompletableFuture.completedFuture(response);
-        when(scheduler.submit(context)).thenReturn(future);
+        DefaultRouter router = mock(DefaultRouter.class);
+        ReflectionTestUtils.setField(service, "router", router);
+        when(router.routeVit(context)).thenReturn(response);
 
-        assertSame(future, service.route(context));
-        assertSame(future, context.getFuture());
-        assertSame(response, context.getResponse());
-        verify(scheduler).submit(context);
-        verifyNoInteractions(reporter);
+        assertSame(response, service.route(context).join());
+        verify(router).routeVit(context);
+        verifyNoInteractions(scheduler, reporter);
     }
 
     @Test

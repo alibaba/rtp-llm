@@ -36,6 +36,18 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+
+static bool waitForCacheStatusVersion(const std::shared_ptr<KVCacheManager>& manager, int64_t version) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        if (manager->getKVCacheInfo(-1, true).version == version) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
 namespace test {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 
@@ -2160,6 +2172,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     {
         ScopedEnvVar snapshot_enabled("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
         kv_cache_manager->refreshKVCacheInfoSnapshot();
+        ASSERT_TRUE(waitForCacheStatusVersion(kv_cache_manager, after_duplicate.version));
         const KVCacheInfo cached = kv_cache_manager->getKVCacheInfo(after_duplicate.version, true);
         EXPECT_EQ(cached.version, after_duplicate.version);
         EXPECT_EQ(cached.cached_keys, after_duplicate.keys);
@@ -2248,6 +2261,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     ASSERT_EQ(initial_tree_snapshot.keys.size(), 2u);
 
     kv_cache_manager->refreshKVCacheInfoSnapshot();
+    ASSERT_TRUE(waitForCacheStatusVersion(kv_cache_manager, initial_tree_snapshot.version));
 
     auto first = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
     ASSERT_GE(first.version, 0);
@@ -2280,6 +2294,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     EXPECT_EQ(stale_keys, expected_initial_keys);
 
     kv_cache_manager->refreshKVCacheInfoSnapshot();
+    ASSERT_TRUE(waitForCacheStatusVersion(kv_cache_manager, updated_tree_snapshot.version));
 
     auto updated = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
     EXPECT_GT(updated.version, first.version);

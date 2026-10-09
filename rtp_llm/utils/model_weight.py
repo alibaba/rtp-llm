@@ -1417,6 +1417,9 @@ class W:
     v4_attn_wo_b_s = "v4.attn.wo_b.scale"
 
     # Outer compressor (CSA + HCA)
+    v41_indexer_wk = "v41.indexer.wk.weight"
+    v41_indexer_k_norm = "v41.indexer.k_norm.weight"
+    v4_router_bias_vl = "v4.router.bias_vl"
     v4_compressor_wkv = "v4.compressor.wkv.weight"
     v4_compressor_wgate = "v4.compressor.wgate.weight"
     v4_compressor_norm = "v4.compressor.norm.weight"
@@ -1625,6 +1628,9 @@ class W:
         v4_attn_wo_a_s: sp_id,
         v4_attn_wo_b_w: sp_id,
         v4_attn_wo_b_s: sp_id,
+        v41_indexer_wk: sp_id,
+        v41_indexer_k_norm: sp_id,
+        v4_router_bias_vl: sp_id,
         v4_compressor_wkv: sp_id,
         v4_compressor_wgate: sp_id,
         v4_compressor_norm: sp_id,

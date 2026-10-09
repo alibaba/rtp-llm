@@ -73,6 +73,8 @@ def _resolve_rpc_timeout_seconds(
     default_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
 ) -> float:
     """Resolve each input's complete RPC budget, then use the longest one."""
+    if request.timeout_ms > 0:
+        return min(request.timeout_ms / 1000.0, default_timeout_seconds)
     max_timeout_seconds = 0.0
     for mm_input in request.multimodal_inputs:
         cfg_ms = mm_input.mm_preprocess_config.mm_timeout_ms

@@ -76,6 +76,18 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "dsv41_jit_sources",
+    srcs = glob([
+        "modules/dsv41/**/*.cu",
+        "modules/dsv41/**/*.cuh",
+        "modules/dsv41/**/*.cc",
+        "modules/dsv41/**/*.h",
+        "modules/dsv41/**/*.LICENSE",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -84,6 +96,7 @@ py_library(
     ]),
     data = [
         ":cutlass_moe_config",
+        ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [

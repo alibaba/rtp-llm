@@ -9,6 +9,9 @@ namespace rtp_llm {
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
+    static torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor, const torch::Tensor& tokens);
+    static torch::Tensor
+    advanceEngramTokenWindows(const torch::Tensor& anchor, const torch::Tensor& tokens, const torch::Tensor& lengths);
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
@@ -104,6 +107,7 @@ public:
         torch::Tensor anchors;
         torch::Tensor committed_ends;
         torch::Tensor position_bases;
+        torch::Tensor engram_windows;
     };
     DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
                                            const GptModelInputs& model_input,
@@ -180,15 +184,15 @@ protected:
     torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
     torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
     torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
-    int64_t dsparkQueryWidth() const {
+    int64_t       dsparkQueryWidth() const {
         return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
     }
 
     int     propose_step_;
-    size_t  vocab_size_                   = 0;
-    bool    is_dspark_                    = false;
-    int32_t dspark_mask_token_id_         = -1;
-    bool    dspark_sample_from_anchor_     = true;
+    size_t  vocab_size_                = 0;
+    bool    is_dspark_                 = false;
+    int32_t dspark_mask_token_id_      = -1;
+    bool    dspark_sample_from_anchor_ = true;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
