@@ -3208,7 +3208,7 @@ public final class JavaMockEngineCluster {
                         synchronizedShapes = shapes;
                     }
                 } else {
-                    int cap = performance.maxWaitingPrefillBatches();
+                    int cap = prefillWaitingBatchCap();
                     if (cap > 0 && prefillPendingQueue.size() >= cap) {
                         // Waiting-queue cap hit — reject before claiming anything.
                         return false;
@@ -3241,10 +3241,17 @@ public final class JavaMockEngineCluster {
          */
         private int directWaitingRequestCap() {
             if (performance.prefillBatchPolicy() != null) {
-                return performance.prefillBatchPolicy().maxWaitingRequests();
+                return performance.prefillBatchPolicy().faultLimitsEnabled()
+                        ? performance.prefillBatchPolicy().maxWaitingRequests() : 0;
             }
             int batchCap = performance.maxWaitingPrefillBatches();
             return batchCap > 0 ? batchCap * performance.directBatchSizeMax() : 0;
+        }
+
+        private int prefillWaitingBatchCap() {
+            var policy = performance.prefillBatchPolicy();
+            return policy == null || policy.faultLimitsEnabled()
+                    ? performance.maxWaitingPrefillBatches() : 0;
         }
 
         // ────────────────────────────────────────────────────────────────
@@ -3330,8 +3337,12 @@ public final class JavaMockEngineCluster {
             long id = queued.input().getRequestId();
             synchronized (completionLock) {
                 if (!runningTasks.containsKey(id) || cancelledRequests.containsKey(id)) return null;
-                int initializedCap = performance.prefillBatchPolicy().maxInitedKvStreams();
-                if (initializedCap > 0 && activeBlockLeases.size() >= initializedCap) return null;
+                var policy = performance.prefillBatchPolicy();
+                var existingLease = activeBlockLeases.get(id);
+                boolean alreadyInitialized = existingLease != null && existingLease.totalBlocks() > 0;
+                long initializedStreams = policy.maxInitedKvStreams() > 0
+                        ? activeBlockLeases.values().stream().filter(lease -> lease.totalBlocks() > 0).count() : 0;
+                if (!policy.allowsKvInitialization(initializedStreams, alreadyInitialized)) return null;
                 synchronized (cache) {
                     // A preceding batch may have populated or evicted this prefix
                     // since enqueue. Price the batch using the execution-time hit.
@@ -3339,8 +3350,10 @@ public final class JavaMockEngineCluster {
                     var current = matchPrefillMemory(new MockPerformanceModel.RequestShape(queued.input(), queued.inputLen(),
                             queued.outputLen(), queued.blockKeys(),
                             Math.min((long) hits * performance.blockSize(), queued.inputLen()), hits, queued.nativeKeys()));
-                    if (!budget.fits(current.inputLen(), current.hitTokens())) return null;
-                    if (acquireBlockLease(id, current) == null) return null;
+                    if (!budget.fits(current.inputLen(), current.hitTokens(), current.prefillSequenceCount())) return null;
+                    // An initialized waiter owns its existing blocks. Do not
+                    // allocate a second lease and overwrite the first one.
+                    if (existingLease == null && acquireBlockLease(id, current) == null) return null;
                     cacheKeyHits.add(current.hitBlocks() - queued.hitBlocks());
                     return current;
                 }
@@ -3366,7 +3379,7 @@ public final class JavaMockEngineCluster {
                     waitingPrefillRequests.decrementAndGet();
                     if (alive) {
                         selected.add(new BatchMember(candidate, -1L, 0));
-                        budget.add(candidate.inputLen(), candidate.hitTokens());
+                        budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
                     }
                 }
             }
@@ -3383,7 +3396,7 @@ public final class JavaMockEngineCluster {
                             skipped.add(shape);
                         } else {
                             selected.add(new BatchMember(candidate, batch.batchId(), batch.dpRank()));
-                            budget.add(candidate.inputLen(), candidate.hitTokens());
+                            budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
                             waitingPrefillRequests.decrementAndGet();
                         }
                     }
@@ -3400,7 +3413,7 @@ public final class JavaMockEngineCluster {
                     var candidate = selectFifoCandidate(shape, budget);
                     if (candidate != null) {
                         selected.add(new BatchMember(candidate, member.batchId(), member.dpRank()));
-                        budget.add(candidate.inputLen(), candidate.hitTokens());
+                        budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
                     } else skipped.add(member);
                 }
                 if (!skipped.isEmpty()) {
