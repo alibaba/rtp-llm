@@ -1,15 +1,21 @@
 import unittest
 from typing import List
+from unittest.mock import AsyncMock, Mock
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    GenerateResponse,
+)
 
 
 class MockTokenizer(BaseTokenizer):
@@ -458,6 +464,56 @@ class PipelineDecodeTest(unittest.TestCase):
         self.assertEqual(len(decoding_states), 1)
         self.assertEqual(len(token_buffers), 1)
         self.assertEqual(len(output_tokens_list), 1)
+
+
+class FrontendBatchTokenIdsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_preserves_requested_token_ids_per_row(self):
+        outputs = [
+            GenerateOutput(
+                input_ids=torch.tensor([[11, 12]]),
+                output_ids=torch.tensor([[1, 0]]),
+                finished=True,
+                aux_info=AuxInfo(input_len=2, output_len=2),
+            ),
+            GenerateOutput(
+                input_ids=torch.tensor([[21, 22, 23]]),
+                output_ids=torch.tensor([[2, 3, 0]]),
+                finished=True,
+                aux_info=AuxInfo(input_len=3, output_len=3),
+            ),
+        ]
+        responses = [
+            GenerateResponse(GenerateOutputs([output]), [text])
+            for output, text in zip(outputs, ("A", "BC"))
+        ]
+        worker = Mock()
+        worker.pipeline.tokenizer = [0]
+        worker.pipeline.batch_infer = AsyncMock(return_value=responses)
+        for input_flag, output_flag in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(input_flag=input_flag, output_flag=output_flag):
+                config = GenerateConfig(
+                    return_input_ids=input_flag, return_output_ids=output_flag
+                )
+                worker.pipeline.create_generate_config.return_value = config
+                result = await FrontendWorker.batch_infer(
+                    worker, ["one", "two"], 100, {}
+                )
+                self.assertEqual(len(result.response_batch), 2)
+                for row, expected in zip(result.response_batch, outputs):
+                    self.assertTrue(row.finished)
+                    self.assertEqual(
+                        row.input_ids,
+                        expected.input_ids.tolist() if input_flag else None,
+                    )
+                    self.assertEqual(
+                        row.output_ids,
+                        expected.output_ids.tolist() if output_flag else None,
+                    )
 
 
 if __name__ == "__main__":

@@ -194,6 +194,16 @@ class FrontendWorker:
                         if gc.return_logits and out.logits is not None
                         else None
                     ),
+                    output_ids=(
+                        out.output_ids.tolist()
+                        if gc.return_output_ids and out.output_ids is not None
+                        else None
+                    ),
+                    input_ids=(
+                        out.input_ids.tolist()
+                        if gc.return_input_ids and out.input_ids is not None
+                        else None
+                    ),
                     prompt_logprobs=prompt_logits_dict,
                     custom_output=(
                         out.custom_output.tolist()
