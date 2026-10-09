@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from rtp_llm.tools.dsv41_attention_history_replay import validate_native_recipe
 from rtp_llm.tools.dsv41_attention_replay import (
     aligned_sparse_inputs,
     history_identities,
@@ -132,6 +133,29 @@ class AttentionReplayHistoryTest(unittest.TestCase):
                     history_identities(reference, native)
         with self.assertRaisesRegex(ValueError, "different step counts"):
             history_identities(reference, reference[:2])
+
+    def test_native_history_cannot_silently_use_a_different_recipe(self):
+        traces = self.traces()
+        recipe = {
+            "precision_profile": "tp8_projection_mhc_fp32_compressor_recipe",
+            "compressor_fused": True,
+            "hca_bf16_projection": True,
+        }
+        for trace in traces:
+            trace["metadata"].update(recipe)
+        validate_native_recipe(traces)
+        for field, invalid in (
+            ("precision_profile", "baseline"),
+            ("compressor_fused", False),
+            ("hca_bf16_projection", False),
+        ):
+            with self.subTest(field=field):
+                traces[1]["metadata"][field] = invalid
+                with self.assertRaisesRegex(
+                    ValueError, "composed TP8/mHC/compressor recipe"
+                ):
+                    validate_native_recipe(traces)
+                traces[1]["metadata"][field] = recipe[field]
 
 
 if __name__ == "__main__":

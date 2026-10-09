@@ -21,7 +21,7 @@ py_library(
 py_library(
     name = "dsv41_attention_replay",
     testonly = True,
-    srcs = ["dsv41_attention_replay.py", "dsv41_attention_history_replay.py"],
+    srcs = ["dsv41_attention_replay.py", "dsv41_attention_history_replay.py", "dsv41_native_history_replay.py"],
     deps = [
         ":dsv41_reference_probe",
         ":dsv41_trace_compare",

@@ -11,7 +11,6 @@ import importlib
 import json
 import subprocess
 import sys
-from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -44,6 +43,20 @@ def require_exact(expected, actual, label):
 
 def cpu_snapshot(values):
     return {key: value.cpu() for key, value in values.items() if torch.is_tensor(value)}
+
+
+def validate_native_recipe(traces):
+    for trace in traces:
+        metadata = trace["metadata"]
+        if (
+            metadata.get("precision_profile")
+            != "tp8_projection_mhc_fp32_compressor_recipe"
+            or metadata.get("compressor_fused") is not True
+            or metadata.get("hca_bf16_projection") is not True
+        ):
+            raise ValueError(
+                "Native history requires the composed TP8/mHC/compressor recipe"
+            )
 
 
 def prepared_engram(module, args, layout, reader, layer, ids):
@@ -389,6 +402,7 @@ def main():
     parser.add_argument("reference_traces", type=Path)
     parser.add_argument("report", type=Path)
     parser.add_argument("--input-artifact", type=Path, required=True)
+    parser.add_argument("--native-traces", type=Path)
     parser.add_argument("--steps", type=int, default=3, choices=(2, 3))
     cli = parser.parse_args()
     if cli.report.exists() or cli.input_artifact.exists():
@@ -403,7 +417,20 @@ def main():
         for step in range(cli.steps)
     ]
     traces = [torch.load(path, map_location="cpu", weights_only=True) for path in paths]
-    identities = history_identities(traces)
+    native_paths = (
+        [
+            cli.native_traces / f"native-prompt0-step{step}.pt"
+            for step in range(cli.steps)
+        ]
+        if cli.native_traces is not None
+        else []
+    )
+    native_traces = [
+        torch.load(path, map_location="cpu", weights_only=True) for path in native_paths
+    ]
+    identities = history_identities(traces, native_traces if native_paths else None)
+    if native_paths:
+        validate_native_recipe(native_traces)
     root = cli.checkpoint.resolve()
     sys.path.insert(0, str(root / "inference"))
     official, converter = [
@@ -428,13 +455,35 @@ def main():
             )
             for identity in identities
         ]
-    steps, reconstruction, _ = reconstruct_official(
+    steps, reconstruction, prepared_rows = reconstruct_official(
         official, converter, args, layout, reader, traces, identities, hashes
     )
     config = json.loads((root / "config.json").read_text())["text_config"]
     results, snapshots = compare_official_history(
         args, config, reader, steps, identities
     )
+    native_reconstruction, native_results, native_snapshots, native_inputs = (
+        {},
+        [],
+        [],
+        [],
+    )
+    if native_paths:
+        from rtp_llm.tools.dsv41_native_history_replay import reconstruct_native
+
+        native_reconstruction, native_results, native_snapshots, native_inputs = (
+            reconstruct_native(
+                args,
+                config,
+                reader,
+                steps,
+                native_traces,
+                identities,
+                hashes,
+                prepared_rows,
+                hash_state.token_map.tolist(),
+            )
+        )
     with cli.input_artifact.open("xb") as handle:
         torch.save(
             {
@@ -447,6 +496,10 @@ def main():
                     for step in steps
                 ],
                 "official_input_history": snapshots,
+                "native_inputs": [
+                    [value.cpu() for value in step] for step in native_inputs
+                ],
+                "native_input_history": native_snapshots,
             },
             handle,
         )
@@ -454,6 +507,12 @@ def main():
     source_names = (
         "rtp_llm/tools/dsv41_attention_history_replay.py",
         "rtp_llm/tools/dsv41_attention_replay.py",
+        "rtp_llm/tools/dsv41_native_history_replay.py",
+        "rtp_llm/models_py/modules/dsv4/hc/delayed.py",
+        "rtp_llm/models_py/modules/dsv4/hc/v41_prenorm.py",
+        "rtp_llm/models_py/modules/dsv4/engram.py",
+        "rtp_llm/models_py/modules/dsv4/_engram_triton.py",
+        "rtp_llm/models_py/modules/base/cuda/norm.py",
         "rtp_llm/models_py/modules/dsv4/fp8/attention_v41.py",
         "rtp_llm/models_py/modules/dsv4/fp8/compressor.py",
         "rtp_llm/models_py/modules/dsv4/fp8/_v41_prefill_attention_sm120.py",
@@ -461,11 +520,19 @@ def main():
         "rtp_llm/models_py/modules/dsv4/fp8/_v41_decode_global.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_compressor_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_tp8_projection.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/v41_mhc_precision.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_attention_owner_sm120.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_decode_owner_sm120.py",
+        "rtp_llm/models_py/modules/dsv4/v41_attention.py",
+        "rtp_llm/models_py/modules/dsv4/v41_cache.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/_v41_attention_triton.py",
     )
     report = {
         "identities": identities,
         "official_reconstruction": reconstruction,
         "official_input_history": results,
+        "native_reconstruction": native_reconstruction,
+        "native_input_history": native_results,
         "weight_sha256": reader.hashes,
         "selected_row_reads": reader.selected_row_reads,
         "official_source_sha256": {
@@ -480,6 +547,10 @@ def main():
         },
         "reference_trace_sha256": {
             str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths
+        },
+        "native_trace_sha256": {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in native_paths
         },
         "native_revision": subprocess.run(
             [
@@ -504,8 +575,8 @@ def main():
         ).hexdigest(),
         "limitations": [
             "One short L0-L2 request: retained caches use exact official attention inputs.",
-            "Saved official FFN outputs are substituted; experts are not re-executed.",
-            "Native-input history is a separate experiment, not established by this replay.",
+            "Saved FFN outputs are substituted from each experiment's own trace; experts are not re-executed.",
+            "Native-input history is limited to the composed diagnostic recipe and optional saved traces.",
             "TP8 output partials are simulated serially, without live collectives.",
             "Serving, distributed topology, graphs, full-model accuracy and latency remain separate.",
         ],
