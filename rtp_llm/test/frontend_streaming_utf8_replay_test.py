@@ -162,6 +162,50 @@ class FrontendStreamingUtf8ReplayTest(IsolatedAsyncioTestCase):
             "X😊\n\n你DeepSeek，一个",
         )
 
+    async def _render_nonstream(self, token_ids):
+        status = (await self.renderer._create_status_list(1, self.request))[0]
+        output = GenerateOutput()
+        output.output_ids = torch.tensor([token_ids], dtype=torch.int64)
+        output.aux_info = AuxInfo()
+        output.aux_info.input_len = 5
+        output.aux_info.output_len = len(token_ids)
+        return await self.renderer._update_single_status(
+            status,
+            output,
+            max_new_tokens=65536,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=False,
+        )
+
+    async def test_nonstream_long_response_has_linear_decode_work(self):
+        token_ids = [9001] * 32000
+        decode = self.tokenizer.decode
+        decoded_tokens = 0
+
+        def bounded_decode(ids):
+            nonlocal decoded_tokens
+            decoded_tokens += len(ids)
+            self.assertLessEqual(
+                decoded_tokens,
+                4 * len(token_ids),
+                "Nonstream rendering must not decode every growing prefix",
+            )
+            return decode(ids)
+
+        self.tokenizer.decode = bounded_decode
+        delta = await self._render_nonstream(token_ids)
+        self.assertEqual(delta.output_str, "X" * len(token_ids))
+
+    async def test_nonstream_complete_multibyte_text_matches_one_shot(self):
+        ids = [9001, 9000, 235, 271, 4000, 4001, 4002, 53091, 4374, 1465]
+        delta = await self._render_nonstream(ids)
+        self.assertEqual(delta.output_str, "X😊\n\n你DeepSeek")
+
+    async def test_nonstream_incomplete_utf8_keeps_existing_fallback(self):
+        delta = await self._render_nonstream([9001, 9000])
+        self.assertEqual(delta.output_str, "X")
+
 
 if __name__ == "__main__":
     main()

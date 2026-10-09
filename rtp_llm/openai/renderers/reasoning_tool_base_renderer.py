@@ -496,10 +496,16 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     collected_deltas.append(token_delta)
             return collected_deltas, normalizer_yielded
 
-        # Non-streaming: accumulate all text first, then process once
-        all_text = "".join(
-            normalizer.normalize_tokens(status.prev_token_id, new_token_ids)
-        )
+        # A merged nonstream response already contains the complete token span.
+        # Decoding every growing prefix here is quadratic in response length;
+        # the detector consumes this text once, so one complete decode suffices.
+        # Retain the existing normalizer for partial contexts or invalid UTF-8.
+        prev_token_ids = status.prev_token_id
+        all_text = self.tokenizer.decode(new_token_ids) if not prev_token_ids else None
+        if all_text is None or "\uFFFD" in all_text:
+            all_text = "".join(
+                normalizer.normalize_tokens(prev_token_ids, new_token_ids)
+            )
         if not all_text:
             return [], False
 
