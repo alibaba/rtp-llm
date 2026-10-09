@@ -488,9 +488,22 @@ class BuildRecordTest(TestCase):
         self.assertEqual(payload["generate_config"]["max_new_tokens"], 32)
         self.assertEqual(payload["server_id"], 1)
         self.assertEqual(payload["rank_id"], 0)
-        # Frontend struct path records the actual token ids the servicer fed.
+        # Requests without consent headers retain the existing token logging.
+        self.assertEqual(rec.input_ids, [10, 20, 30])
+        self.assertEqual(rec.generated_ids, [10, 20, 30, 40])
         self.assertEqual(payload["input_ids"], [10, 20, 30])
         self.assertEqual(payload["generated_ids"], [10, 20, 30, 40])
+
+    def test_logging_consent_omits_tokens_without_disabling_repetition(self) -> None:
+        rec = _make_record(log_input_output=False)
+        rec.capture_structured_request(_make_infer_request(input_ids=[10, 20]))
+        rec.record_generated_ids([30, 40])
+        payload = rec.build_record(server_id=1, rank_id=0)
+        self.assertIsNone(payload["input_ids"])
+        self.assertIsNone(payload["generated_ids"])
+        self.assertEqual(payload["input_token_len"], 2)
+        self.assertEqual(rec.input_ids, [10, 20])
+        self.assertEqual(rec.generated_ids, [30, 40])
 
     def test_frontend_records_generate_config_role_addrs_by_phase(self) -> None:
         rec = _make_record()

@@ -1592,6 +1592,76 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_logging_consent_only_hides_input_in_both_phases(self) -> None:
+        for allowed in (True, False):
+            with self.subTest(log_input_output=allowed):
+                visitor = _MultiStreamVisitor(
+                    [
+                        _FakeAsyncStream(
+                            [
+                                GenerateOutputs(
+                                    generate_outputs=[
+                                        GenerateOutput(
+                                            output_ids=torch.tensor(
+                                                [10, 1], dtype=torch.int32
+                                            ),
+                                            finished=False,
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                        _FakeAsyncStream(
+                            [
+                                GenerateOutputs(
+                                    generate_outputs=[
+                                        GenerateOutput(
+                                            output_ids=torch.tensor(
+                                                [20, 21], dtype=torch.int32
+                                            ),
+                                            finished=True,
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                    ]
+                )
+                tokenizer = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                with self.assertLogs(level=logging.DEBUG) as logs:
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [7, 8, 128821],
+                            SamplingParams(),
+                            DashScRequestControls(
+                                enable_thinking=True, log_input_output=allowed
+                            ),
+                            visitor,
+                            rtp_llm_request_id=100,
+                            echo_prefix_ids=[128821, 198],
+                            tokenizer=tokenizer,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(
+                                tokenizer, env_cfg, "deepseek_v4"
+                            ),
+                            phase2_request_id_factory=lambda: 200,
+                        )
+                    )
+                self.assertEqual(visitor.enqueue_called, 2)
+                phase2_chunks = [
+                    c for c in chunks if c.infer_response.id.endswith("-2")
+                ]
+                self.assertEqual(len(phase2_chunks), 1)
+                self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+                input_logs = [
+                    record for record in logs.records if "generate_input:" in record.msg
+                ]
+                self.assertEqual(len(input_logs), 2)
+                for record, generate_input in zip(input_logs, visitor.generate_inputs):
+                    self.assertIs(record.args[-1], generate_input if allowed else None)
+
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(
@@ -2735,6 +2805,37 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["aux_info"]["local_reuse_len"], 1)
         self.assertEqual(payload["aux_info"]["remote_reuse_len"], 1)
         self.assertEqual(payload["aux_info"]["aux_string"], "backend-diagnostic")
+
+    async def test_access_log_uses_handled_request_consent(self) -> None:
+        for consents in (("all", "none"), ("none", "all"), ("all", "all")):
+            with self.subTest(consents=consents):
+                requests = []
+                for consent in consents:
+                    request = self._valid_infer_request()
+                    request.parameters["ds_header_attributes"].string_param = (
+                        json.dumps({"X-DashScope-LoggingConsent": consent})
+                    )
+                    requests.append(request)
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                with patch.object(
+                    logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+                ) as info:
+                    responses = await _drain(
+                        servicer.ModelStreamInfer(
+                            _areq_iter(requests), _FakeGrpcContext()
+                        )
+                    )
+                # The frontend finishes the RPC after handling its first request.
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(visitor.enqueue_called, 1)
+                info.assert_called_once()
+                payload = json.loads(info.call_args.args[0])
+                self.assertEqual(payload["req_count"], 1)
+                allowed = consents[0] == "all"
+                self.assertEqual(payload["input_ids"], [42] if allowed else None)
+                self.assertEqual(payload["generated_ids"], [9] if allowed else None)
+                self.assertEqual(payload["output_token_len"], 1)
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [

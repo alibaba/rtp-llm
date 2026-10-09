@@ -429,6 +429,7 @@ class GrpcAccessRecord:
     peer: str
     start_ts: float
     raw_mode: bool = False
+    log_input_output: bool = True
     first_request_ts: Optional[float] = None
     request_end_ts: Optional[float] = None
     request_read_status: Optional[str] = None
@@ -448,8 +449,7 @@ class GrpcAccessRecord:
     # Parsed request / response statistics.
     request_controls: Optional[dict[str, Any]] = None
     input_len: Optional[int] = None
-    # Full request input token ids. Only the frontend struct path calls the
-    # structured request writer; the forwarder never decodes payloads.
+    # Tokens stay in memory for repetition detection even when logging is denied.
     input_ids: Optional[list[int]] = None
     # Full generated token ids. Only the frontend struct path appends ids; the
     # forwarder does not call the generated-id writer.
@@ -979,8 +979,10 @@ class GrpcAccessRecord:
                 "max_tokens_per_frame": self.max_tokens_per_frame,
                 "generate_config": self.generate_config,
                 "aux_info": dump_aux_info(self.aux_info),
-                "input_ids": self.input_ids,
-                "generated_ids": self.generated_ids or None,
+                "input_ids": self.input_ids if self.log_input_output else None,
+                "generated_ids": (
+                    (self.generated_ids or None) if self.log_input_output else None
+                ),
             }
         )
         if self.generate_config_role_addrs is not None:
