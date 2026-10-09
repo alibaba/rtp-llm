@@ -129,7 +129,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                     "chunked prefill incompatible: hidden_state_capture");
         return;
     }
-    if (!input->fake_query && chunk_size > 0
+    // A short multimodal context needs no slicing; retain the normal prefill path
+    // rather than rejecting it just because text chunking is configured.
+    const bool short_multimodal_context = multimodalFeaturesLength() != 0 && seqLength() <= chunk_size;
+    if (!input->fake_query && chunk_size > 0 && !short_multimodal_context
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
         const char* reason = isGroup()                                       ? "force_batch" :
