@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 #include <sstream>
+#include <algorithm>
+#include <cstring>
 
 namespace rtp_llm {
 
@@ -20,6 +22,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     start_check_seq_length_(other.start_check_seq_length_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
+    v41_inputs_       = other.v41_inputs_;
+    canonical_offset_ = other.canonical_offset_ + shift_token_num;
     if (share) {
         if (shift_token_num == 0) {
             complete_token_ids_ = other.complete_token_ids_;
@@ -43,7 +47,9 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(generate_input != nullptr);
 
-    seq_length_ = generate_input->inputLength();
+    v41_inputs_       = generate_input->v41_inputs;
+    canonical_offset_ = 0;
+    seq_length_       = generate_input->inputLength();
     RTP_LLM_CHECK_WITH_INFO(
         (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
@@ -61,6 +67,54 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     }
 
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+}
+
+std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) const {
+    std::vector<int32_t> result;
+    if (!v41_inputs_) {
+        return result;
+    }
+    for (const auto& image : v41_inputs_->images) {
+        const int64_t start = image.start - canonical_offset_;
+        const int64_t end   = start + image.types.numel();
+        if (end <= begin || start >= static_cast<int64_t>(begin) + count) {
+            continue;
+        }
+        // Domain-separate image content from ordinary canonical token words.
+        result.insert(result.end(),
+                      {-41, static_cast<int32_t>(start), static_cast<int32_t>(end), image.n_vit_h, image.n_vit_w});
+        for (const auto* digest : {&image.content_sha256, &image.processor_identity}) {
+            for (size_t offset = 0; offset + 8 <= digest->size(); offset += 8) {
+                const uint32_t word = static_cast<uint32_t>(std::stoul(digest->substr(offset, 8), nullptr, 16));
+                int32_t        value;
+                std::memcpy(&value, &word, sizeof(value));
+                result.push_back(value);
+            }
+        }
+    }
+    return result;
+}
+
+bool CompleteTokenIds::isValidReuseLength(int reuse_length, int min_fresh_tokens) const {
+    if (min_fresh_tokens > 0 && reuse_length > std::max(0, seqLength() - min_fresh_tokens)) {
+        return false;
+    }
+    if (!v41_inputs_) {
+        return true;
+    }
+    for (const auto& image : v41_inputs_->images) {
+        const int64_t start = image.start - canonical_offset_;
+        const int64_t end   = start + image.types.numel();
+        // Without both content and preprocessing identity no later prefix is
+        // trustworthy, even when its endpoint lies beyond the image.
+        if (reuse_length > start && (image.content_sha256.empty() || image.processor_identity.empty())) {
+            return false;
+        }
+        if (reuse_length > start && reuse_length < end) {
+            return false;
+        }
+    }
+    return true;
 }
 
 int CompleteTokenIds::maxBatchSize() {

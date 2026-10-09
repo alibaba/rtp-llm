@@ -16,10 +16,10 @@
 
 namespace rtp_llm {
 
-bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
-                          const std::vector<MMRdmaSlotPB::Role>&   roles,
-                          const MultimodalOutputPB*                output_pb,
-                          MultimodalOutput*                        mm_output) {
+bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
+                          const std::vector<MMRdmaSlotPB::Role>& roles,
+                          const MultimodalOutputPB*              output_pb,
+                          MultimodalOutput*                      mm_output) {
     try {
         if (mm_output == nullptr || output_pb == nullptr || mm_tensors.size() != roles.size()) {
             return false;
@@ -38,7 +38,7 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
                         return false;
                     }
                     mm_position_id = mm_tensors[i].to(torch::kCPU);
-                    has_pos_id = true;
+                    has_pos_id     = true;
                     break;
                 case MMRdmaSlotPB::EXTRA_INPUT:
                     extra_inputs.emplace_back(mm_tensors[i]);
@@ -53,10 +53,9 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
         if (embedding_chunks.empty()) {
             return false;
         }
-        auto embedding =
-            embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
+        auto embedding = embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
         std::vector<int64_t> split_sizes(output_pb->split_size().begin(), output_pb->split_size().end());
-        const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
+        const int64_t        split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
         if (split_sizes.empty() || split_total != embedding.size(0)) {
             return false;
         }
@@ -93,6 +92,9 @@ public:
             context_.control.release(context_.endpoint, handles_, context_.budget);
         }
     }
+    void handoff() {
+        released_ = true;
+    }
     void releaseAsync() {
         context_.control.releaseAsync(context_.endpoint, std::move(handles_));
         released_ = true;
@@ -126,15 +128,27 @@ ConsumeResult MMRdmaReader::consume(const MultimodalOutputPB& receipt, DeliveryC
             ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "rdma receipt reached an adapter with no RDMA reader"));
     }
 
-    std::vector<std::string>       handles = handlesOf(receipt);
+    std::vector<std::string>        handles = handlesOf(receipt);
     std::vector<torch::Tensor>      mm_tensors;
     std::vector<MMRdmaSlotPB::Role> roles;
     SlotLease                       lease(context, std::move(handles));
     bool                            deadline_exhausted = false;
-    const bool read_ok = readAllSlots(receipt, context, &mm_tensors, &roles, &deadline_exhausted);
+    bool                            release_deferred   = false;
+    bool                            read_ok            = false;
+    try {
+        read_ok = readAllSlots(receipt, context, &mm_tensors, &roles, &deadline_exhausted, &release_deferred);
+    } catch (...) {
+        if (release_deferred) {
+            lease.handoff();
+        }
+        throw;
+    }
+    if (release_deferred) {
+        lease.handoff();
+    }
 
     if (!read_ok) {
-        if (deadline_exhausted) {
+        if (deadline_exhausted && !release_deferred) {
             lease.releaseAsync();
         }
         RTP_LLM_LOG_WARNING("rdma read of multimodal embedding failed (%zu slot(s))",
@@ -151,8 +165,7 @@ ConsumeResult MMRdmaReader::consume(const MultimodalOutputPB& receipt, DeliveryC
             ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "invalid multimodal RDMA output manifest"));
     }
 
-    RTP_LLM_LOG_INFO("[MM-RDMA-HIT] multimodal embedding read over rdma, %d slot(s)",
-                     receipt.output_rdma_slots_size());
+    RTP_LLM_LOG_INFO("[MM-RDMA-HIT] multimodal embedding read over rdma, %d slot(s)", receipt.output_rdma_slots_size());
     lease.releaseAsync();
     return ConsumeResult::success(std::move(mm_output));
 }
@@ -161,11 +174,12 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                                 DeliveryContext&                 context,
                                 std::vector<torch::Tensor>*      mm_tensors,
                                 std::vector<MMRdmaSlotPB::Role>* roles,
-                                bool*                            deadline_exhausted) {
-    *deadline_exhausted = false;
-    constexpr size_t kMaxDescriptorsPerReceipt    = 1024;
+                                bool*                            deadline_exhausted,
+                                bool*                            release_deferred) {
+    *deadline_exhausted                            = false;
+    constexpr size_t kMaxDescriptorsPerReceipt     = 1024;
     constexpr size_t kMaxManifestEntriesPerReceipt = 16384;
-    const size_t descriptor_count = static_cast<size_t>(receipt.output_rdma_slots_size());
+    const size_t     descriptor_count              = static_cast<size_t>(receipt.output_rdma_slots_size());
     if (descriptor_count == 0 || descriptor_count > kMaxDescriptorsPerReceipt) {
         RTP_LLM_LOG_WARNING("rdma receipt has invalid descriptor count %zu", descriptor_count);
         return false;
@@ -173,8 +187,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
 
     uint64_t split_total = 0;
     for (int64_t split_size : receipt.split_size()) {
-        if (split_size <= 0
-            || split_total > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - split_size)) {
+        if (split_size <= 0 || split_total > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - split_size)) {
             RTP_LLM_LOG_WARNING("rdma receipt has invalid or overflowing split_size");
             return false;
         }
@@ -186,14 +199,14 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
     }
 
     std::vector<rdma_transport::RdmaDescriptor> descriptors;
-    std::vector<MMRdmaSlotPB::Role>              parsed_roles;
-    std::unordered_set<std::string>              lease_ids;
-    uint64_t                                     embedding_rows     = 0;
-    uint64_t                                     position_rows      = 0;
-    uint64_t                                     total_payload_bytes = 0;
-    uint64_t                                     total_tensor_bytes  = 0;
-    size_t                                       position_count     = 0;
-    size_t                                       extra_count        = 0;
+    std::vector<MMRdmaSlotPB::Role>             parsed_roles;
+    std::unordered_set<std::string>             lease_ids;
+    uint64_t                                    embedding_rows      = 0;
+    uint64_t                                    position_rows       = 0;
+    uint64_t                                    total_payload_bytes = 0;
+    uint64_t                                    total_tensor_bytes  = 0;
+    size_t                                      position_count      = 0;
+    size_t                                      extra_count         = 0;
     descriptors.reserve(static_cast<size_t>(receipt.output_rdma_slots_size()));
     for (const auto& slot : receipt.output_rdma_slots()) {
         if (slot.roles_size() != slot.rdma_descriptor().tensors_size()) {
@@ -202,8 +215,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                                 slot.rdma_descriptor().tensors_size());
             return false;
         }
-        if (static_cast<size_t>(slot.roles_size())
-            > kMaxManifestEntriesPerReceipt - parsed_roles.size()) {
+        if (static_cast<size_t>(slot.roles_size()) > kMaxManifestEntriesPerReceipt - parsed_roles.size()) {
             RTP_LLM_LOG_WARNING("rdma receipt has too many tensor manifest entries");
             return false;
         }
@@ -227,8 +239,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
             return false;
         }
         if (validate_descriptors_) {
-            const auto validation =
-                rdma_transport::validateRdmaDescriptor(descriptor, rdma_config_->max_slot_bytes);
+            const auto validation = rdma_transport::validateRdmaDescriptor(descriptor, rdma_config_->max_slot_bytes);
             if (!validation.ok()) {
                 RTP_LLM_LOG_WARNING("invalid rdma descriptor: %s", validation.ToString().c_str());
                 return false;
@@ -313,9 +324,8 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
         *deadline_exhausted = true;
         return false;
     }
-    const int64_t read_remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          read_deadline - std::chrono::steady_clock::now())
-                                          .count();
+    const int64_t read_remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(read_deadline - std::chrono::steady_clock::now()).count();
     if (read_remaining_ms <= 0) {
         *deadline_exhausted = context.budget.exhausted();
         return false;
@@ -323,7 +333,12 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
     read_timeout_ms = std::min(remaining, read_remaining_ms);
     rdma_transport::RdmaReadResult result;
     try {
-        result = reader_->read(descriptors, read_timeout_ms);
+        auto release = [owner = context.control_owner, endpoint = context.endpoint, handles = handlesOf(receipt)]() {
+            if (owner) {
+                owner->releaseAsync(endpoint, handles);
+            }
+        };
+        result = reader_->readWithCleanup(descriptors, read_timeout_ms, std::move(release), release_deferred);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("tensor rdma read threw an exception: %s", e.what());
         return false;
@@ -336,9 +351,8 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
         return false;
     }
     if (result.tensors.size() != parsed_roles.size()) {
-        RTP_LLM_LOG_WARNING("rdma batch returned %zu tensors for %zu manifest entries",
-                            result.tensors.size(),
-                            parsed_roles.size());
+        RTP_LLM_LOG_WARNING(
+            "rdma batch returned %zu tensors for %zu manifest entries", result.tensors.size(), parsed_roles.size());
         return false;
     }
     *roles      = std::move(parsed_roles);
@@ -347,7 +361,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
 }
 
 std::vector<std::string> MMRdmaReader::handlesOf(const MultimodalOutputPB& receipt) {
-    std::vector<std::string> handles;
+    std::vector<std::string>        handles;
     std::unordered_set<std::string> seen;
     handles.reserve(static_cast<size_t>(receipt.output_rdma_slots_size()));
     for (const auto& slot : receipt.output_rdma_slots()) {
@@ -364,8 +378,7 @@ void MMRdmaReader::discard(const MultimodalOutputPB& receipt, DeliveryContext& c
     if (handles.empty()) {
         return;
     }
-    RTP_LLM_LOG_WARNING("discarding %zu unusable rdma slot(s) from a receipt we will not consume",
-                        handles.size());
+    RTP_LLM_LOG_WARNING("discarding %zu unusable rdma slot(s) from a receipt we will not consume", handles.size());
     context.control.release(context.endpoint, handles, context.budget);
 }
 

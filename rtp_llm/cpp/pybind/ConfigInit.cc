@@ -1785,6 +1785,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
         // DeepSeek-V4 fields
+        .def_readwrite("v41_kv_source_layer_ids", &AttentionConfigs::v41_kv_source_layer_ids)
         .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)
         .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
@@ -1854,6 +1855,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register MMModelConfig
     py::class_<MMModelConfig>(m, "MMModelConfig")
         .def(py::init<>())
+        .def_readwrite("mm_padding_size", &MMModelConfig::mm_padding_size)
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
@@ -2031,6 +2033,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
+        .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
+        .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)

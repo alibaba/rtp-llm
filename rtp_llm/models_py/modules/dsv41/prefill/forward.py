@@ -1,0 +1,928 @@
+"""DSV4 prefill forward helpers — extracted from ``DeepSeekV4Model``.
+
+Exposes qwen3-style prefill primitives as free functions so the Model
+class stays thin:
+
+* ``set_cp_info``                    — bind/clear Context-Parallel metadata on ``v4``
+* ``forward_layers``                 — per-layer loop body (embed → layers → reduce → norm)
+* unified cache-store registration via
+  :func:`rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl`
+* ``forward_prefill``                — full prefill arm (per-request loop over flat 1D input_ids)
+
+Generic KV-cache lookup helpers (``build_block_tables_batched``) live
+in :mod:`rtp_llm.models_py.modules.dsv41.kv_cache_utils`.
+
+Nothing in here holds state. ``DeepSeekV4Model.forward`` feeds in
+``self.v4`` / ``self.kv_cache`` / ``self.parallelism_config`` explicitly.
+
+Paired with :mod:`rtp_llm.models_py.modules.dsv41.decode.forward`, which
+does the same job for the decode path.
+
+----------------------------------------------------------------------
+Context-Parallel (CP) prefill data flow
+----------------------------------------------------------------------
+
+CP repurposes the TP process group as the CP group (see
+``ParallelismConfig::get_attn_tp_size`` — returns 1 when CP enabled).
+The C++ ``ZigZagProcessor`` splits each request's padded prefill tokens
+across the CP group with a zigzag layout. ``forward_layers`` consumes
+the resulting per-rank metadata and builds a ``CPContext`` (in
+``cp.py``) bound onto every Attention / Compressor / Indexer module
+via ``v4._propagate_cp_ctx`` before the per-layer loop runs.
+
+Per-rank inputs (rank-local, shaped for ``T_local = chunk_length``):
+  * ``input_ids``                — token slice owned by this rank
+  * ``inputs.combo_position_ids``        — framework-provided positions; under CP,
+                                   ``forward_layers`` replaces these with
+                                   CPContext's per-token request-absolute
+                                   positions
+  * ``attn.cu_seqlens``          — rank-local request boundaries
+  * ``attn.input_lengths``       — rank-local per-req token count
+
+Rank-invariant inputs:
+  * ``attn.prefix_lengths``      — global per-req KV prefix length
+
+Global view (held on ``CPContext``, derived once in
+``build_cp_context``):
+  * ``cp_ctx.input_lengths_global`` — full per-req length, =
+    ``cp_info.prefill_actual_input_lengths_cpu``
+  * ``cp_ctx.cu_seqlens_global``    — cumsum, used as ``query_start_loc``
+    for SWA-pool write meta
+  * ``cp_ctx.global_positions``     — GLOBAL absolute pos per rank-local
+    token (zigzag-derived, per-request for B>=1)
+  * ``cp_ctx.seq_len_full``         — total real prefill length
+
+Per-layer pipeline under CP (compress_ratio == 0, SWA-only):
+  1. ``_prefill_compute_qkv``: rank-local Q + KV → KV all-gathered to
+     ``kv_full[seq_len_full, D]`` in GLOBAL request order
+  2. ``_prefill_write_swa_fp8_paged``: every rank writes the GATHER'd
+     KV to its own paged pool. ``slot_mapping`` is built from the
+     global write trio (cu_seqlens_global / combined_seq_lens_global /
+     seq_len_full) so all ranks' pools end up bit-identical.
+  3. ``_attn_fp8_swa_via_kv_full`` (fresh, sp==0): rank-local Q over
+     gathered KV. The varlen topk builder uses CP global positions plus
+     global per-request cu_seqlens, so topk indices address rows in
+     ``kv_full`` for B>=1.
+  4. ``_attn_fp8_swa_via_concat`` (cont, sp>0): workspace ``[B, M, D]``
+     with per-request prefix tails and new-K slots. ``combined_indices`` /
+     ``combined_lens`` are built in Python because the Triton helper's
+     ``pos = start_pos + token_idx_in_query`` formula assumes contiguous Q,
+     which zigzag CP breaks.
+
+CSA / HCA layers (compress_ratio == 4 / 128) add:
+  * ``CompressorFP8.forward`` all-gathers KV/score then drops the
+    rank-local ``meta`` and rebuilds ``state_slots`` / ``kv_slots`` from
+    CPContext's full per-request positions.
+  * ``IndexerFP8.prepare`` swaps ``input_lengths`` →
+    ``cp_ctx.input_lengths_global`` for ``T_per_req`` so ks / ke /
+    cu_kv_seqlens index into the per-rank pool's GLOBAL compressed-K
+    extent. Nested compressor_meta is nulled for the same rebuild path.
+
+Output: each layer's hidden state ``h`` is rank-local
+``[T_local, hc, dim]`` — the framework's exit all-gather + strip-pad
+gather (driven by ``cp_info.prefill_qkv_restore_indice`` /
+``prefill_qkv_padding_mask``) reassembles the full sequence for the
+next-layer / lm-head step.
+
+Decode does NOT all-gather. Each rank's pool already holds the full
+sequence's compressed entries (each rank wrote the gather'd new K
+during prefill), so per-rank decode reads remain self-contained.
+
+Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+
+import torch
+
+from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41.cp import (
+    build_cp_context_for_forward,
+    cp_gather_last_by_request,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
+    build_and_propagate_prefill_meta_fp8,
+    clear_prefill_meta_shared_fp8,
+    release_v41_prefill_shared,
+)
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+    as_tagged_attention_inputs,
+    build_block_tables_batched,
+    create_tagged_cache_store_writer,
+    host_block_tables,
+)
+from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, permits_ced
+from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
+    PrefillWorkspace,
+    prefill_q_workspace_rows,
+)
+from rtp_llm.models_py.modules.factory.attention.common import (
+    create_write_cache_store_impl,
+)
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
+
+if TYPE_CHECKING:
+    # Kept behind TYPE_CHECKING to avoid an import cycle — ``transformer``
+    # doesn't depend on ``prefill`` today but this guard makes that
+    # non-load-bearing (module loads fine even if the cycle reappears).
+    from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
+
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_PREFILL_FAST_LAYER_CALLS_ATTR = "_dsv4_prefill_fast_layer_calls"
+
+_PrefillFastLayerCall = Callable[..., torch.Tensor]
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+def _cp_prepare_fusion_supported(v4: "V4Transformer") -> bool:
+    if getattr(v4, "_cp_info", None) is None or int(getattr(v4, "_cp_size", 1)) <= 1:
+        return False
+    try:
+        from rtp_llm.models_py.modules.dsv41._cp_metadata_triton import (
+            cp_metadata_fusion_supported,
+        )
+
+        return cp_metadata_fusion_supported()
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
+def _prefill_fast_path_layer_calls(
+    v4: "V4Transformer",
+) -> Optional[Tuple[_PrefillFastLayerCall, ...]]:
+    if hasattr(v4, _PREFILL_FAST_LAYER_CALLS_ATTR):
+        return getattr(v4, _PREFILL_FAST_LAYER_CALLS_ATTR)
+
+    layer_calls: Optional[Tuple[_PrefillFastLayerCall, ...]] = None
+    layers = getattr(v4, "layers", None)
+    if getattr(v4, "fp8_kv_cache", False) and layers:
+        from rtp_llm.models_py.modules.dsv41.block import Block
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import AttentionFP8
+
+        calls = []
+        for layer in layers:
+            if not isinstance(layer, Block):
+                calls = []
+                break
+            if not isinstance(getattr(layer, "attn", None), AttentionFP8):
+                calls = []
+                break
+            fast_callable_fn = getattr(layer, "prefill_fast_callable", None)
+            if fast_callable_fn is None:
+                calls = []
+                break
+            fast_call = fast_callable_fn()
+            if fast_call is None:
+                if (
+                    getattr(layer.attn, "v41_config", None) is not None
+                    and getattr(layer, "engram", None) is not None
+                ):
+                    # Engram runs before HC only on these layers; compatible
+                    # neighbors can still use the existing FP8 fast body.
+                    fast_call = layer
+                else:
+                    calls = []
+                    break
+            calls.append(fast_call)
+        if calls:
+            layer_calls = tuple(calls)
+
+    # The layer stack is static after model construction. Cache both the
+    # supported and unsupported outcomes so the hot path does not rescan every
+    # Block. If a future maintainer mutates ``v4.layers`` at runtime, this cache
+    # must be invalidated together with that mutation.
+    setattr(v4, _PREFILL_FAST_LAYER_CALLS_ATTR, layer_calls)
+    return layer_calls
+
+
+def _prefill_fast_path_enabled(
+    v4: "V4Transformer",
+    prepare_hidden_fn: Optional[Any],
+    layer_calls: Optional[Tuple[_PrefillFastLayerCall, ...]] = None,
+) -> bool:
+    # Default-on production fast path. The normal path remains the source of
+    # truth for debug/recording, BF16, custom-hidden, and unsupported modules.
+    if not _env_flag("DSV4_PREFILL_FAST_PATH", "1"):
+        return False
+    if prepare_hidden_fn is not None:
+        return False
+    if _rt.ENABLED or _fwd_dbg.enabled():
+        return False
+    if layer_calls is None:
+        layer_calls = _prefill_fast_path_layer_calls(v4)
+    return layer_calls is not None
+
+
+def _build_positions_from_lengths(
+    input_lengths: torch.Tensor,  # [B] int
+    prefix_lengths: torch.Tensor,  # [B] int
+    device: torch.device,
+    total_tokens: Optional[int] = None,
+) -> torch.Tensor:
+    """Synthesize per-token global positions ``[T_total]`` int64 when the
+    framework didn't populate ``inputs.combo_position_ids`` (warmup / cudagraph
+    capture path).
+
+    For each request ``b`` with prefix ``sp[b]`` and input length ``L[b]``,
+    emit ``sp[b], sp[b]+1, ..., sp[b]+L[b]-1``; concatenated across the batch.
+
+    Must be CUDA-graph-capture-safe: callers pass GPU-resident tensors
+    (``input_lengths`` / ``prefix_lengths``) during capture. Keep the
+    body tensor-only so capture does not synchronize on scalar reads.
+    """
+    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
+    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
+    batch_size = int(input_lengths.numel())
+    if total_tokens is None:
+        total_tokens = int(input_lengths.sum().item())
+    if batch_size == 0 or total_tokens == 0:
+        return torch.zeros(0, dtype=torch.int64, device=device)
+
+    token_offsets = torch.arange(total_tokens, dtype=torch.int64, device=device)
+    cu_seqlens = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int64, device=device),
+            input_lengths.cumsum(0),
+        ],
+        dim=0,
+    )
+    req_ids = torch.searchsorted(cu_seqlens[1:], token_offsets, right=True)
+    req_ids = req_ids.clamp(max=batch_size - 1)
+    local_offsets = token_offsets - cu_seqlens.gather(0, req_ids)
+    return prefix_lengths.gather(0, req_ids) + local_offsets
+
+
+def _last_hidden_by_request(
+    flat: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor],
+    cp_ctx: Optional[Any],
+) -> torch.Tensor:
+    if cp_ctx is not None and cp_ctx.cp_size > 1:
+        return cp_gather_last_by_request(flat, cp_ctx)
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        last_indices = cu_seqlens[1:].to(device=flat.device, dtype=torch.long) - 1
+        return flat.index_select(0, last_indices).contiguous()
+    return flat[-1:].contiguous()
+
+
+def set_cp_info(
+    v4: V4Transformer,
+    parallelism_config: Optional[ParallelismConfig],
+    attn: Optional[PyAttentionInputs],
+    is_prefill: bool,
+) -> None:
+    """Stash per-forward Context-Parallel metadata on ``v4`` so
+    :func:`forward_layers` can build + propagate the derived
+    ``CPContext`` when it enters the per-layer loop.
+
+    Clears with ``(None, 1, 0)`` when CP is off so no stale ctx leaks
+    from a prior request (warmup, etc.).
+    """
+    cp_enabled = (
+        parallelism_config is not None
+        and getattr(parallelism_config, "prefill_cp_config", None) is not None
+        and parallelism_config.prefill_cp_config.is_enabled()
+        and is_prefill
+        and attn is not None
+        and getattr(attn, "context_parallel_info", None) is not None
+    )
+    if cp_enabled:
+        v4.set_cp_info(
+            cp_info=attn.context_parallel_info,
+            cp_size=int(parallelism_config.tp_size),
+            cp_rank=int(parallelism_config.tp_rank),
+            kv_cache_sharded=bool(
+                getattr(parallelism_config.prefill_cp_config, "kv_cache_sharded", False)
+            ),
+        )
+    else:
+        v4.set_cp_info(None, 1, 0)
+
+
+def forward_layers(
+    v4: V4Transformer,
+    kv_cache: Optional[KVCache],
+    input_ids: torch.Tensor,  # [T_total] flat 1D
+    positions: torch.Tensor,  # [T_total] int64 — per-token global absolute pos
+    cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
+    block_tables_by_type: Optional[Dict[int, torch.Tensor]],
+    attn_inputs: Optional[PyAttentionInputs] = None,
+    prepare_hidden_fn: Optional[Any] = None,
+    allow_ced: bool = False,
+) -> torch.Tensor:
+    """Flat per-layer loop — vLLM-aligned layout.
+
+    Shapes:
+      * ``input_ids``   ``[T_total]``    — flat tokens across the forward's requests
+      * ``positions``   ``[T_total]``    — per-token global absolute position (RoPE)
+      * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
+      * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
+      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
+
+    The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
+    matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
+    bookkeeping that still needs request boundaries (block-table lookups,
+    compressor/indexer per-row state) is carried by ``cu_seqlens``.
+
+    **Stage-2 compat shim**: ``Block.forward`` is now flat-native (accepts
+    ``[T, hc, dim]`` + 1D ``input_ids`` / ``positions`` / ``cu_seqlens``)
+    so the layer call site has no unsqueeze/squeeze. ``attention.py`` /
+    ``compressor.py`` / ``indexer.py`` still consume ``[B=1, T, hc, dim]``
+    internally — ``Block.forward`` re-wraps them. ``_hc_head_reduce`` +
+    ``norm`` also still assume a 4D input (``dim=2`` for the hc reduction),
+    so the reduce + norm pair here is still wrapped until ``transformer.py``
+    is flattened.
+
+    When ``attn_inputs`` is provided AND cache_store is active, each layer's
+    owned KV regions are registered with the PD-disagg cache_store immediately
+    after that layer's forward.
+    """
+    # Allocate before CP metadata or embedding can split a reusable cached block.
+    # V4.1 streams padded query rows through one Q chunk. Ordinary V4 retains
+    # its fixed maximum Q and compressor CP capacities for allocator reuse.
+    first_attn = getattr(next(iter(v4.layers), None), "attn", None)
+    shared_prefill = getattr(first_attn, "_shared_attention", None)
+    prefill_write_by_region = None
+    if shared_prefill is not None:
+        release_v41_prefill_shared(shared_prefill)
+
+    ws: Optional[PrefillWorkspace] = None
+    if v4.fp8_kv_cache:
+        # AttentionV41FP8 only uses prefill_q: its global/KV gathers own their
+        # buffers, and it never constructs the V4 compressor/indexer modules.
+        v41 = getattr(getattr(v4, "args", None), "v41_config", None) is not None
+        reserve_cp = (
+            not v41
+            and getattr(v4, "_cp_info", None) is not None
+            and int(getattr(v4, "_cp_size", 1)) > 1
+            and int(v4._prefill_ws_full_rows) > 0
+        )
+        ws = PrefillWorkspace(
+            input_ids.device,
+            q_rows=(
+                prefill_q_workspace_rows(input_ids.size(0))
+                if v41
+                else v4._prefill_ws_q_rows
+            ),
+            q_dim=v4._prefill_ws_q_dim,
+            reserve_cp=reserve_cp,
+            cp_rows=v4._prefill_ws_full_rows,
+            main_w=v4._prefill_ws_main_w,
+            idx_w=v4._prefill_ws_idx_w,
+            align_bytes=(64 << 20) if v41 else (1 << 30),
+        )
+
+    # Build + propagate CP context once per prefill step. Under CP the
+    # caller hands us a per-rank chunk slice (T_local = chunk_length),
+    # and each attn / compressor / indexer reads ``cp_ctx`` off the
+    # module to compute its own per-token positions. Without CP we pass
+    # None to clear any stale context from a prior forward (warmup).
+    cp_info = getattr(v4, "_cp_info", None)
+    cp_size = getattr(v4, "_cp_size", 1)
+    cp_rank = getattr(v4, "_cp_rank", 0)
+    cp_ctx = None
+    with _profiler.record_function_range("dsv4.prefill.prepare_cp_context"):
+        if cp_info is not None and cp_size > 1:
+            cp_ctx = build_cp_context_for_forward(
+                cp_info,
+                cp_size,
+                cp_rank,
+                int(input_ids.size(0)),
+                input_ids.device,
+                prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
+                prefix_lengths_host=getattr(
+                    cp_info, "prefill_prefix_lengths_cpu", None
+                ),
+                chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
+                kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
+            )
+    with _profiler.record_function_range("dsv4.prefill.propagate_cp_context"):
+        v4._propagate_cp_ctx(cp_ctx)
+    if cp_ctx is not None:
+        # The framework's fallback position_ids are rank-local contiguous
+        # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
+        # DSV4 attention/indexer/compressor need the per-token absolute
+        # request positions carried by CPContext.
+        positions = cp_ctx.global_positions.to(
+            device=positions.device, dtype=torch.long
+        )
+    positions = positions.reshape(-1).contiguous()
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.reshape(-1).contiguous()
+
+    # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
+    # smoke / production prefill path produces the same per-layer dump
+    # consumed by /tmp/moedbg_runs diff scripts).  Read once per forward.
+    _rt_on = _rt.ENABLED
+    if _rt_on:
+        _rt.begin(seqlen=int(input_ids.size(0)))
+        if _rt._get_buf() is None:
+            _rt_on = False
+
+    # Build the per-layer cache_store writer once per forward. Active
+    # only on prefill calls with cache_store_inputs bound; otherwise
+    # ``write_cache_store_impl`` is None and the per-layer call site is
+    # a cheap None check.
+    write_cache_store_impl = None
+    if kv_cache is not None and attn_inputs is not None:
+        write_cache_store_impl = create_tagged_cache_store_writer(kv_cache, attn_inputs)
+
+    with _profiler.record_function_range("dsv4.prefill.embedding"):
+        if prepare_hidden_fn is None:
+            h = v4.embed(input_ids)  # [T_total, dim]
+            if _rt_on:
+                _rt.record("prefill_embed_out", h)
+            h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+        else:
+            h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
+    image_token_mask = getattr(v4, "_image_token_mask", None)
+    if image_token_mask is not None:
+        input_ids = torch.where(
+            image_token_mask,
+            torch.full_like(input_ids, int(v4.args.vocab_size)),
+            input_ids,
+        )
+    if _rt_on:
+        _rt.record("prefill_embed_hc_expanded", h)
+
+    capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    capture_aux = bool(capture_ids)
+
+    prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
+    use_prefill_fast_path = _prefill_fast_path_enabled(
+        v4, prepare_hidden_fn, prefill_fast_layer_calls
+    )
+    if not use_prefill_fast_path:
+        prefill_fast_layer_calls = None
+    record_range_ctx = (
+        _profiler.disable_record_function_ranges
+        if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
+        else nullcontext
+    )
+    # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
+    # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
+    # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
+    # own forward.
+    with record_range_ctx():
+        if v4.fp8_kv_cache:
+            first_position_host = getattr(cp_ctx, "first_position_host", None)
+            sp_int_for_meta = (
+                first_position_host
+                if first_position_host is not None
+                else int(positions[0].item())
+            )
+            sp_per_req: Optional[torch.Tensor] = None
+            req_id_per_token: Optional[torch.Tensor] = None
+            if cp_ctx is not None:
+                # Under CP, rank-local token order is zigzagged. The first token of
+                # each rank-local request chunk is therefore not necessarily the
+                # request's absolute start position. Use CP metadata instead of
+                # deriving request ids from rank-local cu_seqlens.
+                sp_per_req = cp_ctx.prefix_lengths.to(
+                    device=positions.device, dtype=torch.int64
+                ).contiguous()
+                req_id_per_token = cp_ctx.req_id_per_token.to(
+                    device=positions.device, dtype=torch.int32
+                ).contiguous()
+            elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
+                sp_per_req = (
+                    positions.index_select(0, starts).to(torch.int64).contiguous()
+                )
+                req_id_per_token = (
+                    torch.searchsorted(
+                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                        torch.arange(
+                            positions.numel(),
+                            device=positions.device,
+                            dtype=torch.int64,
+                        ),
+                        right=True,
+                    )
+                    .sub_(1)
+                    .to(torch.int32)
+                    .contiguous()
+                )
+            batch_size = 1
+            if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                batch_size = int(cu_seqlens.numel() - 1)
+            input_lengths: Optional[torch.Tensor] = None
+            prefix_lengths: Optional[torch.Tensor] = None
+            max_seqlen_q = 0
+            if attn_inputs is not None:
+                il = getattr(attn_inputs, "input_lengths", None)
+                if il is not None and il.numel() > 0:
+                    input_lengths = il.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+                    max_seqlen_q = (
+                        max(cp_ctx.chunk_lengths_per_req)
+                        if cp_ctx is not None
+                        and cp_ctx.chunk_lengths_per_req is not None
+                        else int(input_lengths.max().item())
+                    )
+                pl = getattr(attn_inputs, "prefix_lengths", None)
+                if pl is not None and pl.numel() > 0:
+                    prefix_lengths = pl.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+            # The workspace was allocated at function entry, before
+            # embedding could fragment its cached address range.  It remains a
+            # per-forward local so the MTP draft can reuse the block immediately.
+            prefill_write_by_region = build_and_propagate_prefill_meta_fp8(
+                v4,
+                h,
+                sp_int_for_meta,
+                kv_cache,
+                block_tables_by_type,
+                sp_per_req=sp_per_req,
+                cu_seqlens=cu_seqlens,
+                batch_size=batch_size,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                position_ids=positions,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+                workspace=ws,
+                host_block_ids=host_block_tables(kv_cache, attn_inputs),
+            )
+
+    layer_forward_range = _profiler.make_layer_forward_range()
+    ced_tail = None
+    original_cp_ctx = cp_ctx
+    try:
+        if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
+            host_tables = host_block_tables(kv_cache, attn_inputs)
+            if (
+                kv_cache is not None
+                and isinstance(host_tables, torch.Tensor)
+                and host_tables.device.type == "cpu"
+                and host_tables.ndim == 3
+            ):
+                shared_prefill["prefill_producer_host_tables"] = (
+                    tuple(kv_cache.group_tags),
+                    host_tables,
+                )
+        if allow_ced and _env_flag("DSV41_CED"):
+            if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
+                ced_tail = CEDPlan.create(
+                    v4,
+                    cp_ctx,
+                    attn_inputs,
+                    kv_cache,
+                    prepare_hidden_fn=prepare_hidden_fn,
+                    bounded_replay=v4.swa_bounded_replay,
+                )
+        ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
+        with record_range_ctx():
+            # Two callable chains intentionally coexist:
+            #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
+            #   * cached fast callables are validated once for the FP8 production
+            #     matrix, then reused for every request. Keep both signatures in
+            #     sync when changing prefill inputs, including B>1/reuse metadata.
+            layer_calls = (
+                prefill_fast_layer_calls
+                if prefill_fast_layer_calls is not None
+                else v4.layers
+            )
+            for layer_idx, layer_call in enumerate(layer_calls):
+                if layer_idx == 21 and ced_tail is not None:
+                    with _profiler.record_function_range("dsv41.ced.compact"):
+                        if not ced_in_l20:
+                            h, input_ids = ced_tail.compact(
+                                v4, h, input_ids, shared_prefill
+                            )
+                        cp_ctx = ced_tail.context
+                        logging.debug(
+                            "V4.1 CED compacted: bounded=%s cp=%d rows=%d->%d local_rows=%d",
+                            v4.swa_bounded_replay,
+                            cp_ctx.cp_size,
+                            ced_tail.original_context.seq_len_full,
+                            cp_ctx.unpad_restore.numel(),
+                            h.shape[0],
+                        )
+                        positions = cp_ctx.global_positions
+                        cu_seqlens = ced_tail.cu_seqlens
+                        v4._propagate_cp_ctx(cp_ctx)
+                        clear_prefill_meta_shared_fp8(v4)
+                        build_and_propagate_prefill_meta_fp8(
+                            v4,
+                            h,
+                            cp_ctx.prefix_length,
+                            kv_cache,
+                            block_tables_by_type,
+                            sp_per_req=cp_ctx.prefix_lengths,
+                            cu_seqlens=cu_seqlens,
+                            batch_size=len(cp_ctx.chunk_lengths_per_req),
+                            input_lengths=cu_seqlens[1:] - cu_seqlens[:-1],
+                            prefix_lengths=cp_ctx.prefix_lengths,
+                            position_ids=positions,
+                            req_id_per_token=cp_ctx.req_id_per_token,
+                            max_seqlen_q=max(cp_ctx.chunk_lengths_per_req),
+                            workspace=ws,
+                            first_layer=21,
+                            reuse_write_by_region=prefill_write_by_region,
+                            host_block_ids=host_block_tables(kv_cache, attn_inputs),
+                        )
+                        prefill_write_by_region = None
+                with layer_forward_range(layer_idx):
+                    with (
+                        ced_tail.candidate_publication(shared_prefill)
+                        if layer_idx == 20 and ced_tail is not None and not ced_in_l20
+                        else nullcontext()
+                    ):
+                        if layer_idx == 20 and ced_in_l20:
+                            h, input_ids = v4.layers[20].forward_prefill_ced_l20(
+                                h,
+                                input_ids,
+                                positions,
+                                ced_tail,
+                                kv_cache=kv_cache,
+                                block_tables_by_type=block_tables_by_type,
+                            )
+                        else:
+                            h = layer_call(
+                                h,  # [T, hc, dim]
+                                input_ids,  # [T]
+                                positions,  # [T]
+                                cu_seqlens,  # [B+1]
+                                kv_cache=kv_cache,
+                                block_tables_by_type=block_tables_by_type,
+                            )  # [T, hc, dim]
+                    if shared_prefill is not None:
+                        release_v41_prefill_shared(shared_prefill, layer_idx)
+                    if layer_idx in capture_ids:
+                        v4.capture_aux_hidden(layer_idx, h)
+                    if _rt_on:
+                        _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+                    if write_cache_store_impl is not None:
+                        write_cache_store_impl(layer_idx)
+                    if _rt_on:
+                        _rt.record(f"layer{layer_idx:02d}_out", h)
+                        if cp_ctx is None:
+                            layer_last = h[-1:].contiguous()
+                        else:
+                            layer_last_pos = cp_ctx.seq_len_total - 1
+                            layer_last_mask = (
+                                cp_ctx.global_positions == layer_last_pos
+                            ) & cp_ctx.local_is_real
+                            layer_last = h[layer_last_mask].contiguous()
+                            dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                            if dbg_pos >= 0:
+                                layer_pos_mask = (
+                                    cp_ctx.global_positions == dbg_pos
+                                ) & cp_ctx.local_is_real
+                                _rt.record(
+                                    f"layer{layer_idx:02d}_pos{dbg_pos}",
+                                    h[layer_pos_mask].contiguous(),
+                                )
+                            layer_tail_mask = (
+                                (
+                                    cp_ctx.global_positions
+                                    >= max(cp_ctx.seq_len_total - 128, 0)
+                                )
+                                & (cp_ctx.global_positions < cp_ctx.seq_len_total)
+                                & cp_ctx.local_is_real
+                            )
+                            _rt.record(
+                                f"layer{layer_idx:02d}_tail128",
+                                h[layer_tail_mask].contiguous(),
+                            )
+                        _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+    finally:
+        prefill_write_by_region = None
+        # Always drop the per-layer ``common.workspace`` references, even if a
+        # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
+        # the exact case this per-forward workspace exists to relieve). The
+        # ref lives on each layer's ``_prefill_meta_shared`` (a persistent
+        # module attr), so without this the ~16 GiB workspace would stay
+        # pinned past the failing forward and starve the retry / next request
+        # on a near-full card. ``clear`` is idempotent (sets None per layer).
+        if v4.fp8_kv_cache:
+            clear_prefill_meta_shared_fp8(v4)
+        if shared_prefill is not None:
+            release_v41_prefill_shared(shared_prefill)
+        if ced_tail is not None:
+            v4._propagate_cp_ctx(original_cp_ctx)
+
+    if v4._mtp_hidden_buffer is not None:
+        if capture_aux:
+            # DSpARK mode: the buffer already holds this forward's aux rows
+            # (written per selected layer above); only account for them.
+            v4._note_aux_hidden_rows(h.size(0), is_cuda_graph=False)
+            if ced_tail is not None:
+                ced_tail.restore_aux(v4)
+        else:
+            _pre_hc_flat = h.flatten(-2)
+            v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
+            if v4._mtp_last_hidden_buffer is not None:
+                _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
+                v4._write_mtp_last_hidden_buffer(_last_pre_hc)
+
+    # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
+    # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
+    with record_range_ctx():
+        h = v4._hc_head_reduce(h)  # [T, dim]
+        if _rt_on:
+            _rt.record("prefill_hc_reduced", h)
+        h = v4.norm(h)  # [T, dim]
+    if _rt_on:
+        _rt.record("prefill_final_norm", h)
+        if cp_ctx is None:
+            last_h = h[-1:].contiguous()
+        else:
+            last_pos = cp_ctx.seq_len_total - 1
+            last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
+            last_h = h[last_mask].contiguous()
+        _rt.record("lm_last_hidden", last_h)
+        lm_logits = torch.mm(
+            last_h.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
+        _rt.record("lm_logits_last", lm_logits)
+        top_k = min(16, lm_logits.size(-1))
+        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
+        _rt.record("lm_top_values", lm_top_values)
+        _rt.record("lm_top_indices", lm_top_indices)
+
+    if _rt_on:
+        extra: dict = {
+            "input_ids_shape": tuple(input_ids.shape),
+            "input_ids": input_ids.detach().cpu(),
+            "path": "prefill",
+            "positions": positions.detach().cpu(),
+            "cu_seqlens": cu_seqlens.detach().cpu(),
+        }
+        if cp_ctx is not None:
+            extra.update(
+                {
+                    "cp_size": cp_ctx.cp_size,
+                    "cp_rank": cp_ctx.cp_rank,
+                    "chunk_length": cp_ctx.chunk_length,
+                    "padded_seq_len": cp_ctx.padded_seq_len,
+                    "seq_len_full": cp_ctx.seq_len_full,
+                    "prefix_length": cp_ctx.prefix_length,
+                    "seq_len_total": cp_ctx.seq_len_total,
+                    "relative_positions": cp_ctx.relative_positions.detach().cpu(),
+                    "global_positions": cp_ctx.global_positions.detach().cpu(),
+                    "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
+                    "local_is_real": cp_ctx.local_is_real.detach().cpu(),
+                }
+            )
+        else:
+            extra.update(
+                {
+                    "cp_size": 1,
+                    "cp_rank": 0,
+                    "seq_len_full": int(input_ids.size(0)),
+                    "prefix_length": 0,
+                    "seq_len_total": int(input_ids.size(0)),
+                }
+            )
+        if attn_inputs is not None:
+            for name in ("input_lengths", "prefix_lengths", "sequence_lengths"):
+                value = getattr(attn_inputs, name, None)
+                if value is not None and value.numel() > 0:
+                    extra[name] = value.detach().cpu()
+        step = getattr(v4, "_dbg_step", 0)
+        _rt.dump(step=step, extra=extra)
+        v4._dbg_step = step + 1
+    if _fwd_dbg.enabled():
+        _fwd_dbg.print_prefill(
+            hidden=h,
+            input_ids=input_ids,
+            positions=positions,
+            cu_seqlens=cu_seqlens,
+            attn_inputs=attn_inputs,
+            cp_ctx=cp_ctx,
+            head_weight=getattr(v4, "head_weight", None),
+            step=int(getattr(v4, "_dbg_step", 0)),
+        )
+    # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
+    # gather/restore scratch) is a local of this function: it drops here on
+    # return, returning ~16 GiB to the caching allocator so the MTP draft
+    # forward (which runs right after the main model on a near-full card) can
+    # borrow it. No explicit reset needed — the per-layer ``common.workspace``
+    # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if ced_tail is not None:
+        with _profiler.record_function_range("dsv41.ced.restore"):
+            h = ced_tail.restore_rows(h)
+    return h  # [T, dim]
+
+
+def forward_prefill(
+    v4: V4Transformer,
+    kv_cache: Optional[KVCache],
+    parallelism_config: Optional[ParallelismConfig],
+    inputs: PyModelInputs,
+    prepare_hidden_fn: Optional[Any] = None,
+) -> PyModelOutputs:
+    """Prefill dispatcher — single :func:`forward_layers` call on the full
+    flat ``[T_total]`` batch (vLLM-aligned).
+
+    Pulls flat metadata off :attr:`PyModelInputs.attention_inputs` directly:
+
+    * ``positions``  = ``inputs.combo_position_ids``     — ``[T_total]`` int32 global pos
+    * ``cu_seqlens`` = ``attn.cu_seqlens``       — ``[B+1]`` int32 prefix sum
+    * ``block_tables_by_type`` = Dict[attn_type, [B, max_blocks]] — full-batch
+      block tables (B axis = request axis), built via
+      :func:`build_block_tables_batched`.
+
+    Downstream (``block.py`` / ``attention.py`` / ``compressor.py`` /
+    ``indexer.py``) consumes the cu_seqlens-aware metadata directly; under CP
+    the per-layer setup swaps in CPContext's request-absolute positions and
+    full-length write-side view.
+
+    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
+    """
+    attn = as_tagged_attention_inputs(inputs.attention_inputs)
+    # Context-Parallel setup must precede the per-layer loop because
+    # forward_layers reads v4._cp_info to build the CP context.
+    set_cp_info(v4, parallelism_config, attn, is_prefill=True)
+
+    input_ids: torch.Tensor = inputs.input_ids  # [T_total] flat 1D
+
+    # Framework already populates these — don't recompute.
+    #  * ``attn.cu_seqlens``   : [B+1]     per-request cumulative prefix sum
+    #  * ``inputs.combo_position_ids`` : [T_total] per-token global absolute position
+    from rtp_llm.models_py.modules.dsv4.prefill.forward import (
+        _resolve_prefill_cu_seqlens,
+    )
+
+    cu_seqlens = attn.cu_seqlens
+    device_cu = attn.cu_seqlens_device
+    capturing = input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+    if (capturing or cu_seqlens is None or cu_seqlens.numel() < 2) and (
+        device_cu is not None and device_cu.numel() >= 2
+    ):
+        cu_seqlens = device_cu
+    lengths = attn.input_lengths_device
+    if lengths is None or lengths.numel() == 0:
+        lengths = attn.input_lengths
+    cu_seqlens = _resolve_prefill_cu_seqlens(
+        cu_seqlens, lengths, input_ids.device if capturing else torch.device("cpu")
+    )
+    positions = inputs.combo_position_ids
+    # warmup / cudagraph capture path doesn't populate position_ids —
+    # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
+    # variants when available: during cudagraph capture, the host-side
+    # ``input_lengths`` / ``prefix_lengths`` are pinned int32 CPU tensors,
+    # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
+    # tensor produces an unpinned intermediate which capture rejects.
+    if positions is None or positions.numel() == 0:
+        with _profiler.record_function_range("dsv4.prefill.prepare_positions"):
+            if _cp_prepare_fusion_supported(v4):
+                # CPContext replaces this placeholder with rank-local zigzag
+                # global positions before embedding. Building contiguous
+                # fallback positions here would be dead work.
+                positions = torch.empty(0, dtype=torch.int64, device=input_ids.device)
+            else:
+                il_d = attn.input_lengths_device
+                pl_d = attn.prefix_lengths_device
+                input_lens = (
+                    il_d
+                    if il_d is not None and il_d.numel() > 0
+                    else attn.input_lengths
+                )
+                prefix_lens = (
+                    pl_d
+                    if pl_d is not None and pl_d.numel() > 0
+                    else attn.prefix_lengths
+                )
+                positions = _build_positions_from_lengths(
+                    input_lens,
+                    prefix_lens,
+                    input_ids.device,
+                    total_tokens=int(input_ids.numel()),
+                )
+
+    block_tables_by_type = build_block_tables_batched(kv_cache, attn)
+
+    hidden = forward_layers(
+        v4,
+        kv_cache,
+        input_ids,
+        positions,
+        cu_seqlens,
+        block_tables_by_type,
+        attn_inputs=attn,
+        prepare_hidden_fn=prepare_hidden_fn,
+        allow_ced=permits_ced(inputs),
+    )  # [T_total, dim]
+    return PyModelOutputs(hidden)

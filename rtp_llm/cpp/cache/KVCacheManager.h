@@ -154,6 +154,7 @@ public:
 private:
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
+    void                  cacheStatusRefreshLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
@@ -194,6 +195,11 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    std::mutex                         cache_status_refresh_mutex_;
+    std::condition_variable            cache_status_refresh_cv_;
+    std::thread                        cache_status_refresh_thread_;
+    bool                               cache_status_refresh_requested_ = false;
+    bool                               cache_status_refresh_stopped_   = false;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;
