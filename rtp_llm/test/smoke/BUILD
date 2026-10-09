@@ -81,7 +81,14 @@ cc_binary(
     srcs = ["pace_sdk_smoke.cc"],
     # The paired SDK RPM uses the C++11 string ABI; --config=cpu uses ABI 0.
     copts = ["-std=c++17", "-U_GLIBCXX_USE_CXX11_ABI", "-D_GLIBCXX_USE_CXX11_ABI=1"],
-    deps = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client"],
+    deps = [
+        "//3rdparty/3fs:hf3fs",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "@grpc//:grpc++",
+        "@havenask//aios/alog:alog",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:string_helper",
+    ],
 )
 
 cc_binary(
