@@ -62,6 +62,8 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateConfigPB,
     GenerateInputPB,
@@ -850,6 +852,175 @@ class _ControlledFetchServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
         await self.release.wait()
         if self.status != StatusCode.OK:
             await context.abort(self.status, "injected terminal RPC error")
+
+
+class _BatchMetadataServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
+    def __init__(self, mode):
+        self.mode = mode
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def BatchGenerateCall(self, request, context):
+        self.request = request
+        self.metadata = dict(context.invocation_metadata())
+        self.started.set()
+        try:
+            if self.mode in ("cancel", "timeout"):
+                await asyncio.Event().wait()
+            if self.mode == "rpc_error":
+                await context.abort(
+                    StatusCode.UNAVAILABLE, "injected batch transport error"
+                )
+            response = BatchGenerateOutputsPB()
+            for i, inp in enumerate(request.inputs):
+                result = response.results.add()
+                if self.mode == "business_error" and i == 1:
+                    result.error_info.error_code = ErrorCodePB.UNKNOWN_ERROR
+                    result.error_info.error_message = "injected item failure"
+                else:
+                    result.final_output.CopyFrom(_MetadataCaptureServicer._response())
+                    result.final_output.flatten_output.output_ids.int32_data = (
+                        struct.pack("<i", inp.request_id)
+                    )
+            return response
+        finally:
+            self.closed.set()
+
+
+class BatchTraceRpcTest(TestCase):
+    def _check_batch(self, mode="ok", enabled=True):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        tracing.reset_telemetry_for_test()
+        self.addCleanup(tracing.reset_telemetry_for_test)
+        exporter = InMemorySpanExporter()
+        if enabled:
+            self.assertTrue(
+                tracing.init_telemetry_for_test(exporter, role="test", tp_rank=0)
+            )
+
+        async def run():
+            server = grpc.aio.server()
+            servicer = _BatchMetadataServicer(mode)
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, 1000)
+            client._channel_pool = _RealChannelPool(channel)
+            root = tracing.start_server_span(
+                "POST /batch_infer",
+                {
+                    "traceparent": "00-11111111111111111111111111111111-2222222222222222-01",
+                    "tracestate": "vendor=batch",
+                },
+            )
+            inputs = [
+                GenerateInput(
+                    token_ids=torch.tensor([1, 2, 3]),
+                    request_id=801 + i,
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(
+                        max_new_tokens=2 + i,
+                        timeout_ms=50 if mode == "timeout" else 1000,
+                    ),
+                )
+                for i in range(2)
+            ]
+            try:
+                task = asyncio.create_task(client.batch_enqueue(inputs))
+                await asyncio.wait_for(servicer.started.wait(), 5)
+                if mode == "cancel":
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                elif mode != "ok":
+                    with self.assertRaises(FtRuntimeException):
+                        await task
+                else:
+                    outputs = await task
+                    self.assertEqual(
+                        [o.generate_outputs[0].output_ids.item() for o in outputs],
+                        [801, 802],
+                    )
+                self.assertEqual(
+                    [i.generate_config.max_new_tokens for i in servicer.request.inputs],
+                    [2, 3],
+                )
+                self.assertEqual(
+                    [i.request_id for i in servicer.request.inputs], [801, 802]
+                )
+                if mode in ("cancel", "timeout"):
+                    await asyncio.wait_for(servicer.closed.wait(), 5)
+            finally:
+                if root is not None:
+                    root.finish()
+                await channel.close()
+                await server.stop(None)
+            return servicer
+
+        servicer = asyncio.run(run())
+        self.assertTrue(tracing.shutdown_telemetry())
+        spans = exporter.get_finished_spans()
+        if not enabled:
+            self.assertEqual(len(spans), 0)
+            self.assertNotIn("traceparent", servicer.metadata)
+            self.assertFalse(
+                servicer.request.inputs[0].request_info.HasField("trace_context")
+            )
+            return
+        self.assertEqual(len(spans), 4)
+        root = next(s for s in spans if s.name == "POST /batch_infer")
+        rpc = next(s for s in spans if s.name == "rtp_llm.batch_generate_call")
+        items = sorted(
+            (s for s in spans if s.name == "rtp_llm.batch_request"),
+            key=lambda s: s.attributes["rtp_llm.batch.index"],
+        )
+        self.assertEqual(root.parent.span_id, int("2222222222222222", 16))
+        self.assertEqual(rpc.parent.span_id, root.context.span_id)
+        self.assertEqual(
+            servicer.metadata["traceparent"].split("-")[2],
+            format(rpc.context.span_id, "016x"),
+        )
+        for i, span in enumerate(items):
+            self.assertEqual(span.parent.span_id, root.context.span_id)
+            self.assertEqual(span.attributes["request_id"], str(801 + i))
+            self.assertNotIn("rtp_llm.request_id", span.attributes)
+            carrier = servicer.request.inputs[i].request_info.trace_context
+            self.assertEqual(
+                carrier.traceparent.split("-")[2], format(span.context.span_id, "016x")
+            )
+            self.assertEqual(carrier.tracestate, "vendor=batch")
+            expected_error = mode in ("rpc_error", "cancel", "timeout") or (
+                mode == "business_error" and i == 1
+            )
+            self.assertEqual(
+                span.status.status_code.name, "ERROR" if expected_error else "OK"
+            )
+        self.assertNotEqual(items[0].context.span_id, items[1].context.span_id)
+        expected_rpc = {
+            "rpc_error": "UNAVAILABLE",
+            "timeout": "DEADLINE_EXCEEDED",
+            "cancel": "CANCELLED",
+        }.get(mode, "OK")
+        self.assertEqual(rpc.attributes.get("rpc.response.status_code"), expected_rpc)
+
+    def test_batch_trace_parents_order_configuration_and_disabled_parity(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self._check_batch(enabled=enabled)
+
+    def test_batch_business_error_belongs_to_failed_item_with_rpc_ok(self):
+        self._check_batch("business_error")
+
+    def test_batch_transport_error_cancel_and_deadline_finish_all_items(self):
+        for mode in ("rpc_error", "cancel", "timeout"):
+            with self.subTest(mode=mode):
+                self._check_batch(mode)
 
 
 class ModelRpcClientGrpcMetadataTest(TestCase):

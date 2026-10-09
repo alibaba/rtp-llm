@@ -430,7 +430,7 @@ class FrontendServer(object):
             sequence,
         )
 
-        # Trace entry point: only chat completions get an HTTP SERVER span.
+        # Chat completions HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.
         loaded_model = (
             self._openai_endpoint.model_name
@@ -512,6 +512,21 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+        previous_trace_state = CURRENT_TRACE_STATE.get()
+        trace_state = start_server_span(
+            "POST /v1/batch/chat/completions",
+            raw_request.headers,
+            initial_attributes={
+                trace_attrs.HTTP_REQUEST_METHOD: "POST",
+                trace_attrs.HTTP_METHOD: "POST",
+                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                trace_attrs.LINGJI_FLAG: True,
+                trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                trace_attrs.GEN_AI_OPERATION_NAME: "batch",
+                trace_attrs.REQUEST_ID: str(request_id),
+            },
+        )
         try:
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
@@ -522,7 +537,21 @@ class FrontendServer(object):
                     responses=[r.model_dump(exclude_none=True) for r in responses]
                 ).model_dump()
             )
+        except BaseException as error:
+            if trace_state is not None:
+                _record_http_status(trace_state, 500)
+                trace_state.finish(
+                    error=error,
+                    error_type=(
+                        "Cancelled" if isinstance(error, asyncio.CancelledError) else ""
+                    ),
+                )
+            raise
         finally:
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
+            CURRENT_TRACE_STATE.set(previous_trace_state)
             self._global_controller.decrement()
 
     async def batch_infer(self, req: dict, raw_request: Request):
@@ -539,6 +568,21 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+        previous_trace_state = CURRENT_TRACE_STATE.get()
+        trace_state = start_server_span(
+            "POST /batch_infer",
+            raw_request.headers,
+            initial_attributes={
+                trace_attrs.HTTP_REQUEST_METHOD: "POST",
+                trace_attrs.HTTP_METHOD: "POST",
+                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                trace_attrs.LINGJI_FLAG: True,
+                trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                trace_attrs.GEN_AI_OPERATION_NAME: "batch",
+                trace_attrs.REQUEST_ID: str(request_id),
+            },
+        )
         try:
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
@@ -549,7 +593,21 @@ class FrontendServer(object):
                 generate_config=generate_config,
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
+        except BaseException as error:
+            if trace_state is not None:
+                _record_http_status(trace_state, 500)
+                trace_state.finish(
+                    error=error,
+                    error_type=(
+                        "Cancelled" if isinstance(error, asyncio.CancelledError) else ""
+                    ),
+                )
+            raise
         finally:
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
+            CURRENT_TRACE_STATE.set(previous_trace_state)
             self._global_controller.decrement()
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):

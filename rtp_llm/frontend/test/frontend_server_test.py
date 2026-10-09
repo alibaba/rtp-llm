@@ -91,6 +91,106 @@ class FrontendServerTest(TestCase):
         self.addCleanup(tracing.reset_telemetry_for_test)
         self.assertTrue(tracing.reset_telemetry_for_test())
 
+    def test_batch_http_trace_success_failure_cancel_and_disabled_parity(self):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
+
+        class BatchResult(BaseModel):
+            response_batch: list[str]
+
+        async def run_case(route, mode, enabled):
+            tracing.reset_telemetry_for_test()
+            exporter = InMemorySpanExporter()
+            if enabled:
+                self.assertTrue(
+                    tracing.init_telemetry_for_test(exporter, role="test", tp_rank=0)
+                )
+            controller = MagicMock()
+            controller.increment.return_value = 1
+            server = self.frontend_server
+            original_controller = server._global_controller
+            original_worker = server._frontend_worker
+            original_endpoint = server._openai_endpoint
+            server._global_controller = controller
+            previous = object()
+            token = CURRENT_TRACE_STATE.set(previous)
+            captured = []
+
+            async def endpoint(*args, **kwargs):
+                captured.append(CURRENT_TRACE_STATE.get())
+                if mode == "error":
+                    raise RuntimeError("batch item failed")
+                if mode == "cancel":
+                    raise asyncio.CancelledError()
+                if route == "batch_infer":
+                    return BatchResult(response_batch=["first", "second"])
+                return [
+                    BatchResult(response_batch=["first"]),
+                    BatchResult(response_batch=["second"]),
+                ]
+
+            worker = MagicMock()
+            worker.batch_infer = endpoint
+            openai = MagicMock()
+            openai.batch_chat_completion = endpoint
+            server._frontend_worker = worker
+            server._openai_endpoint = openai
+            raw = FakeRawRequest(
+                {
+                    "traceparent": "00-11111111111111111111111111111111-2222222222222222-01"
+                }
+            )
+            try:
+                call = getattr(server, route)(
+                    {
+                        "prompt_batch": ["first", "second"],
+                        "generate_config": {"max_new_tokens": 24},
+                    },
+                    raw,
+                )
+                if mode == "ok":
+                    response = await call
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn("first", response.body.decode())
+                    self.assertIn("second", response.body.decode())
+                else:
+                    with self.assertRaises(
+                        RuntimeError if mode == "error" else asyncio.CancelledError
+                    ):
+                        await call
+                controller.decrement.assert_called_once()
+                self.assertIs(CURRENT_TRACE_STATE.get(), previous)
+                self.assertTrue(tracing.shutdown_telemetry())
+                spans = exporter.get_finished_spans()
+                self.assertEqual(len(spans), 1 if enabled else 0)
+                if enabled:
+                    span = spans[0]
+                    self.assertEqual(span.parent.span_id, int("2222222222222222", 16))
+                    self.assertIsInstance(span.attributes["request_id"], str)
+                    self.assertEqual(
+                        span.attributes["http.response.status_code"],
+                        200 if mode == "ok" else 500,
+                    )
+                    self.assertEqual(
+                        span.status.status_code.name, "OK" if mode == "ok" else "ERROR"
+                    )
+                    self.assertIsNot(captured[0], previous)
+            finally:
+                CURRENT_TRACE_STATE.reset(token)
+                server._global_controller = original_controller
+                server._frontend_worker = original_worker
+                server._openai_endpoint = original_endpoint
+                tracing.reset_telemetry_for_test()
+
+        for route in ("batch_infer", "batch_chat_completion"):
+            for mode in ("ok", "error", "cancel"):
+                for enabled in (False, True):
+                    with self.subTest(route=route, mode=mode, enabled=enabled):
+                        asyncio.run(run_case(route, mode, enabled))
+
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res

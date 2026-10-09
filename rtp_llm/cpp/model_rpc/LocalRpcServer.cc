@@ -28,6 +28,78 @@ namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
 constexpr size_t  kAllocatorDumpReplayHistoryMax = 1024;
 
+class BatchItemTraceCarrier: public opentelemetry::context::propagation::TextMapCarrier {
+public:
+    explicit BatchItemTraceCarrier(const TraceContextPB& context): context_(context) {}
+    opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
+        if (key == "traceparent" && context_.traceparent().size() <= 256) {
+            return context_.traceparent();
+        }
+        if (key == "tracestate" && context_.tracestate().size() <= 512) {
+            return context_.tracestate();
+        }
+        return "";
+    }
+    void Set(opentelemetry::nostd::string_view, opentelemetry::nostd::string_view) noexcept override {}
+
+private:
+    const TraceContextPB& context_;
+};
+
+opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>
+startBatchItemSpan(const GenerateInputPB&                                              input,
+                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& rpc_span) {
+    if (!telemetry::TelemetryRuntime::isActive()) {
+        return {};
+    }
+    try {
+        opentelemetry::trace::StartSpanOptions options;
+        options.kind = opentelemetry::trace::SpanKind::kInternal;
+        if (rpc_span) {
+            options.parent = rpc_span->GetContext();
+        }
+        if (input.request_info().has_trace_context()) {
+            BatchItemTraceCarrier carrier(input.request_info().trace_context());
+            auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+            opentelemetry::context::Context empty_context;
+            auto                            parent = propagator->Extract(carrier, empty_context);
+            if (opentelemetry::trace::GetSpan(parent)->GetContext().IsValid()) {
+                options.parent = parent;
+            }
+        }
+        return telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.batch_generate_request", options);
+    } catch (...) {
+        return {};
+    }
+}
+
+void recordBatchItemCompletion(telemetry::GrpcStatusSpanGuard&        guard,
+                               const std::shared_ptr<GenerateStream>& stream,
+                               bool                                   request_ok) {
+    if (!guard.valid()) {
+        return;
+    }
+    const auto             time_info = stream->getTimeInfo();
+    telemetry::PhaseTiming timing;
+    timing.begin_time_us           = time_info.begin_time_us;
+    timing.running_started         = time_info.running_started;
+    timing.running_started_time_us = time_info.running_started_time_us;
+    timing.first_token_committed   = time_info.first_token_committed;
+    timing.first_token_time_us     = time_info.first_token_time_us;
+    timing.generation_done         = time_info.generation_done;
+    timing.generation_done_time_us = time_info.generation_done_time_us;
+    timing.synthesis_end_time_us   = currentTimeUs();
+    timing.request_id              = stream->streamId();
+    timing.error_type              = request_ok ? nullptr : "BusinessError";
+    if (request_ok && time_info.generation_done) {
+        const auto sequence_count =
+            stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
+        telemetry::setUsageTokenAttributes(
+            guard, (int64_t)stream->inputLength(), (int64_t)(stream->outputTokenLen() * sequence_count));
+    }
+    telemetry::synthesizePhaseSpans(guard.sharedSpan(), timing, telemetry::PhaseRole::Fusion, request_ok);
+}
+
 std::string endpointHost(std::string endpoint) {
     const auto scheme_separator = endpoint.find(':');
     if (endpoint.compare(0, scheme_separator, "ipv4") == 0 || endpoint.compare(0, scheme_separator, "ipv6") == 0) {
@@ -424,6 +496,28 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     const int          batch_size = request->inputs_size();
     RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
 
+    grpc::Status rpc_status = grpc::Status::OK;
+    auto         rpc_span =
+        telemetry::startRpcServerSpan("rtp_llm.batch_generate_call", context, false, "RpcService/BatchGenerateCall");
+    telemetry::GrpcStatusSpanGuard rpc_guard(rpc_span, &rpc_status);
+    if (batch_size > 0) {
+        rpc_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request->inputs(0).request_id()));
+    }
+    rpc_guard.setAttribute("rtp_llm.batch.size", (int64_t)batch_size);
+    std::vector<grpc::Status>                                    item_statuses(batch_size, grpc::Status::OK);
+    std::vector<std::unique_ptr<telemetry::GrpcStatusSpanGuard>> item_guards;
+    item_guards.reserve(batch_size);
+    for (int i = 0; i < batch_size; ++i) {
+        auto guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(startBatchItemSpan(request->inputs(i), rpc_span),
+                                                                      &item_statuses[i],
+                                                                      telemetry::SpanStatusSemantics::Logical);
+        guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request->inputs(i).request_id()));
+        guard->setAttribute("rtp_llm.batch.index", (int64_t)i);
+        guard->setAttribute("gen_ai.span.kind", "LLM");
+        guard->setAttribute(telemetry::kAttrRtpLlmPdSep, false);
+        item_guards.push_back(std::move(guard));
+    }
+
     if (batch_size == 0) {
         return grpc::Status::OK;
     }
@@ -432,10 +526,12 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     inputs.reserve(batch_size);
     for (int i = 0; i < batch_size; i++) {
         std::shared_ptr<GenerateInput> input;
-        auto                           err = prepareInput(request->inputs(i), input);
+        auto                           err = prepareInput(request->inputs(i), input, item_guards[i]->sharedSpan());
         if (!err.ok()) {
             // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
             for (int j = 0; j < batch_size; j++) {
+                item_statuses[j] = grpc::Status(grpc::StatusCode::INTERNAL, "Batch input preparation failed");
+                item_guards[j]->setLogicalErrorType(j == i ? "BusinessError" : "BatchAborted");
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
                 err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
@@ -464,6 +560,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
+            item_statuses[i] = grpc::Status(err.code() == ErrorCode::CANCELLED ? grpc::StatusCode::CANCELLED :
+                                                                                 grpc::StatusCode::INTERNAL,
+                                            "Batch request failed");
+            item_guards[i]->setLogicalErrorType(err.code() == ErrorCode::CANCELLED ? "Cancelled" : "BusinessError");
+            item_guards[i]->setAttribute(telemetry::kAttrRtpLlmErrorCode, (int64_t)err.code());
             auto* err_pb = result->mutable_error_info();
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
                                                                         ErrorCodePB::UNKNOWN_ERROR);
@@ -476,6 +577,8 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                           maga_init_params_.misc_config.aux_string,
                                           streams[i]->specialTokens().eos_token_id);
         }
+        recordBatchItemCompletion(*item_guards[i], streams[i], err.ok());
+        item_guards[i]->finish();
     }
 
     RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);

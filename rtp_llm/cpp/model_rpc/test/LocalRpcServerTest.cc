@@ -11,6 +11,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
+#include "opentelemetry/sdk/trace/span_data.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
+
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
@@ -87,6 +92,10 @@ public:
 
     std::future<void> cancellationChecked() {
         return cancellation_checked_.get_future();
+    }
+
+    void setBatchEngine(std::shared_ptr<EngineBase> engine) {
+        engine_ = std::move(engine);
     }
 
     std::atomic<bool> cancelled{false};
@@ -198,6 +207,107 @@ ErrorCode expectedStreamError(WakeReason reason) {
         return ErrorCode::GENERATE_TIMEOUT;
     }
     return ErrorCode::CANCELLED;
+}
+
+class BatchTraceEngine: public EngineBase {
+public:
+    BatchTraceEngine(): EngineBase(EngineInitParams{}) {}
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return {};
+    }
+    void enqueue(std::shared_ptr<GenerateStream>&) override {}
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        ++calls;
+        request_ids.clear();
+        for (const auto& input : inputs) {
+            request_ids.push_back(input->request_id);
+        }
+        return {{true, true}, streams};
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+    int                            calls = 0;
+    std::vector<int64_t>           request_ids;
+    std::vector<GenerateStreamPtr> streams;
+};
+
+TEST(LocalRpcServerTest, BatchTraceKeepsPerItemParentsErrorsAndTransportOk) {
+    namespace memory = opentelemetry::exporter::memory;
+    for (const bool enabled : {false, true}) {
+        for (const bool cancelled : {false, true}) {
+            telemetry::TelemetryRuntime::shutdown(5000);
+            auto data = std::make_shared<memory::InMemorySpanData>(128);
+            if (enabled) {
+                telemetry::TelemetryConfig config;
+                config.enabled = true;
+                config.role    = "test";
+                ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(
+                    memory::InMemorySpanExporterFactory::Create(data), config));
+            }
+            TestLocalRpcServer server;
+            server.cancelled = cancelled;
+            auto engine      = std::make_shared<BatchTraceEngine>();
+            auto first       = createMockStream();
+            auto second      = createMockStream();
+            EXPECT_CALL(*first, nextOutput(_)).WillOnce(Return(wakeResult(WakeReason::STREAM_ERROR)));
+            EXPECT_CALL(*second, nextOutput(_)).WillOnce(Return(wakeResult(WakeReason::FINISHED)));
+            engine->streams = {first, second};
+            server.setBatchEngine(engine);
+            BatchGenerateInputPB request;
+            for (int i = 0; i < 2; ++i) {
+                auto* input = request.add_inputs();
+                input->set_request_id(801 + i);
+                input->add_token_ids(1);
+                input->mutable_generate_config()->set_max_new_tokens(1);
+                input->mutable_request_info()->mutable_trace_context()->set_traceparent(
+                    i == 0 ? "00-11111111111111111111111111111111-2222222222222222-01" :
+                             "00-11111111111111111111111111111111-3333333333333333-01");
+            }
+            grpc::ServerContext    context;
+            BatchGenerateOutputsPB response;
+            EXPECT_TRUE(server.BatchGenerateCall(&context, &request, &response).ok());
+            ASSERT_EQ(response.results_size(), 2);
+            EXPECT_TRUE(response.results(0).has_error_info());
+            EXPECT_EQ(response.results(1).has_error_info(), cancelled);
+            EXPECT_EQ(engine->calls, 1);
+            EXPECT_EQ(engine->request_ids, (std::vector<int64_t>{801, 802}));
+            EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+            auto   spans = data->GetSpans();
+            size_t items = 0;
+            size_t rpcs  = 0;
+            for (const auto& span : spans) {
+                if (span->GetName() == "rtp_llm.batch_generate_call") {
+                    ++rpcs;
+                    EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kOk);
+                }
+                if (span->GetName() != "rtp_llm.batch_generate_request") {
+                    continue;
+                }
+                ++items;
+                char parent[16];
+                span->GetParentSpanId().ToLowerBase16(parent);
+                const bool is_first = std::string(parent, 16) == "2222222222222222";
+                EXPECT_EQ(std::string(parent, 16), is_first ? "2222222222222222" : "3333333333333333");
+                EXPECT_EQ(span->GetStatus(),
+                          (is_first || cancelled) ? opentelemetry::trace::StatusCode::kError :
+                                                    opentelemetry::trace::StatusCode::kOk);
+                const auto& attrs = span->GetAttributes();
+                EXPECT_EQ(opentelemetry::nostd::get<std::string>(attrs.at("request_id")), is_first ? "801" : "802");
+                EXPECT_EQ(attrs.count("rtp_llm.request_id"), 0u);
+                EXPECT_EQ(attrs.count("rpc.response.status_code"), 0u);
+            }
+            EXPECT_EQ(items, enabled ? 2u : 0u);
+            EXPECT_EQ(rpcs, enabled ? 1u : 0u);
+        }
+    }
 }
 
 TEST(LocalRpcServerTest, AllocatorDumpAuthorizationRequiresEnablementAndSecret) {

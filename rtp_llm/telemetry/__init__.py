@@ -26,6 +26,7 @@ __all__ = [
     "resolve_pod_ip",
     "shutdown_telemetry",
     "start_client_span",
+    "start_batch_item_span",
     "start_internal_span",
     "start_server_span",
     "telemetry_state",
