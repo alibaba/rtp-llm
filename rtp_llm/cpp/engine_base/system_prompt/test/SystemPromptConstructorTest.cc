@@ -46,14 +46,9 @@ private:
 
 class CountingReadyContext: public LoadAsyncContext {
 public:
-    static std::shared_ptr<CountingReadyContext> create(bool fail_load = false) {
+    static std::shared_ptr<CountingReadyContext> create() {
         auto coordinator = std::make_shared<LoadContextCoordinator>(
-            [fail_load](const std::shared_ptr<LoadAsyncContext>& context) {
-                if (fail_load) {
-                    context->onTaskFail();
-                }
-                return true;
-            }, [](LoadAsyncContext&) {});
+            [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
         auto context = std::shared_ptr<CountingReadyContext>(new CountingReadyContext(coordinator));
         EXPECT_TRUE(coordinator->registerContext(context));
         return context;
@@ -99,53 +94,6 @@ createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_toke
     };
     auto engine                        = std::make_shared<EngineType>(params, nullptr);
     NormalExecutor::test_model_factory = nullptr;
-    return engine;
-}
-
-class DirectBuildExecutor: public Executor {
-public:
-    explicit DirectBuildExecutor(int fail_on_build = 0): fail_on_build_(fail_on_build) {}
-
-    absl::Status process(const ScheduleOutput& output, int64_t = 0) override {
-        retired_ids.insert(retired_ids.end(), output.finished_request_ids.begin(), output.finished_request_ids.end());
-        for (const auto& stream : output.streams) {
-            ++build_calls;
-            EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
-            EXPECT_TRUE(stream->pipeline_parallel_);
-            EXPECT_TRUE(stream->need_release_resource_);
-            if (auto earlier = previous_stream.lock()) {
-                EXPECT_TRUE(earlier->need_release_resource_);
-            } else if (build_calls > 1) {
-                ADD_FAILURE() << "earlier build stream was released before all tasks completed";
-            }
-            previous_stream = stream;
-            if (build_calls == fail_on_build_) {
-                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "injected PP system prompt failure");
-            } else {
-                stream->updateFromPP({torch::tensor({{9}}, torch::kInt32), 1});
-            }
-            stream->clearPPInflight();
-        }
-        return absl::OkStatus();
-    }
-
-    int build_calls = 0;
-    std::vector<int64_t> retired_ids;
-    std::weak_ptr<GenerateStream> previous_stream;
-
-private:
-    int fail_on_build_;
-};
-
-std::shared_ptr<NormalEngine> createDirectBuildEngine(int fail_on_build = 0, bool multi_group = false) {
-    auto engine = createFocusedEngine<NormalEngine>(128, 4096, multi_group);
-    /** Stop and join the serving loop before substituting the executor. The test drives
-     * real build/allocation/commit code synchronously, without constructing PP channels. */
-    engine->running_ = false;
-    EXPECT_TRUE(engine->scheduler_->stop().ok());
-    engine->loop_thread_->join();
-    engine->executor_ = std::make_unique<DirectBuildExecutor>(fail_on_build);
-    engine->parallelism_config.pp_size = 2;
     return engine;
 }
 
@@ -349,123 +297,6 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
 
     stream_status.value().reset();
     manager->coordinator_manager_ = real_allocator;
-}
-
-TEST_F(SystemPromptConstructorTest, ppDirectBuildWaitsForAllocatorAndPreservesTaggedResidentRows) {
-    auto engine = createDirectBuildEngine(0, true);
-    auto manager = engine->resourceContext().cache_manager;
-    auto real_allocator = manager->coordinator_manager_;
-    std::vector<std::shared_ptr<CountingReadyContext>> contexts;
-    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(manager->config_);
-    ON_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillByDefault(testing::Invoke([&](const MallocInfo& info) {
-            auto result = real_allocator->initMallocForCommonLen(info);
-            contexts.push_back(CountingReadyContext::create());
-            result.async_context = contexts.back();
-            return result;
-        }));
-    ON_CALL(*allocator, incrMalloc(testing::_)).WillByDefault(testing::Invoke([&](const MallocInfo& info) {
-        return real_allocator->incrMalloc(info);
-    }));
-    ON_CALL(*allocator, free(testing::_)).WillByDefault(testing::Invoke([&](const FreeInfo& info) {
-        real_allocator->free(info);
-    }));
-    ON_CALL(*allocator, insertIntoCache(testing::_, testing::_))
-        .WillByDefault(testing::Invoke([&](const InsertInfo& info, size_t& prefix) {
-            EXPECT_TRUE(info.is_resident);
-            EXPECT_EQ(info.target_tier, Tier::DEVICE);
-            real_allocator->insertIntoCache(info, prefix);
-        }));
-    ON_CALL(*allocator, seqSizePerBlock()).WillByDefault(testing::Invoke([&] {
-        return real_allocator->seqSizePerBlock();
-    }));
-    manager->coordinator_manager_ = allocator;
-    engine->kv_cache_config.multi_task_prompt_tokens = {{"1", {1, 2, 3}}, {"2", {4, 5, 6}}};
-    const auto result = engine->buildSystemPromptsDirect();
-    manager->coordinator_manager_ = real_allocator;
-    ASSERT_TRUE(result.ok()) << result;
-    ASSERT_EQ(contexts.size(), 2u);
-    for (const auto& context : contexts) {
-        EXPECT_EQ(context->waitCalls(), 1u);
-    }
-    auto* executor = static_cast<DirectBuildExecutor*>(engine->executor_.get());
-    EXPECT_EQ(executor->build_calls, 2);
-    EXPECT_EQ(executor->retired_ids, (std::vector<int64_t>{1, 2}));
-    ASSERT_NE(engine->resource_context_.system_prompt, nullptr);
-    for (const auto& [task_id, tokens] : engine->kv_cache_config.multi_task_prompt_tokens) {
-        GenerateConfig config;
-        config.task_id = task_id;
-        const auto prompt = engine->resource_context_.system_prompt->getPromptParams(config);
-        EXPECT_EQ(prompt.prompt_tokens, tokens);
-        ASSERT_EQ(prompt.group_block_ids.size(), 2u);
-        EXPECT_FALSE(prompt.group_block_ids.at("first").empty());
-        EXPECT_FALSE(prompt.group_block_ids.at("second").empty());
-    }
-}
-
-TEST_F(SystemPromptConstructorTest, ppDirectSecondTaskFailureReleasesRequestRefsAndRetiresBothTasks) {
-    auto engine = createDirectBuildEngine(2);
-    auto manager = engine->resourceContext().cache_manager;
-    auto pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
-    engine->kv_cache_config.multi_task_prompt_tokens = {{"1", {1, 2, 3}}, {"2", {1, 2, 4}}};
-    const auto result = engine->buildSystemPromptsDirect();
-    EXPECT_FALSE(result.ok());
-    EXPECT_NE(result.message().find("injected PP system prompt failure"), std::string::npos);
-    EXPECT_EQ(engine->resource_context_.system_prompt, nullptr);
-    EXPECT_EQ(pool->referencedBlocksNum(), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
-    auto* executor = static_cast<DirectBuildExecutor*>(engine->executor_.get());
-    EXPECT_EQ(executor->retired_ids, (std::vector<int64_t>{1, 2}));
-    EXPECT_TRUE(executor->previous_stream.expired());
-}
-
-TEST_F(SystemPromptConstructorTest, ppDirectAllocatorFailureAbortsBeforeSubmissionAndReleasesKv) {
-    auto engine = createDirectBuildEngine();
-    auto manager = engine->resourceContext().cache_manager;
-    auto real_allocator = manager->coordinator_manager_;
-    auto pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
-    auto context = CountingReadyContext::create(/*fail_load=*/true);
-    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(manager->config_);
-    ON_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillByDefault(testing::Invoke([&](const MallocInfo& info) {
-            auto result = real_allocator->initMallocForCommonLen(info);
-            result.async_context = context;
-            return result;
-        }));
-    ON_CALL(*allocator, incrMalloc(testing::_)).WillByDefault(testing::Invoke([&](const MallocInfo& info) {
-        return real_allocator->incrMalloc(info);
-    }));
-    ON_CALL(*allocator, free(testing::_)).WillByDefault(testing::Invoke([&](const FreeInfo& info) {
-        real_allocator->free(info);
-    }));
-    manager->coordinator_manager_ = allocator;
-    engine->kv_cache_config.multi_task_prompt_tokens = {{"1", {1, 2, 3}}};
-    const auto result = engine->buildSystemPromptsDirect();
-    manager->coordinator_manager_ = real_allocator;
-    EXPECT_FALSE(result.ok());
-    EXPECT_NE(result.message().find("allocator load failed"), std::string::npos);
-    EXPECT_EQ(context->waitCalls(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(), 0u);
-    auto* executor = static_cast<DirectBuildExecutor*>(engine->executor_.get());
-    EXPECT_EQ(executor->build_calls, 0);
-    EXPECT_TRUE(executor->retired_ids.empty());
-}
-
-TEST_F(SystemPromptConstructorTest, ppReserveCoversTwoWindowsWithoutAddingToMainDSparkReserve) {
-    EngineInitParams params;
-    for (const auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
-        params.sp_config.type = type;
-        params.sp_config.gen_num_per_cycle = 3;
-        params.parallelism_config.pp_size = 1;
-        params.pd_sep_config.role_type = RoleType::PDFUSION;
-        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
-        params.parallelism_config.pp_size = 2;
-        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 7);
-        params.pd_sep_config.role_type = RoleType::PREFILL;
-        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
-    }
-    params.sp_config.type = SP_TYPE_NONE;
-    EXPECT_EQ(NormalEngine::calculateReserveStep(params), 0);
 }
 
 }  // namespace rtp_llm

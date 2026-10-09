@@ -5,6 +5,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include "torch/all.h"
 
 #define private public
@@ -41,6 +42,84 @@ public:
 private:
     int update_count_ = 0;
 };
+
+struct FinishState {
+    std::promise<std::thread::id> started;
+    std::shared_future<void> release;
+    std::atomic<int> calls{0};
+    std::atomic<bool> completed{false};
+    std::atomic<bool> destroyed{false};
+    std::atomic<bool> destroyed_after_finish{false};
+};
+
+class GatedFinishExecutor: public Executor {
+public:
+    GatedFinishExecutor(std::shared_ptr<FinishState> state, const std::atomic<bool>& running):
+        state_(std::move(state)), running_(running) {}
+
+    absl::Status process(const ScheduleOutput&, int64_t) override {
+        return absl::OkStatus();
+    }
+
+    absl::Status finish() override {
+        EXPECT_FALSE(running_.load());
+        ++state_->calls;
+        state_->started.set_value(std::this_thread::get_id());
+        state_->release.wait();
+        state_->completed = true;
+        return absl::OkStatus();
+    }
+
+    ~GatedFinishExecutor() override {
+        state_->destroyed_after_finish = state_->completed.load();
+        state_->destroyed = true;
+    }
+
+private:
+    std::shared_ptr<FinishState> state_;
+    const std::atomic<bool>& running_;
+};
+
+class EngineFinishTest: public DeviceTestBase {};
+
+TEST_F(EngineFinishTest, StopJoinsLoopFinishBeforeDestroyingExecutor) {
+    for (int pp_size : {1, 3}) {
+        SCOPED_TRACE(pp_size);
+        auto engine = createMockEngine(CustomConfig{});
+        ASSERT_TRUE(engine->stop().ok());
+        auto state = std::make_shared<FinishState>();
+        std::promise<void> release;
+        state->release = release.get_future().share();
+        auto started = state->started.get_future();
+        engine->executor_ = std::make_unique<GatedFinishExecutor>(state, engine->running_);
+        engine->parallelism_config.pp_size = pp_size;
+        /** Keep the scheduler stopped: this test observes loop teardown without admitting new requests. */
+        ASSERT_TRUE(engine->startLoop().ok());
+        std::thread::id stop_thread;
+        auto stopped = std::async(std::launch::async, [&] {
+            stop_thread = std::this_thread::get_id();
+            return engine->stop();
+        });
+
+        /** Always release finish before destroying the stop future, including assertion failures. */
+        const auto ready = started.wait_for(std::chrono::seconds(10));
+        EXPECT_EQ(ready, std::future_status::ready);
+        if (ready == std::future_status::ready) {
+            EXPECT_NE(started.get(), stop_thread);
+        }
+        EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+        EXPECT_FALSE(state->destroyed.load());
+        release.set_value();
+        EXPECT_EQ(stopped.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+        EXPECT_TRUE(stopped.get().ok());
+        EXPECT_EQ(state->calls.load(), 1);
+        EXPECT_TRUE(state->completed.load());
+        EXPECT_TRUE(state->destroyed_after_finish.load());
+        EXPECT_EQ(engine->executor_, nullptr);
+        EXPECT_TRUE(engine->stop().ok());
+        EXPECT_EQ(state->calls.load(), 1);
+    }
+}
 
 class EngineStopTest: public DeviceTestBase, public ::testing::WithParamInterface<int> {};
 

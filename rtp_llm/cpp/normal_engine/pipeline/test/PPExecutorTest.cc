@@ -15,7 +15,6 @@
  */
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -332,11 +331,8 @@ private:
 };
 
 struct WorkState {
-    int     unbounded_waits = 0;
-    int     bounded_waits   = 0;
-    bool    completed      = true;
-    bool    fail           = false;
-    int64_t timeout_ms     = 0;
+    int  waits = 0;
+    bool fail  = false;
 };
 
 /** Control wait outcomes without sleeping or depending on a distributed backend. */
@@ -345,15 +341,10 @@ public:
     explicit RecordingWork(std::shared_ptr<WorkState> state): state_(std::move(state)) {}
 
     void wait() override {
-        ++state_->unbounded_waits;
+        ++state_->waits;
         if (state_->fail) {
             throw std::runtime_error("peer disconnected");
         }
-    }
-    bool wait(std::chrono::milliseconds timeout) override {
-        ++state_->bounded_waits;
-        state_->timeout_ms = timeout.count();
-        return state_->completed;
     }
 
 private:
@@ -384,13 +375,17 @@ public:
     }
 
     std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor) override {
+        if (on_receive) {
+            on_receive();
+        }
         tensor.copy_(received_tensors.at(receive_index++));
         return std::make_unique<PPCommTicket>(std::make_unique<InMemoryP2PWork>(tensor));
     }
 
     std::vector<torch::Tensor> received_tensors;
     std::vector<torch::Tensor> sent_tensors;
-    size_t                      receive_index = 0;
+    size_t                    receive_index = 0;
+    std::function<void()>     on_receive;
 };
 
 /** Replay root broadcasts through the real TP input packing and non-root unpacking paths. */
@@ -609,6 +604,13 @@ protected:
         }
     }
 
+    static PPExecutionPlan makeShutdownPlan() {
+        PPExecutionPlan plan;
+        plan.shutdown = true;
+        plan.model_input.skip_run = true;
+        return plan;
+    }
+
     static PPExecutionResult lastResult(const InMemoryPPTransport& wire) {
         return pp_serialization::deserializeExecutionResult(wire.sent_tensors.back());
     }
@@ -678,15 +680,21 @@ protected:
         executor.metrics_reporter_ = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags());
     }
 
+    static GenerateStreamPtr makeFakeStream(const EngineInitParams& params,
+                                            const ResourceContext& resources,
+                                            bool                   decode = false) {
+        return decode ? PPExecutor::createMinFakeDecodeStream(
+                            params.model_config_, params.runtime_config, resources, params.sp_config) :
+                        PPExecutor::createMinFakePrefillStream(params.model_config_, params.runtime_config,
+                            resources, params.sp_config, params.pd_sep_config.role_type);
+    }
+
     static PPExecutionPlan makeFakePlan(const EngineInitParams& params, bool decode) {
         ResourceContext resources;
         resources.cache_manager = std::make_shared<KVCacheManager>(
             test::makeSimpleMhaCacheConfig(3, 16, 4, DataType::TYPE_FP16));
         EXPECT_TRUE(resources.cache_manager->init());
-        auto stream = decode ? PPExecutor::createMinFakeDecodeStream(
-                                   params.model_config_, params.runtime_config, resources, params.sp_config) :
-                               PPExecutor::createMinFakePrefillStream(params.model_config_, params.runtime_config,
-                                   resources, params.sp_config, params.pd_sep_config.role_type);
+        auto stream = makeFakeStream(params, resources, decode);
         PPBatchStreamProcessor processor(params.model_config_, params.pd_sep_config, ProfilingDebugLoggingConfig{},
                                         resources.cache_manager->cacheConfig(), false, params.sp_config.type);
         const StreamGroups groups({stream});
@@ -924,8 +932,8 @@ TEST_F(PPExecutorTest, CommonSlotReuseWaitsForPreviousSendsBeforeForward) {
         }
         auto model = std::make_unique<RecordingStageModel>(params.parallelism_config);
         model->on_forward = [&] {
-            EXPECT_EQ(previous_plan->unbounded_waits, stage == 2 ? 0 : 1);
-            EXPECT_EQ(previous_payload->unbounded_waits, 1);
+            EXPECT_EQ(previous_plan->waits, stage == 2 ? 0 : 1);
+            EXPECT_EQ(previous_payload->waits, 1);
         };
         executor.setModel(std::move(model));
         ScheduleOutput schedule;
@@ -935,41 +943,79 @@ TEST_F(PPExecutorTest, CommonSlotReuseWaitsForPreviousSendsBeforeForward) {
             enqueuePlan(*wire, makePlan(params));
         }
         ASSERT_TRUE(executor.process(schedule).ok());
-        EXPECT_EQ(previous_payload->unbounded_waits, 1);
+        EXPECT_EQ(previous_payload->waits, 1);
         /** New sends belong to the current execution, not to the completed work. */
-        executor.waitAll(slot.plan_sends, "test plan sends");
-        executor.waitAll(slot.activation_sends, "test activation sends");
-        executor.waitAll(slot.execution_result_sends, "test result sends");
-        EXPECT_EQ(previous_payload->unbounded_waits, 1);
+        executor.waitAll(slot.plan_sends);
+        executor.waitAll(slot.activation_sends);
+        executor.waitAll(slot.execution_result_sends);
+        EXPECT_EQ(previous_payload->waits, 1);
     }
 }
 
-TEST_F(PPExecutorTest, CommonCommunicationWaitUsesShutdownDeadlineAndPropagatesFailures) {
-    auto params = makeStageParams(1);
-    PPExecutor executor(params, nullptr, false);
+TEST_F(PPExecutorTest, CommonCommunicationWaitCompletesOnceAndPropagatesFailures) {
     auto running = std::make_shared<WorkState>();
     PPCommTicket running_ticket(std::make_unique<RecordingWork>(running));
-    executor.waitTicket(running_ticket, "running receive");
-    EXPECT_EQ(running->unbounded_waits, 1);
-    EXPECT_EQ(running->bounded_waits, 0);
+    running_ticket.wait();
+    running_ticket.wait();
+    EXPECT_EQ(running->waits, 1);
 
     auto failed = std::make_shared<WorkState>();
     failed->fail = true;
     PPCommTicket failed_ticket(std::make_unique<RecordingWork>(failed));
-    EXPECT_THROW(executor.waitTicket(failed_ticket, "failed receive"), PPCommWatchdogTimeout);
+    EXPECT_THROW(failed_ticket.wait(), std::runtime_error);
+}
 
-    executor.notifyShutdown();
-    executor.comm_watchdog_timeout_ms_ = 7;
-    auto stopping = std::make_shared<WorkState>();
-    stopping->completed = false;
-    PPCommTicket stopping_ticket(std::make_unique<RecordingWork>(stopping));
-    EXPECT_THROW(executor.waitTicket(stopping_ticket, "stopping receive"), PPCommWatchdogTimeout);
-    EXPECT_EQ(stopping->unbounded_waits, 0);
-    EXPECT_EQ(stopping->timeout_ms, 7);
-    EXPECT_NO_THROW(executor.waitTicket(stopping_ticket, "teardown send", false));
-    stopping->completed = true;
-    EXPECT_NO_THROW(executor.waitTicket(stopping_ticket, "completed receive"));
-    EXPECT_EQ(stopping->bounded_waits, 3);
+TEST_F(PPExecutorTest, FinishWaitsForEarlierSendsAndPropagatesFailures) {
+    for (int stage : {1, 2}) {
+        for (bool fail : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "stage=" << stage << ", fail=" << fail);
+            auto params = makeStageParams(stage);
+            PPExecutor executor(params, nullptr, false);
+            auto* wire = attachTransport(executor);
+            auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+            auto* recorded = target.get();
+            executor.setModel(std::move(target));
+            enqueuePlan(*wire, makeShutdownPlan());
+
+            /** Earlier batches still own sends in slots other than the one used by the terminal plan. */
+            std::vector<std::shared_ptr<WorkState>> pending;
+            for (size_t slot = 1; slot < executor.slots_.size(); ++slot) {
+                auto& batch = executor.slots_[slot];
+                for (auto* tickets : {&batch.plan_sends, &batch.activation_sends, &batch.execution_result_sends}) {
+                    if ((stage == 2) != (tickets == &batch.execution_result_sends)) {
+                        continue;
+                    }
+                    auto state = std::make_shared<WorkState>();
+                    tickets->push_back(std::make_unique<PPCommTicket>(std::make_unique<RecordingWork>(state)));
+                    pending.push_back(state);
+                }
+            }
+            pending.back()->fail = fail;
+            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+            EXPECT_TRUE(executor.stopped_);
+            for (const auto& state : pending) {
+                EXPECT_EQ(state->waits, 0);
+            }
+            const auto sends = wire->sent_tensors.size();
+            const auto receives = wire->receive_index;
+            if (fail) {
+                EXPECT_THROW((void)executor.finish(), std::runtime_error);
+            } else {
+                ASSERT_TRUE(executor.finish().ok());
+                for (const auto& batch : executor.slots_) {
+                    EXPECT_TRUE(batch.plan_sends.empty());
+                    EXPECT_TRUE(batch.activation_sends.empty());
+                    EXPECT_TRUE(batch.execution_result_sends.empty());
+                }
+            }
+            for (const auto& state : pending) {
+                EXPECT_EQ(state->waits, 1);
+            }
+            EXPECT_TRUE(recorded->inputs.empty());
+            EXPECT_EQ(wire->sent_tensors.size(), sends);
+            EXPECT_EQ(wire->receive_index, receives);
+        }
+    }
 }
 
 TEST_F(PPExecutorTest, CommonModelExecutionExceptionDoesNotSendSuccessfulOutput) {
@@ -1027,53 +1073,73 @@ TEST_F(PPExecutorTest, FirstExecutesPrefillAndDecodeWithoutUpstreamActivations) 
     }
 }
 
-TEST_F(PPExecutorTest, FirstConsumesEachBatchOnceAcrossSlotWraparound) {
-    auto params = makeStageParams(0);
-    PPExecutor executor(params, nullptr, false);
-    auto* wire = attachTransport(executor);
-    auto target = std::make_unique<RecordingDraftModel>();
-    auto* recorded = target.get();
-    executor.setModel(std::move(target));
-    const int batches = 7;
-    const int delay = params.parallelism_config.pp_size;
-    std::vector<GenerateStreamPtr> streams;
-    for (int index = 0; index < batches; ++index) {
-        auto stream = makeStream(ResourceContext{}, params.model_config_, 101 + index, {1, 2}, 1);
-        streams.push_back(stream);
-        PPExecutionResult result;
-        result.request_ids = torch::tensor({101 + index}, torch::kInt64);
-        result.new_token_ids = intTensor({20 + index}).reshape({1, 1});
-        result.new_token_lengths = intTensor({1});
-        result.request_errors.resize(1);
-        result.prompt_logits.resize(1);
-        wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
-    }
-    const auto start = autil::TimeUtility::currentTimeInMicroSeconds();
-    for (int round = 0; round < batches + delay; ++round) {
-        SCOPED_TRACE(round);
-        ScheduleOutput schedule;
-        if (round < batches) {
-            streams[round]->setPPInflight();
-            schedule.streams = {streams[round]};
-        }
-        ASSERT_TRUE(executor.process(schedule, start + round).ok());
-        const int returned = std::clamp(round - delay + 1, 0, batches);
-        EXPECT_EQ(wire->receive_index, 2u * returned);
-        for (int index = 0; index < std::min(round + 1, batches); ++index) {
-            EXPECT_EQ(streams[index]->isPPInflight(), index >= returned);
-            EXPECT_EQ(streams[index]->seqLength(), index < returned ? 3 : 2);
-            if (index < returned) {
-                EXPECT_EQ(streams[index]->completeTokenIdsVec(0).back(), 20 + index);
+TEST_F(PPExecutorTest, FirstEmptyPlansDrainEachBatchOnceAcrossSlotWraparound) {
+    for (int pp_size : {2, 3, 4}) {
+        for (int batches : {1, 7}) {
+            SCOPED_TRACE(testing::Message() << "pp_size=" << pp_size << ", batches=" << batches);
+            auto params = makeStageParams(0);
+            params.model_config_.num_layers = pp_size;
+            params.parallelism_config.pp_size = pp_size;
+            params.parallelism_config.world_size = pp_size;
+            params.parallelism_config.pp_stage_layer_counts.assign(pp_size, 1);
+            PPExecutor executor(params, nullptr, false);
+            auto* wire = attachTransport(executor);
+            auto target = std::make_unique<RecordingDraftModel>();
+            auto* recorded = target.get();
+            executor.setModel(std::move(target));
+            std::vector<GenerateStreamPtr> streams;
+            for (int index = 0; index < batches; ++index) {
+                auto stream = makeStream(ResourceContext{}, params.model_config_, 101 + index, {1, 2}, 1);
+                streams.push_back(stream);
+                PPExecutionResult result;
+                result.request_ids = torch::tensor({101 + index}, torch::kInt64);
+                result.new_token_ids = intTensor({20 + index}).reshape({1, 1});
+                result.new_token_lengths = intTensor({1});
+                result.request_errors.resize(1);
+                result.prompt_logits.resize(1);
+                wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
+            }
+            const auto start = autil::TimeUtility::currentTimeInMicroSeconds();
+            /** After the real batches, ordinary empty plans alone must drain results, including a single request. */
+            for (int round = 0; round < batches + pp_size; ++round) {
+                SCOPED_TRACE(round);
+                ScheduleOutput schedule;
+                if (round < batches) {
+                    streams[round]->setPPInflight();
+                    schedule.streams = {streams[round]};
+                }
+                const auto slot = executor.current_slot_;
+                const auto sends = wire->sent_tensors.size();
+                ASSERT_TRUE(executor.process(schedule, start + round).ok());
+                EXPECT_EQ(executor.current_slot_, (slot + 1) % executor.slots_.size());
+                const auto& admitted = executor.slots_[slot];
+                EXPECT_EQ(admitted.schedule_time_us, start + round);
+                if (round >= batches) {
+                    ASSERT_EQ(wire->sent_tensors.size(), sends + 2);
+                    const auto empty_plan = pp_serialization::deserializePlan(wire->sent_tensors[sends + 1]);
+                    EXPECT_TRUE(empty_plan.model_input.skip_run);
+                    EXPECT_FALSE(empty_plan.model_input.is_fake_stream);
+                    EXPECT_FALSE(empty_plan.shutdown);
+                    EXPECT_TRUE(empty_plan.finished_request_ids.empty());
+                    EXPECT_FALSE(admitted.result_pending);
+                }
+                EXPECT_EQ(recorded->inputs.size(), std::min(round + 1, batches));
+                const int returned = std::clamp(round - pp_size + 1, 0, batches);
+                EXPECT_EQ(wire->receive_index, 2u * returned);
+                for (int index = 0; index < std::min(round + 1, batches); ++index) {
+                    EXPECT_EQ(streams[index]->isPPInflight(), index >= returned);
+                    EXPECT_EQ(streams[index]->seqLength(), index < returned ? 3 : 2);
+                    if (index < returned) {
+                        EXPECT_EQ(streams[index]->completeTokenIdsVec(0).back(), 20 + index);
+                    }
+                }
+            }
+            EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+            for (const auto& batch : executor.slots_) {
+                EXPECT_FALSE(batch.result_pending);
             }
         }
-        if (round < batches) {
-            const auto& admitted = executor.slots_[round % executor.slots_.size()];
-            EXPECT_EQ(admitted.schedule_time_us, start + round);
-        }
     }
-    ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
-    EXPECT_EQ(wire->receive_index, 2u * batches);
-    EXPECT_EQ(recorded->inputs.size(), batches);
 }
 
 TEST_F(PPExecutorTest, FirstCancelledAndTimedOutBatchesStillConsumeTheirResult) {
@@ -1104,56 +1170,257 @@ TEST_F(PPExecutorTest, FirstCancelledAndTimedOutBatchesStillConsumeTheirResult) 
     }
 }
 
-TEST_F(PPExecutorTest, FirstShutdownDrainsRealWorkAndAllowsEmptyOrFakeRounds) {
-    for (bool fake : {false, true}) {
-        SCOPED_TRACE(fake);
+TEST_F(PPExecutorTest, FirstShutdownDrainsOnlyPreviouslySubmittedBatches) {
+    for (int pp_size : {2, 3, 4}) {
+        /** Dense, mixed and fake-only histories exercise results separated by skip_run slots. */
+        for (int pattern : {0, 1, 2}) {
+            for (int rounds = 0; rounds <= 2 * (pp_size + 1); ++rounds) {
+                SCOPED_TRACE(testing::Message() << "pp=" << pp_size << ", pattern=" << pattern
+                                               << ", rounds=" << rounds);
+                auto params = makeStageParams(0);
+                params.model_config_.num_layers = pp_size;
+                params.parallelism_config.pp_size = pp_size;
+                params.parallelism_config.world_size = pp_size;
+                params.parallelism_config.pp_stage_layer_counts.assign(pp_size, 1);
+                ResourceContext resources;
+                resources.cache_manager = std::make_shared<KVCacheManager>(
+                    test::makeSimpleMhaCacheConfig(pp_size, 16, 4, DataType::TYPE_FP16));
+                ASSERT_TRUE(resources.cache_manager->init());
+                PPExecutor executor(params, resources.cache_manager, false);
+                auto* wire = attachTransport(executor);
+                auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+                auto* recorded = target.get();
+                executor.setModel(std::move(target));
+                std::vector<GenerateStreamPtr> streams;
+                std::vector<int32_t> expected_tokens;
+                for (int round = 0; round < rounds; ++round) {
+                    ScheduleOutput schedule;
+                    const bool empty = pattern == 1 && round % 4 == 1;
+                    const bool fake = pattern == 2 || (pattern == 1 && round % 4 == 2);
+                    if (!empty) {
+                        PPExecutionResult result;
+                        if (fake) {
+                            schedule.streams = {makeFakeStream(params, resources)};
+                        } else {
+                            auto stream = makeStream(resources, params.model_config_, 101 + round, {1, 2}, 1);
+                            stream->fakeInitKVBlock(4);
+                            stream->setPPInflight();
+                            schedule.streams = {stream};
+                            streams.push_back(stream);
+                            expected_tokens.push_back(20 + round);
+                            result.request_ids = torch::tensor({101 + round}, torch::kInt64);
+                            result.new_token_ids = intTensor({20 + round}).reshape({1, 1});
+                            result.new_token_lengths = intTensor({1});
+                            result.request_errors.resize(1);
+                            result.prompt_logits.resize(1);
+                        }
+                        wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
+                    }
+                    ASSERT_TRUE(executor.process(schedule).ok());
+                    EXPECT_FALSE(executor.stopped_);
+                }
+
+                /** stop() can cancel streams before their results arrive; matching receives are still required. */
+                for (size_t i = 0; i < streams.size(); ++i) {
+                    if (i % 2 == 0 && streams[i]->isPPInflight()) {
+                        streams[i]->reportError(ErrorCode::CANCELLED, "cancelled before shutdown drain");
+                    }
+                }
+                const auto sends = wire->sent_tensors.size();
+                const auto forwards = recorded->inputs.size();
+                const auto slot = executor.current_slot_;
+                wire->on_receive = [&] {
+                    /** Downstream ranks must receive the terminal plan before the root drains their results. */
+                    ASSERT_EQ(wire->sent_tensors.size(), sends + 2);
+                    const auto terminal = pp_serialization::deserializePlan(wire->sent_tensors[sends + 1]);
+                    EXPECT_TRUE(terminal.shutdown);
+                    EXPECT_TRUE(terminal.model_input.skip_run);
+                };
+                ASSERT_TRUE(executor.finish().ok());
+                EXPECT_TRUE(executor.stopped_);
+                /** No terminal result is queued: extra or duplicate receives fail the transport. */
+                EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+                ASSERT_EQ(wire->sent_tensors.size(), sends + 2);
+                const auto terminal = pp_serialization::deserializePlan(wire->sent_tensors[sends + 1]);
+                EXPECT_TRUE(terminal.shutdown);
+                EXPECT_TRUE(terminal.model_input.skip_run);
+                EXPECT_FALSE(terminal.model_input.is_fake_stream);
+                EXPECT_EQ(recorded->inputs.size(), forwards);
+                EXPECT_EQ(executor.current_slot_, (slot + 1) % executor.slots_.size());
+                const auto stopped_slot = executor.current_slot_;
+                ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+                EXPECT_EQ(executor.current_slot_, stopped_slot);
+                EXPECT_EQ(wire->sent_tensors.size(), sends + 2);
+                EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+                for (size_t i = 0; i < streams.size(); ++i) {
+                    EXPECT_FALSE(streams[i]->isPPInflight());
+                    if (streams[i]->statusInfo().code() == ErrorCode::CANCELLED) {
+                        EXPECT_EQ(streams[i]->seqLength(), 2);
+                    } else {
+                        EXPECT_EQ(streams[i]->seqLength(), 3);
+                        EXPECT_EQ(streams[i]->completeTokenIdsVec(0).back(), expected_tokens[i]);
+                    }
+                }
+                for (const auto& batch : executor.slots_) {
+                    EXPECT_TRUE(batch.plan_sends.empty());
+                    EXPECT_TRUE(batch.activation_sends.empty());
+                    EXPECT_TRUE(batch.execution_result_sends.empty());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(PPExecutorTest, FirstExplicitDrainPreservesOrderAcrossWrapsAndServingOverlap) {
+    for (int pp_size : {2, 3, 4}) {
+        SCOPED_TRACE(pp_size);
         auto params = makeStageParams(0);
+        params.model_config_.num_layers = pp_size;
+        params.parallelism_config.pp_size = pp_size;
+        params.parallelism_config.world_size = pp_size;
+        params.parallelism_config.pp_stage_layer_counts.assign(pp_size, 1);
         ResourceContext resources;
         resources.cache_manager = std::make_shared<KVCacheManager>(
-            test::makeSimpleMhaCacheConfig(3, 16, 4, DataType::TYPE_FP16));
+            test::makeSimpleMhaCacheConfig(pp_size, 16, 4, DataType::TYPE_FP16));
         ASSERT_TRUE(resources.cache_manager->init());
         PPExecutor executor(params, resources.cache_manager, false);
         auto* wire = attachTransport(executor);
-        executor.setModel(std::make_unique<RecordingDraftModel>());
-        auto real = makeStream(resources, params.model_config_, 101, {1, 2}, 1);
-        real->setPPInflight();
-        ASSERT_TRUE(executor.process(ScheduleOutput{{real}}).ok());
-        PPExecutionResult result;
-        result.request_ids = torch::tensor({101}, torch::kInt64);
-        result.new_token_ids = intTensor({20}).reshape({1, 1});
-        result.new_token_lengths = intTensor({1});
-        result.request_errors.resize(1);
-        result.prompt_logits.resize(1);
-        wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
-        executor.notifyShutdown();
-        const int limit = 2 * params.parallelism_config.pp_size + 3;
-        for (int round = 0; round < limit && !executor.shutdownCompleted(); ++round) {
+        executor.setModel(std::make_unique<RecordingStageModel>(params.parallelism_config));
+        std::vector<GenerateStreamPtr> streams;
+        std::vector<int32_t> expected_tokens;
+
+        auto submit = [&](int round, int kind, bool synchronous) {
             ScheduleOutput schedule;
-            if (fake) {
-                auto placeholder = PPExecutor::createMinFakePrefillStream(
-                    params.model_config_,
-                    params.runtime_config,
-                    resources,
-                    params.sp_config,
-                    RoleType::PDFUSION);
-                schedule.streams = {placeholder};
-                wire->enqueueObject(pp_serialization::serializeExecutionResult(PPExecutionResult{}));
+            if (kind != 0) {
+                PPExecutionResult result;
+                if (kind == 1) {
+                    schedule.streams = {makeFakeStream(params, resources)};
+                } else {
+                    auto stream = makeStream(resources, params.model_config_, 101 + round, {1, 2}, 1);
+                    stream->fakeInitKVBlock(4);
+                    stream->setPPInflight();
+                    schedule.streams = {stream};
+                    streams.push_back(stream);
+                    expected_tokens.push_back(20 + round);
+                    result.request_ids = torch::tensor({101 + round}, torch::kInt64);
+                    result.new_token_ids = intTensor({20 + round}).reshape({1, 1});
+                    result.new_token_lengths = intTensor({1});
+                    result.request_errors.resize(1);
+                    result.prompt_logits.resize(1);
+                }
+                wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
+            } else {
+                schedule.finished_request_ids = {100 + round};
             }
             const auto sends = wire->sent_tensors.size();
+            const auto slot = executor.current_slot_;
             ASSERT_TRUE(executor.process(schedule).ok());
-            if (real->isPPInflight()) {
-                EXPECT_FALSE(executor.shutdownCompleted());
+            if (synchronous) {
+                ASSERT_TRUE(executor.drainPendingResults().ok());
             }
-            if (round == params.parallelism_config.pp_size - 1) {
-                EXPECT_FALSE(real->isPPInflight());
-                EXPECT_EQ(executor.idle_streak_, 0);
+            /** Waiting never submits pump plans or advances the ring beyond the single submitted plan. */
+            EXPECT_EQ(wire->sent_tensors.size() - sends, kind == 0 ? 2u : 5u);
+            EXPECT_EQ(executor.current_slot_, (slot + 1) % executor.slots_.size());
+            if (synchronous) {
+                EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+                for (const auto& batch : executor.slots_) {
+                    EXPECT_FALSE(batch.result_pending);
+                }
+                /** Waiting for results does not retire the new slot's asynchronous sends. */
+                EXPECT_FALSE(executor.slots_[slot].plan_sends.empty());
+                for (const auto& stream : streams) {
+                    EXPECT_FALSE(stream->isPPInflight());
+                }
             }
-            const auto sent_plan = pp_serialization::deserializePlan(wire->sent_tensors.at(sends + 1));
-            EXPECT_EQ(sent_plan.model_input.shutdown, executor.shutdownCompleted());
+        };
+
+        const int rounds = 4 * (pp_size + 1);
+        for (int round = 0; round < rounds; ++round) {
+            submit(round, round % 3, round % (pp_size + 1) == pp_size - 1);
         }
-        EXPECT_FALSE(real->isPPInflight());
-        EXPECT_TRUE(executor.shutdownCompleted());
-        EXPECT_EQ(real->seqLength(), 3);
+        submit(rounds, 2, true);
+        /** After explicitly draining pending results, normal serving must still retain its pipeline overlap. */
+        const auto receives = wire->receive_index;
+        for (int round = 0; round < pp_size; ++round) {
+            submit(rounds + 1 + round, 2, false);
+            EXPECT_TRUE(streams.back()->isPPInflight());
+            EXPECT_EQ(wire->receive_index, receives);
+        }
+        ASSERT_TRUE(executor.finish().ok());
+        EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+        for (const auto& batch : executor.slots_) {
+            EXPECT_FALSE(batch.result_pending);
+        }
+        for (size_t i = 0; i < streams.size(); ++i) {
+            EXPECT_FALSE(streams[i]->isPPInflight());
+            EXPECT_EQ(streams[i]->completeTokenIdsVec(0), (std::vector<int>{1, 2, expected_tokens[i]}));
+        }
+    }
+}
+
+TEST_F(PPExecutorTest, FirstConsumedInvalidResultIsNotReceivedAgain) {
+    auto params = makeStageParams(0);
+    PPExecutor executor(params, nullptr, false);
+    auto* wire = attachTransport(executor);
+    auto stream = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 1);
+    auto& batch = executor.slots_[0];
+    batch.result_pending = true;
+    batch.stream_groups = StreamGroups({stream});
+    stream.reset();
+    /** A deserialized but invalid result has already consumed its wire message. */
+    wire->enqueueObject(pp_serialization::serializeExecutionResult(PPExecutionResult{}));
+    EXPECT_THROW((void)executor.drainPendingResults(), std::exception);
+    EXPECT_FALSE(batch.result_pending);
+    EXPECT_EQ(wire->receive_index, 2u);
+    EXPECT_TRUE(executor.drainPendingResults().ok());
+    EXPECT_EQ(wire->receive_index, 2u);
+}
+
+TEST_F(PPExecutorTest, DownstreamFinishProcessesOutstandingPlansUntilShutdown) {
+    for (int stage : {1, 2}) {
+        SCOPED_TRACE(stage);
+        auto params = makeStageParams(stage);
+        PPExecutor executor(params, nullptr, false);
+        auto* wire = attachTransport(executor);
+        auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+        auto* recorded = target.get();
+        executor.setModel(std::move(target));
+        enqueuePlan(*wire, makePlan(params));
+        PPExecutionPlan cleanup;
+        cleanup.model_input.skip_run = true;
+        cleanup.finished_request_ids = {101, 202};
+        enqueuePlan(*wire, cleanup);
+        enqueuePlan(*wire, makeShutdownPlan());
+
+        /** Local stop can arrive before the upstream terminal plan. finish must still forward outstanding work. */
+        ASSERT_TRUE(executor.finish().ok());
+        EXPECT_TRUE(executor.stopped_);
+        EXPECT_EQ(recorded->inputs.size(), 1u);
+        EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+        EXPECT_TRUE(executor.sampling_states_.empty());
+        if (stage == 1) {
+            ASSERT_EQ(wire->sent_tensors.size(), 9u);
+            EXPECT_FALSE(pp_serialization::deserializePlan(wire->sent_tensors[1]).shutdown);
+            const auto forwarded_cleanup = pp_serialization::deserializePlan(wire->sent_tensors[6]);
+            EXPECT_EQ(forwarded_cleanup.finished_request_ids, cleanup.finished_request_ids);
+            EXPECT_FALSE(forwarded_cleanup.shutdown);
+            EXPECT_TRUE(pp_serialization::deserializePlan(wire->sent_tensors[8]).shutdown);
+        } else {
+            ASSERT_EQ(wire->sent_tensors.size(), 2u);
+            EXPECT_EQ(tensorToVector<int64_t>(lastResult(*wire).request_ids), (std::vector<int64_t>{101, 202}));
+        }
+        for (const auto& batch : executor.slots_) {
+            EXPECT_TRUE(batch.plan_sends.empty());
+            EXPECT_TRUE(batch.activation_sends.empty());
+            EXPECT_TRUE(batch.execution_result_sends.empty());
+        }
+        const auto slot = executor.current_slot_;
+        const auto sends = wire->sent_tensors.size();
+        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+        EXPECT_EQ(executor.current_slot_, slot);
+        EXPECT_EQ(recorded->inputs.size(), 1u);
+        EXPECT_EQ(wire->sent_tensors.size(), sends);
+        EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
     }
 }
 
@@ -1166,7 +1433,7 @@ TEST_F(PPExecutorTest, FirstEmptyExecutionStillDispatchesThePreviousBatchOutside
         auto current  = makeStream(ResourceContext{}, params.model_config_, 101, {1, 2}, 0);
         auto previous = makeStream(ResourceContext{}, params.model_config_, 202, {3, 4}, 0);
         previous->setPPInflight();
-        executor.slots_[1].skip_run      = false;
+        executor.slots_[1].result_pending = true;
         executor.slots_[1].stream_groups = StreamGroups({previous});
 
         PPExecutionResult result;
@@ -1211,7 +1478,6 @@ TEST_F(PPExecutorTest, FirstEmptyExecutionStillDispatchesThePreviousBatchOutside
         EXPECT_EQ(wire->receive_index, 2u);
         EXPECT_FALSE(previous->isPPInflight());
         EXPECT_EQ(previous->completeTokenIdsVec(0), (std::vector<int>{3, 4, 17}));
-        EXPECT_EQ(executor.idle_streak_, 0);
     }
 }
 
@@ -1272,7 +1538,11 @@ TEST_F(PPExecutorTest, FirstSpAdmissionFiltersUnsupportedRequestsBeforeForward) 
         for (auto stream : {failed, healthy}) {
             stream->setPPInflight();
         }
-        ASSERT_TRUE(executor.process(ScheduleOutput{{failed, healthy}}).ok());
+        const ScheduleOutput schedule{{failed, healthy}};
+        ASSERT_TRUE(executor.process(schedule).ok());
+        if (all_failed) {
+            ASSERT_TRUE(executor.drainPendingResults().ok());
+        }
         EXPECT_TRUE(failed->hasError());
         EXPECT_FALSE(failed->isPPInflight());
         EXPECT_EQ(healthy->hasError(), all_failed);
@@ -1280,6 +1550,8 @@ TEST_F(PPExecutorTest, FirstSpAdmissionFiltersUnsupportedRequestsBeforeForward) 
         EXPECT_EQ(recorded->inputs.size(), all_failed ? 0u : 1u);
         const auto sent_plan = pp_serialization::deserializePlan(wire->sent_tensors.at(1));
         EXPECT_EQ(sent_plan.model_input.skip_run, all_failed);
+        EXPECT_EQ(executor.slots_[0].result_pending, !all_failed);
+        EXPECT_EQ(wire->receive_index, 0u);
         if (!all_failed) {
             EXPECT_EQ(tensorToVector<int64_t>(sent_plan.sampling_plan.request_ids), std::vector<int64_t>{202});
             EXPECT_NE(healthy->getSPOutputBuffer(), nullptr);
@@ -1351,6 +1623,90 @@ TEST_F(PPExecutorTest, FirstBuildsFakePlansWithoutLocalProposeParameters) {
             const int64_t token_count = decode && type != SP_TYPE_NONE ? 4 : 1;
             EXPECT_EQ(plan.model_input.combo_tokens.numel(), token_count);
             EXPECT_EQ(stream->completeTokenIdsVec(0), history);
+        }
+    }
+}
+
+TEST_F(PPExecutorTpTest, ShutdownPlanStopsEveryTpRankBeforeOrDuringFinishWithoutExecution) {
+    for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP}) {
+        for (bool terminal_before_finish : {false, true}) {
+            for (int stage : {0, 1, 2}) {
+                ReplayTpBroadcast broadcasts;
+                for (int rank : {0, 1}) {
+                    SCOPED_TRACE(testing::Message() << "type=" << type << ", stage=" << stage << ", tp=" << rank
+                                                   << ", terminal_before_finish=" << terminal_before_finish);
+                    if (rank != 0) {
+                        broadcasts.replay();
+                    }
+                    auto params = makeStageParams(stage, type);
+                    params.parallelism_config.tp_size = 2;
+                    params.parallelism_config.world_size = 6;
+                    params.parallelism_config.tp_rank = rank;
+                    params.parallelism_config.world_rank = stage * 2 + rank;
+                    auto propose = makeMtpProposeParams(params);
+                    PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr,
+                                        stage == 2 && type == SP_TYPE_MTP ? propose.get() : nullptr);
+                    auto* wire = attachTransport(executor);
+                    auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+                    auto* recorded = target.get();
+                    executor.setModel(std::move(target));
+                    RecordingDraftModel* recorded_draft = nullptr;
+                    if (stage == 2 && type == SP_TYPE_MTP) {
+                        auto draft = std::make_unique<RecordingDraftModel>();
+                        recorded_draft = draft.get();
+                        executor.draft_model_ = std::move(draft);
+                    }
+                    if (stage == 0 && rank == 0) {
+                        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+                        EXPECT_FALSE(executor.stopped_);
+                    } else {
+                        if (stage != 0) {
+                            PPExecutionPlan empty;
+                            empty.model_input.skip_run = true;
+                            enqueuePlan(*wire, empty, rank != 0);
+                            enqueuePlan(*wire, makeShutdownPlan(), rank != 0);
+                        }
+                        if (terminal_before_finish) {
+                            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+                            EXPECT_FALSE(executor.stopped_);
+                            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+                            EXPECT_TRUE(executor.stopped_);
+                            const auto slot = executor.current_slot_;
+                            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+                            EXPECT_EQ(executor.current_slot_, slot);
+                        }
+                    }
+                    ASSERT_TRUE(executor.finish().ok());
+                    EXPECT_TRUE(executor.stopped_);
+                    EXPECT_TRUE(recorded->inputs.empty());
+                    EXPECT_EQ(executor.current_slot_, 2u);
+                    EXPECT_EQ(wire->receive_index, stage == 0 ? 0u : 4u);
+                    ASSERT_EQ(wire->sent_tensors.size(), stage == 2 ? 0u : 4u);
+                    /** Both full and metadata-only plans must distinguish ordinary emptiness from shutdown. */
+                    if (stage != 2) {
+                        EXPECT_FALSE(pp_serialization::deserializePlan(wire->sent_tensors[1]).shutdown);
+                        const auto terminal = pp_serialization::deserializePlan(wire->sent_tensors[3]);
+                        EXPECT_TRUE(terminal.shutdown);
+                        if (rank == 0) {
+                            EXPECT_TRUE(terminal.model_input.skip_run);
+                            EXPECT_FALSE(terminal.model_input.is_fake_stream);
+                        }
+                    }
+                    if (recorded_draft) {
+                        EXPECT_TRUE(recorded_draft->inputs.empty());
+                    }
+                    EXPECT_TRUE(executor.sampling_states_.empty());
+                    for (const auto& batch : executor.slots_) {
+                        EXPECT_FALSE(batch.result_pending);
+                        EXPECT_TRUE(batch.plan_sends.empty());
+                        EXPECT_TRUE(batch.activation_sends.empty());
+                        EXPECT_TRUE(batch.execution_result_sends.empty());
+                    }
+                    if (rank != 0) {
+                        EXPECT_EQ(broadcasts.position(), broadcasts.size());
+                    }
+                }
+            }
         }
     }
 }
@@ -1464,6 +1820,7 @@ TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
         params.model_config_, params.runtime_config, resources, params.sp_config);
     const auto history = stream->completeTokenIdsVec(0);
     PPExecutor::InflightBatch batch;
+    batch.result_pending   = true;
     batch.stream_groups    = StreamGroups({stream});
     batch.schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 100000;
 
@@ -1481,6 +1838,7 @@ TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
     executor.transport_ = std::move(transport);
 
     ASSERT_TRUE(executor.processExecutionResult(batch).ok());
+    EXPECT_FALSE(batch.result_pending);
     EXPECT_EQ(recorded_transport->receive_index, 2);
     EXPECT_EQ(stream->completeTokenIdsVec(0), history);
     EXPECT_FALSE(executor.tps_reporter_.collector_.hasMetrics());
@@ -1762,7 +2120,7 @@ TEST_F(PPExecutorTest, FirstInflightMetricsStayWithTheirBatchThroughExecutionAnd
 
     const auto schedule_time = autil::TimeUtility::currentTimeInMicroSeconds();
     auto& retired            = executor.slots_[1];
-    retired.skip_run         = false;
+    retired.result_pending   = true;
     retired.stream_groups   = StreamGroups({decode});
     retired.schedule_time_us = schedule_time - 100000;
     retired.executor_collector.generate_batch_size = 1;
@@ -1871,7 +2229,7 @@ TEST_F(PPExecutorTest, MiddlePassesActivationsThroughTargetForEachExecutionPhase
     }
 }
 
-TEST_F(PPExecutorTest, MiddleEmptyAndShutdownPlansSkipTargetExecution) {
+TEST_F(PPExecutorTest, MiddleEmptyPlanSkipsTargetExecutionWithoutStopping) {
     auto params = makeStageParams(1);
     PPExecutor executor(params, nullptr, false);
     auto* wire = attachTransport(executor);
@@ -1881,19 +2239,21 @@ TEST_F(PPExecutorTest, MiddleEmptyAndShutdownPlansSkipTargetExecution) {
     int profile_calls = 0;
     executor.profile_step_start_ = [&] { ++profile_calls; };
     executor.profile_step_finish_ = [&] { ++profile_calls; };
-    for (bool shutdown : {false, true}) {
-        PPExecutionPlan plan;
-        plan.model_input.skip_run = true;
-        plan.model_input.shutdown = shutdown;
-        enqueuePlan(*wire, plan);
-        const auto sends = wire->sent_tensors.size();
-        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
-        EXPECT_EQ(wire->sent_tensors.size(), sends + 2);
-        EXPECT_EQ(executor.shutdownCompleted(), shutdown);
-    }
+    PPExecutionPlan plan;
+    plan.model_input.skip_run = true;
+    enqueuePlan(*wire, plan);
+    ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+    EXPECT_EQ(wire->sent_tensors.size(), 2u);
+    EXPECT_FALSE(executor.stopped_);
     EXPECT_TRUE(recorded->inputs.empty());
     EXPECT_EQ(profile_calls, 0);
-    EXPECT_EQ(wire->receive_index, 4u);
+    EXPECT_EQ(wire->receive_index, 2u);
+    enqueuePlan(*wire, makePlan(params));
+    ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+    EXPECT_EQ(recorded->inputs.size(), 1u);
+    EXPECT_EQ(profile_calls, 2);
+    EXPECT_FALSE(executor.stopped_);
+    EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
 }
 
 /** Last: sampling and request state first, then PD/speculative/TP/CP additions. */
@@ -1942,6 +2302,48 @@ TEST_F(PPExecutorTest, LastSamplesAcrossRoundsWithoutReinitializingRequestState)
     EXPECT_EQ(tensorToVector<int32_t>(processor->committed_tokens[0]), std::vector<int32_t>{11});
     EXPECT_EQ(recorded->has_input, (std::vector<bool>{true, true}));
     EXPECT_EQ(recorded->has_output, (std::vector<bool>{false, false}));
+}
+
+TEST_F(PPExecutorTest, LastRetirementAllowsRequestIdReuseWithFreshSamplingState) {
+    for (bool fake_cleanup : {false, true}) {
+        SCOPED_TRACE(fake_cleanup);
+        auto params = makeStageParams(2);
+        PPExecutor executor(params, nullptr, false);
+        auto* wire = attachTransport(executor);
+        auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+        auto* recorded = target.get();
+        executor.setModel(std::move(target));
+        auto first = makePlan(params);
+        first.sampling_plan.random_seeds = {123, 456};
+        enqueuePlan(*wire, first);
+        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+        const auto old_generator = executor.sampling_states_.at(101).generator;
+        auto old_processor = std::make_shared<RecordingLogitsProcessor>();
+        executor.sampling_states_.at(101).logits_processors = {old_processor};
+
+        /** Both control-only cleanup and a scheduled fake batch must retire state before request IDs are reused. */
+        PPExecutionPlan cleanup = fake_cleanup ? makeFakePlan(params, false) : PPExecutionPlan{};
+        cleanup.model_input.skip_run = !fake_cleanup;
+        cleanup.finished_request_ids = {101, 202};
+        enqueuePlan(*wire, cleanup);
+        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+        EXPECT_TRUE(executor.sampling_states_.empty());
+        EXPECT_FALSE(executor.stopped_);
+        EXPECT_EQ(wire->sent_tensors.size(), fake_cleanup ? 4u : 2u);
+
+        auto second = makePlan(params);
+        second.sampling_plan.random_seeds = {789, 999};
+        enqueuePlan(*wire, second);
+        ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+        EXPECT_EQ(executor.sampling_states_.at(101).generator.current_seed(), 789u);
+        EXPECT_EQ(executor.sampling_states_.at(202).generator.current_seed(), 999u);
+        EXPECT_NE(executor.sampling_states_.at(101).generator, old_generator);
+        EXPECT_TRUE(old_processor->committed_tokens.empty());
+        EXPECT_EQ(recorded->inputs.size(), fake_cleanup ? 3u : 2u);
+        EXPECT_EQ(wire->sent_tensors.size(), fake_cleanup ? 6u : 4u);
+        EXPECT_EQ(tensorToVector<int64_t>(lastResult(*wire).request_ids), (std::vector<int64_t>{101, 202}));
+        EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+    }
 }
 
 TEST_F(PPExecutorTest, LastUpdatesStatesAtRequestSequenceOffsetsAndPreservesEarlierErrors) {
@@ -2086,18 +2488,20 @@ TEST_F(PPExecutorTest, LastOrdinaryAllFailedRequestsStillSendTheirErrors) {
     EXPECT_TRUE(second->committed_tokens.empty());
 }
 
-TEST_F(PPExecutorTest, LastShutdownOnEmptyPlanCleansStatesWithoutProducingAResult) {
+TEST_F(PPExecutorTest, LastShutdownPlanCleansFinishedStatesWithoutExecutionOrResult) {
     auto params = makeStageParams(2);
     PPExecutor executor(params, nullptr, false);
     auto* wire = attachTransport(executor);
+    auto target = std::make_unique<RecordingStageModel>(params.parallelism_config);
+    auto* recorded = target.get();
+    executor.setModel(std::move(target));
     recordState(executor, 101);
-    PPExecutionPlan plan;
-    plan.model_input.skip_run = true;
-    plan.model_input.shutdown = true;
+    auto plan = makeShutdownPlan();
     plan.finished_request_ids = {101};
     enqueuePlan(*wire, plan);
     ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
-    EXPECT_TRUE(executor.shutdownCompleted());
+    EXPECT_TRUE(recorded->inputs.empty());
+    EXPECT_TRUE(executor.stopped_);
     EXPECT_TRUE(executor.sampling_states_.empty());
     EXPECT_TRUE(wire->sent_tensors.empty());
 }
@@ -2760,7 +3164,7 @@ TEST_F(PPExecutorTest, LastVerifyFailuresKeepDraftRowsForPartialAndWholeBatchErr
     }
 }
 
-TEST_F(PPExecutorTest, LastFakeExecutionKeepsDraftParticipationWithoutSamplingState) {
+TEST_F(PPExecutorTest, LastOrdinaryFakeReturnsAResultButShutdownSkipsTargetAndDraft) {
     for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_DSPARK}) {
         for (bool decode : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "type=" << type << ", decode=" << decode);
@@ -2769,8 +3173,11 @@ TEST_F(PPExecutorTest, LastFakeExecutionKeepsDraftParticipationWithoutSamplingSt
             PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr,
                                 type == SP_TYPE_NONE ? nullptr : propose.get());
             auto* wire = attachTransport(executor);
-            enqueuePlan(*wire, makeFakePlan(params, decode));
-            executor.setModel(std::make_unique<RecordingDraftModel>());
+            auto plan = makeFakePlan(params, decode);
+            enqueuePlan(*wire, plan);
+            auto target = std::make_unique<RecordingDraftModel>();
+            auto* recorded = target.get();
+            executor.setModel(std::move(target));
             std::vector<GptModelInputs>* draft_inputs = nullptr;
             if (type == SP_TYPE_DSPARK) {
                 auto draft = installDSparkModels(executor, 3);
@@ -2793,6 +3200,19 @@ TEST_F(PPExecutorTest, LastFakeExecutionKeepsDraftParticipationWithoutSamplingSt
             } else {
                 EXPECT_FALSE(result.propose_token_ids.defined());
             }
+
+            enqueuePlan(*wire, makeShutdownPlan());
+            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+            EXPECT_TRUE(executor.stopped_);
+            EXPECT_EQ(recorded->inputs.size(), 1u);
+            EXPECT_EQ(wire->sent_tensors.size(), 2u);
+            EXPECT_EQ(wire->receive_index, wire->received_tensors.size());
+            EXPECT_TRUE(executor.sampling_states_.empty());
+            if (draft_inputs) {
+                EXPECT_EQ(draft_inputs->size(), type == SP_TYPE_DSPARK ? 2u : 3u);
+            }
+            ASSERT_TRUE(executor.finish().ok());
+            EXPECT_EQ(wire->sent_tensors.size(), 2u);
         }
     }
 }

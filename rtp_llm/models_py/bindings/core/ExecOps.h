@@ -8,7 +8,6 @@
 
 #include <memory>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -133,16 +132,6 @@ public:
      * completes.
      */
     virtual void wait() = 0;
-
-    /**
-     * Bounded wait; returns false if the timeout expires before completion.
-     * The default implementation preserves the unbounded wait() behavior.
-     */
-    virtual bool wait(std::chrono::milliseconds timeout) {
-        (void)timeout;
-        wait();
-        return true;
-    }
 };
 
 enum class P2PBackend {

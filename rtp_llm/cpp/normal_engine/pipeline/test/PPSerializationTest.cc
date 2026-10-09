@@ -8,6 +8,29 @@ namespace rtp_llm {
 
 class PPSerializationTest: public DeviceTestBase {};
 
+TEST_F(PPSerializationTest, EmptyAndShutdownPlansRemainDistinctOnRootAndPeerLanes) {
+    for (bool shutdown : {false, true}) {
+        for (bool metadata_only : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "shutdown=" << shutdown << ", metadata_only=" << metadata_only);
+            PPExecutionPlan plan;
+            plan.shutdown = shutdown;
+            plan.model_input.skip_run = true;
+            plan.model_input.kv_cache_group_tags = {"full", "linear"};
+            plan.finished_request_ids = {101, 202};
+
+            const auto received =
+                pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, metadata_only));
+            EXPECT_EQ(received.shutdown, shutdown);
+            EXPECT_EQ(received.model_input.kv_cache_group_tags, plan.model_input.kv_cache_group_tags);
+            if (!metadata_only) {
+                EXPECT_TRUE(received.model_input.skip_run);
+                EXPECT_FALSE(received.model_input.is_fake_stream);
+                EXPECT_EQ(received.finished_request_ids, plan.finished_request_ids);
+            }
+        }
+    }
+}
+
 TEST_F(PPSerializationTest, SamplingPlanRoundTripPreservesMixedAndHomogeneousProposalModes) {
     for (int mode = 0; mode < 3; ++mode) {
         PPExecutionPlan plan;

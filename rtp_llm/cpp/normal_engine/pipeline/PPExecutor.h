@@ -54,6 +54,11 @@ public:
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
 
+    /** First-stage root receives pending results in submission order without sending plans or advancing the ring. */
+    absl::Status drainPendingResults();
+
+    absl::Status finish() override;
+
     bool updateEplbConfig(const EPLBConfig& config) override;
 
     static GenerateStreamPtr createMinFakePrefillStream(const ModelConfig&                model_config,
@@ -75,21 +80,12 @@ public:
         model_ = std::move(model);
     }
 
-    void notifyShutdown() override {
-        stopping_ = true;
-    }
-
-    /** True once the shutdown sentinel flow has completed for this stage (loop may exit). */
-    bool shutdownCompleted() const {
-        return shutdown_completed_;
-    }
-
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
 private:
     struct InflightBatch {
-        bool                          skip_run = true;
+        bool                          result_pending = false;
         StreamGroups                  stream_groups;
         int64_t                       schedule_time_us = 0;
         RtpLLMExecutorMetricsCollector executor_collector;
@@ -102,6 +98,8 @@ private:
     };
 
     absl::Status warmUp(const ScheduleOutput& schedule_output);
+
+    absl::Status processImpl(const ScheduleOutput& schedule_output, int64_t schedule_time_us, bool shutdown);
 
     void releaseAllModelBuffers();
 
@@ -165,9 +163,7 @@ private:
 
     torch::Tensor receiveObject();
 
-    void waitAll(PPTickets& tickets, const char* what, bool throw_on_timeout = true);
-
-    void waitTicket(PPCommTicket& ticket, const char* what, bool throw_on_timeout = true);
+    void waitAll(PPTickets& tickets);
 
     bool isFirstStage() const {
         return pp_layout_.hasEmbedding();
@@ -206,13 +202,8 @@ private:
     TensorHolder   buffer_holder_;
     SamplingStates sampling_states_;
 
-    /** PP comm watchdog: bounded waits once shutdown has been notified. */
-    bool    stopping_                 = false;
-    int64_t comm_watchdog_timeout_ms_ = 30000;
-
-    /** Sentinel flow state; only touched from the engine loop thread. */
-    size_t idle_streak_        = 0;
-    bool   shutdown_completed_ = false;
+    /** A processed terminal plan prevents further execution while the engine waits for local stop(). */
+    bool stopped_ = false;
 
     bool                                             sp_enabled_                 = false;
     bool                                             is_dspark_                  = false;

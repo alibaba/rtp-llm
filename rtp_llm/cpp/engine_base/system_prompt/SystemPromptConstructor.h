@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <optional>
@@ -18,17 +17,6 @@ class SystemPromptConstructor {
 public:
     static absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> construct(
         const KVCacheConfig& kv_cache_config, EngineBase* engine, KVCacheManager* cache_manager, bool insert_kv_cache);
-
-    static std::shared_ptr<GenerateInput> makeBuildInput(const std::vector<int>& tokens_id, int64_t request_id);
-
-    /** Commit already-executed KV using main's per-tag resident cache contract.
-     * Both callers retain releasable build streams until all tasks have succeeded;
-     * committing one prefix does not transfer the stream's request ownership. */
-    static absl::StatusOr<SystemPromptParams> commitResident(const GenerateStreamPtr& stream,
-                                                            KVCacheManager*          cache_manager,
-                                                            const std::vector<int>&  tokens_id,
-                                                            bool                     insert_kv_cache,
-                                                            const std::string&       task_id);
 };
 
 }  // namespace rtp_llm

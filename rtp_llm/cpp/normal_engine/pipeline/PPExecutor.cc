@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -122,7 +121,7 @@ GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&      
 }
 
 void PPExecutor::InflightBatch::reset() {
-    skip_run           = true;
+    result_pending     = false;
     stream_groups      = StreamGroups();
     schedule_time_us   = 0;
     executor_collector = RtpLLMExecutorMetricsCollector();
@@ -137,11 +136,11 @@ void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
 torch::Tensor PPExecutor::receiveObject() {
     auto object_size  = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64));
     auto size_receive = transport_->asyncReceive(object_size);
-    waitTicket(*size_receive, "object size from previous stage");
+    size_receive->wait();
 
     auto object         = torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8));
     auto object_receive = transport_->asyncReceive(object);
-    waitTicket(*object_receive, "object payload from previous stage");
+    object_receive->wait();
     return object;
 }
 
@@ -153,7 +152,7 @@ void PPExecutor::asyncSendPlan(const PPExecutionPlan& plan, bool metadata_only, 
 PPExecutionPlan PPExecutor::receivePlan() {
     RTP_LLM_PROFILE_SCOPE("executor.pp.recv_plan");
     auto plan = pp_serialization::deserializePlan(receiveObject());
-    if (plan.model_input.shutdown) {
+    if (plan.shutdown) {
         RTP_LLM_LOG_INFO("received pipeline shutdown sentinel from previous stage");
     }
     return plan;
@@ -185,40 +184,9 @@ PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
     return tensors;
 }
 
-void PPExecutor::waitTicket(PPCommTicket& ticket, const char* what, bool throw_on_timeout) {
-    const bool armed = stopping_;
-    if (!armed) {
-        /**
-         * Running: unbounded wait, which also drives backend progress; the shutdown
-         * window is re-evaluated by the next wait once data arrives.
-         */
-        try {
-            ticket.wait();
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("PP comm failed while running (peer likely died): %s", e.what());
-            throw PPCommWatchdogTimeout(std::string("peer communication failed: ") + e.what());
-        }
-        return;
-    }
-    /**
-     * Stopping: bound the wait for the final frames/sentinel. Not delivering within the
-     * bound means the peer is gone and this stage must exit.
-     */
-    if (ticket.wait(std::chrono::milliseconds(comm_watchdog_timeout_ms_))) {
-        return;
-    }
-    RTP_LLM_LOG_ERROR("PP comm watchdog: %s not received within %ld ms after shutdown started%s",
-                      what,
-                      static_cast<long>(comm_watchdog_timeout_ms_),
-                      throw_on_timeout ? "; aborting wait" : "; ignored during teardown");
-    if (throw_on_timeout) {
-        throw PPCommWatchdogTimeout(std::string("timed out waiting for ") + what);
-    }
-}
-
-void PPExecutor::waitAll(PPTickets& tickets, const char* what, bool throw_on_timeout) {
+void PPExecutor::waitAll(PPTickets& tickets) {
     for (auto& ticket : tickets) {
-        waitTicket(*ticket, what, throw_on_timeout);
+        ticket->wait();
     }
     tickets.clear();
 }
@@ -230,6 +198,7 @@ absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
         RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
         result = pp_serialization::deserializeExecutionResult(receiveObject());
     }
+    batch.result_pending = false;
     if (batch.stream_groups.isFakeStream()) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return absl::OkStatus();
@@ -307,10 +276,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
     RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
                             "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
-
-    if (const char* watchdog_timeout_env = std::getenv("RTP_LLM_PP_COMM_WATCHDOG_TIMEOUT_MS")) {
-        comm_watchdog_timeout_ms_ = std::max<int64_t>(1, std::strtoll(watchdog_timeout_env, nullptr, 10));
-    }
 
     RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ || params.sp_config.gen_num_per_cycle > 0,
                             "PP speculative decoding requires a positive gen_num_per_cycle, got %ld",
@@ -526,11 +491,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 }
 
 PPExecutor::~PPExecutor() {
-    for (auto& slot : slots_) {
-        waitAll(slot.plan_sends, "plan send completion", false);
-        waitAll(slot.activation_sends, "activation send completion", false);
-        waitAll(slot.execution_result_sends, "execution result send completion", false);
-    }
     cudaProfilerEnd();
 }
 
@@ -1114,6 +1074,50 @@ void PPExecutor::runDraftStep(const GptModelInputs& target_input,
 }
 
 absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    if (!stopped_) {
+        return processImpl(schedule_output, schedule_time_us, false);
+    }
+    return absl::OkStatus();
+}
+
+absl::Status PPExecutor::drainPendingResults() {
+    /** current_slot_ is the oldest position after processImpl advances the ring. Skip completed and non-result plans. */
+    for (size_t offset = 0; offset < slots_.size(); ++offset) {
+        auto& batch = slots_[(current_slot_ + offset) % slots_.size()];
+        if (batch.result_pending) {
+            RETURN_IF_STATUS_ERROR(processExecutionResult(batch));
+        }
+    }
+    return absl::OkStatus();
+}
+
+absl::Status PPExecutor::finish() {
+    ScheduleOutput empty_output;
+    if (isFirstStage() && isStageRoot()) {
+        /** An empty terminal plan skips model execution while preserving TP sync and downstream plan propagation. */
+        RETURN_IF_STATUS_ERROR(processImpl(empty_output, 0, true));
+        RETURN_IF_STATUS_ERROR(drainPendingResults());
+    } else {
+        /** Local stop may precede the terminal plan; keep serving upstream until it has been processed. */
+        while (!stopped_) {
+            RETURN_IF_STATUS_ERROR(process(empty_output));
+        }
+    }
+    for (auto& slot : slots_) {
+        waitAll(slot.plan_sends);
+        waitAll(slot.activation_sends);
+        waitAll(slot.execution_result_sends);
+    }
+    /** NCCL wait only orders the current stream; complete it before model/transport teardown. */
+    cuda_graph::graphGetCurrentStream().synchronize();
+    RTP_LLM_LOG_INFO("PP shutdown completed: pp_rank=%ld, tp_rank=%ld, dp_rank=%ld",
+                     parallelism_config_.pp_rank,
+                     parallelism_config_.tp_rank,
+                     parallelism_config_.dp_rank);
+    return absl::OkStatus();
+}
+
+absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int64_t schedule_time_us, bool shutdown) {
     if (warm_up_) {
         return warmUp(schedule_output);
     }
@@ -1144,11 +1148,8 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         auto       plan_status   = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids);
         RETURN_IF_STATUS_OR_ERROR(plan_status);
         plan                                    = std::move(plan_status.value());
+        plan.shutdown                            = shutdown;
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        if (isStageRoot() && stopping_ && idle_streak_ >= parallelism_config_.pp_size + 1) {
-            plan.model_input.shutdown = true;
-            RTP_LLM_LOG_INFO("pipeline drained, emitting shutdown sentinel to next stage");
-        }
     } else {
         plan = receivePlan();
     }
@@ -1165,6 +1166,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     {
         RTP_LLM_PROFILE_SCOPE("executor.pp.tp_sync_input");
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (isFirstStage() && parallelism_config_.tp_size > 1) {
+            /** First-stage TP peers enter independently; use the root's terminal plan to stop on the same round. */
+            auto shutdown_tensor = torch::tensor({static_cast<int64_t>(plan.shutdown)}, torch::kInt64);
+            execBroadcastCpu({{shutdown_tensor}, 0});
+            plan.shutdown = shutdown_tensor.item<int64_t>() != 0;
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1176,13 +1183,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     auto& inflight = slots_[current_slot_];
     {
         RTP_LLM_PROFILE_SCOPE("executor.pp.wait_slot_reuse");
-        waitAll(inflight.plan_sends, "plan send completion");
-        waitAll(inflight.activation_sends, "activation send completion");
-        waitAll(inflight.execution_result_sends, "execution result send completion");
+        waitAll(inflight.plan_sends);
+        waitAll(inflight.activation_sends);
+        waitAll(inflight.execution_result_sends);
     }
     inflight.reset();
-    inflight.skip_run = model_input.skip_run;
     if (isFirstStage() && isStageRoot()) {
+        /** Keep first-stage receives paired with last-stage sends, including ordinary fake batches. */
+        inflight.result_pending   = !model_input.skip_run;
         inflight.stream_groups    = std::move(scheduled_stream_groups);
         inflight.schedule_time_us = schedule_time_us;
     }
@@ -1205,7 +1213,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         if (!isFirstStage()) {
             input_tensors = receiveTensors(tensor_receives);
-            waitAll(tensor_receives, "intermediate tensors from previous stage");
+            waitAll(tensor_receives);
         }
 
         if (cache_manager_) {
@@ -1323,23 +1331,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     current_slot_ = (current_slot_ + 1) % slots_.size();
 
     /** 6. recv the execution result of next batch and process it. */
-    auto& next_batch                = slots_[current_slot_];
-    bool  received_result_this_step = false;
-    if (isFirstStage() && isStageRoot() && !next_batch.skip_run) {
-        /** A fake batch's result is not real progress; it must not reset the drain counter. */
-        received_result_this_step = !next_batch.stream_groups.isFakeStream();
+    auto& next_batch = slots_[current_slot_];
+    if (isFirstStage() && isStageRoot() && next_batch.result_pending) {
         RETURN_IF_STATUS_ERROR(processExecutionResult(next_batch));
     }
 
-    if (isFirstStage() && isStageRoot() && !model_input.shutdown) {
-        /** Empty/fake batches must not reset the drain counter, or DP+PP never emits the sentinel. */
-        const bool no_work   = model_input.skip_run || model_input.is_fake_stream;
-        const bool no_result = !received_result_this_step;
-        idle_streak_         = (no_work && no_result) ? idle_streak_ + 1 : 0;
-    }
-    if (model_input.shutdown) {
-        shutdown_completed_ = true;
-    }
+    stopped_ = plan.shutdown;
     return absl::OkStatus();
 }
 

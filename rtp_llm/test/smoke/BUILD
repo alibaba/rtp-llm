@@ -113,6 +113,23 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
+# Shutdown must wake idle scheduling and finish the full stop path on every PP/TP/DP rank.
+custom_smoke_test(
+    name = "qwen3_pp_shutdown_test",
+    main = "pp_test.py",
+    args = ["--cases=shutdown_pp2_tp1_before_requests,shutdown_pp2_tp1,shutdown_pp3_tp1,shutdown_pp4_tp1,shutdown_pp2_tp2,shutdown_pp2_tp1_dp2"],
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 30",
+    gpu_type = ["H20"],
+)
+
+custom_smoke_test(
+    name = "qwen35_pp_shutdown_mtp_test",
+    main = "pp_test.py",
+    args = ["--cases=shutdown_pp2_tp2_mtp"],
+    smoke_args = "--tp_size 2 --pp_size 2 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --warm_up 0 --model_warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 30",
+    gpu_type = ["H20"],
+)
+
 # PP multi-task system prompt: startup builds resident KV through the pipeline and
 # requests reuse it via task_id. Compared against a PP=1 baseline of the same config.
 custom_smoke_test(
@@ -133,8 +150,8 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
-# PP=2 DP=2 multi-task system prompt: verifies mayAddFakeStream alignment across DP lanes
-# during the startup build (all lanes build the same tasks in lockstep).
+# PP=2 DP=2 multi-task system prompt: each DP builds prompts with control-only cleanup,
+# then serves requests without extra startup model executions or result receives.
 custom_smoke_test(
     name = "qwen3_multi_task_prompt_pp2_dp2_test",
     main = "pp_test.py",

@@ -1,5 +1,8 @@
+#include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 #include "torch/all.h"
@@ -26,6 +29,26 @@
 using namespace std;
 
 namespace rtp_llm {
+
+/** Observe the real idle wait predicate so stop is requested after schedule reaches its blocking path. */
+class IdleWaitPPScheduler: public PPScheduler {
+public:
+    using PPScheduler::PPScheduler;
+
+    std::promise<void> idle_wait;
+
+private:
+    bool waitPredicate() override {
+        const bool ready = PPScheduler::waitPredicate();
+        if (!ready && !observed_idle_) {
+            observed_idle_ = true;
+            idle_wait.set_value();
+        }
+        return ready;
+    }
+
+    bool observed_idle_ = false;
+};
 
 std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
@@ -64,7 +87,8 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<PPScheduler> createScheduler(size_t max_generate_batch_size = 100,
+    template<typename Scheduler = PPScheduler>
+    std::shared_ptr<Scheduler> createScheduler(size_t max_generate_batch_size = 100,
                                                  RoleType role = RoleType::PDFUSION,
                                                  SpeculativeType type = SP_TYPE_NONE) {
         ModelConfig model_config;
@@ -81,7 +105,7 @@ protected:
         SpeculativeExecutionConfig sp_config;
         sp_config.type = type;
         sp_config.gen_num_per_cycle = 3;
-        return std::make_shared<PPScheduler>(runtime_config, model_config, pd_sep_config,
+        return std::make_shared<Scheduler>(runtime_config, model_config, pd_sep_config,
                                              parallelism_config, ModelSpecificConfig{}, sp_config, cache_manager_);
     }
 
@@ -166,18 +190,52 @@ protected:
     size_t                                                          initial_malloc_calls_{0};
 };
 
-TEST_F(PPSchedulerTest, InflightIsSkippedUntilResultCommit) {
+TEST_F(PPSchedulerTest, StopWakesSingleDpScheduleWithNoOutstandingRequests) {
+    auto scheduler = createScheduler<IdleWaitPPScheduler>();
+    ASSERT_FALSE(scheduler->need_fill_fake_stream_);
+    ASSERT_TRUE(scheduler->empty());
+    auto idle = scheduler->idle_wait.get_future();
+    auto scheduled = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    /** Keep assertions nonfatal until the waiting schedule has been released. */
+    EXPECT_EQ(idle.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_EQ(scheduled.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_TRUE(scheduler->stop().ok());
+    const auto stopped = scheduled.wait_for(std::chrono::seconds(10));
+    EXPECT_EQ(stopped, std::future_status::ready);
+    if (stopped != std::future_status::ready) {
+        /** Release the future even when the regression is a missing stop notification or stop predicate. */
+        {
+            std::lock_guard<std::mutex> lock(scheduler->lock_);
+            scheduler->schedule_trigger_ = true;
+        }
+        scheduler->cond_.notify_all();
+    }
+    const auto output = scheduled.get();
+    ASSERT_TRUE(output.ok()) << output.status().ToString();
+    EXPECT_TRUE(output->streams.empty());
+    EXPECT_TRUE(output->finished_request_ids.empty());
+}
+
+TEST_F(PPSchedulerTest, SingleDpInflightKeepsProducingEmptySchedulesUntilResultCommit) {
     auto scheduler = createScheduler();
+    ASSERT_FALSE(scheduler->need_fill_fake_stream_);
     auto stream = createStream({1, 2, 3}, false, false, 4);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_EQ(first->streams.size(), 1u);
     ASSERT_TRUE(stream->isPPInflight());
-    auto pending = scheduler->schedule();
-    ASSERT_TRUE(pending.ok());
-    EXPECT_TRUE(pending->streams.empty());
-    EXPECT_TRUE(pending->finished_request_ids.empty());
+    /** With no queued requests, inflight work alone must keep the scheduler awake without fake streams. */
+    for (int round = 0; round < 3; ++round) {
+        SCOPED_TRACE(round);
+        ASSERT_FALSE(scheduler->empty());
+        ASSERT_TRUE(scheduler->waitPredicate());
+        auto pending = scheduler->schedule();
+        ASSERT_TRUE(pending.ok());
+        EXPECT_TRUE(pending->streams.empty());
+        EXPECT_TRUE(pending->finished_request_ids.empty());
+        EXPECT_TRUE(stream->isPPInflight());
+    }
     stream->updateFromPP({torch::tensor({{4}}, torch::kInt32), 1});
     stream->clearPPInflight();
     auto next = scheduler->schedule();
@@ -209,12 +267,16 @@ TEST_F(PPSchedulerTest, CancelledInflightKeepsKvUntilResponseAndRetiresOnce) {
     EXPECT_EQ(retired->finished_request_ids, (std::vector<int64_t>{stream->streamId()}));
     EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
     EXPECT_EQ(stream->seqLength(), 3);
-    /** Allow an idle round without enqueueing another request; retirement must not repeat. */
-    scheduler->schedule_trigger_ = true;
-    auto idle = scheduler->schedule();
-    ASSERT_TRUE(idle.ok());
-    EXPECT_TRUE(idle->streams.empty());
-    EXPECT_TRUE(idle->finished_request_ids.empty());
+    /** Only after retirement is there no outstanding work. The next real request must not repeat the cleanup ID. */
+    EXPECT_TRUE(scheduler->empty());
+    EXPECT_FALSE(scheduler->waitPredicate());
+    auto next_stream = createStream({4, 5, 6});
+    ASSERT_TRUE(scheduler->enqueue(next_stream).ok());
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->streams.size(), 1u);
+    EXPECT_EQ(next->streams.front(), next_stream);
+    EXPECT_TRUE(next->finished_request_ids.empty());
 }
 
 TEST_F(PPSchedulerTest, LoadedRequestsReenterAdmissionAndRespectCurrentBatchLimit) {

@@ -19,7 +19,7 @@ namespace {
  * presence flag encodes definedness so defined-but-empty tensors survive;
  * host tensors are rebuilt pinned to match gatherModelInput plan tensors.
  */
-constexpr uint32_t kVersion = 18;
+constexpr uint32_t kVersion = 19;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -245,7 +245,6 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.flag(in.skip_run);
     w.flag(in.is_fake_stream);
     w.flag(in.is_target_verify);
-    w.flag(in.shutdown);
 }
 
 void readModelInput(ByteReader& r, GptModelInputs& in) {
@@ -289,7 +288,6 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.skip_run                  = r.flag();
     in.is_fake_stream            = r.flag();
     in.is_target_verify          = r.flag();
-    in.shutdown                  = r.flag();
 }
 
 void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {
@@ -444,6 +442,7 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool metadata_only) {
     ByteWriter w;
     w.val<uint32_t>(kVersion);
     w.flag(metadata_only);
+    w.flag(plan.shutdown);
     if (metadata_only) {
         /** TP peers need the upstream tag identities before synchronizing numeric cache rows. */
         w.strings(plan.model_input.kv_cache_group_tags);
@@ -465,7 +464,9 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     ByteReader r(buffer);
     RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP plan payload version mismatch");
     PPExecutionPlan plan;
-    if (r.flag()) {
+    const bool      metadata_only = r.flag();
+    plan.shutdown                 = r.flag();
+    if (metadata_only) {
         plan.model_input.kv_cache_group_tags = r.strings();
         r.expectEnd();
         return plan;

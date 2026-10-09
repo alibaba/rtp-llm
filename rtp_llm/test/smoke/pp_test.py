@@ -10,6 +10,10 @@ SP_MODEL_TYPE, SP_CHECKPOINT_PATH and SP_TYPE select the optional draft model.
 PD_MODEL_TYPE / PD_SP_MODEL_TYPE remain supported as fallbacks.
 For Qwen3.5 dense, use MODEL_TYPE=qwen35_dense and PP_SEQ_SIZE_PER_BLOCK=2048.
 DP cases configure EP=TP*DP; expert communication is exercised only by MoE models.
+shutdown_pp* cases stop after startup, after requests, or while idle DP lanes run
+fake batches. Each rank must complete executor finish and BackendManager.stop,
+children must exit, and signaling the start_server parent must need no forced kill.
+Executor tests cover result draining and both local-stop/terminal-plan arrival orders.
 """
 
 import argparse
@@ -18,6 +22,7 @@ import logging
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 import unittest
@@ -25,6 +30,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import psutil
 import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM, ServerConfig
@@ -219,6 +225,28 @@ VARIANTS.update(
     }
 )
 
+VARIANTS.update(
+    {
+        f"shutdown_pp{pp}_tp{tp}{'_mtp' if sp else ''}": {
+            "pp": pp,
+            "tp": tp,
+            "dp": 1,
+            "ep": 1,
+            "sp": sp,
+            "graceful_shutdown": True,
+            "block_size": 2048 if sp else 16,
+        }
+        for pp, tp, sp in ((2, 1, 0), (3, 1, 0), (4, 1, 0), (2, 2, 0), (2, 2, 3))
+    }
+)
+
+VARIANTS["shutdown_pp2_tp1_before_requests"] = dict(
+    VARIANTS["shutdown_pp2_tp1"], shutdown_scenario="idle_after_startup"
+)
+VARIANTS["shutdown_pp2_tp1_dp2"] = dict(
+    VARIANTS["shutdown_pp2_tp1"], dp=2, ep=2, shutdown_scenario="dp_fake_batches"
+)
+
 
 def selected_cases():
     names = os.environ.get("PP_TEST_CASES", os.environ.get("PD_VARIANT", "sym"))
@@ -372,10 +400,10 @@ class PPTopologyTest(unittest.TestCase):
         self.assertEqual(len(result["output_ids"][0]), max_new_tokens, result)
         return result
 
-    def run_baseline(self, checkpoint, devices, tp_size):
+    def run_baseline(self, checkpoint, devices, tp_size, block_size=16):
         """Target-only PP=1 reference for the PDFUSION cases."""
         args = (
-            base_smoke_args()
+            base_smoke_args(default_seq_size_per_block=block_size)
             + [
                 "--tp_size",
                 str(tp_size),
@@ -646,12 +674,71 @@ class PPTopologyTest(unittest.TestCase):
                 f"while the real request was pending: {idle_progress}",
             )
 
+    def assert_graceful_shutdown(self, server, variant):
+        """Signal the parent and require every backend to finish the complete stop path."""
+        with server._state_lock:
+            process = server._server_process
+        self.assertIsNotNone(process)
+        self.assertIsNone(process.poll(), "server exited before shutdown was requested")
+        children = psutil.Process(process.pid).children(recursive=True)
+        started = time.monotonic()
+        process.terminate()
+        try:
+            try:
+                exit_code = process.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                self.fail(f"PP shutdown did not finish within 90s: {server.log_file_path}")
+            self.assertEqual(exit_code, 0, server.log_file_path)
+            _, alive = psutil.wait_procs(children, timeout=5)
+            self.assertFalse(
+                alive, f"PP shutdown left children alive: {[p.pid for p in alive]}"
+            )
+            log = Path(server.log_file_path).read_text(errors="replace")
+            completed = Counter(
+                tuple(map(int, match))
+                for match in re.findall(
+                    r"PP shutdown completed: pp_rank=(\d+), tp_rank=(\d+), dp_rank=(\d+)",
+                    log,
+                )
+            )
+            expected = Counter(
+                (pp_rank, tp_rank, dp_rank)
+                for pp_rank in range(variant["pp"])
+                for tp_rank in range(variant["tp"])
+                for dp_rank in range(variant["dp"])
+            )
+            self.assertEqual(completed, expected, server.log_file_path)
+            backend_stops = log.count("BackendManager stopped successfully")
+            self.assertEqual(backend_stops, sum(expected.values()), server.log_file_path)
+            self.assertNotIn("Force killing process ", log)
+            self.assertNotRegex(log, r"Timed out waiting for .* process group to exit")
+            self.assertNotIn("engine stop failed during backend shutdown", log)
+            self.shutdown_evidence.update(
+                scenario=variant.get("shutdown_scenario", "idle_after_requests"),
+                backend_stops=backend_stops,
+                elapsed_seconds=time.monotonic() - started,
+                exit_code=exit_code,
+                completed_ranks=sorted(completed),
+                log_file=server.log_file_path,
+            )
+        finally:
+            # Once the parent exits, stop_server cannot discover orphaned children.
+            # Assert graceful exit above before cleaning up a failing case.
+            if process.poll() is not None:
+                _, alive = psutil.wait_procs(children, timeout=0)
+                for child in alive:
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                psutil.wait_procs(alive, timeout=5)
+
     def run_pdfusion(self, checkpoint, gpu_ids, variant):
         pp, tp, dp = (variant[key] for key in ("pp", "tp", "dp"))
         world_size = pp * tp * dp
         self.assertGreaterEqual(len(gpu_ids), world_size)
         args = (
-            base_smoke_args()
+            base_smoke_args(default_seq_size_per_block=variant.get("block_size", 16))
             + [
                 "--pp_size",
                 str(pp),
@@ -679,9 +766,28 @@ class PPTopologyTest(unittest.TestCase):
             "RTP_LLM_STREAM_ASYNC": "0",
             "RTP_LLM_DEVICE_INPUT": "0",
         }
-        if dp > 1:
-            # The completion marker is emitted after receiving the fake result.
-            # Console output keeps all ranks' evidence in this server's process.log.
+        if variant.get("graceful_shutdown"):
+            args.extend(
+                [
+                    "--shutdown_timeout",
+                    "30",
+                    "--frontend_pre_stop_drain_seconds",
+                    "0",
+                    "--dash_sc_grpc_pre_stop_drain_seconds",
+                    "0",
+                    "--backend_post_frontend_drain_seconds",
+                    "0",
+                    "--pre_stop_drain_signal",
+                    "0",
+                ]
+            )
+            env.update(
+                DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS="0",
+                RTP_LLM_STOP_TIMEOUT_MS="30000",
+                RTP_LLM_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS="10",
+            )
+        if dp > 1 or variant.get("graceful_shutdown"):
+            # Keep fake-result progress and shutdown completion from all ranks in process.log.
             env.update(FT_SERVER_TEST="1", LOG_LEVEL="DEBUG")
             # initLogger reloads alog.conf after LOG_LEVEL was applied. Set the
             # console level in that config as well so completion markers survive.
@@ -712,11 +818,17 @@ class PPTopologyTest(unittest.TestCase):
                 ),
                 f"{self.case_name} failed to start: {server.log_file_path}",
             )
+            if variant.get("shutdown_scenario") == "idle_after_startup":
+                self.assert_graceful_shutdown(server, variant)
+                return []
             if dp == 1:
-                return [
+                outputs = [
                     self.generate(server.port, prompt, tokens, self.case_name)
                     for prompt, tokens in self.cases()
                 ]
+                if variant.get("graceful_shutdown"):
+                    self.assert_graceful_shutdown(server, variant)
+                return outputs
 
             progress = FakeBatchProgress(server.log_file_path)
             ports = [
@@ -724,6 +836,15 @@ class PPTopologyTest(unittest.TestCase):
             ]
             self.wait_frontends(ports)
             self.wait_fake_progress(progress, Counter(), list(range(dp)), pp + 1)
+            if variant.get("graceful_shutdown"):
+                for busy_dp in range(dp):
+                    self.generate_on_dp(
+                        server.port, progress, variant, busy_dp, 64, f"before_shutdown,dp={busy_dp}"
+                    )
+                before = progress.poll()
+                self.wait_fake_progress(progress, before, list(range(dp)), pp + 1)
+                self.assert_graceful_shutdown(server, variant)
+                return
             # Exercise both busy/idle directions, then return to each DP after idle.
             for cycle in range(2):
                 for busy_dp in range(dp):
@@ -800,6 +921,7 @@ class PPTopologyTest(unittest.TestCase):
         gpu_ids = [str(x) for x in get_gpu_ids()]
         self.outputs = []
         self.fake_progress = []
+        self.shutdown_evidence = {}
         report = {
             "case": self.case_name,
             "model_type": MODEL_TYPE,
@@ -811,17 +933,21 @@ class PPTopologyTest(unittest.TestCase):
             "topology": variant,
             "outputs": self.outputs,
             "fake_completions": self.fake_progress,
+            "shutdown": self.shutdown_evidence,
             "passed": False,
         }
         try:
             if "prefill_pp" in variant:
                 self.check_pd_variant(checkpoint, gpu_ids, variant)
-            elif variant["dp"] > 1:
+            elif variant["dp"] > 1 or variant.get("shutdown_scenario") == "idle_after_startup":
                 self.run_pdfusion(checkpoint, gpu_ids, variant)
             else:
                 self.assertGreaterEqual(len(gpu_ids), variant["pp"] * variant["tp"])
                 baseline = self.run_baseline(
-                    checkpoint, ",".join(gpu_ids[: variant["tp"]]), variant["tp"]
+                    checkpoint,
+                    ",".join(gpu_ids[: variant["tp"]]),
+                    variant["tp"],
+                    block_size=variant.get("block_size", 16),
                 )
                 actual = self.run_pdfusion(checkpoint, gpu_ids, variant)
                 self.assertEqual(
@@ -1045,8 +1171,8 @@ MULTI_TASK_CASES_LONG = [
 class MultiTaskPromptPPTest(unittest.TestCase):
     """PP multi-task system prompt: build resident KV at startup, reuse it per request.
 
-    PP>1 exercises the direct pipeline build (buildSystemPromptsDirect); the PP=1
-    baseline exercises the proven non-PP preRun build. Both servers share the same
+    PP>1 exercises preRun's synchronous pipeline completion; the PP=1 baseline
+    uses the same constructor with local execution. Both servers share the same
     multi_task_prompt config and the same task_id requests, so both prepend identical
     prefix tokens. Matching greedy output plus reuse_len>0 verifies the PP startup build
     produced correct, reusable resident KV on every stage.
@@ -1056,6 +1182,19 @@ class MultiTaskPromptPPTest(unittest.TestCase):
 
     def id(self):
         return f"{super().id()}[{self.case_name}]"
+
+    def request_cases(self, block_size):
+        """Switch tasks across slot wraps, then send identical user tokens under different resident prefixes."""
+        cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
+        requests_by_task = [
+            case
+            for round_index in range(VARIANTS[self.case_name]["pp"] + 1)
+            for case in (cases if round_index % 2 == 0 else reversed(cases))
+        ]
+        requests_by_task.extend(
+            (task_id, "One, two, three,", 8) for task_id, _, _ in cases
+        )
+        return requests_by_task
 
     def shortDescription(self):
         return self.case_name
@@ -1158,7 +1297,7 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             sp=sp,
             block_size=block_size,
         )
-        cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
+        cases = self.request_cases(block_size)
         try:
             return [
                 self.generate_with_task(server, task_id, prompt, tokens)
@@ -1288,29 +1427,10 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                 ),
                 f"PD prefill failed to start: {prefill.log_file_path}",
             )
-            results = []
-            for task_id, prompt, tokens in MULTI_TASK_CASES:
-                generate_config = {
-                    "is_streaming": False,
-                    "max_new_tokens": tokens,
-                    "min_new_tokens": tokens,
-                    "top_k": 1,
-                    "top_p": 1.0,
-                    "random_seed": 1234,
-                    "return_output_ids": True,
-                    "aux_info": True,
-                    "task_id": task_id,
-                }
-                response = requests.post(
-                    f"http://127.0.0.1:{prefill.port}/",
-                    json={"prompt": prompt, "generate_config": generate_config},
-                    timeout=REQUEST_TIMEOUT,
-                )
-                self.assertEqual(response.status_code, 200, response.text)
-                result = response.json()
-                self.assertTrue(result["finished"], result)
-                results.append(result)
-            return results
+            return [
+                self.generate_with_task(prefill, task_id, prompt, tokens)
+                for task_id, prompt, tokens in self.request_cases(block_size)
+            ]
         finally:
             prefill.stop_server()
             decode.stop_server()
@@ -1325,7 +1445,7 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         sp = variant.get("sp", 0)
         block_size = variant.get("block_size", 16)
         is_pd = variant.get("pd", False)
-        cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
+        cases = self.request_cases(block_size)
         gpu_ids = [str(x) for x in get_gpu_ids()]
         baseline = self.run_with_prompt(
             checkpoint,
@@ -1374,6 +1494,9 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             "passed": False,
         }
         try:
+            self.assertEqual(len(baseline), len(cases))
+            self.assertEqual(len(actual), len(cases))
+            seen_tasks = set()
             for (task_id, prompt, _), base, got in zip(cases, baseline, actual):
                 got_reuse = got["aux_info"]["reuse_len"]
                 base_reuse = base["aux_info"]["reuse_len"]
@@ -1383,12 +1506,14 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                     f"task {task_id!r}: reuse_len={got_reuse} < one full block ({block_size}); "
                     f"resident prefix was not reused",
                 )
-                self.assertEqual(
-                    got_reuse,
-                    base_reuse,
-                    f"task {task_id!r}: PP={pp} reuse_len={got_reuse} != "
-                    f"PP=1 baseline reuse_len={base_reuse}",
-                )
+                if task_id not in seen_tasks:
+                    self.assertEqual(
+                        got_reuse,
+                        base_reuse,
+                        f"task {task_id!r}: PP={pp} reuse_len={got_reuse} != "
+                        f"PP=1 baseline reuse_len={base_reuse}",
+                    )
+                    seen_tasks.add(task_id)
                 self.assertEqual(
                     got["output_ids"],
                     base["output_ids"],

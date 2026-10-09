@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -96,13 +95,6 @@ public:
         return false;
     }
     virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
-
-    // Blocks until startup settles: READY returns OK, FAILED returns the stored error, and a
-    // timeout returns DeadlineExceeded. Engines without a deferred startup phase are ready once
-    // constructed, so the default returns OK immediately.
-    virtual absl::Status waitStartupResult(std::chrono::milliseconds /*timeout*/) {
-        return absl::OkStatus();
-    }
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 

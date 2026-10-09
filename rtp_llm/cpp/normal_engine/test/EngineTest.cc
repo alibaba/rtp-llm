@@ -682,6 +682,23 @@ TEST_F(NormalEngineTest, testParallelDispatchMultipleRequests) {
     engine.reset();
 }
 
+TEST_F(NormalEngineTest, ppReserveCoversTwoWindowsWithoutAddingToMainDSparkReserve) {
+    EngineInitParams params;
+    for (const auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        params.sp_config.type = type;
+        params.sp_config.gen_num_per_cycle = 3;
+        params.parallelism_config.pp_size = 1;
+        params.pd_sep_config.role_type = RoleType::PDFUSION;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
+        params.parallelism_config.pp_size = 2;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 7);
+        params.pd_sep_config.role_type = RoleType::PREFILL;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
+    }
+    params.sp_config.type = SP_TYPE_NONE;
+    EXPECT_EQ(NormalEngine::calculateReserveStep(params), 0);
+}
+
 TEST_F(NormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int>  prompt_1           = {1, 2, 3};

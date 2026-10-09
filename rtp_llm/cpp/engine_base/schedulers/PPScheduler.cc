@@ -279,6 +279,7 @@ size_t PPScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream
 }
 
 bool PPScheduler::waitPredicate() {
+    /** Inflight streams remain in running_streams_: empty schedules must keep advancing PP even with DP=1. */
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
            || !running_streams_.empty();
 }
