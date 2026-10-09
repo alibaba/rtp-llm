@@ -207,6 +207,47 @@ def _build_block(
     )
 
 
+def _v41_prefill_stage_bindings(args: V4Args):
+    """Admit the qualified target-prefill slice before consuming loader weights."""
+    expected = list(range(21)) if args.pp_rank == 0 else list(range(21, 40))
+    if (
+        type(args.pp_size) is not int
+        or args.pp_size != 2
+        or type(args.pp_rank) is not int
+        or args.pp_rank not in (0, 1)
+        or args.n_layers != 40
+        or not isinstance(args.pp_layer_ids, list)
+        or any(type(i) is not int for i in args.pp_layer_ids)
+        or args.pp_layer_ids != expected
+        or args.pp_has_embedding is not (args.pp_rank == 0)
+        or args.pp_has_lm_head is not (args.pp_rank == 1)
+        or args.tp_size != 1
+        or args.ep_size not in (1, 4)
+        or args.is_decode_role
+        or args.gen_num_per_cycle != 0
+        or args.n_mtp_layers != 0
+        or (
+            args.dim,
+            args.hc_mult,
+            args.head_dim,
+            args.index_head_dim,
+            args.window_size,
+        )
+        != (5120, 4, 512, 128, 128)
+        or args.compress_ratios != [0, 0] + [2] * 18 + [1] * 20
+        or any(
+            type(i) is not int or not 0 <= i < 21
+            for i in args.v41_config.get("engram_layer_ids", ())
+        )
+    ):
+        raise NotImplementedError(
+            "V4.1 transformer PP requires the qualified gen=0 21/19 prefill stages"
+        )
+    from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings
+
+    return dsv41_cache_bindings(args.v41_config, 2, args.pp_rank)
+
+
 class V4Transformer(nn.Module):
     """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
 
@@ -225,14 +266,13 @@ class V4Transformer(nn.Module):
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
         self.fp8_kv_cache = args.fp8_kv_cache
+        v41_pp_bindings = ()
         if args.v41_config is not None:
             if args.pp_size != 1 or (
                 args.pp_layer_ids is not None
                 and args.pp_layer_ids != list(range(args.n_layers))
             ):
-                raise NotImplementedError(
-                    "V4.1 transformer PP requires imported attention and delayed mHC state"
-                )
+                v41_pp_bindings = _v41_prefill_stage_bindings(args)
             if not args.fp8_kv_cache or self.commit_only:
                 raise NotImplementedError(
                     "V4.1 requires the target paged-cache runtime"
@@ -247,7 +287,11 @@ class V4Transformer(nn.Module):
             if args.pp_layer_ids
             else list(range(args.n_layers))
         )
-        shared_attention = {}
+        shared_attention = (
+            {"cache_bindings": {(b.source_layer_id, b.tag): b for b in v41_pp_bindings}}
+            if v41_pp_bindings
+            else {}
+        )
         self.layers = nn.ModuleList(
             [
                 _build_block(

@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4.test.test_v41_stage_slices_sm120 import (
     assert_cleared,
     capture_frame,
     model_for,
+    native_stage_for,
     project_control,
     tables,
     wide_fixture,
@@ -173,12 +174,16 @@ def call(model, cache, ids, positions, lengths, prefixes, pages, cp=None, hidden
         model.set_cp_info(None, 1, 0)
 
 
-def run_controls(rank, group):
+def run_controls(rank, group, native_construction=False):
     torch.manual_seed(41600 + (rank // 4) * 100)
     args, weights = wide_fixture()
     cp1, whole = model_for(args, weights), model_for(args, weights)
-    first, _ = project_control(model_for(args, weights), 0)
-    second, shared = project_control(model_for(args, weights), 1)
+    if native_construction:
+        first, _ = native_stage_for(args, weights, 0)
+        second, shared = native_stage_for(args, weights, 1)
+    else:
+        first, _ = project_control(model_for(args, weights), 0)
+        second, shared = project_control(model_for(args, weights), 1)
     oracle_cache = NativeTaggedCache([l.attn for l in cp1.layers], gen=0, pages=6)
     whole_cache = NativeTaggedCache([l.attn for l in whole.layers], gen=0, pages=6)
     first_cache = NativeTaggedCache([l.attn for l in first.layers], gen=0, pages=6)
@@ -457,13 +462,14 @@ def run_controls(rank, group):
                     "cache_bytes_exact": True,
                     "transport_bytes_exact": True,
                     "selections_exact": True,
+                    "native_construction": native_construction,
                 }
             ),
             flush=True,
         )
 
 
-def run_rank(rank, port):
+def run_rank(rank, port, native_construction=False):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -494,7 +500,7 @@ def run_rank(rank, port):
             range(rank // 4 * 4, rank // 4 * 4 + 4)
         )
         with torch.inference_mode():
-            run_controls(rank, group)
+            run_controls(rank, group, native_construction)
         dist.barrier()
     finally:
         destroy_distributed_environment()

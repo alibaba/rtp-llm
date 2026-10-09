@@ -115,6 +115,49 @@ def model_for(args, weights):
     return model
 
 
+def native_stage_for(args, weights, rank):
+    """Construct a stage with only its actual owned loader entries."""
+    ids = list(range(21)) if rank == 0 else list(range(21, 40))
+    globals_owned = {W.embedding} if rank == 0 else {W.final_ln_gamma, W.lm_head}
+    owned = SimpleNamespace(
+        global_weights={
+            key: value
+            for key, value in weights.global_weights.items()
+            if key in globals_owned
+        },
+        weights=[
+            dict(layer) if i in ids else {} for i, layer in enumerate(weights.weights)
+        ],
+    )
+    model = model_for(
+        replace(
+            args,
+            pp_size=2,
+            pp_rank=rank,
+            pp_layer_ids=ids,
+            pp_has_embedding=rank == 0,
+            pp_has_lm_head=rank == 1,
+        ),
+        owned,
+    )
+    shared = model.layers[0].attn._shared_attention
+    assert list(shared["layers"]) == ids
+    assert all(layer.attn.cache_layer_id == i for i, layer in enumerate(model.layers))
+    assert tuple(shared["cache_bindings"].values()) == dsv41_cache_bindings(
+        TEXT, 2, rank
+    )
+    if rank == 0:
+        assert (
+            model.embed is not None
+            and model.norm is model.head_weight is model.head_hc is None
+        )
+    else:
+        assert model.embed is None and model.norm is not None
+        assert model.layers[0].attn_hc._previous_ref is None
+        assert not any(layer.attn.is_kv_source for layer in model.layers)
+    return model, shared
+
+
 def project_control(model, rank):
     """Test-only projection of an initialized owner, preserving its layer loop."""
     ids = list(range(21)) if rank == 0 else list(range(21, 40))
