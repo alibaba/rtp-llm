@@ -24,6 +24,7 @@ public:
                        bool pdfusion = false) {
         static std::once_flag runtime_once;
         std::call_once(runtime_once, [&]() {
+            AUTIL_ROOT_LOG_CONFIG();
             initRuntime(static_cast<int>(parallelism.local_rank), false, false, MlaOpsType::AUTO);
         });
         RTP_LLM_CHECK(config.num_layers == 40 && config.gen_num_per_cycle == 0);

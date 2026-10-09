@@ -31,6 +31,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     save_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
+    reference_precision,
+)
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
     _locked,
@@ -42,7 +45,7 @@ from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 from rtp_llm.utils.model_weight import W
 
 
-def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
+def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, context=256):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     os.environ.update(
@@ -73,12 +76,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
     completed = threading.Event()
     stop_requested = threading.Event()
     stopped = threading.Event()
+    precision = os.environ.get("DSV41_TEST_REFERENCE_PRECISION", "baseline")
     try:
-        with torch.inference_mode():
+        with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
                 assert torch.cuda.mem_get_info()[0] > 60 * 2**30
-            config, kv_config = load_configuration(Path(checkpoint))
+            config, kv_config = load_configuration(
+                Path(checkpoint), max_seq_len=context
+            )
             parallelism, loader = make_loader(config, kv_config, 8, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
@@ -135,7 +141,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
                 result = initialize(resource)
                 print(
                     f"rank={rank} native initialization seconds={time.monotonic() - began:.2f} "
-                    f"allocated={torch.cuda.memory_allocated()}",
+                    f"allocated={torch.cuda.memory_allocated()} precision={precision}",
                     flush=True,
                 )
                 return result
@@ -171,6 +177,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
                         {
                             "input_ids": request.input_ids.tolist(),
                             "cache_spans": request.v41_cache_spans.tolist(),
+                            "precision_profile": precision,
                         },
                     )
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
@@ -218,8 +225,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
                     calls["idle"] += 1
                 return PyModelOutputs(hidden)
 
+            def fail_fast_forward(request, fmha_impl=None):
+                try:
+                    return checked_forward(request, fmha_impl)
+                except BaseException:
+                    # Native loop retries would hide the original test failure
+                    # and leave peers waiting in the next collective round.
+                    traceback.print_exc()
+                    sys.stderr.flush()
+                    os._exit(1)
+
             with patch.object(model, "initialize", checked_initialize), patch.object(
-                model, "forward", checked_forward
+                model, "forward", fail_fast_forward
             ), patch.object(_PinnedSharedTable, "register_cuda", checked_register):
                 engine = native_ops.NativeEngine(
                     model, config, parallelism, head, pdfusion=new_tokens > 1
@@ -286,7 +303,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
                 assert not list(Path(directory).glob("*.lease.*"))
                 assert not list(Path(directory).glob("*.json"))
                 print(
-                    f"checkpoint-to-native-engine full_nas={full} new_tokens={new_tokens} generation liveness PASS",
+                    f"checkpoint-to-native-engine full_nas={full} new_tokens={new_tokens} "
+                    f"context={context} precision={precision} generation liveness PASS",
                     flush=True,
                 )
     except BaseException:
@@ -305,31 +323,54 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens):
 
 
 class V41CheckpointEngineSM120Test(unittest.TestCase):
-    def run_checkpoint(self, checkpoint, directory, prompts, *, full, new_tokens=1):
+    def run_checkpoint(
+        self, checkpoint, directory, prompts, *, full, new_tokens=1, context=256
+    ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         mp.spawn(
             run_rank,
-            args=(port, str(checkpoint), str(directory), prompts, full, new_tokens),
+            args=(
+                port,
+                str(checkpoint),
+                str(directory),
+                prompts,
+                full,
+                new_tokens,
+                context,
+            ),
             nprocs=8,
             join=True,
         )
 
-    def run_bounded_checkpoint(self, new_tokens):
+    def run_bounded_checkpoint(self, new_tokens, context=256):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            args, weights = fixture(experts=16, full_schedule=True)
+            args, weights = fixture(experts=16, full_schedule=True, max_seq_len=context)
             save_checkpoint(root, args, weights)
             del weights
             gc.collect()
             torch.cuda.empty_cache()
             directory = root / "cache"
             directory.mkdir()
+            prompts = (
+                [
+                    [(start + i) % 127 for i in range(count)]
+                    for start, count in ((3, 253), (6, 503))
+                ]
+                if context > 256
+                else [[3, 4, 5], [6, 7]]
+            )
             self.run_checkpoint(
-                root, directory, [[3, 4, 5], [6, 7]], full=False, new_tokens=new_tokens
+                root,
+                directory,
+                prompts,
+                full=False,
+                new_tokens=new_tokens,
+                context=context,
             )
 
     def test_bounded_checkpoint_cold_engine(self):
@@ -337,6 +378,9 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
 
     def test_bounded_checkpoint_cold_decode(self):
         self.run_bounded_checkpoint(9)
+
+    def test_two_page_bounded_checkpoint_cold_decode(self):
+        self.run_bounded_checkpoint(9, context=512)
 
     @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1",

@@ -162,6 +162,7 @@ py_test(
     name = "test_v41_checkpoint_engine_sm120",
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
+        "v41_reference_precision.py",
         "test_v41_loader_worker_sm120.py",
         "test_v41_worker_sm120.py",
         "test_v41_transformer_sm120.py",
