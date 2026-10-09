@@ -543,6 +543,36 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise NotImplementedError("V4.1 worker CUDA graphs are not integrated")
         return None
 
+    @torch.inference_mode()
+    def prepare_native_pp_prefill(self, inputs):
+        """Agree on native CP admission; PP execution remains a separate gate."""
+        from rtp_llm.models_py.modules.dsv4.native_pp_prefill import (
+            prepare_native_pp_prefill_dispatch,
+        )
+
+        with self._worker_lock:
+            self._check_worker()
+            if self._worker_state != "ready":
+                raise RuntimeError("V4.1 worker is not initialized")
+            if self._v4_args.pp_size != 2:
+                raise NotImplementedError("V4.1 native PP preflight requires CEP4PP2")
+            dispatch = error = None
+            try:
+                dispatch = prepare_native_pp_prefill_dispatch(self, inputs)
+            except Exception as exc:
+                error = exc
+            with torch.cuda.stream(self._worker_stream):
+                self._agree_dp(
+                    error,
+                    (
+                        "native-pp-prefill-preflight",
+                        None if dispatch is None else dispatch.schedule,
+                    ),
+                    self._weight_device(),
+                    native_dispatch=True,
+                )
+            return dispatch
+
     def _validate_decode(self, inputs, attn):
         from rtp_llm.models_py.modules.dsv4.decode.forward import (
             build_metadata_eager,

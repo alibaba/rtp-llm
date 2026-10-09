@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -157,7 +158,8 @@ public:
 
     torch_ext::KVCache cache() const {
         requireOpen();
-        return torch_ext::KVCache(manager_->getMainModelGroupedCacheLayerLayout());
+        return torch_ext::KVCache(manager_->getMainModelGroupedCacheLayerLayout(),
+                                  manager_->allLayerCacheBase().topologyPtr());
     }
 
     V41PPCacheBatchPtr prepareLocal(const torch::Tensor& spans,
@@ -201,6 +203,72 @@ public:
     void checkLocalConfig(const ModelConfig& model, const ParallelismConfig& parallelism) {
         requireOpen();
         V41PPLocalCache candidate(manager_, model, parallelism);
+    }
+
+    torch_ext::PyModelInputs localInputs(const V41PPCacheBatchPtr& batch, torch_ext::PyModelInputs inputs) {
+        requireOpen();
+        if (!local_cache_ || !local_cache_->ownsBatch(batch)) {
+            throw std::invalid_argument("native PP local inputs require this owner's admitted batch");
+        }
+        inputs.v41_cache_spans = torch::empty({static_cast<int64_t>(batch->bindings().size()), 6}, torch::kInt64);
+        auto* rows = inputs.v41_cache_spans.data_ptr<int64_t>();
+        for (const auto& binding : batch->bindings()) {
+            std::copy(binding.span.begin(), binding.span.end(), rows);
+            rows += 6;
+        }
+        inputs.v41_cache_leases = batch->leases();
+        return inputs;
+    }
+
+    torch_ext::PyModelInputs splitLocalInputs(const V41PPCacheBatchPtr& batch,
+                                               const torch::Tensor& ids,
+                                               const torch::Tensor& windows) {
+        requireOpen();
+        if (!local_cache_ || !local_cache_->ownsBatch(batch) || ids.device().type() != torch::kCPU
+            || ids.scalar_type() != torch::kInt32 || ids.dim() != 1 || !ids.is_contiguous()
+            || windows.device().type() != torch::kCPU || windows.scalar_type() != torch::kInt32
+            || windows.sizes().vec() != std::vector<int64_t>{ids.numel(), 4} || !windows.is_contiguous()) {
+            throw std::invalid_argument("native PP CP fixture requires its admitted batch and complete host tokens");
+        }
+        GptModelInputs global;
+        global.combo_tokens = ids.clone();
+        global.input_lengths = torch::empty({static_cast<int64_t>(batch->bindings().size())}, torch::kInt32);
+        global.prefix_lengths = torch::empty_like(global.input_lengths);
+        global.sequence_lengths = torch::empty({0}, torch::kInt32);
+        global.engram_token_windows = windows.clone();
+        int64_t total = 0;
+        for (size_t row = 0; row < batch->bindings().size(); ++row) {
+            const auto& span = batch->bindings()[row].span;
+            global.input_lengths.data_ptr<int32_t>()[row] = span[5];
+            global.prefix_lengths.data_ptr<int32_t>()[row] = span[4];
+            total += span[5];
+        }
+        if (total != ids.numel()) {
+            throw std::invalid_argument("native PP CP fixture token count disagrees with spans");
+        }
+        torch_ext::PyContextParallelParams cp;
+        ZigZagProcessor processor(parallelism_, false);
+        processor.handleInputs(global, cp);
+        torch_ext::PyModelInputs local;
+        local.input_ids = global.combo_tokens;
+        local.combo_position_ids = global.combo_position_ids;
+        local.engram_token_windows = global.engram_token_windows;
+        const auto table = batch->kernelBlockTable().squeeze(-1);
+        for (const auto& group : manager_->allLayerCacheBase().topology().groups()) {
+            torch_ext::PyAttentionInputs attention;
+            attention.is_prefill = true;
+            attention.input_lengths = global.input_lengths;
+            attention.prefix_lengths = global.prefix_lengths;
+            attention.sequence_lengths = global.sequence_lengths;
+            attention.combo_position_ids = global.combo_position_ids;
+            attention.context_parallel_info = cp;
+            attention.cu_seqlens = torch::cat({torch::zeros({1}, torch::kInt32),
+                                             global.input_lengths.cpu().cumsum(0).to(torch::kInt32)});
+            attention.kv_cache_kernel_block_id = table.narrow(1, group.canonical_idx, 1).contiguous();
+            attention.kv_cache_kernel_block_id_device = attention.kv_cache_kernel_block_id.cuda();
+            local.attention_inputs_by_tag.emplace(group.tag, std::move(attention));
+        }
+        return localInputs(batch, std::move(local));
     }
 
     void sendLocal(const std::map<std::string, torch::Tensor>& tensors, const V41PPCacheBatchPtr& batch) {
@@ -379,6 +447,8 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def("retire_local", &rtp_llm::test::V41NativePPTransportTest::retireLocal)
         .def_property_readonly("active_local", &rtp_llm::test::V41NativePPTransportTest::activeLocal)
         .def("check_local_config", &rtp_llm::test::V41NativePPTransportTest::checkLocalConfig)
+        .def("local_inputs", &rtp_llm::test::V41NativePPTransportTest::localInputs)
+        .def("split_local_inputs", &rtp_llm::test::V41NativePPTransportTest::splitLocalInputs)
         .def("send_local", &rtp_llm::test::V41NativePPTransportTest::sendLocal)
         .def("receive_local", &rtp_llm::test::V41NativePPTransportTest::receiveLocal)
         .def_property_readonly("cache", &rtp_llm::test::V41NativePPTransportTest::cache)

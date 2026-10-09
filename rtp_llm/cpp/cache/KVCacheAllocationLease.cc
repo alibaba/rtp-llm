@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/BlockPool.h"
 
 namespace rtp_llm {
 

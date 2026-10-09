@@ -2,6 +2,7 @@
 #pragma once
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
@@ -227,7 +228,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "kernel_tokens_per_block=%zu",
                                 params.tokens_per_block,
                                 params.kernel_tokens_per_block);
-        init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        init_resources.kv_cache.emplace(
+            params.kv_cache_layer_layout.value(),
+            params.cache_manager ? params.cache_manager->allLayerCacheBase().topologyPtr() : nullptr);
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
