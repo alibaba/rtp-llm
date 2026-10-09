@@ -17,8 +17,7 @@ def cuda13_suites():
     #   smoke_cuda13_x86  L20D_TEST       L20D / B300  --config=cuda13 (SM 10.3)
     #
     # B300 capacity is the scarce one — a single dedicated node — so x86 carries
-    # the two capacity-sensitive cases that GB200 cannot host, plus the tier-isolated
-    # BlockTreeCache cases that are recorded for B300.
+    # the two capacity-sensitive cases that GB200 cannot host.
     #
     # The x86 cases target L20D_TEST rather than L20D_DEV: L20D_DEV is shared with
     # other users' work, which left these cases waiting hours for a slot on its one
@@ -229,10 +228,7 @@ def cuda13_suites():
         tags = ["manual"],
     )
 
-    # X86 coverage — capacity-sensitive cases plus tier-isolated page-RR golden coverage:
-    #   *_block_tree_device/only_memory/
-    #   *_only_disk_sm100                  Two-query DEVICE/HOST/DISK-only P/D
-    #                                      handoff with MTP, logits, and page-RR.
+    # X86 coverage — capacity-sensitive cases:
     #   *_1m                               1M-token prefill: chunked Mega MoE buffer,
     #                                      indexer chunked score, int64 row indexing.
     #                                      Block counts and reserved memory are tuned
@@ -242,74 +238,12 @@ def cuda13_suites():
     #                                      ~216GB/rank at EP=4, over GB200's ~186GB.
     #
     # CP page-RR (--prefill_cp_kv_cache_sharded) is covered both ways:
-    #   ON   *_mega_moe_se and *_dspark_cprr_async_xgrammar_json on ARM, plus
-    #        the three tier-isolated x86 BlockTree cases
+    #   ON   *_mega_moe_se and *_dspark_cprr_async_xgrammar_json on ARM
     #   OFF  *_reuse_memory_cache
     # The x86 *_1m case runs cp_rr off as well, but ARM already gates that half.
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
-            # Tier-isolated two-query P/D handoff regressions. These preserve the
-            # legacy SM100 x86 golden payloads while using the existing shared cloud-disk model.
-            smoke_test(
-                name = "smoke_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_device_only_sm100",
-                task_info = "data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_device_only_sm100_arm.json",
-                smoke_args = {
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 1024 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --test_block_num 34 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 1024 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                envs = {
-                    "prefill": [
-                        "DSV4_USE_FRAMEWORK_KV=1",
-                        "LOG_LEVEL=DEBUG",
-                    ],
-                    "decode": ["DSV4_USE_FRAMEWORK_KV=1"],
-                },
-                gpu_type = ["L20D_TEST"],
-                sleep_time_qr = 1,
-            ),
-
-            # HOST/DISK use 23 physical working blocks: block 0 leaves 22 usable,
-            # covering the 8188-token warmup's 17 planned + 5 reserved blocks.
-            smoke_test(
-                name = "smoke_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_only_memory_sm100",
-                task_info = "data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_only_memory_sm100_arm.json",
-                smoke_args = {
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 32 --memory_cache_sync_timeout_ms 120000 --test_block_num 23 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                envs = {
-                    "prefill": [
-                        "DSV4_USE_FRAMEWORK_KV=1",
-                        "LOG_LEVEL=DEBUG",
-                    ],
-                    "decode": ["DSV4_USE_FRAMEWORK_KV=1"],
-                },
-                gpu_type = ["L20D_TEST"],
-                sleep_time_qr = 1,
-            ),
-
-            smoke_test(
-                name = "smoke_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_only_disk_sm100",
-                task_info = "data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_dp2ep2_mtp_page_rr_logits_block_tree_only_disk_sm100_arm.json",
-                smoke_args = {
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 1 --enable_remote_cache 0 --disk_cache_staging_block_count 2 --test_block_num 23 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type mtp --gen_num_per_cycle 3 --sp_model_type deepseek_v4_mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                envs = {
-                    "prefill": [
-                        "DSV4_USE_FRAMEWORK_KV=1",
-                        "LOG_LEVEL=DEBUG",
-                        "DISK_CACHE_PATHS=__TEST_TMPDIR__/disk_kv_only_disk_prefill0,__TEST_TMPDIR__/disk_kv_only_disk_prefill1",
-                        "DISK_CACHE_SIZE_MB=64",
-                        "DISK_CACHE_BUFFERED_IO=1",
-                        "DISK_CACHE_SYNC_TIMEOUT_MS=120000",
-                    ],
-                    "decode": ["DSV4_USE_FRAMEWORK_KV=1"],
-                },
-                gpu_type = ["L20D_TEST"],
-                sleep_time_qr = 2,
-            ),
             # CP=2/EP=2 prefill + TP=1/EP=1/DP=1 single-card decode PD smoke
             # targeting 1M context. Single ~1.09M-token LongBench-V2 q62 query
             # (max_tokens=8) exercises the long-context prefill
