@@ -23,6 +23,7 @@ SERVICE_ID = "aigc.text-generation.generation.engine_service"
 PREFILL_DOMAIN = "smoke.prefill"
 DECODE_DOMAIN = "smoke.decode"
 DECISION_METRIC = "flexlb_app_cache_affinity_decision_qps_total"
+DEFAULT_TIMEOUT_SECONDS = 900
 JAVA_HOMES = (
     "/opt/taobao/install/ajdk21_21.0.6.0.6",
     "/opt/taobao/java21",
@@ -122,7 +123,7 @@ class ManagedProcess:
 class CacheAffinitySmoke:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.deadline = time.monotonic() + getattr(args, "timeout_seconds", 6900)
+        self.deadline = time.monotonic() + args.timeout_seconds
         self.processes: List[ManagedProcess] = []
         self.port_locks = []
         output_root = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
@@ -310,7 +311,10 @@ class CacheAffinitySmoke:
         for process in self.processes:
             try:
                 process.log_stream.flush()
-                lines = process.log_path.read_text(errors="replace").splitlines()
+                with process.log_path.open("rb") as log_file:
+                    size = log_file.seek(0, os.SEEK_END)
+                    log_file.seek(max(0, size - 64 * 1024))
+                    lines = log_file.read().decode(errors="replace").splitlines()
             except OSError:
                 continue
             logging.error(
@@ -393,6 +397,7 @@ class CacheAffinitySmoke:
             f"--server.port={http_port}",
             f"--management.server.port={management_port}",
             "--spring.profiles.active=test",
+            "--flexlb.monitor.provider=micrometer",
             "--flexlb.monitor.metric-whitelist=flexlb_",
         ]
         return self._spawn("flexlb-process", command, env, cwd=self.log_dir)
@@ -844,10 +849,7 @@ class CacheAffinitySmoke:
         expected_decision: str,
         prefill_ports: Sequence[int],
     ) -> str:
-        expected_workers = {
-            address.rsplit(":", 1)[0]
-            for address in self._addresses(prefill_ports).split(",")
-        }
+        expected_workers = set(self._addresses(prefill_ports).split(","))
         last_deltas: Dict[Tuple[str, str, str], float] = {}
         while True:
             self._remaining(
@@ -1177,7 +1179,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-decisions", required=True)
     parser.add_argument("--max-extra-ttft-ms", required=True, type=int)
     parser.add_argument("--prefill-cost-formula")
-    parser.add_argument("--timeout-seconds", type=float, default=6900)
+    parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     if args.max_extra_ttft_ms < 0:
         parser.error("--max-extra-ttft-ms must be nonnegative")
