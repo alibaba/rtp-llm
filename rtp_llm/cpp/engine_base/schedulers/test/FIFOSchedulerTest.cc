@@ -4289,4 +4289,56 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+TEST_F(FIFOSchedulerTest, separateQueryAndKvBudgetsAllowPrefixReuseWithoutPaddedRectangle) {
+    auto cache_manager = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    runtime_config.fifo_scheduler_config.max_batch_kv_len      = 101;
+    auto cached = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    cached->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(cached->moveToNext(), StreamState::RUNNING);
+    cached->setReuseLength(59);
+    cached->generate_status_->status.store(StreamState::WAITING);
+    auto candidate = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto admits    = [&](int64_t kv_budget, int query_budget) {
+        runtime_config.fifo_scheduler_config.max_batch_kv_len      = kv_budget;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = query_budget;
+        FIFOScheduler configured(
+            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        return configured.evaluateRunningMemory({cached}, candidate);
+    };
+    EXPECT_TRUE(admits(101, 100));
+    EXPECT_FALSE(admits(99, 100));
+    EXPECT_FALSE(admits(101, 40));
+    EXPECT_TRUE(admits(101, 41));
+    EXPECT_FALSE(admits(0, 100));
+}
+
+TEST_F(FIFOSchedulerTest, separateTokenBudgetsRejectOverflowingAccumulatedCost) {
+    auto cache_manager = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    runtime_config.fifo_scheduler_config.max_batch_kv_len      = 101;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    auto       candidate = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(2, 1));
+    const auto large     = std::numeric_limits<size_t>::max();
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, large, 1, 1, 1, candidate));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 1, large, 1, 1, candidate));
+    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 98, 97, 98, 1, candidate));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 99, 97, 99, 1, candidate));
+}
+
 }  // namespace rtp_llm
