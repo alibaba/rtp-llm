@@ -37,6 +37,13 @@ py_library(
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
 )
 
+py_library(
+    name = "dsv41_sparse_arithmetic_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_arithmetic_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
+)
+
 py_binary(
     name = "checkpoint_inventory",
     srcs = ["checkpoint_inventory.py"],
