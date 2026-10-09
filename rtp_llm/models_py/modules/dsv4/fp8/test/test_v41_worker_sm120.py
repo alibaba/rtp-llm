@@ -28,7 +28,7 @@ from rtp_llm.ops import KvCacheDataType, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
-def checkpoint(root, *, full_schedule=False):
+def checkpoint(root, *, full_schedule=False, hidden_size=512):
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(
             WordLevel({f"token{i}": i for i in range(128)}, unk_token="token0")
@@ -39,10 +39,12 @@ def checkpoint(root, *, full_schedule=False):
     tensors = {
         "embed.weight": (torch.randn(4000, 32) * 0.25).to(torch.float8_e4m3fn),
         "embed.scale": torch.ones(4000, 1).to(torch.float8_e8m0fnu),
-        "wkv.weight": (torch.randn(2560, 384) * 0.025).to(torch.float8_e4m3fn),
-        "wkv.scale": torch.ones(80, 12).to(torch.float8_e8m0fnu),
-        "q_weight": torch.ones(4, 512, dtype=torch.bfloat16),
-        "k_weight": torch.ones(4, 512, dtype=torch.bfloat16),
+        "wkv.weight": (torch.randn(5 * hidden_size, 384) * 0.025).to(
+            torch.float8_e4m3fn
+        ),
+        "wkv.scale": torch.ones(5 * hidden_size // 32, 12).to(torch.float8_e8m0fnu),
+        "q_weight": torch.ones(4, hidden_size, dtype=torch.bfloat16),
+        "k_weight": torch.ones(4, hidden_size, dtype=torch.bfloat16),
     }
     layers = [1, 14] if full_schedule else [1]
     tensors = {
@@ -57,7 +59,7 @@ def checkpoint(root, *, full_schedule=False):
     return {
         "checkpoint_path": str(root),
         "num_hidden_layers": 40 if full_schedule else 6,
-        "hidden_size": 512,
+        "hidden_size": hidden_size,
         "hc_mult": 4,
         "rms_norm_eps": 1e-20,
         "engram_layer_ids": layers,
@@ -835,7 +837,7 @@ class V41WorkerSM120Test(unittest.TestCase):
         model = self.worker(initialize=False)
         for field in ("tp_size", "ep_size", "dp_size", "pp_size"):
             with patch.object(model._v4_args, field, 2):
-                with self.assertRaisesRegex(NotImplementedError, "PP1/CP1"):
+                with self.assertRaisesRegex(NotImplementedError, "PP1/CP1|CEP4PP2"):
                     model.initialize(resources())
         for field in ("is_decode_role", "is_speculative"):
             with self.assertRaises(NotImplementedError):

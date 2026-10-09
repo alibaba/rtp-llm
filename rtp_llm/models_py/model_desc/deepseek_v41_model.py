@@ -13,7 +13,7 @@ import json
 import os
 import shutil
 import threading
-from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -86,9 +86,74 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._worker_state = "new"
         self._worker_stream = None
         self._dp_group = None
+        self._stage_agreement = None
 
     def _configure_dp_group(self):
         args = self._v4_args
+        if args.pp_size == 2:
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.ep_stage_context import (
+                BACKEND_FORK_NCCL_MXFP8,
+                EpStageContext,
+                resolve_pp_ep_opt_in,
+            )
+            from rtp_llm.models_py.distributed.rank_layout import Group
+            from rtp_llm.models_py.modules.dsv4.transformer import (
+                _v41_prefill_stage_bindings,
+            )
+            from rtp_llm.ops import RoleType
+
+            pcfg = self.parallelism_config
+            enabled, backend = resolve_pp_ep_opt_in(pcfg)
+            if (
+                (
+                    pcfg.pp_size,
+                    pcfg.dp_size,
+                    pcfg.tp_size,
+                    pcfg.ep_size,
+                    pcfg.world_size,
+                )
+                != (2, 1, 4, 4, 8)
+                or (args.dp_size, args.ep_size, args.world_size) != (1, 4, 8)
+                or pcfg.role_type != RoleType.PREFILL
+                or not pcfg.local_cp_enabled()
+                or not enabled
+                or backend != BACKEND_FORK_NCCL_MXFP8
+                or not pcfg.pp_ep_enabled
+                or pcfg.pp_ep_backend != backend
+                or list(pcfg.pp_stage_layer_counts) != [21, 19]
+                or args.pp_rank != pcfg.pp_rank
+                or args.world_rank != pcfg.world_rank
+                or args.ep_rank != pcfg.ep_rank
+                or pcfg.tp_rank != pcfg.ep_rank
+            ):
+                raise NotImplementedError(
+                    "V4.1 PP workers require the exact opted-in CEP4PP2 PREFILL topology"
+                )
+            _v41_prefill_stage_bindings(args)
+            context = EpStageContext.build(pcfg, backend=backend)
+            dist = torch.distributed
+            if (
+                dist.get_backend(context.process_group) != "nccl"
+                or dist.get_world_size() != 8
+                or args.ep_rank != context.group_rank
+                or args.dp_rank != 0
+            ):
+                raise ValueError(
+                    "V4.1 CEP4PP2 requires its registered NCCL STAGE roster"
+                )
+            if self._dp_group is not None and (
+                self._dp_group is not context.process_group
+                or self._stage_agreement != context
+            ):
+                raise RuntimeError("V4.1 stage agreement changed; replace the worker")
+            if context.process_group is not collective_torch._get_group(Group.STAGE):
+                raise ValueError(
+                    "V4.1 stage agreement requires the registered STAGE group"
+                )
+            self._dp_group = context.process_group
+            self._stage_agreement = context
+            return
         if (args.dp_size, args.ep_size, args.world_size) == (1, 1, 1):
             return
         if (args.dp_size, args.ep_size, args.world_size) != (8, 8, 8):
@@ -107,6 +172,37 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise RuntimeError("V4.1 DP group changed; replace the worker")
         self._dp_group = dist.group.WORLD
 
+    def _agreement_config(self):
+        # dataclasses.asdict deep-copies ProcessGroup, which cannot be pickled.
+        # Bind its verified immutable metadata while excluding peer-local ranks.
+        config = {
+            field.name: getattr(self._v4_args, field.name)
+            for field in fields(self._v4_args)
+            if not field.name.endswith("_rank") and field.name != "moe_stage_context"
+        }
+        context = self._v4_args.moe_stage_context
+        if context is not None:
+            if self._stage_agreement is None or context != self._stage_agreement:
+                raise RuntimeError(
+                    "V4.1 expert context disagrees with worker agreement"
+                )
+            config["moe_stage_context"] = {
+                "world_ranks": context.world_ranks,
+                "group_size": context.group_size,
+                "pp_rank": context.pp_rank,
+                "generation": context.generation,
+                "backend": context.backend,
+            }
+        if self._stage_agreement is not None:
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.rank_layout import Group
+
+            if self._dp_group is not collective_torch._get_group(Group.STAGE):
+                raise RuntimeError(
+                    "V4.1 registered stage group changed; replace the worker"
+                )
+        return config
+
     def _agree_dp(self, error, phase, device, *, native_dispatch=False):
         recoverable = isinstance(error, (ValueError, NotImplementedError))
         status = (
@@ -115,11 +211,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         if self._dp_group is not None:
             # Bind the whole model schedule before any rank enters layer
             # collectives. Request lengths/IDs remain rank-local.
-            config = {
-                key: value
-                for key, value in asdict(self._v4_args).items()
-                if not key.endswith("_rank")
-            }
+            config = self._agreement_config()
             options = {
                 key: os.environ.get(key)
                 for key in (
@@ -139,7 +231,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
             signature = torch.tensor(
                 [status, *digest], dtype=torch.uint8, device=device
             ).view(1, 33)
-            peers = torch.empty((8, 33), dtype=torch.uint8, device=device)
+            group_size = (
+                self._stage_agreement.group_size
+                if self._stage_agreement is not None
+                else 8
+            )
+            peers = torch.empty((group_size, 33), dtype=torch.uint8, device=device)
             try:
                 torch.distributed.all_gather_into_tensor(
                     peers, signature, group=self._dp_group
@@ -181,6 +278,28 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise RuntimeError("V4.1 workers must be spawned, not inherited after fork")
         if self._worker_state in ("failed", "closing", "closed"):
             raise RuntimeError(f"V4.1 worker is {self._worker_state}")
+
+    def _pp_ep_grouped_kernel_available(self) -> bool:
+        # V4.1's group-32 recipe consumes DeepGEMM, independently of V4's
+        # FlashInfer group-32 scale interleave/graph provider.
+        from importlib.metadata import PackageNotFoundError, version
+
+        from packaging.version import Version
+
+        try:
+            import deep_gemm
+
+            if Version(version("deep-gemm")) < Version("2.6.0"):
+                return False
+        except (ImportError, OSError, RuntimeError, PackageNotFoundError):
+            return False
+        return all(
+            callable(getattr(deep_gemm, name, None))
+            for name in (
+                "m_grouped_fp8_fp4_gemm_nt_contiguous",
+                "m_grouped_fp8_fp4_gemm_nt_masked",
+            )
+        )
 
     def _plan_engram(self):
         config = self._v4_args.v41_config
@@ -231,12 +350,13 @@ class DeepSeekV41Model(DeepSeekV4Model):
         with self._worker_lock:
             self._check_worker()
             args = self._v4_args
+            stage_prefill = args.pp_size == 2
             if (
-                args.pp_size != 1
+                args.pp_size not in (1, 2)
                 or args.tp_size != 1
-                or self.parallelism_config.local_cp_enabled()
+                or (self.parallelism_config.local_cp_enabled() and not stage_prefill)
                 or self.parallelism_config.enable_sp
-                or self.parallelism_config.ffn_tp_size != 1
+                or self.parallelism_config.get_ffn_tp_size() != 1
                 or self.parallelism_config.ffn_sp_size != 1
                 or self.parallelism_config.use_ub_comm
                 or not args.fp8_kv_cache
@@ -246,7 +366,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 or self._gen_num_per_cycle not in (0, 1)
             ):
                 raise NotImplementedError(
-                    "V4.1 worker currently requires eager PP1/CP1/TP1 prefill"
+                    "V4.1 worker requires eager PP1/CP1/TP1 prefill/decode or CEP4PP2 target prefill"
                 )
             self._configure_dp_group()
             if self._materialized:
@@ -486,6 +606,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 layer.attn._require_qualified_decode(probe, metadata)
 
     def _validate_forward(self, inputs, fmha_impl):
+        if self._v4_args.pp_size != 1:
+            raise NotImplementedError(
+                "V4.1 PP worker forward requires qualified native frame transport"
+            )
         if fmha_impl is not None or torch.cuda.is_current_stream_capturing():
             raise NotImplementedError("V4.1 worker requires eager execution")
         if torch.cuda.current_stream(self._weight_device()) != self._worker_stream:

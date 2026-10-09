@@ -675,6 +675,13 @@ class DeepSeekV4Model(GptModelBase):
                 mtp_last_hidden_capacity,
             )
 
+    def _pp_ep_grouped_kernel_available(self) -> bool:
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4 import (
+            _has_fp8_fp4_grouped_kernel,
+        )
+
+        return _has_fp8_fp4_grouped_kernel()
+
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
@@ -723,16 +730,13 @@ class DeepSeekV4Model(GptModelBase):
                 validate_pp_ep_shape,
                 validate_pp_ep_target,
             )
-            from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4 import (
-                _has_fp8_fp4_grouped_kernel,
-            )
             from rtp_llm.models_py.modules.dsv4.moe.strategies.nccl_ep_mxfp8 import (
                 _is_sm120_runtime,
             )
 
             validate_pp_ep_shape(_pcfg)
             is_sm120 = _is_sm120_runtime()
-            has_grouped_fp4 = is_sm120 and _has_fp8_fp4_grouped_kernel()
+            has_grouped_fp4 = is_sm120 and self._pp_ep_grouped_kernel_available()
             validate_pp_ep_target(
                 _pcfg,
                 hw_kernel_config=self.py_hw_kernel_config,
@@ -1191,7 +1195,15 @@ class DeepSeekV4Model(GptModelBase):
         embed = getattr(self.v4, "embed", None)
         if embed is not None:
             return embed.weight.device
+        head_weight = getattr(self.v4, "head_weight", None)
+        if head_weight is not None:
+            return head_weight.device
         for layer in self.v4.layers:
+            # Factory modules retain loader tensors directly; nn.Module's
+            # parameters() does not enumerate these stage-owned weights.
+            norm_weight = getattr(getattr(layer, "attn_norm", None), "weight", None)
+            if norm_weight is not None:
+                return norm_weight.device
             param = next(iter(layer.parameters()), None)
             if param is not None:
                 return param.device
