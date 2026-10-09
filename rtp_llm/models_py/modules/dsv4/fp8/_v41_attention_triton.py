@@ -116,6 +116,7 @@ def _attention(
     SWA_ENTRIES: tl.constexpr,
     GLOBAL_WIDTH: tl.constexpr,
     GLOBAL_ENTRIES: tl.constexpr,
+    DIRECT_SINK_DIV_RN: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     heads = tl.program_id(1) * 16 + tl.arange(0, 16)
@@ -158,10 +159,16 @@ def _attention(
             True,
         )
     sink = tl.load(sinks + heads, heads < HEADS, other=0)
-    next_max = tl.maximum(maximum, sink)
-    alpha = tl.exp(maximum - next_max)
-    denominator = total * alpha + tl.exp(sink - next_max)
-    result = acc * (alpha / denominator)[:, None]
+    if DIRECT_SINK_DIV_RN:
+        has_keys = total > 0
+        finite_max = tl.where(has_keys, maximum, 0.0)
+        denominator = total + tl.exp(sink - finite_max)
+        result = tl.where(has_keys[:, None], tl.div_rn(acc, denominator[:, None]), 0.0)
+    else:
+        next_max = tl.maximum(maximum, sink)
+        alpha = tl.exp(maximum - next_max)
+        denominator = total * alpha + tl.exp(sink - next_max)
+        result = acc * (alpha / denominator)[:, None]
     tl.store(out + addresses, result, heads[:, None] < HEADS)
 
 

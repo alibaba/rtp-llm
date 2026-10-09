@@ -44,6 +44,13 @@ py_library(
     deps = [":dsv41_attention_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
 )
 
+py_library(
+    name = "dsv41_sparse_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_owner_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
+)
+
 py_binary(
     name = "checkpoint_inventory",
     srcs = ["checkpoint_inventory.py"],
