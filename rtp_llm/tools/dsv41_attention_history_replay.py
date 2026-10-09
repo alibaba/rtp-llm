@@ -468,8 +468,12 @@ def main():
         [],
         [],
     )
+    input_causality, causality_snapshots = {}, {}
     if native_paths:
-        from rtp_llm.tools.dsv41_native_history_replay import reconstruct_native
+        from rtp_llm.tools.dsv41_native_history_replay import (
+            compare_prefix_current_histories,
+            reconstruct_native,
+        )
 
         native_reconstruction, native_results, native_snapshots, native_inputs = (
             reconstruct_native(
@@ -483,6 +487,16 @@ def main():
                 prepared_rows,
                 hash_state.token_map.tolist(),
             )
+        )
+        input_causality, causality_snapshots = compare_prefix_current_histories(
+            args,
+            config,
+            reader,
+            steps,
+            identities,
+            native_inputs,
+            snapshots,
+            native_snapshots,
         )
     with cli.input_artifact.open("xb") as handle:
         torch.save(
@@ -500,6 +514,7 @@ def main():
                     [value.cpu() for value in step] for step in native_inputs
                 ],
                 "native_input_history": native_snapshots,
+                "prefix_current_substitutions": causality_snapshots,
             },
             handle,
         )
@@ -533,6 +548,7 @@ def main():
         "official_input_history": results,
         "native_reconstruction": native_reconstruction,
         "native_input_history": native_results,
+        "prefix_current_substitutions": input_causality,
         "weight_sha256": reader.hashes,
         "selected_row_reads": reader.selected_row_reads,
         "official_source_sha256": {

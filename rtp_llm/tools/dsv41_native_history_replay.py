@@ -5,6 +5,8 @@ mHC, RMSNorm and attention modules. Its caches and residuals are independent
 of the experiment that fixes all attention inputs to the official history.
 """
 
+import json
+
 import torch
 
 from rtp_llm.tools.dsv41_attention_history_replay import (
@@ -177,3 +179,97 @@ def reconstruct_native(
             inputs.append(step_inputs)
             history.extend(identity["input_ids"])
     return boundaries, records, snapshots, inputs
+
+
+def compare_prefix_current_histories(
+    args,
+    config,
+    reader,
+    steps,
+    identities,
+    native_inputs,
+    official_snapshots,
+    native_snapshots,
+):
+    """Hold prior attention inputs and the current input independently fixed."""
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
+        compressor_bf16,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
+        tp8_projection,
+    )
+
+    streams = {
+        "official": [step["inputs"][2] for step in steps],
+        "native": [step[2] for step in native_inputs],
+    }
+    controls = {
+        "official": official_snapshots["tp8_projection_compressor_recipe"]["2"],
+        "native": [step[2] for step in native_snapshots],
+    }
+    results, snapshots = {}, {}
+    with tp8_projection(True), compressor_bf16(True, fused=True, hca_projection=True):
+        for prefix in streams:
+            for current in streams:
+                name = f"{prefix}_prefix_{current}_current"
+                records, saved = [], []
+                for target in range(1, len(steps)):
+                    owner = native_attention(args, config, reader, 2)
+                    cache, tables = fresh_cache(owner)
+                    for step in range(target):
+                        execute_native(
+                            owner,
+                            cache,
+                            tables,
+                            streams[prefix][step],
+                            identities[step]["start_pos"],
+                            steps[step]["reference"][2],
+                        )
+                    _, captured = execute_native(
+                        owner,
+                        cache,
+                        tables,
+                        streams[current][target],
+                        identities[target]["start_pos"],
+                        steps[target]["reference"][2],
+                    )
+                    result = compare_capture(
+                        owner,
+                        steps[target]["reference"][2],
+                        captured,
+                        identities[target],
+                    )
+                    result["attention_input"] = difference(
+                        steps[target]["inputs"][2], streams[current][target]
+                    )
+                    result["step"] = target
+                    if prefix == current:
+                        result["control_reconstruction"] = {
+                            key: require_exact(
+                                controls[prefix][target][key],
+                                captured[key],
+                                f"{name}.step{target}.{key}",
+                            )
+                            for key in ("q", "kv", "attention", "output")
+                        }
+                        for key in ("indices", "lengths"):
+                            if not torch.equal(
+                                controls[prefix][target][key], captured[key].cpu()
+                            ):
+                                raise AssertionError(
+                                    f"History control index plan differs: {name} step {target} {key}"
+                                )
+                    records.append(result)
+                    saved.append(cpu_snapshot(captured))
+                    print(
+                        json.dumps(
+                            {
+                                "history": name,
+                                "step": target,
+                                "output": result["output"],
+                            }
+                        ),
+                        flush=True,
+                    )
+                results[name], snapshots[name] = records, saved
+    return results, snapshots
