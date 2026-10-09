@@ -57,6 +57,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         return;
     }
 
+    // Cap newly generated tokens independently of the prompt length. Non-positive values disable the service cap.
+    const int max_decode_output_len = autil::EnvUtil::getEnv("MAX_DECODE_OUTPUT_LEN", 0);
+    if (max_decode_output_len > 0) {
+        auto& max_new_tokens = generate_input_->generate_config->max_new_tokens;
+        max_new_tokens       = std::min(max_new_tokens, max_decode_output_len);
+    }
+
     // batch size depends on perf_test_, initialize it first
     perf_test_ = perf_test || autil::EnvUtil::getEnv("PERF_TEST", false);
     if (perf_test_ && hasNumBeams()) {

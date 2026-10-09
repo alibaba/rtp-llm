@@ -93,6 +93,67 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testMaxDecodeOutputLen) {
+    for (const auto& env_value : {"0", "-1", "3"}) {
+        SCOPED_TRACE(env_value);
+        autil::EnvGuard output_limit("MAX_DECODE_OUTPUT_LEN", env_value);
+        for (int request_limit : {2, 8}) {
+            SCOPED_TRACE(request_limit);
+            for (int prompt_length : {1, 5}) {
+                SCOPED_TRACE(prompt_length);
+                auto input                             = std::make_shared<GenerateInput>();
+                input->input_ids                       = torch::ones({prompt_length}, torch::kInt32);
+                input->generate_config                 = std::make_shared<GenerateConfig>();
+                input->generate_config->max_new_tokens = request_limit;
+                ModelConfig model;
+                model.max_seq_len = 128;
+                auto stream =
+                    std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+                const int expected_output_len =
+                    std::string(env_value) == "3" ? std::min(request_limit, 3) : request_limit;
+                EXPECT_EQ(input->generate_config->max_new_tokens, expected_output_len);
+                EXPECT_EQ(stream->maxTokenNum(), prompt_length + expected_output_len);
+                // The existing total sequence limit still takes precedence when it is smaller.
+                stream->max_seq_len_ = prompt_length + 1;
+                EXPECT_EQ(stream->maxTokenNum(), prompt_length + 1);
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testMaxDecodeOutputLenCountsPrefillTokenAndTrimsMtpBlock) {
+    autil::EnvGuard output_limit("MAX_DECODE_OUTPUT_LEN", "3");
+    auto            input                    = std::make_shared<GenerateInput>();
+    input->input_ids                         = torch::tensor({1, 1}, torch::kInt32);
+    input->generate_config                   = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens   = 8;
+    input->generate_config->return_all_probs = true;
+    input->generate_config->is_streaming     = true;
+    ModelConfig model;
+    model.max_seq_len                 = 128;
+    model.vocab_size                  = 4;
+    model.special_tokens.eos_token_id = -1;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    // PD decode replays the first generated token that prefill already returned.
+    stream->incLastOutputPos();
+    stream->update({torch::tensor({{2}}, torch::kInt32), 1, {}, {}, {}, {}, {}, {}, {}, {}});
+    EXPECT_FALSE(stream->hasOutput());
+    auto sp_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_buffer->propose_step = 3;
+    stream->setSPOutputBuffer(sp_buffer);
+    auto probabilities =
+        torch::tensor({{{0.1f, 0.2f, 0.1f, 0.6f}, {0.1f, 0.2f, 0.6f, 0.1f}, {0.1f, 0.6f, 0.2f, 0.1f}}});
+    stream->update({torch::tensor({{3, 2, 1}}, torch::kInt32), 3, {}, {}, {}, {}, probabilities, {}, {}, {}});
+    ASSERT_TRUE(stream->hasOutput());
+    auto result = stream->nextOutput();
+    ASSERT_TRUE(result.ok());
+    const auto& output = result.value().generate_outputs[0];
+    EXPECT_TRUE(output.finished);
+    EXPECT_EQ(stream->seqLength(), 5);
+    EXPECT_EQ(output.output_ids.numel(), 2);
+    EXPECT_TRUE(torch::allclose(output.aux_info.all_probs.value(), probabilities.narrow(1, 0, 2)));
+}
+
 TEST_F(GenerateStreamTest, testCancelledReplayFinishesBeforeNextSchedule) {
     for (bool pending_worker : {false, true}) {
         SCOPED_TRACE(pending_worker);
@@ -125,7 +186,7 @@ TEST_F(GenerateStreamTest, testLinearReplayRequiresLiveResources) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3, 4});
     EXPECT_TRUE(absl::IsFailedPrecondition(stream->prepareLinearReplayRound().status()));
     stream->stream_cache_resource_->linear_replay_lease_ = std::make_shared<LinearReplayLease>();
-    stream->stream_cache_resource_->resource_released_ = true;
+    stream->stream_cache_resource_->resource_released_   = true;
     EXPECT_TRUE(absl::IsFailedPrecondition(stream->prepareLinearReplayRound().status()));
 }
 
