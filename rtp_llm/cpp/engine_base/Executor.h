@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <cstdlib>
@@ -21,6 +22,9 @@ public:
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,
                                                    const MoeConfig&         moe_config) {
+        RTP_LLM_CHECK_WITH_INFO(std::isfinite(model_config.final_logit_softcapping)
+                                    && model_config.final_logit_softcapping >= 0.0,
+                                "final_logit_softcapping must be finite and non-negative");
         AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.get_attn_tp_size());
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto moe_configs =
@@ -79,6 +83,7 @@ public:
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,
                 model_config.reverse_e_h_norm,
+                model_config.final_logit_softcapping,
                 moe_config};
     }
 

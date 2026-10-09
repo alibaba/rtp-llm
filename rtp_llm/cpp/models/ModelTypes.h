@@ -38,6 +38,7 @@ struct GptModelDescription {
     double                    input_embedding_scalar   = 1;
     double                    residual_scalar          = 1;
     bool                      reverse_e_h_norm         = false;
+    double                    final_logit_softcapping = 0.0;
     // Runtime MoE strategy selected by server configuration. Keep it with the
     // description produced by Executor::genModelDescription so every model
     // construction path receives the same fail-closed eligibility inputs.

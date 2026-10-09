@@ -1,10 +1,10 @@
-
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 
@@ -71,6 +71,20 @@ TEST_F(ModelDataTest, testConstruct) {
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     auto sl = sampler_inputs.sequence_lengths;
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
+}
+
+TEST_F(ModelDataTest, testFinalLogitSoftcapPropagatesToModelDescription) {
+    ModelConfig model_config;
+    model_config.attn_config.head_num      = 1;
+    model_config.attn_config.kv_head_num   = 1;
+    model_config.attn_config.size_per_head = 1;
+
+    for (const double cap : {0.0, 7.5, 30.0}) {
+        model_config.final_logit_softcapping = cap;
+        const auto description =
+            Executor::genModelDescription(model_config, ParallelismConfig{}, EPLBConfig{}, MoeConfig{});
+        EXPECT_DOUBLE_EQ(description.final_logit_softcapping, cap);
+    }
 }
 
 TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {

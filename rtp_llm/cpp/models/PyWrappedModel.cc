@@ -1227,6 +1227,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
 
+        if (description_.final_logit_softcapping > 0.0) {
+            const auto cap = description_.final_logit_softcapping;
+            logits = torch::tanh(logits / cap) * cap;
+        }
+
         GptModelOutputs outputs;
         // Internal warmup/system-prefix requests have no selected token and do not score.
         if (custom_output_enabled_ && has_context_request && inputs.custom_output_indexes.defined()

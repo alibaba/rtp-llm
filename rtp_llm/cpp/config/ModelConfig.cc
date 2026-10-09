@@ -258,6 +258,7 @@ std::string ModelConfig::to_string() const {
         << "add_bias_linear: " << add_bias_linear << "\n"
         << "has_moe_norm: " << has_moe_norm << "\n"
         << "logit_scale: " << logit_scale << "\n"
+        << "final_logit_softcapping: " << final_logit_softcapping << "\n"
         << "use_kvcache: " << use_kvcache << "\n"
         << "pre_seq_len: " << pre_seq_len << "\n"
         << "prefix_projection: " << prefix_projection << "\n"
