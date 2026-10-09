@@ -102,6 +102,9 @@ public final class MasterEngineSynchronizer {
     }
 
     private void reportExecutorMetrics() {
+        org.flexlb.util.SyncDiagnostics.event("event=pools engine_active={} engine_queue={} status_active={} status_queue={}",
+                engineSyncExecutor.getActiveCount(), engineSyncExecutor.getQueue().size(),
+                statusCheckExecutor.getActiveCount(), statusCheckExecutor.getQueue().size());
         try {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,

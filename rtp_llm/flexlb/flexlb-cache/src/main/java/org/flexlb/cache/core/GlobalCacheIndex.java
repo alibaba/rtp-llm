@@ -1,6 +1,7 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.util.SyncDiagnostics;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -55,7 +56,9 @@ public class GlobalCacheIndex {
             return;
         }
 
+        long diagStart = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         lock.lock();
+        long diagAcquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         try {
             Set<String> engines = blockToEnginesMap.computeIfAbsent(
                     blockCacheKey, k -> ConcurrentHashMap.newKeySet());
@@ -65,7 +68,11 @@ public class GlobalCacheIndex {
                 totalMappings.increment();
             }
         } finally {
+            long diagReleased = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             lock.unlock();
+            if (SyncDiagnostics.ENABLED) {
+                SyncDiagnostics.cacheLock("add", engineIpPort, diagStart, diagAcquired, diagReleased, blockToEnginesMap.size());
+            }
         }
     }
 
@@ -80,7 +87,9 @@ public class GlobalCacheIndex {
             return;
         }
 
+        long diagStart = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         lock.lock();
+        long diagAcquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
         try {
             Set<String> engines = blockToEnginesMap.get(blockCacheKey);
             if (engines == null) {
@@ -97,7 +106,11 @@ public class GlobalCacheIndex {
                 }
             }
         } finally {
+            long diagReleased = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             lock.unlock();
+            if (SyncDiagnostics.ENABLED) {
+                SyncDiagnostics.cacheLock("remove", engineIp, diagStart, diagAcquired, diagReleased, blockToEnginesMap.size());
+            }
         }
     }
 
@@ -115,8 +128,15 @@ public class GlobalCacheIndex {
         // Use the detached local view; do not scan blocks owned only by other workers.
         // Bound each critical section so surviving workers can keep updating their indexes.
         Iterator<Long> keys = blockCacheKeys.iterator();
+        long start = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
+        long wait = 0L;
+        long hold = 0L;
+        long maxHold = 0L;
+        int acquisitions = 0;
         while (keys.hasNext()) {
+            long waiting = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             lock.lock();
+            long acquired = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
             try {
                 for (int count = 0; count < CACHE_REMOVE_LOCK_CHUNK_SIZE && keys.hasNext(); count++) {
                     Long key = keys.next();
@@ -129,8 +149,17 @@ public class GlobalCacheIndex {
                     }
                 }
             } finally {
+                long released = SyncDiagnostics.ENABLED ? System.nanoTime() : 0L;
                 lock.unlock();
+                wait += acquired - waiting;
+                hold += released - acquired;
+                maxHold = Math.max(maxHold, released - acquired);
+                acquisitions++;
             }
+        }
+        if (SyncDiagnostics.ENABLED) {
+            SyncDiagnostics.cacheRemoval(engineIp, start, wait, hold, maxHold,
+                    acquisitions, blockCacheKeys.size(), blockToEnginesMap.size());
         }
     }
 
