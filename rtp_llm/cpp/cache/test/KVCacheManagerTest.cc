@@ -1253,6 +1253,16 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
 
     const int csa_layer = manager_config.layerIdsForGroup("csa_kv")[0];
     const int hca_layer = manager_config.layerIdsForGroup("hca_kv")[0];
+    auto      projected = manager->getProjectedMainModelGroupedCacheLayerLayout(
+        {static_cast<size_t>(csa_layer), static_cast<size_t>(csa_layer), static_cast<size_t>(hca_layer)});
+    ASSERT_EQ(projected.topology().layers().size(), 3u);
+    EXPECT_EQ(projected.group("csa_kv").at(0).kv_addr.data_ptr(),
+              layout.group("csa_kv").at(csa_layer).kv_addr.data_ptr());
+    EXPECT_EQ(projected.group("csa_kv").at(1).kv_addr.data_ptr(),
+              layout.group("csa_kv").at(csa_layer).kv_addr.data_ptr());
+    EXPECT_EQ(projected.group("hca_kv").at(2).kv_addr.data_ptr(),
+              layout.group("hca_kv").at(hca_layer).kv_addr.data_ptr());
+
     EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_kv", resource->blocks(0, "csa_kv")[0]).kv_addr, nullptr);
     EXPECT_NE(manager->convertIndexToAddr(csa_layer, "indexer_kv", resource->blocks(0, "indexer_kv")[0]).kv_addr,
               nullptr);

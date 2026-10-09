@@ -288,24 +288,37 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                                                == source_group.kernelSeqSizePerBlock(),
                                     "CacheConfig::mergeMTPModule incompatible block token spans for tag=%s",
                                     tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(
-                source_layer_ids.size() == static_cast<size_t>(mtp_layer_num),
-                "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
-                "got=%zu expected=%u",
-                source_group.tag.c_str(),
-                tag.c_str(),
-                source_layer_ids.size(),
-                mtp_layer_num);
-            for (size_t local_layer_id = 0; local_layer_id < source_layer_ids.size(); ++local_layer_id) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    source_layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
-                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s source layers must be ordered 0..%u, "
-                    "index=%zu value=%d",
-                    source_group.tag.c_str(),
-                    tag.c_str(),
-                    mtp_layer_num - 1,
-                    local_layer_id,
-                    source_layer_ids[local_layer_id]);
+            RTP_LLM_CHECK_WITH_INFO(!source_layer_ids.empty(),
+                                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s has no module layers",
+                                    source_group.tag.c_str(),
+                                    tag.c_str());
+            if (uses_default_alias) {
+                RTP_LLM_CHECK_WITH_INFO(source_layer_ids.size() == static_cast<size_t>(mtp_layer_num),
+                                        "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every "
+                                        "module layer, got=%zu expected=%u",
+                                        source_group.tag.c_str(),
+                                        tag.c_str(),
+                                        source_layer_ids.size(),
+                                        mtp_layer_num);
+                for (size_t local_layer_id = 0; local_layer_id < source_layer_ids.size(); ++local_layer_id) {
+                    RTP_LLM_CHECK_WITH_INFO(source_layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
+                                            "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s source layers "
+                                            "must be ordered 0..%u, index=%zu value=%d",
+                                            source_group.tag.c_str(),
+                                            tag.c_str(),
+                                            mtp_layer_num - 1,
+                                            local_layer_id,
+                                            source_layer_ids[local_layer_id]);
+                }
+            }
+            for (int local_layer_id : source_layer_ids) {
+                RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0 && local_layer_id < static_cast<int>(mtp_layer_num),
+                                        "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s invalid module layer "
+                                        "%d for layer count %u",
+                                        source_group.tag.c_str(),
+                                        tag.c_str(),
+                                        local_layer_id,
+                                        mtp_layer_num);
             }
         }
 
@@ -383,8 +396,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }
@@ -509,6 +521,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     OUTPUT_FIELD(layer_num);
     OUTPUT_FIELD_EXPR("layer_all_num", layer_all_num());
     OUTPUT_FIELD_EXPR("use_mla", (use_mla ? "true" : "false"));
+    OUTPUT_FIELD_EXPR("shares_target_kv", (shares_target_kv ? "true" : "false"));
     os << "\n";
 
     os << indent1 << "# Block Configuration:\n";

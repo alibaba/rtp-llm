@@ -882,7 +882,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
         model_params.metrics_reporter = metrics_reporter_;
-#if USING_CUDA || USING_ROCM
+    if (mtp_params->model_config_.shares_target_kv) {
+            RTP_LLM_CHECK_WITH_INFO(params.gpt_weights.embedding != nullptr,
+                                    "shared speculative resources require a target embedding");
+            model_params.speculative_target_embedding        = params.gpt_weights.embedding->kernel;
+            model_params.speculative_target_embedding_scalar = params.model_config_.input_embedding_scalar;
+        }
+    #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
             RTP_LLM_CHECK_WITH_INFO(mtp_params->model_config_.max_seq_len > 0,

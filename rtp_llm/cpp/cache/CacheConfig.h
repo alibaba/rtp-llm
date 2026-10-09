@@ -73,6 +73,7 @@ public:
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
+    bool                                      shares_target_kv = false;
 
     CacheConfig() {}
 

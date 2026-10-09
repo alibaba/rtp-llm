@@ -580,6 +580,20 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
+GroupedCacheLayerLayout
+KVCacheManager::getProjectedMainModelGroupedCacheLayerLayout(const std::vector<size_t>& global_layer_ids) const {
+    RTP_LLM_CHECK_WITH_INFO(!global_layer_ids.empty(), "main cache layout projection requires at least one layer");
+    for (const auto layer_id : global_layer_ids) {
+        RTP_LLM_CHECK_WITH_INFO(layer_id < config_.layer_num,
+                                "main cache layout projection layer %zu is outside [0,%u)",
+                                layer_id,
+                                config_.layer_num);
+    }
+    const auto all_layout      = coordinator_manager_->allLayerCacheBase();
+    auto       target_topology = projectTopology(all_layout.topology(), global_layer_ids);
+    return projectLayout(all_layout, std::move(target_topology), global_layer_ids);
+}
+
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
@@ -588,6 +602,8 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(!mtp_sub_config->shares_target_kv,
+                            "target-KV-shared MTP modules require an explicit main-model layout projection");
     const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
     std::vector<size_t> global_layer_ids;
     global_layer_ids.reserve(mtp_layer_num);

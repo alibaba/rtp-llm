@@ -108,6 +108,8 @@ public:
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
+    GroupedCacheLayerLayout
+    getProjectedMainModelGroupedCacheLayerLayout(const std::vector<size_t>& global_layer_ids) const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
 

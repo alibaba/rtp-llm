@@ -38,7 +38,10 @@ struct GptModelDescription {
     double                    input_embedding_scalar   = 1;
     double                    residual_scalar          = 1;
     bool                      reverse_e_h_norm         = false;
-    double                    final_logit_softcapping = 0.0;
+    // Final logit softcapping applied after the lm_head projection in
+    // PyWrappedModel::forwardPostLayers: logits = cap * tanh(logits / cap).
+    // 0 disables the transform (Gemma2/Gemma4 sets 30.0).
+    double final_logit_softcapping = 0.0;
     // Runtime MoE strategy selected by server configuration. Keep it with the
     // description produced by Executor::genModelDescription so every model
     // construction path receives the same fail-closed eligibility inputs.
@@ -57,9 +60,9 @@ struct GptModelInitParams {
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
     DeviceResourceConfig                         device_resource_config;
-    MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
-    int64_t                                      max_seq_len             = 0;
-    int64_t                                      hidden_size             = 0;
+    MlaOpsType                                   mla_ops_type = MlaOpsType::AUTO;
+    int64_t                                      max_seq_len  = 0;
+    int64_t                                      hidden_size  = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -72,7 +75,9 @@ struct GptModelInitParams {
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
     // the published model topology, actual reserve, and fake caller bounds.
-    int64_t                                    kernel_block_table_width = 0;
+    int64_t       kernel_block_table_width = 0;
+    torch::Tensor speculative_target_embedding;
+    double        speculative_target_embedding_scalar = 1.0;
 };
 
 enum GptModelInputIndex : size_t {

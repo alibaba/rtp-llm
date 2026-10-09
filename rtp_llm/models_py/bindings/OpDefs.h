@@ -230,9 +230,11 @@ private:
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
-    bool                   is_speculative         = false;
-    bool                   is_decode_role         = false;
-    int64_t                max_context_batch_size = 1;
+    torch::Tensor          speculative_target_embedding;
+    double                 speculative_target_embedding_scalar = 1.0;
+    bool                   is_speculative                      = false;
+    bool                   is_decode_role                      = false;
+    int64_t                max_context_batch_size              = 1;
 };
 
 struct PyCacheStoreInputs {

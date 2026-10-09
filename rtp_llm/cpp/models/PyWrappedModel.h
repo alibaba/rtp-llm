@@ -333,6 +333,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
+    init_resources.speculative_target_embedding = params.speculative_target_embedding;
+    init_resources.speculative_target_embedding_scalar = params.speculative_target_embedding_scalar;
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;

@@ -772,6 +772,46 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
     EXPECT_EQ(poolForTag(*allocator, "linear")->allLayerCacheBase().size(), 6u);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, SharedTargetKvDoesNotAddPhysicalLayers) {
+    auto score_model_cfg               = makeTinyModelConfig(/*num_layers=*/4);
+    auto propose_model_cfg             = makeTinyModelConfig(/*num_layers=*/4);
+    propose_model_cfg.model_type       = "shared_draft";
+    propose_model_cfg.shares_target_kv = true;
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.test_block_num = 8;
+    SpeculativeExecutionConfig sp_cfg;
+    sp_cfg.type              = SP_TYPE_MTP;
+    sp_cfg.gen_num_per_cycle = 6;
+
+    auto config = CacheConfigCreator::createConfig(score_model_cfg,
+                                                   parallelism_cfg,
+                                                   kv_cache_cfg,
+                                                   sp_cfg,
+                                                   &propose_model_cfg,
+                                                   /*is_mtp=*/true,
+                                                   /*is_eagle=*/false);
+
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(config.mtp_sub_configs[0], nullptr);
+    EXPECT_TRUE(config.mtp_sub_configs[0]->shares_target_kv);
+    EXPECT_EQ(config.mtp_sub_configs[0]->layer_num, 4u);
+    EXPECT_EQ(config.layer_all_num(), score_model_cfg.num_layers);
+    EXPECT_EQ(config.topology().layers().size(), static_cast<size_t>(score_model_cfg.num_layers));
+
+    RuntimeConfig runtime_cfg;
+    const auto    block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, score_model_cfg, runtime_cfg, kv_cache_cfg, parallelism_cfg, std::nullopt, sp_cfg);
+    config.finalizeBlockNums(block_num, runtime_cfg);
+    for (const auto& group : config.topology().groups()) {
+        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
+        ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
+        EXPECT_EQ(pool_config.memory_layouts[0].layer_num, config.layerIdsForGroup(group.tag).size());
+    }
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasesCompatibleDefaultMlaGroup) {
     auto main_config    = makeSingleLayerCacheConfig(makeResolvedMlaSpec(DataType::TYPE_FP16,
                                                                       /*kv_lora_rank=*/1,

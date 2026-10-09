@@ -1055,6 +1055,7 @@ class KVCacheSpecDesc:
 
 class ModelConfig:
     final_logit_softcapping: float
+    shares_target_kv: bool
     add_bias_linear: bool
     attn_config: AttentionConfigs
     ckpt_path: str

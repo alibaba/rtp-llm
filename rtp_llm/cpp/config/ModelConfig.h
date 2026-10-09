@@ -118,6 +118,7 @@ public:
     bool   has_moe_norm               = false;
     double logit_scale                = 1.0;
     double final_logit_softcapping = 0.0;
+    bool shares_target_kv = false;
     bool   use_kvcache                = true;
 
     int64_t pre_seq_len       = 0;

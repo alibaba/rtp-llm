@@ -72,6 +72,9 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config, const Runtime
         append_segment(config, group, true);
         for (const auto& sub : config.mtp_sub_configs) {
             RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
+            if (sub->shares_target_kv) {
+                continue;
+            }
             RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
                                     "MTP cache configuration is missing group index=%zu for tag=%s",
                                     gid,
@@ -419,11 +422,18 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        const bool shares_target_kv = draft_model_config->shares_target_kv;
+        draft.shares_target_kv      = shares_target_kv;
+        int num_mtp_modules =
+            is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK && !shares_target_kv ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        if (shares_target_kv) {
+            config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(draft));
+        } else {
+            for (int module = 0; module < num_mtp_modules; ++module) {
+                config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+            }
         }
     }
 
