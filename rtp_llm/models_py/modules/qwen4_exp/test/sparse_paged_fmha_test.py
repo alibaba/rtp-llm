@@ -430,5 +430,192 @@ class SparsePagedOnlineSplitTest(unittest.TestCase):
             torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
+class GroupedSparsePagedAttentionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+            12,
+            0,
+        ):
+            if os.environ.get("QWEN4_REQUIRE_GROUPED_SM120_TESTS") == "1":
+                raise RuntimeError("SM120 grouped acceptance must execute on SM120")
+            raise unittest.SkipTest("grouped path requires SM120")
+
+    def inputs(self, query_len=4, batch=8):
+        torch.manual_seed(1317 + query_len)
+        q = torch.randn(batch, 3, query_len, 256, device="cuda", dtype=torch.bfloat16)
+        cache = torch.randn(
+            batch * 3 + 1, 2, 1, 128, 256, device="cuda", dtype=torch.bfloat16
+        )
+        table = torch.arange(1, batch * 3 + 1, device="cuda", dtype=torch.int32).view(
+            batch, 3
+        )
+        lengths = torch.full((batch, query_len), 383, device="cuda", dtype=torch.int32)
+        lengths[0, 0] = 0
+        selected = torch.randint(
+            383, (batch, query_len, 2051), device="cuda", dtype=torch.int32
+        )
+        selected.masked_fill_(selected >= lengths.unsqueeze(-1), -1)
+        selected[:, :, 64:128] = -1
+        return q, cache, table, lengths, selected
+
+    def original(self, inputs):
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "0",
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
+            },
+        ):
+            return sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+
+    def test_grouped_padded_hybrid_pool_and_graph(self):
+        from rtp_llm.models_py.modules.qwen4_exp import (
+            grouped_sparse_paged_fmha as candidate,
+        )
+
+        q, cache, table, lengths, selected = self.inputs()
+        width = cache[0].numel()
+        packed = torch.full(
+            (cache.shape[0], width + 37),
+            float("nan"),
+            device="cuda",
+            dtype=cache.dtype,
+        )
+        packed[:, :width].copy_(cache.flatten(1))
+        inputs = (q, packed, table, lengths, selected)
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
+                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
+                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
+            },
+        ):
+            with patch.object(
+                candidate,
+                "grouped_sparse_paged_split",
+                wraps=candidate.grouped_sparse_paged_split,
+            ) as invoked:
+                actual = sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+                self.assertEqual(invoked.call_count, 1)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = sparse_paged_gqa_attn(
+                        *inputs, page_size=128, kv_head_num=1, graph_capture=True
+                    )
+                self.assertEqual(invoked.call_count, 2)
+            graph.replay()
+            torch.testing.assert_close(
+                actual, self.original(inputs), atol=2e-3, rtol=1e-2
+            )
+            packed[:, :width].normal_()
+            q.normal_()
+            table.copy_(table.flip(1))
+            graph.replay()
+            torch.testing.assert_close(
+                actual, self.original(inputs), atol=2e-3, rtol=1e-2
+            )
+            self.assertTrue(torch.isnan(packed[:, width:]).all())
+
+    def test_grouped_live_graph_inputs_and_invalid_pages(self):
+        from rtp_llm.models_py.modules.qwen4_exp import (
+            grouped_sparse_paged_fmha as candidate,
+        )
+
+        for query_len in (1, 2, 3, 4):
+            inputs = self.inputs(query_len)
+            q, cache, table, lengths, selected = inputs
+            expected = self.original(inputs)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
+                    "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
+                    "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
+                },
+            ):
+                with patch.object(
+                    candidate,
+                    "grouped_sparse_paged_split",
+                    wraps=candidate.grouped_sparse_paged_split,
+                ) as invoked:
+                    actual = sparse_paged_gqa_attn(
+                        *inputs, page_size=128, kv_head_num=1
+                    )
+                    self.assertEqual(invoked.call_count, 1)
+                torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = sparse_paged_gqa_attn(
+                        *inputs, page_size=128, kv_head_num=1, graph_capture=True
+                    )
+                for scale in (0.0, 1.0, 4.0):
+                    q.normal_().mul_(scale)
+                    cache.normal_()
+                    graph.replay()
+                    torch.testing.assert_close(
+                        actual, self.original(inputs), atol=2e-3, rtol=1e-2
+                    )
+                lengths.fill_(97)
+                selected.fill_(-1)
+                selected[:, :, :65].copy_(
+                    torch.arange(65, device="cuda")[None, None, :]
+                )
+                table.copy_(table.flip(1))
+                graph.replay()
+                torch.testing.assert_close(
+                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
+                )
+                for invalid in (0, cache.shape[0] + 7):
+                    table.fill_(invalid)
+                    graph.replay()
+                    torch.testing.assert_close(actual, torch.zeros_like(actual))
+                table.fill_(1)
+                selected.fill_(1000000)
+                graph.replay()
+                torch.testing.assert_close(actual, torch.zeros_like(actual))
+
+    def test_unsupported_geometry_uses_existing_kernel(self):
+        from rtp_llm.models_py.modules.qwen4_exp import (
+            grouped_sparse_paged_fmha as candidate,
+        )
+
+        heads = list(self.inputs())
+        heads[0] = heads[0].repeat(1, 2, 1, 1)
+        heads[1] = heads[1].repeat(1, 1, 2, 1, 1)
+        width = list(self.inputs())
+        width[-1] = torch.cat((width[-1], width[-1][:, :, :1]), dim=-1)
+        cases = (
+            ("batch", self.inputs(batch=7), 1, 64, 8),
+            ("heads", heads, 2, 64, 8),
+            ("block", self.inputs(), 1, 32, 8),
+            ("splits", self.inputs(), 1, 64, 4),
+            ("query_len", self.inputs(query_len=5), 1, 64, 8),
+            ("selection", width, 1, 64, 8),
+        )
+        for name, inputs, kv_heads, block, splits in cases:
+            with self.subTest(name=name), patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
+                    "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": str(splits),
+                    "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "0",
+                },
+            ):
+                options = dict(page_size=128, kv_head_num=kv_heads, block_k=block)
+                expected = sparse_paged_gqa_attn(*inputs, **options)
+                with patch.dict(
+                    os.environ, {"RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1"}
+                ), patch.object(
+                    candidate,
+                    "grouped_sparse_paged_split",
+                    side_effect=AssertionError("unsupported path launched"),
+                ):
+                    actual = sparse_paged_gqa_attn(*inputs, **options)
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     unittest.main()
