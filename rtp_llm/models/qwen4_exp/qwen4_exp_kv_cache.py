@@ -20,6 +20,7 @@ only the newly generated token, and no attention input carries token history.
 They therefore get a second, tiny int64 region of their own.
 """
 
+import os
 from typing import List
 
 from rtp_llm.config.model_config import ModelConfig
@@ -39,6 +40,16 @@ PLE_STATE_TAG = "ple_conv_state"
 PLE_NGRAM_CTX_TAG = "ple_ngram_ctx"
 INDEXER_KV_TAG = "indexer_kv"
 INDEXER_STATE_TAG = "indexer_state"
+
+
+def qwen4_pd_enabled() -> bool:
+    """Opt in to the tagged PLE/QSA cache-store handoff."""
+    return os.environ.get("RTP_LLM_QWEN4_ENABLE_PD", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:

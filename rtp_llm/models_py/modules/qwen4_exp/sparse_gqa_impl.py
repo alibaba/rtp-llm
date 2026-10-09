@@ -116,7 +116,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp sparse GQA does not support context parallelism"
             )
         if self.is_prefill and inputs.cache_store_inputs is not None:
-            raise RuntimeError("qwen4_exp sparse GQA indexer state does not support PD")
+            from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+                validate_pd_cache_inputs,
+            )
+
+            validate_pd_cache_inputs((inputs,))
 
     def set_mtp_draft_mode(self, enabled: bool) -> None:
         """Explicitly select the MTP draft incremental-prefill bridge.
