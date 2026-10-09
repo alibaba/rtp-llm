@@ -1,10 +1,11 @@
-from typing import Any, Callable, List, Optional, Union, Dict
+import copy
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class AttnConfig(BaseModel):
@@ -28,6 +29,22 @@ class AttnAtomicWeight(AtomicWeight):
     ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
+
+    def _layer_load_config(self, load_config):
+        if self.config is None:
+            return load_config
+        layer_load_config = copy.copy(load_config)
+        layer_load_config.hidden_size = self.config.hidden_size
+        layer_load_config.head_num = self.config.head_num
+        layer_load_config.head_num_kv = self.config.head_num_kv
+        layer_load_config.size_per_head = self.config.size_per_head
+        return layer_load_config
+
+    def _split(self, tensor, load_config):
+        return super()._split(tensor, self._layer_load_config(load_config))
+
+    def _split_lora(self, tensor, load_config):
+        return super()._split_lora(tensor, self._layer_load_config(load_config))
 
 
 class MlaConfig(BaseModel):

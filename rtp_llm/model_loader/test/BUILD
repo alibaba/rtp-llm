@@ -73,3 +73,12 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "attn_layer_load_config_test",
+    srcs = ["attn_layer_load_config_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
