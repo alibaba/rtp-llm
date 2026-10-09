@@ -28,6 +28,10 @@
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 #endif
 
+#if USING_ASCEND
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#endif
+
 using namespace std;
 
 namespace rtp_llm {
@@ -351,6 +355,90 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
     runtimeApplyPackedMaskLogits(logits, packed_allow_mask, torch::Tensor{}, vocab_size);
 }
 
+#elif USING_ASCEND
+
+// ============================================================
+// Copy ops (Ascend)
+// ============================================================
+
+void runtimeCopy(const CopyParams& params) {
+    params.check();
+    const auto& src = params.src;
+    const auto& dst = params.dst;
+    if (src.data_ptr() == dst.data_ptr()) {
+        return;
+    }
+    dst.copy_(src, /*non_blocking=*/src.is_privateuseone() && dst.is_privateuseone());
+}
+
+void multiMergeCopy(const MultiMergeCopyParams& params) {
+    for (size_t i = 0; i < params.src_ptrs.size(); i++) {
+        auto dst = static_cast<char*>(params.dst_ptr) + params.dst_offsets[i];
+        std::memcpy(dst, params.src_ptrs[i], params.copy_size[i]);
+    }
+}
+
+static void batchCopyFallback(const BatchCopyParams& params) {
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
+        auto&  buffers         = params.copy_buffers[copy_type];
+        size_t copy_batch_size = buffers.sizes.size();
+        if (copy_batch_size == 0)
+            continue;
+        for (size_t i = 0; i < copy_batch_size; ++i) {
+            size_t        bytes      = buffers.sizes[i];
+            torch::Device dst_device = torch::kCPU, src_device = torch::kCPU;
+            switch (copy_type) {
+                case BatchCopyParams::D2D:
+                    dst_device = torch::Device(torch::kPrivateUse1);
+                    src_device = torch::Device(torch::kPrivateUse1);
+                    break;
+                case BatchCopyParams::D2H:
+                    dst_device = torch::kCPU;
+                    src_device = torch::Device(torch::kPrivateUse1);
+                    break;
+                case BatchCopyParams::H2D:
+                    dst_device = torch::Device(torch::kPrivateUse1);
+                    src_device = torch::kCPU;
+                    break;
+                case BatchCopyParams::H2H:
+                    break;
+                default:
+                    RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
+                    break;
+            }
+            auto dst_tensor =
+                torch::from_blob(buffers.dst_ptr[i], {(int64_t)bytes}, torch::dtype(torch::kUInt8).device(dst_device));
+            auto src_tensor = torch::from_blob(const_cast<void*>(buffers.src_ptr[i]),
+                                               {(int64_t)bytes},
+                                               torch::dtype(torch::kUInt8).device(src_device));
+            runtimeCopy({dst_tensor, src_tensor, params.overlapped});
+        }
+    }
+}
+
+void runtimeBatchCopy(const BatchCopyParams& params) {
+    batchCopyFallback(params);
+}
+
+void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
+    auto mask_float = mask.to(logits.dtype());
+    logits.masked_fill_(mask_float.to(torch::kBool) == 0, -1e9f);
+}
+
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  const torch::Tensor& row_indices,
+                                  size_t               vocab_size) {
+    applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
+}
+
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  size_t               vocab_size) {
+    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, torch::Tensor{}, vocab_size);
+}
+
 #else  // ROCm / non-CUDA
 
 namespace {
@@ -528,7 +616,7 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
         batchCopyFallback(fallback_copies);
     }
 }
-#else
+#elif !USING_ASCEND
 void runtimeBatchCopy(const BatchCopyParams& params) {
     batchCopyFallback(params);
 }

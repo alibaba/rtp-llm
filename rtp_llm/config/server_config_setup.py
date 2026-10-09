@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.device.device_type import device_count, is_ascend
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
@@ -265,8 +266,8 @@ def set_parallelism_config(
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:
-        if torch.cuda.is_available():
-            n = min(torch.cuda.device_count(), world_size)
+        if torch.cuda.is_available() or is_ascend():
+            n = min(device_count(), world_size)
         else:
             n = world_size
         parallelism_config.local_world_size = max(n, 1)
@@ -428,6 +429,9 @@ def setup_default_args(py_env_configs):
     ):
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
+    if is_ascend() and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+        py_env_configs.kv_cache_config.seq_size_per_block = 128
+        logging.info("[Ascend] set SEQ_SIZE_PER_BLOCK 128 by default, as FIA v2 paged attention recommends block_size=128 for performance.")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
@@ -587,9 +591,19 @@ def load_gpu_nic_affinity() -> bool:
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    """Bind the process to accelerator device `local_rank` (GPU or NPU) and apply ACCL env."""
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
+    elif is_ascend():
+        try:
+            import torch_npu  # noqa: F401  (registers torch.npu)
+        except (ImportError, OSError) as e:
+            raise RuntimeError(
+                f"Ascend backend selected but torch_npu is unusable "
+                f"(import failed: {e}); install a torch-npu wheel matching "
+                f"torch {torch.__version__}"
+            ) from e
+        torch.npu.set_device(local_rank)
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)

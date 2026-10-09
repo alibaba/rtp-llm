@@ -11,6 +11,7 @@ class DeviceType(IntEnum):
     ArmCpu = 3
     ROCm = 4
     Ppu = 5
+    Ascend = 6
 
 
 def get_device_type() -> DeviceType:
@@ -23,6 +24,12 @@ def get_device_type() -> DeviceType:
         ):
             return DeviceType.Ppu
         return DeviceType.Cuda
+    try:
+        import torch_npu
+        if torch.npu.is_available():
+            return DeviceType.Ascend
+    except ImportError:
+        pass
     return DeviceType.Cpu
 
 
@@ -34,5 +41,18 @@ def is_hip() -> bool:
     return get_device_type() == DeviceType.ROCm
 
 
+def is_ascend() -> bool:
+    return get_device_type() == DeviceType.Ascend
+
+
 def is_ppu() -> bool:
     return get_device_type() == DeviceType.Ppu
+
+
+def device_count() -> int:
+    """Local accelerator count: NPU on Ascend, GPU otherwise."""
+    if is_ascend():
+        import torch_npu  # noqa: F401  (registers torch.npu)
+
+        return torch.npu.device_count()
+    return torch.cuda.device_count()
