@@ -31,6 +31,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     save_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
+    compressor_bf16,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import mhc_fp32
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
@@ -81,15 +84,22 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     precision = os.environ.get("DSV41_TEST_REFERENCE_PRECISION", "baseline")
     compare_tp8 = os.environ.get("DSV41_TEST_COMPARE_TP8") == "1"
     compare_mhc = os.environ.get("DSV41_TEST_COMPARE_MHC") == "1"
+    compare_compressor = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR") == "1"
+    paired = compare_tp8 or compare_mhc or compare_compressor
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
         profiles.append("mhc_fp32")
         if compare_tp8:
             profiles.append("tp8_projection_mhc_fp32")
+    if compare_compressor:
+        profiles += [
+            "compressor_bf16" if profile == "baseline" else f"{profile}_compressor_bf16"
+            for profile in profiles
+        ]
     current_profile = [precision]
     trace_steps = dict.fromkeys(profiles, 0)
     try:
-        if (compare_tp8 or compare_mhc) and precision != "baseline":
+        if paired and precision != "baseline":
             raise ValueError("Paired comparison requires unpatched production math")
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
@@ -175,7 +185,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 ) as snapshots, tp8_projection(
                     profile.startswith("tp8_projection")
                 ), mhc_fp32(
-                    profile.endswith("mhc_fp32")
+                    "mhc_fp32" in profile
+                ), compressor_bf16(
+                    profile.endswith("compressor_bf16")
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -193,7 +205,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     trace_root = Path(trace_directory)
                     if not full:
                         trace_root /= f"bounded-context{context}-tokens{new_tokens}"
-                    if compare_tp8 or compare_mhc:
+                    if paired:
                         trace_root /= profile
                     save_model_trace(
                         trace_root / f"native-prompt0-step{trace_steps[profile]}.pt",
