@@ -19,6 +19,19 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_attention_replay",
+    testonly = True,
+    srcs = ["dsv41_attention_replay.py"],
+    deps = [
+        ":dsv41_reference_probe",
+        ":dsv41_trace_compare",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],

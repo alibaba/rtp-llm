@@ -15,6 +15,12 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_attention_replay_test",
+    srcs = ["dsv41_attention_replay_test.py"],
+    deps = ["//rtp_llm/tools:dsv41_attention_replay"],
+)
+
+py_test(
     name = "checkpoint_inventory_test",
     srcs = ["checkpoint_inventory_test.py"],
     data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
