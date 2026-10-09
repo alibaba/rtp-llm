@@ -41,10 +41,12 @@ def get_runner_type(
                 return DpSeperationCaseRunner
             else:
                 return PdSeperationCaseRunner
+        elif "llm" in env_args and any(
+            role == "vit" or role.startswith("vit_") for role in env_args
+        ):
+            return VitSeperationCaseRunner
         elif "frontend" in env_args:
             return FrontAppSeperationCaseRunner
-        elif "vit" in env_args:
-            return VitSeperationCaseRunner
         else:
             raise Exception(f"unknow env_args for runner selection: {env_args}")
 
