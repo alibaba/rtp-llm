@@ -236,7 +236,7 @@ class MlaFlashInferPrefillOp(object):
             kv_indptr_buf=self._kv_indptr_buf,
         )
 
-    def plan(self, mla_params: Any):
+    def plan(self, mla_params: Any, block_table: torch.Tensor):
         # Pass host indptr tensors to FlashInfer's plan() — its implementation
         # calls .cpu() on device inputs which triggers cudaStreamSynchronize.
         # The host mirrors are already populated by fillParams.
@@ -284,11 +284,10 @@ class MlaFlashInferPrefillOp(object):
             self.total_kv_lens = int(ragged_h[-1].item())
         else:
             self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
-        self.block_table = mla_params.page_indice_d.unsqueeze(0)
-        self.workspace_starts = torch.zeros(
-            1, dtype=torch.int32, device=self.block_table.device
-        )
-        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+        # Keep request boundaries: a request's last page may be only partly full.
+        self.block_table = block_table
+        self.workspace_starts = mla_params.prefill_ragged_kv_len_indptr_d[:-1]
+        self.seq_lens = mla_params.kvlen_d
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -324,7 +323,7 @@ class MlaFlashInferPrefillOp(object):
                 self.block_table,
                 self.seq_lens,
                 self.workspace_starts,
-                batch_size=1,  # ragged
+                batch_size=self.seq_lens.numel(),
             )
             return final_compressed_kv, final_k_pe
 

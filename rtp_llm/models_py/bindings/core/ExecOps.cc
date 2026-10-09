@@ -418,8 +418,15 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             group_type,
             param.cp_rank,
             param.cp_size);
+        const int publish_start_token = param.publish_start_tokens.defined() ?
+            param.publish_start_tokens.data_ptr<int32_t>()[batch_id] : 0;
+        RTP_LLM_CHECK(publish_start_token >= 0);
+        const size_t publish_start_block = group_type == CacheGroupType::FULL ?
+            static_cast<size_t>(publish_start_token) / canonical_seq_size_per_block : 0;
         for (const auto& pair : block_plan) {
-            addBlock(pair.key_index, pair.offset_index);
+            if (static_cast<size_t>(pair.key_index) >= publish_start_block) {
+                addBlock(pair.key_index, pair.offset_index);
+            }
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
@@ -435,7 +442,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         if (request_blocks->getBlocksCount() > 0) {
             cache_store->store(request_blocks, storeCallback);
         } else {
-            RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
+            RTP_LLM_LOG_DEBUG("skip cache store because no blocks require publication, request id [%ld], layer id [%d]",
                               request_id,
                               param.layer_id);
         }

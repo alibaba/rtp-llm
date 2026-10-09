@@ -13,6 +13,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <thread>
 #include <unordered_set>
 
@@ -37,6 +38,16 @@ bool fifoBatchTraceEnabled() {
 
 }  // namespace
 
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size, int64_t padding) {
+    if (budget <= 0 || rows <= 0 || remaining <= 0 || block_size <= 0 || padding <= 0) {
+        return 0;
+    }
+
+    const int64_t max_len = (budget / rows / padding) * padding;
+    const int64_t alignment = std::lcm(block_size, padding);
+    return remaining <= max_len ? remaining : (max_len / alignment) * alignment;
+}
+
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -56,6 +67,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
+    prefill_chunk_size_(std::min(runtime_config.fifo_scheduler_config.prefill_chunk_size,
+                                 runtime_config.fifo_scheduler_config.max_batch_tokens_size)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
@@ -99,7 +112,7 @@ FIFOScheduler::~FIFOScheduler() {
 bool FIFOScheduler::empty() {
     lock_guard<mutex> lock(lock_);
     return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty()
-           && waiting_group_queue_.empty() && loading_cache_group_queue_.empty();
+           && waiting_group_queue_.empty() && loading_cache_group_queue_.empty() && pending_decode_streams_.empty();
 }
 
 void FIFOScheduler::cancelStreams(std::list<GenerateStreamPtr>& streams) {
@@ -126,6 +139,7 @@ absl::Status FIFOScheduler::stop() {
             cancelStreams(waiting_streams_);
             cancelStreams(loading_cache_streams_);
             cancelStreams(running_streams_);
+            cancelStreams(pending_decode_streams_);
             cancelGroups(waiting_group_queue_);
             cancelGroups(loading_cache_group_queue_);
             cache_prepare_blocked_stream_.reset();
@@ -142,6 +156,7 @@ absl::Status FIFOScheduler::stop() {
         cancelStreams(waiting_streams_);
         cancelStreams(loading_cache_streams_);
         cancelStreams(running_streams_);
+            cancelStreams(pending_decode_streams_);
         cache_prepare_blocked_stream_.reset();
         publishWorkerStatusSnapshotLocked();
         cancelGroups(waiting_group_queue_);
@@ -251,6 +266,17 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
                                          const GenerateStreamPtr& new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
     const auto admitted_running_stream_count = schedule_runtime.admitted_running_stream_count;
+    if (prefill_chunk_size_ > 0 && new_stream->chunkedPrefillEnabled() && new_stream->isContextStream()) {
+        if (std::any_of(running_streams_.begin(), running_streams_.end(),
+                        [](const auto& stream) { return !stream->isContextStream(); })) {
+            return false;
+        }
+        if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
+            return false;
+        }
+        return admitted_running_stream_count + pending_decode_streams_.size() < max_generate_batch_size_
+               && schedule_runtime.admitted_prefill_token_size_without_cache < static_cast<size_t>(prefill_chunk_size_);
+    }
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         // Decode-only scheduling can top up an existing running decode batch.
         // max_generate_batch_size_ is an inclusive cap; only requests above it
@@ -259,8 +285,11 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    // Active decode rows cannot mix with prefill; parked decode rows may coexist with a chunked context round
+    // because pending_decode_streams_ is excluded from the returned prefill batch.
+    if (!running_streams_.empty()
+        || (!pending_decode_streams_.empty()
+            && !(new_stream->chunkedPrefillEnabled() && new_stream->isContextStream()))) {
         return false;
     }
     if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
@@ -417,7 +446,8 @@ size_t FIFOScheduler::countInitedKVCacheStreams() const {
     };
 
     size_t count = count_inited(waiting_streams_) + count_inited(loading_cache_streams_)
-                   + count_inited(running_streams_) + count_inited(new_streams_);
+                   + count_inited(running_streams_) + count_inited(new_streams_) + count_inited(pending_decode_streams_)
+                   + count_inited(pending_decode_streams_);
     for (const auto& group : waiting_group_queue_) {
         count += count_inited(group);
     }
@@ -446,9 +476,9 @@ bool FIFOScheduler::waitPredicate() {
     if (!async_cache_prepare_enabled_) {
         // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
         return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-               || !running_streams_.empty() || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+               || !running_streams_.empty() || !pending_decode_streams_.empty() || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
     }
-    return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
 void FIFOScheduler::cachePrepareLoop() {
@@ -590,7 +620,11 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
     // they must not delay or isolate ordinary FIFO admission.
 
     ScheduleRuntime schedule_runtime;
-    for (const auto& stream : already_admitted_streams) {
+    auto admitted_streams = already_admitted_streams;
+    if (prefill_chunk_size_ > 0) {
+        admitted_streams.insert(admitted_streams.begin(), running_streams_.begin(), running_streams_.end());
+    }
+    for (const auto& stream : admitted_streams) {
         if (!stream || stream->getStatus() != StreamState::RUNNING) {
             continue;
         }
@@ -647,6 +681,21 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
             continue;
         }
 
+        if (prefill_chunk_size_ > 0 && stream->chunkedPrefillEnabled() && stream->isContextStream()) {
+            const int64_t budget = prefill_chunk_size_ - schedule_runtime.admitted_prefill_token_size_without_cache;
+            const auto grant = computeChunkGrant(budget, stream->currentBatchSize(),
+                                                  stream->seqLength() - stream->reuseLength(), stream->seqSizePerBlock(),
+                                                  prefill_cp_size_ > 1 ? 2 * prefill_cp_size_ : 1);
+            if (grant <= 0) {
+                if (schedule_runtime.admitted_running_stream_count == 0) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, "chunk budget cannot fit one KV block per sequence");
+                    stream->moveToNext();
+                    waiting_streams.erase(current);
+                }
+                break;
+            }
+            stream->setChunkSize(static_cast<int>(grant));
+        }
         const auto state                 = stream->getStatus();
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
         if (!stream->hasEvent(StreamEvents::CanRun)) {
@@ -757,7 +806,7 @@ void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
         })) {
         return;
     }
-    if (!running_streams_.empty()) {
+    if (!running_streams_.empty() || !new_streams_.empty()) {
         return;
     }
 
@@ -871,6 +920,131 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+bool FIFOScheduler::refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams) {
+    bool reaped = false;
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto& stream = *it;
+        if (!stream->isFinished()) {
+            stream->checkTimeout();
+            if (!stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone)) {
+                ++it;
+                continue;
+            }
+            const auto new_state = stream->moveToNext();
+            if (new_state != StreamState::FINISHED) {
+                RTP_LLM_LOG_ERROR("Unexpected state %d when reaping terminal stream [%ld]",
+                                  static_cast<int>(new_state),
+                                  stream->streamId());
+                ++it;
+                continue;
+            }
+        }
+        it     = streams.erase(it);
+        reaped = true;
+    }
+    return reaped;
+}
+
+void FIFOScheduler::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
+                                       const std::list<GenerateStreamPtr>&         streams) const {
+    for (const auto& stream : streams) {
+        EngineScheduleInfo::TaskInfo task_info{};
+        task_info.request_id    = stream->streamId();
+        task_info.prefix_length = stream->initialReuseLength();
+        task_info.input_length  = stream->inputLength();
+        task_info.iterate_count = stream->iterCount();
+        task_info.batch_id      = stream->groupId();
+        task_list.emplace_back(task_info);
+    }
+}
+
+std::list<GenerateStreamPtr> FIFOScheduler::selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams) {
+    if (prefill_chunk_size_ <= 0) {
+        return active_streams;
+    }
+
+    int64_t                      budget_left = prefill_chunk_size_;
+    std::list<GenerateStreamPtr> selected;
+
+    const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
+        const auto error_msg = "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId())
+                               + "]: " + reason;
+        (*it)->reportError(error_code, error_msg);
+        (*it)->moveToNext();
+        return active_streams.erase(it);
+    };
+
+    for (auto it = active_streams.begin(); it != active_streams.end();) {
+        const auto& stream = *it;
+        stream->checkTimeout();
+
+        if (stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone)) {
+            stream->moveToNext();
+            it = active_streams.erase(it);
+            continue;
+        }
+
+        const int64_t rows       = stream->currentBatchSize();
+        const int64_t reuse      = stream->reuseLength();
+        const int64_t remaining  = static_cast<int64_t>(stream->seqLength()) - reuse;
+        const int64_t block_size = stream->seqSizePerBlock();
+
+        if (remaining <= 0 || block_size <= 0 || reuse < 0 || reuse % block_size != 0) {
+            it = finish_invalid_stream(it,
+                                       ErrorCode::EXECUTION_EXCEPTION,
+                                       "invalid chunk window (rows=" + std::to_string(rows)
+                                           + ", reuse=" + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
+                                           + ", block_size=" + std::to_string(block_size) + ")");
+            continue;
+        }
+
+        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size,
+                                                 prefill_cp_size_ > 1 ? 2 * prefill_cp_size_ : 1);
+
+        if (grant <= 0) {
+            if (!selected.empty()) {
+                break;
+            }
+            it = finish_invalid_stream(it,
+                                       ErrorCode::INVALID_PARAMS,
+                                       "full prefill budget cannot produce a positive aligned grant");
+            continue;
+        }
+
+        stream->setChunkSize(static_cast<int>(grant));
+        selected.push_back(stream);
+        budget_left -= prefillTokenCostWithoutCache(stream);
+        ++it;
+
+        if (grant < remaining) {
+            break;
+        }
+    }
+
+    return selected;
+}
+
+bool FIFOScheduler::partitionChunkContinuations() {
+    refreshAndReapTerminalStreams(running_streams_);
+    const bool has_context = std::any_of(
+        running_streams_.begin(), running_streams_.end(), [](const auto& stream) { return stream->isContextStream(); });
+
+    if (has_context) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if (!(*it)->isContextStream()) {
+                auto current = it++;
+                pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
+            } else {
+                ++it;
+            }
+        }
+    } else if (!pending_decode_streams_.empty()) {
+        running_streams_.splice(running_streams_.begin(), pending_decode_streams_);
+        return true;
+    }
+    return false;
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     const bool         async_cache_prepare = async_cache_prepare_enabled_;
@@ -884,7 +1058,15 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_token_size_    = 0;
     last_waiting_oldest_age_us_          = 0;
     const size_t running_streams_before  = running_streams_.size();
-    bool         running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    if (prefill_chunk_size_ > 0) {
+        refreshAndReapTerminalStreams(pending_decode_streams_);
+        partitionChunkContinuations();
+    }
+    bool running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    if (prefill_chunk_size_ > 0 && !running_streams_.empty() && running_streams_.front()->isContextStream()) {
+        // Recompute grants for the next round before admitting waiting requests.
+        selectPrefillPrefix(running_streams_);
+    }
     if (!async_cache_prepare && (!waiting_streams_.empty() || !waiting_group_queue_.empty())) {
         // Reclaim once per admission round, after finished requests released
         // their references, instead of repeatedly evicting for every waiter.
@@ -990,6 +1172,24 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_changed = running_streams_changed || !new_streams_.empty();
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
+    if (prefill_chunk_size_ > 0) {
+        partitionChunkContinuations();
+        if (!running_streams_.empty() && running_streams_.front()->isContextStream()) {
+            auto selected = selectPrefillPrefix(running_streams_);
+            if (fifoBatchTraceEnabled()) {
+                size_t exec_tokens = 0;
+                for (const auto& stream : selected) {
+                    exec_tokens += prefillTokenCostWithoutCache(stream);
+                }
+                RTP_LLM_LOG_INFO("[FIFO_CHUNK_TRACE] batch=%zu exec_tokens=%zu budget=%ld waiting=%zu",
+                                 selected.size(), exec_tokens, prefill_chunk_size_, waiting_streams_.size());
+            }
+            reportMetrics();
+            publishWorkerStatusSnapshotLocked();
+            last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+            return selected;
+        }
+    }
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     if (running_streams_changed) {
@@ -1005,36 +1205,23 @@ int64_t FIFOScheduler::waitingStreamsSize() {
 
 int64_t FIFOScheduler::runningStreamsSize() {
     std::lock_guard<mutex> lock(lock_);
-    return running_streams_.size();
+    return running_streams_.size() + pending_decode_streams_.size();
 }
 
 int64_t FIFOScheduler::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
     return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size()
-           + groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_);
+           + groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_)
+           + pending_decode_streams_.size();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
     std::lock_guard<mutex> lock(lock_);
     waiting_task_list_.clear();
     waiting_task_list_.reserve(waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_));
-    for (const auto& stream : waiting_streams_) {
-        EngineScheduleInfo::TaskInfo task_info;
-        task_info.request_id    = stream->streamId();
-        task_info.prefix_length = stream->prefixLength();
-        task_info.input_length  = stream->inputLength();
-        task_info.batch_id      = stream->groupId();
-        waiting_task_list_.push_back(task_info);
-    }
+    appendTaskInfos(waiting_task_list_, waiting_streams_);
     for (const auto& group : waiting_group_queue_) {
-        for (const auto& stream : group) {
-            EngineScheduleInfo::TaskInfo task_info;
-            task_info.request_id    = stream->streamId();
-            task_info.prefix_length = stream->prefixLength();
-            task_info.input_length  = stream->inputLength();
-            task_info.batch_id      = stream->groupId();
-            waiting_task_list_.push_back(task_info);
-        }
+        appendTaskInfos(waiting_task_list_, group);
     }
     return waiting_task_list_;
 }
@@ -1051,6 +1238,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
         task_info.batch_id      = stream->groupId();
         running_task_list_.push_back(task_info);
     }
+    appendTaskInfos(running_task_list_, pending_decode_streams_);
     return running_task_list_;
 }
 
@@ -1070,6 +1258,9 @@ void FIFOScheduler::publishWorkerStatusSnapshotLocked() {
     for (const auto& stream : running_streams_) {
         snapshot->insert(stream->streamId());
     }
+    for (const auto& stream : pending_decode_streams_) {
+        snapshot->insert(stream->streamId());
+    }
     std::atomic_store_explicit(&worker_status_running_task_ids_snapshot_,
                                std::shared_ptr<const std::unordered_set<int64_t>>(std::move(snapshot)),
                                std::memory_order_release);
@@ -1079,7 +1270,7 @@ void FIFOScheduler::reportMetrics() {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
         collector.wait_stream_size    = waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_);
-        collector.running_stream_size = running_streams_.size();
+        collector.running_stream_size = running_streams_.size() + pending_decode_streams_.size();
         collector.loading_cache_stream_size =
             loading_cache_streams_.size() + groupQueueStreamsSize(loading_cache_group_queue_);
         collector.admitted_context_batch_size = last_admitted_context_batch_size_;

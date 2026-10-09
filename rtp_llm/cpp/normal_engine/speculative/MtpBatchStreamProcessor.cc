@@ -1101,7 +1101,8 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
                                                                const GptModelOutputs& model_output,
                                                                const SamplerOutput&   sampler_output,
-                                                               TensorHolder&          host_holder) {
+                                                               TensorHolder&          host_holder,
+                                                               const StreamGroups*    stream_groups) {
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
@@ -1122,6 +1123,32 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     }
     if (!new_all_tokens_d.is_contiguous()) {
         new_all_tokens_d = new_all_tokens_d.contiguous();
+    }
+
+    if (stream_groups) {
+        auto streams = stream_groups->allStreams();
+        const bool has_middle_chunk = std::any_of(streams.begin(), streams.end(),
+            [](const auto& stream) { return stream->isMiddleChunk(); });
+        if (has_middle_chunk) {
+            auto tails = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            auto mask = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+            int64_t row = 0;
+            for (const auto& stream : streams) {
+                for (int i = 0; i < stream->nextBatchSize(); ++i, ++row) {
+                    RTP_LLM_CHECK(row < batch_size);
+                    const bool middle = stream->isMiddleChunk();
+                    mask.data_ptr<bool>()[row] = middle;
+                    tails.data_ptr<int32_t>()[row] = middle ? stream->nextChunkBoundaryToken() : 0;
+                }
+            }
+            RTP_LLM_CHECK(row == batch_size);
+            host_holder.hold_host(mask);
+            host_holder.hold_host(tails);
+            new_all_tokens_d = new_all_tokens_d.clone();
+            new_all_tokens_d.select(1, token_stride - 1).copy_(torch::where(
+                mask.to(new_all_tokens_d.device(), true), tails.to(new_all_tokens_d.device(), true),
+                new_all_tokens_d.select(1, token_stride - 1)));
+        }
     }
 
     // batch_offsets[b] = cumulative input_lengths through batch b (inclusive end offset).

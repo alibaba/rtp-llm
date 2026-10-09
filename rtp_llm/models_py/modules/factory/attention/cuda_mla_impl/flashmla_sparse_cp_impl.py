@@ -610,6 +610,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.write_cache_store_impl = None
 
     def _refresh_fp8_kernel_metadata(self, n_q: int) -> None:
+        if n_q == 0:
+            self._fp8_kernel_metadata_q0 = None
+            self._fp8_kernel_metadata_q0_key = None
+            return
         key = (
             int(n_q) * int(self.num_heads),
             int(self.top_k),
@@ -1155,6 +1159,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
+
+        # A short tail can leave this rank with padding only. It must still
+        # gather and write KV before returning rows for the following layers.
+        if self.total_local_ids.numel() == 0:
+            return q.new_zeros((q.size(0), q.size(1), self.kv_lora_rank))
 
         no_q_work = (
             topk is None

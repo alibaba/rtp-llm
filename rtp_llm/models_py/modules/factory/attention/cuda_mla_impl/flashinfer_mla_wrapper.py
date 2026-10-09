@@ -107,7 +107,12 @@ class MlaFlashInferImplBase(MlaImplBase):
             plan_cuda_graph = getattr(self.fmha_impl, "plan_cuda_graph", None)
             if callable(plan_cuda_graph) and plan_cuda_graph(attn_inputs):
                 return
-        self.fmha_impl.plan(self.fmha_params)
+        if isinstance(self.fmha_impl, MlaFlashInferPrefillOp):
+            self.fmha_impl.plan(
+                self.fmha_params, attn_inputs.kv_cache_kernel_block_id_device
+            )
+        else:
+            self.fmha_impl.plan(self.fmha_params)
 
     def forward(
         self,

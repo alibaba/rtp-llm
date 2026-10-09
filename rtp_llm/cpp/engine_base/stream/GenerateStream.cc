@@ -134,6 +134,29 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    // Enable chunked prefill only for request shapes supported by the chunk window path.
+    const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    if (!input->fake_query && chunk_size > 0 && input->generate_config->max_new_tokens > 0
+        && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
+        const auto& config = *generateConfig();
+        const char* reason = isGroup()                                       ? "force_batch" :
+                             hasNumBeams()                                   ? "num_beams" :
+                             returnLogits()                                  ? "return_logits" :
+                             calculateLoss()                                 ? "calculate_loss" :
+                             config.return_hidden_states                     ? "return_hidden_states" :
+                             config.return_all_hidden_states                 ? "return_all_hidden_states" :
+                             getReturnAllProbs() ? "return_all_probs" :
+                             multimodalFeaturesLength() != 0                 ? "multimodal" :
+                                                                               nullptr;
+        if (reason != nullptr) {
+            reportEvent(StreamEvents::Error,
+                        ErrorCode::INVALID_PARAMS,
+                        "chunked prefill incompatible: " + std::string(reason));
+            return;
+        }
+        setChunkSize(static_cast<int>(chunk_size));
+    }
+
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_,
         init_batch_size,
@@ -512,6 +535,9 @@ int GenerateStream::seqSizePerBlock() const {
 }
 
 int GenerateStream::contextLength() const {
+    if (useChunkWindow()) {
+        return currentChunkLen();
+    }
     int begin_pos = prefixLength();
     int end_pos   = seqLength();
     return end_pos - begin_pos;
@@ -525,8 +551,44 @@ int GenerateStream::reuseLength() const {
     return reuse_length_;
 }
 
+// ---- chunked prefill ----
+bool GenerateStream::useChunkWindow() const {
+    // Enable chunk windows after cache reuse is finalized or explicitly for warmup.
+    return chunkedPrefillEnabled() && (getStatus() == StreamState::RUNNING || warmup_chunk_window_)
+           && isContextStream();
+}
+
+int GenerateStream::currentChunkLen() const {
+    int remaining = seqLength() - reuse_length_;
+    if (!chunkedPrefillEnabled() || chunk_size_ >= remaining) {
+        return remaining;  // not chunking / last chunk: take all that's left
+    }
+    return chunk_size_;
+}
+
+bool GenerateStream::isLastChunk() const {
+    return reuse_length_ + currentChunkLen() >= seqLength();
+}
+
+bool GenerateStream::isMiddleChunk() const {
+    // a context chunk that is NOT the final one → produces no sampled token / no output row
+    return useChunkWindow() && !isLastChunk();
+}
+
+void GenerateStream::advanceChunk() {
+    reuse_length_ += currentChunkLen();
+    chunk_advanced_ = true;
+}
+
+int GenerateStream::nextChunkBoundaryToken() const {
+    // Absolute position right after the current chunk window. A middle chunk never reaches
+    // seqLength(), so boundary_pos is always a valid prompt-token index here.
+    const int boundary_pos = prefixLength() + contextLength();
+    return complete_token_ids_->contextTokens(0, boundary_pos, 1).at(0);
+}
+
 int GenerateStream::initialReuseLength() const {
-    return initial_reuse_length_;
+    return __atomic_load_n(&initial_reuse_length_, __ATOMIC_RELAXED);
 }
 
 void GenerateStream::setReuseLength(int reuse_length) {
@@ -578,7 +640,7 @@ int GenerateStream::memoryReuseLength() const {
 }
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
-    initial_reuse_length_ = initial_reuse_length;
+    __atomic_store_n(&initial_reuse_length_, initial_reuse_length, __ATOMIC_RELAXED);
 }
 
 void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
@@ -725,10 +787,13 @@ vector<int> GenerateStream::textTokensMask() const {
 }
 
 torch::Tensor GenerateStream::generateContextPositionIds() {
-    context_position_ids_ = PositionIdsGenerator::generatePositionIds(generate_input_->inputLength(),
-                                                                      mm_position_ids_style_,
-                                                                      generate_input_->mm_locs,
-                                                                      generate_input_->mm_position_ids);
+    // Cache prompt-derived position ids; chunked prefill reuses them across chunks.
+    if (!context_position_ids_) {
+        context_position_ids_ = PositionIdsGenerator::generatePositionIds(generate_input_->inputLength(),
+                                                                          mm_position_ids_style_,
+                                                                          generate_input_->mm_locs,
+                                                                          generate_input_->mm_position_ids);
+    }
     return context_position_ids_.value();
 }
 
@@ -879,6 +944,10 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (getStatus() == StreamState::RUNNING && chunkedPrefillEnabled() && isContextStream()
+        && !generate_status_->error_info.hasError() && !generate_status_->hasEvent(StreamEvents::GenerateDone)) {
+        return StreamState::RUNNING;
+    }
     StreamState                 state = generate_status_->moveToNext();
 
     // notify one thread waiting for stream completion
@@ -1148,7 +1217,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
-    *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
     }
@@ -1160,6 +1228,14 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         // GenerateDone. Discard an already-enqueued next MTP round as well.
         return;
     }
+
+    if (isMiddleChunk()) {
+        if (!hasError() && !isFinished()) {
+            advanceChunk();
+        }
+        return;
+    }
+    *is_context_stream_ = false;
 
     speculative_verify_rounds_ += update_info.speculative_verify_rounds;
     speculative_accepted_token_num_ += update_info.speculative_accepted_token_num;
@@ -1296,7 +1372,6 @@ void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTi
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
-    *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
     }
@@ -1305,6 +1380,14 @@ void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTi
     if (isFinished() && !update_info.force_update_info) {
         return;
     }
+
+    if (isMiddleChunk()) {
+        if (!hasError() && !isFinished()) {
+            advanceChunk();
+        }
+        return;
+    }
+    *is_context_stream_ = false;
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
@@ -1639,10 +1722,11 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length       = initial_reuse_length_;
-            collector.input_token_length = inputLength();
+            const int64_t initial_reuse_length = initialReuseLength();
+            collector.reuse_length             = initial_reuse_length;
+            collector.input_token_length       = inputLength();
             collector.effective_context_length =
-                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();

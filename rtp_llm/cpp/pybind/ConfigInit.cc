@@ -1219,6 +1219,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_batch_kv_len", &FIFOSchedulerConfig::max_batch_kv_len)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
+        .def_readwrite("prefill_chunk_size", &FIFOSchedulerConfig::prefill_chunk_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
@@ -1227,10 +1228,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
-                                      self.max_batch_kv_len);
+                                      self.max_batch_kv_len,
+                                      self.prefill_chunk_size);
             },
             [](py::tuple t) {
-                if (t.size() < 2 || t.size() > 6)
+                if (t.size() < 2 || t.size() > 7)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1240,6 +1242,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_inited_kv_cache_streams    = t.size() >= 4 ? t[3].cast<int64_t>() : 0;
                     c.max_batch_tokens_without_cache = t.size() >= 5 ? t[4].cast<int64_t>() : 0;
                     c.max_batch_kv_len               = t.size() >= 6 ? t[5].cast<int64_t>() : 0;
+                    c.prefill_chunk_size = t.size() >= 7 ? t[6].cast<int64_t>() : 0;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

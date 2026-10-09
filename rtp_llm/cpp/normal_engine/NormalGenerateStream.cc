@@ -160,7 +160,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
             generate_output.aux_info.output_len                         = subGenerateOutputLength(i);
             generate_output.aux_info.step_output_len                    = output_len;
-            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.reuse_len                          = initialReuseLength();
             generate_output.aux_info.pd_sep                             = queryPdSep();
             generate_output.aux_info.local_reuse_len                    = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len                   = remote_reuse_length_;
@@ -227,7 +227,7 @@ GenerateOutputs NormalGenerateStream::prepareFrontendMetricOutput() {
             generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
             generate_output.aux_info.output_len                         = subGenerateOutputLength(i);
             generate_output.aux_info.step_output_len                    = step_output_len;
-            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.reuse_len                          = initialReuseLength();
             generate_output.aux_info.pd_sep                             = queryPdSep();
             generate_output.aux_info.speculative_verify_rounds          = speculative_verify_rounds_;
             generate_output.aux_info.speculative_accepted_token_num     = speculative_accepted_token_num_;

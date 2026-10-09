@@ -1912,7 +1912,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
-                model_input, model_output, sampler_output, buffer_holder_);
+                model_input, model_output, sampler_output, buffer_holder_, &stream_groups);
         }
     }
 

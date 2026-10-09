@@ -206,7 +206,8 @@ public:
     void updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
                                           const GptModelOutputs& model_output,
                                           const SamplerOutput&   sampler_output,
-                                          TensorHolder&          host_holder);
+                                          TensorHolder&          host_holder,
+                                          const StreamGroups*    stream_groups = nullptr);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

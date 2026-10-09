@@ -15,6 +15,8 @@
 
 namespace rtp_llm {
 
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size, int64_t padding = 1);
+
 class FIFOScheduler: public SchedulerBase {
 public:
     explicit FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -65,6 +67,11 @@ private:
         size_t newly_inited_kv_streams                   = 0;
     };
 
+    std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
+    bool refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
+    bool partitionChunkContinuations();
+    void appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& tasks,
+                         const std::list<GenerateStreamPtr>& streams) const;
     int64_t lastScheduleTime() override;
     bool    fitsPrefillTokenLimits(size_t                   admitted_stream_count,
                                    size_t                   admitted_tokens,
@@ -117,6 +124,7 @@ protected:
     size_t                          max_batch_kv_len_               = 0;
     size_t                          max_generate_batch_size_        = 1;
     size_t                          max_inited_kv_cache_streams_    = 0;
+    int64_t                         prefill_chunk_size_             = 0;
     const bool                      need_fill_fake_stream_          = false;
     const size_t                    prefill_cp_size_                = 1;
     const bool                      cp_force_single_prefill_        = false;
@@ -141,6 +149,7 @@ protected:
     std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
 
     // TODO @wangyin support different beams run togather
+    std::list<GenerateStreamPtr> pending_decode_streams_;
 };
 
 }  // namespace rtp_llm

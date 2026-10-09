@@ -34,6 +34,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::cacheStorePublishStartTokens] =
+        inputs.cache_store_publish_start_tokens.defined() ? inputs.cache_store_publish_start_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] =
         inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
@@ -179,6 +181,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
+        const auto publish_count = (size_t)shape_hints_ptr[GptModelInputIndex::cacheStorePublishStartTokens];
+        inputs.cache_store_publish_start_tokens = publish_count ?
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
             // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
@@ -254,6 +259,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
+    collect(inputs.cache_store_publish_start_tokens);
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);

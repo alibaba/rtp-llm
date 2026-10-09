@@ -376,6 +376,7 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "max_batch_kv_len: " << max_batch_kv_len << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
+    oss << "\nprefill_chunk_size: " << prefill_chunk_size;
     return oss.str();
 }
 

@@ -280,6 +280,7 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
+    torch::Tensor publish_start_tokens;
 };
 
 struct PyPrefillCudaGaphCopyParams {

@@ -47,6 +47,7 @@ struct GptModelInputs {
     torch::Tensor         input_lengths;            // [batch_size]
     torch::Tensor         sequence_lengths;         // [decoder_batch_size]
     torch::Tensor         lm_output_indexes;        // selected output rows
+    torch::Tensor         cache_store_publish_start_tokens;
     torch::Tensor         prefix_lengths;           // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
@@ -229,6 +230,7 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
+    torch::Tensor publish_start_tokens;
 };
 
 struct AttentionCommonInputs {
