@@ -1428,6 +1428,32 @@ TEST_F(PPExecutorTpTest, MiddleTpPeerKeepsUpstreamCacheTagsThroughPlanAndTpSync)
     }
 }
 
+/** A PP stage owns only part of the model's cache groups, so the [N,3] update mapping is
+ * decoded by tag and rows whose tag is absent from the local topology are skipped. The raw
+ * [N,3] tensor cannot go to the 2-column block-copy overload, which checks size(1) == 2. */
+TEST_F(PPExecutorTest, MiddleStageDecodesCacheUpdateMappingByGroup) {
+    auto params = makeStageParams(/*pp_rank=*/1);
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(
+        test::makeSimpleMhaCacheConfig(/*layer_num=*/3, /*block_num=*/16, /*tokens_per_block=*/4, DataType::TYPE_FP16));
+    ASSERT_TRUE(resources.cache_manager->init());
+    PPExecutor executor(params, resources.cache_manager, false);
+    auto* wire = attachTransport(executor);
+
+    auto plan = makePlan(params);
+    // Payload carries "default" (owned by this stage) and "foreign" (owned by another stage).
+    plan.model_input.kv_cache_group_tags      = {"default", "foreign"};
+    plan.model_input.kv_cache_block_id        = intTensor({1, 2, 3, 4}).reshape({2, 2, 1});
+    plan.model_input.kv_cache_kernel_block_id = plan.model_input.kv_cache_block_id.clone();
+    // Row 0 -> tag row 0 ("default"): copy block 3 to 4. Row 1 -> tag row 1 ("foreign"): skipped.
+    plan.model_input.kv_cache_update_mapping  = intTensor({0, 3, 4, 1, 5, 6}).reshape({2, 3});
+
+    enqueuePlan(*wire, plan);
+    executor.setModel(std::make_unique<RecordingStageModel>(params.parallelism_config));
+
+    ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+}
+
 /** First-stage result metrics: preserve batch ownership and the existing counting semantics. */
 TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
     auto params = makeMtpParams(3);

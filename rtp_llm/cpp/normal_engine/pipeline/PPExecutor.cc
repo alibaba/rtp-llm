@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -36,6 +37,42 @@
 namespace rtp_llm {
 
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
+
+namespace {
+
+std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&            copy_mapping,
+                                                        const std::vector<std::string>& group_tags,
+                                                        const CacheTopology&            local_topology) {
+    RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
+                                && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
+                                && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
+                            "cache update mapping must be a contiguous CPU int32 [N,3] tensor");
+    std::unordered_set<std::string> seen;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
+                                "cache update mapping tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    const std::unordered_set<std::string> local_tags(local_topology.groupTags().begin(),
+                                                     local_topology.groupTags().end());
+    std::vector<TaggedBlockIdPair>        mappings;
+    mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
+    const auto* rows = copy_mapping.data_ptr<int32_t>();
+    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+        const auto row = rows[3 * i];
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && static_cast<size_t>(row) < group_tags.size(),
+                                "cache update mapping payload row is out of range: row=%d",
+                                row);
+        const auto& tag = group_tags[row];
+        if (local_tags.find(tag) == local_tags.end()) {
+            continue;
+        }
+        mappings.push_back({tag, rows[3 * i + 1], rows[3 * i + 2]});
+    }
+    return mappings;
+}
+
+}  // namespace
 
 GenerateStreamPtr PPExecutor::createMinFakePrefillStream(const ModelConfig&                model_config,
                                                          const RuntimeConfig&              runtime_config,
@@ -525,7 +562,10 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     releaseAllModelBuffers();
     if (cache_manager_) {
         if (model_input.kv_cache_update_mapping.defined()) {
-            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            cache_manager_->blockBatchCopyByGroup(
+                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping,
+                                         model_input.kv_cache_group_tags,
+                                         cache_manager_->cacheConfig().topology()));
         }
     }
 
@@ -1171,7 +1211,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         if (cache_manager_) {
             RTP_LLM_PROFILE_SCOPE("executor.pp.kv_cache_update");
             if (model_input.kv_cache_update_mapping.defined()) {
-                cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+                cache_manager_->blockBatchCopyByGroup(
+                    decodeCacheUpdateMapping(model_input.kv_cache_update_mapping,
+                                             model_input.kv_cache_group_tags,
+                                             cache_manager_->cacheConfig().topology()));
             }
         }
 
