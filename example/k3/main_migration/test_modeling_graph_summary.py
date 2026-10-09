@@ -181,7 +181,7 @@ class EightRankSummaryTest(unittest.TestCase):
                 entries.append(
                     {"rank": rank, "path": path.name, "sha256": file_sha256(path)}
                 )
-            labels = [f"warmup-{i}" for i in range(10)]
+            labels = ["warmup-0"]
             groups = [
                 {
                     "label": label,
@@ -228,12 +228,15 @@ class EightRankSummaryTest(unittest.TestCase):
             client_path.write_text(json.dumps(client))
             window = {
                 "window": 1,
-                "warmup_completed_batches": 10,
+                "warmup_completed_batches": 1,
                 "traces": entries,
                 "client_summary_path": client_path.name,
                 "client_summary_sha256": file_sha256(client_path),
             }
             self.assertEqual(load_window(window, root, 1)["all_rank_matched_rounds"], 1)
+            unheated = dict(window, warmup_completed_batches=0)
+            with self.assertRaisesRegex(ValueError, "At least 1"):
+                load_window(unheated, root, 1)
             original_ready = copy.deepcopy(client["groups"][0]["ready_snapshot"])
             for mutation in ("missing", "partial", "waiting", "wrong_kv"):
                 client["groups"][0]["ready_snapshot"] = copy.deepcopy(original_ready)

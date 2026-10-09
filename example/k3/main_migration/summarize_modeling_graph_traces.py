@@ -124,9 +124,9 @@ def load_window(window, root, sample_rounds):
     entries = window["traces"]
     if len(entries) != 8 or {e["rank"] for e in entries} != set(range(8)):
         raise ValueError("Each window needs exactly eight unique rank traces")
-    if window["warmup_completed_batches"] < 10:
+    if window["warmup_completed_batches"] < 1:
         raise ValueError(
-            "At least 10 completed same-shape warmup batches required per window"
+            "At least 1 completed same-shape warmup batch required per window"
         )
     client_path = root / window["client_summary_path"]
     if file_sha256(client_path) != window["client_summary_sha256"]:

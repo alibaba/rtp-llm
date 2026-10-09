@@ -1,8 +1,14 @@
 import copy
+import json
 import threading
 import unittest
 
-from run_modeling_graph_case import arm_profile, full_batch_ready, owner_rows
+from run_modeling_graph_case import (
+    arm_profile,
+    fixed_output_completed,
+    full_batch_ready,
+    owner_rows,
+)
 
 
 def owner(rank, tp=4):
@@ -19,6 +25,29 @@ def owner(rank, tp=4):
 
 
 class ServingCaptureBoundaryTest(unittest.TestCase):
+    def test_stop_word_truncation_or_inactive_minimum_cannot_complete_warmup(self):
+        response = {
+            "debug_info": {
+                "generate_config": {
+                    "min_new_tokens": 4096,
+                    "max_new_tokens": 4096,
+                    "ignore_eos": True,
+                }
+            },
+            "usage": {"completion_tokens": 4096},
+        }
+        self.assertTrue(fixed_output_completed(response, 4096))
+        truncated = copy.deepcopy(response)
+        truncated["usage"]["completion_tokens"] = 1531
+        self.assertFalse(fixed_output_completed(truncated, 4096))
+        inactive = copy.deepcopy(response)
+        inactive["debug_info"]["generate_config"]["min_new_tokens"] = 0
+        self.assertFalse(fixed_output_completed(inactive, 4096))
+        response["debug_info"]["generate_config"] = json.dumps(
+            response["debug_info"]["generate_config"]
+        )
+        self.assertTrue(fixed_output_completed(response, 4096))
+
     def test_profiles_every_tp_owner_not_just_owner_zero(self):
         calls = []
         lock = threading.Lock()

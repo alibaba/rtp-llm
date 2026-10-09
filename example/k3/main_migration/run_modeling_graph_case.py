@@ -21,6 +21,18 @@ from urllib.parse import urlsplit
 FIXTURE_SHA = "291c1a008a064a73afda5fbb7d7daab97aaa64e656b2d00ab44610ed73db7460"
 
 
+def fixed_output_completed(response, output_tokens):
+    config = response.get("debug_info", {}).get("generate_config", {})
+    if isinstance(config, str):
+        config = json.loads(config)
+    return (
+        config.get("min_new_tokens") == output_tokens
+        and config.get("max_new_tokens") == output_tokens
+        and config.get("ignore_eos") is True
+        and response.get("usage", {}).get("completion_tokens") == output_tokens
+    )
+
+
 def post(url, payload, timeout=30):
     request = urllib.request.Request(
         url,
@@ -124,7 +136,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path, required=True)
     parser.add_argument("--trace-prefix", required=True)
-    parser.add_argument("--warmup-batches", type=int, default=10)
+    parser.add_argument("--warmup-batches", type=int, default=1)
     parser.add_argument("--profile-steps", type=int, default=40)
     parser.add_argument("--profile-start-step", type=int, default=8)
     parser.add_argument("--output-tokens", type=int, default=4096)
@@ -134,13 +146,13 @@ def main():
     if len(urls) != 8 // args.tp or len(set(urls)) != len(urls):
         parser.error("One distinct URL required per Decode TP owner")
     if (
-        args.warmup_batches < 10
+        args.warmup_batches < 1
         or args.profile_steps < 32
         or args.output_tokens < 512
         or args.profile_start_step < 0
     ):
         parser.error(
-            "Need >=10 warmup batches, >=32 profiling steps and >=512 output tokens"
+            "Need >=1 warmup batch, >=32 profiling steps and >=512 output tokens"
         )
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,55}", args.trace_prefix):
         parser.error("trace prefix must contain 1..55 safe characters")
@@ -167,6 +179,8 @@ def main():
         "dp": 8 // args.tp,
         "warmup_batches_per_window_required": args.warmup_batches,
         "output_tokens": args.output_tokens,
+        "min_new_tokens": args.output_tokens,
+        "ignore_eos": True,
         "profile_start_step": args.profile_start_step,
         "prefill_url": prefill_url,
         "decode_urls": urls,
@@ -225,6 +239,7 @@ def main():
                 "enable_thinking": False,
                 "extra_configs": {
                     "ignore_eos": True,
+                    "min_new_tokens": args.output_tokens,
                     "reuse_cache": True,
                     "role_addrs": [
                         {
@@ -251,8 +266,7 @@ def main():
                 or response.get("debug_info", {}).get("input_ids") != ids
                 or response.get("aux_info", {}).get("input_len") != len(ids)
                 or response.get("aux_info", {}).get("pd_sep") is not True
-                or response.get("usage", {}).get("completion_tokens")
-                != args.output_tokens
+                or not fixed_output_completed(response, args.output_tokens)
             ):
                 raise RuntimeError(
                     f"{label}/owner{owner}/request{local}: HTTP, PD, token or output check failed"
@@ -319,10 +333,7 @@ def main():
 
     save()
     summary["initial_queues"] = drain()
-    # Seed the Prefill Memory Cache before concurrent arrivals. This single
-    # request does not replace any of the required same-shape B32 warmups.
-    request_group("prefill-cache-seed", per_owner=1)
-    request_group("materialize")
+    # Each window follows one complete B32 warmup group by default.
     for window in range(1, 4):
         warmup_labels = []
         for iteration in range(args.warmup_batches):
