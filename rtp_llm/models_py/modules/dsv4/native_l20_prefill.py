@@ -1,7 +1,8 @@
 """Forward-local source publication through the maintained L21 attention owner.
 
 The caller owns the native allocation lease and forward serialization. This
-first adapter admits short eager CP1 controls; it does not admit PP execution.
+adapter admits short eager CP1 maintained-stage controls; it does not admit
+production PP execution.
 """
 
 from contextlib import contextmanager
@@ -37,22 +38,44 @@ class NativeL20PrefillSource:
             )
 
     def require_owner(self, attention: Any) -> None:
-        """Check the admitted short L21 owner before any forward cache writes."""
+        """Check L21-39 source provenance before any forward cache writes."""
         self._ready()
         shared = attention._shared_attention
+        layers = shared.get("layers")
+        if not isinstance(layers, Mapping) or not layers or min(layers) != 21:
+            raise NotImplementedError(
+                "Native L20 publication requires the maintained L21 stage entry"
+            )
+        layer_id = attention.layer_id
+        expected_index_source = 20 if layer_id < 24 else layer_id // 4 * 4
         if (
-            attention.layer_id != 21
+            not 21 <= layer_id < 40
+            or any(not 21 <= i < 40 for i in layers)
+            or layers.get(layer_id) is not attention
             or attention.kv_source_layer_id != 20
-            or attention.index_source_layer_id != 20
+            or attention.index_source_layer_id != expected_index_source
             or attention.is_kv_source
-            or attention.is_index_source
+            or attention.is_index_source != (layer_id == expected_index_source)
             or attention.tp_size != 1
-            or min(shared["layers"]) != 21
-            or 20 in shared["layers"]
         ):
             raise NotImplementedError(
-                "Native L20 publication requires eager CP1 L21 entry"
+                "Native L20 publication requires maintained CP1 L21-39 owners"
             )
+        if expected_index_source != 20:
+            producer = layers.get(expected_index_source)
+            if (
+                producer is None
+                or producer.layer_id != expected_index_source
+                or producer.index_source_layer_id != expected_index_source
+                or not producer.is_index_source
+                or producer.is_kv_source
+                or producer.kv_source_layer_id != 20
+                or producer.tp_size != 1
+                or producer._shared_attention is not shared
+            ):
+                raise NotImplementedError(
+                    "Native L20 consumer requires its maintained local index owner"
+                )
         if attention._kv_cache is not self.receiver._native_cache:
             raise ValueError(
                 "Native L20 publication must use the admitted replica cache"
@@ -82,7 +105,9 @@ class NativeL20PrefillSource:
                 raise ValueError(f"Native L20 dispatch disagrees with {tag} pages")
 
     def publish(self, attention: Any, common: Any) -> None:
-        """Validate the current dispatch, then publish after the owner's reset."""
+        """Publish only at L21, after the entry owner's forward reset."""
+        if attention.layer_id != 21:
+            raise NotImplementedError("Native L20 sources publish only at L21")
         self.require_owner(attention)
         shared = attention._shared_attention
         if common.cp_on:
