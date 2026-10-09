@@ -202,7 +202,7 @@ def store_ssm_state_to_block_map_kernel(
             BLOCK_V,
             CONV_STRIDE_TOKEN,
         )
-    elif chunk > 0 and (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0:
+    elif (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0:
         source_ptr = (
             h
             + linear_offset_64(i_c + 1, SSM_PER_BATCH)
