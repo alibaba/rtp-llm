@@ -101,6 +101,8 @@ public:
     void shutdown();
 
 protected:
+    // The resolver must own its backing state when retained by asynchronous I/O.
+    BufferResolver bufferResolver() const { return buffer_resolver_; }
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;

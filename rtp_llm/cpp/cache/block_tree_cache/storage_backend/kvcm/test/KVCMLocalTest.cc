@@ -278,7 +278,8 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(0);
+    ::testing::Mock::AllowLeak(client_wrapper.get());
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
@@ -291,7 +292,11 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
 
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
+    const auto source_refs = environment.device_pool->refCount(environment.block_id);
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+    EXPECT_GT(environment.device_pool->refCount(environment.block_id), source_refs);
+    backend->shutdown();
+    EXPECT_TRUE(::testing::Mock::VerifyAndClearExpectations(client_wrapper.get()));
 }
 
 }  // namespace

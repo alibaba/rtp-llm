@@ -36,8 +36,8 @@ TEST(KVCMMockOnlyFullTest, TPFollowerUsesControllerBlockIdsWithoutLocalAllocatio
     EXPECT_FALSE(backend->execute(request, response));
 }
 
-TEST(KVCMMockOnlyFullTest, TPWriteTimeoutKeepsControllerPinsUntilPeerIoCompletes) {
-    auto environment = makeBackendEnvironment("kvcm_tp_write_drain");
+TEST(KVCMMockOnlyFullTest, TPWriteTimeoutReturnsWithControllerPinsQuarantined) {
+    auto environment = makeBackendEnvironment("kvcm_tp_write_quarantine");
     auto client = std::make_shared<MockClientWrapper>();
     std::promise<void> peer_entered;
     auto entered = peer_entered.get_future();
@@ -72,7 +72,8 @@ TEST(KVCMMockOnlyFullTest, TPWriteTimeoutKeepsControllerPinsUntilPeerIoCompletes
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client, shutdown()).Times(1);
+    EXPECT_CALL(*client, shutdown()).Times(0);
+    ::testing::Mock::AllowLeak(client.get());
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
         parallelism, SpeculativeExecutionConfig{}, broadcaster, client));
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
@@ -85,24 +86,21 @@ TEST(KVCMMockOnlyFullTest, TPWriteTimeoutKeepsControllerPinsUntilPeerIoCompletes
     location.locations = {{{"tp0_Fdefault", "rank0_uri"}, {"tp1_Fdefault", "rank1_uri"}}};
     EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, location)));
-    EXPECT_CALL(*client, finishWrite(_, _, "drained_timeout", _, _))
-        .WillOnce(Invoke([](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
-            EXPECT_TRUE(std::holds_alternative<kv_cache_manager::BlockMaskOffset>(mask));
-            EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), 0u);
-            EXPECT_TRUE(locations.empty());
-            return true;
-        }));
+    EXPECT_CALL(*client, finishWrite(_, _, "drained_timeout", _, _)).Times(0);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     environment.device_pool->decRef(environment.block_id);
     const bool peer_started = entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     EXPECT_TRUE(peer_started);
-    if (peer_started) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        EXPECT_TRUE(environment.device_pool->isAllocated(environment.block_id));
-    }
-    release_peer.set_value();
+    // The frontend and shutdown must finish before the peer is released.
     EXPECT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_FALSE(environment.device_pool->isAllocated(environment.block_id));
+    EXPECT_TRUE(environment.device_pool->isAllocated(environment.block_id));
+    backend->shutdown();
+    release_peer.set_value();
+    // Unknown completion never makes these physical IDs reusable again.
+    EXPECT_TRUE(environment.device_pool->isAllocated(environment.block_id));
+    // Restore the fixture's own reference so its destructor does not consume a quarantine pin.
+    environment.device_pool->incRef(environment.block_id);
+    EXPECT_TRUE(::testing::Mock::VerifyAndClearExpectations(client.get()));
 }
 
 TEST(KVCMMockOnlyFullTest, MetadataLengthRpcUsesTheInstanceDefaultAndReturnsTheSdkResult) {
@@ -488,7 +486,7 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     }
 }
 
-TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
+TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureQuarantinesWriteSession) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -512,7 +510,8 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
     parallelism_config.tp_rank    = 0;
     parallelism_config.local_rank = 0;
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(0);
+    ::testing::Mock::AllowLeak(client_wrapper.get());
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
                               environment.pools_by_tag,
@@ -529,32 +528,22 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
     }};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_failed_broadcast_write", _, _))
-        .WillOnce(Invoke([](const std::string&,
-                            const std::string&,
-                            const std::string&,
-                            const kv_cache_manager::BlockMask& block_mask,
-                            const kv_cache_manager::Locations& locations) {
-            const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&block_mask);
-            EXPECT_NE(offset, nullptr);
-            if (offset != nullptr) {
-                EXPECT_EQ(*offset, 0u);
-            }
-            EXPECT_TRUE(locations.empty());
-            return true;
-        }));
+    // A failed RPC may leave a peer writing; do not recycle its remote destination.
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_failed_broadcast_write", _, _)).Times(0);
 
     const auto source_ref_count = environment.device_pool->refCount(environment.block_id);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
+    EXPECT_GT(environment.device_pool->refCount(environment.block_id), source_ref_count);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
         EXPECT_EQ(requests.front().op(), REMOTE_OPERATION_WRITE);
     }
+    backend->shutdown();
+    EXPECT_TRUE(::testing::Mock::VerifyAndClearExpectations(client_wrapper.get()));
 }
 
 TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
@@ -923,12 +912,13 @@ TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
-TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
+TEST(KVCMMockOnlyFullTest, TransferFailureQuarantinesWriteSession) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_abort_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(0);
+    ::testing::Mock::AllowLeak(client_wrapper.get());
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
@@ -941,22 +931,13 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::UriStrVec{})));
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "abort_session", _, _))
-        .WillOnce(Invoke([](const std::string&,
-                            const std::string&,
-                            const std::string&,
-                            const kv_cache_manager::BlockMask& block_mask,
-                            const kv_cache_manager::Locations& locations) {
-            const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&block_mask);
-            EXPECT_NE(offset, nullptr);
-            if (offset != nullptr) {
-                EXPECT_EQ(*offset, 0u);
-            }
-            EXPECT_TRUE(locations.empty());
-            return true;
-        }));
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "abort_session", _, _)).Times(0);
+    const auto source_refs = environment.device_pool->refCount(environment.block_id);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    EXPECT_GT(environment.device_pool->refCount(environment.block_id), source_refs);
+    backend->shutdown();
+    EXPECT_TRUE(::testing::Mock::VerifyAndClearExpectations(client_wrapper.get()));
 }
 
 TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {

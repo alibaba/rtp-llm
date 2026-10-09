@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <thread>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -33,6 +35,12 @@ std::string nextTraceId(const char* operation, std::atomic<uint64_t>& sequence) 
     return std::string("block_tree_") + operation + "_" + std::to_string(sequence.fetch_add(1));
 }
 
+// An RPC failure does not prove that a peer has stopped accessing its buffers.
+class UncertainTransfer final: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
     bool                       filtered = false;
@@ -47,7 +55,7 @@ const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& hand
 
 }  // namespace
 
-class KVCMStorageBackend::Impl {
+class KVCMStorageBackend::Impl: public std::enable_shared_from_this<KVCMStorageBackend::Impl> {
 public:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
 
@@ -67,6 +75,74 @@ public:
         client_wrapper_(std::move(client_wrapper)),
         sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
 
+    // The caller has a finite wait even when a synchronous SDK call never returns.
+    // A quarantined call intentionally owns itself for the process lifetime: late
+    // RPC/SDK completion is not sufficient evidence that every peer stopped I/O.
+    template<typename Function>
+    auto run(int timeout_ms, Function function) -> std::invoke_result_t<Function&> {
+        using Result = std::invoke_result_t<Function&>;
+        struct Call {
+            explicit Call(Function fn): function(std::move(fn)) {}
+            Function function;
+            std::promise<Result> promise;
+            std::shared_ptr<Call> quarantine;
+        };
+        if (failed_.load()) {
+            throw std::runtime_error("KVCM backend disabled after uncertain I/O completion");
+        }
+        const size_t limit = std::max<size_t>(2, 2 * kv_cache_config_.kvcm_asyncwrapper_thread_num);
+        const auto active = active_operations_.fetch_add(1);
+        if (active >= limit) {
+            active_operations_.fetch_sub(1);
+            throw std::runtime_error("KVCM I/O concurrency limit reached");
+        }
+        auto self = shared_from_this();
+        std::shared_ptr<Call> call;
+        std::future<Result> result;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        try {
+            call = std::make_shared<Call>(std::move(function));
+            result = call->promise.get_future();
+            std::thread([self, call] {
+                try {
+                    if constexpr (std::is_void_v<Result>) {
+                        call->function();
+                        call->promise.set_value();
+                    } else {
+                        call->promise.set_value(call->function());
+                    }
+                } catch (...) {
+                    call->promise.set_exception(std::current_exception());
+                }
+                self->active_operations_.fetch_sub(1);
+            }).detach();
+        } catch (...) {
+            active_operations_.fetch_sub(1);
+            throw;
+        }
+        const auto quarantine = [&] {
+            failed_.store(true);
+            call->quarantine = call;
+            RTP_LLM_LOG_ERROR("KVCM I/O completion unknown; retaining buffers and disabling remote operations");
+        };
+        if (result.wait_until(deadline) != std::future_status::ready) {
+            quarantine();
+            throw UncertainTransfer("KVCM operation timed out; buffers quarantined");
+        }
+        try {
+            return result.get();
+        } catch (const UncertainTransfer&) {
+            quarantine();
+            throw;
+        }
+    }
+
+    int timeoutMs(bool write) const {
+        return write ? kv_cache_config_.kvcm_put_broadcast_timeout : kv_cache_config_.kvcm_get_broadcast_timeout;
+    }
+
+    bool failed() const { return failed_.load(); }
+
     bool init(const CacheTopology&                                                topology,
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
@@ -82,7 +158,8 @@ public:
         // strides; do not replace this with topology-derived geometry.
         std::unordered_map<std::string, size_t> group_block_size_bytes;
         const std::vector<GroupBase>&           groups = topology.groups();
-        topology_ = &topology;
+        topology_owner_ = std::make_shared<const CacheTopology>(topology);
+        topology_ = topology_owner_.get();
         group_block_size_bytes.reserve(groups.size());
         for (const auto& group : groups) {
             has_swa_ = has_swa_ || group.policy.group_type == CacheGroupType::SWA;
@@ -95,9 +172,9 @@ public:
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                *topology_, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         } else {
-            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
+            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(*topology_,
                                                                                buffer_resolver,
                                                                                full_group_tags,
                                                                                other_group_tags,
@@ -135,6 +212,7 @@ public:
         const int query_type = resolveQueryType(kv_cache_config_.kvcm_query_type);
         if (default_query_type_ < 1 || default_query_type_ > 4 || query_type < 1 || query_type > 4
             || kv_cache_config_.kvcm_min_replica_count < 0
+            || kv_cache_config_.kvcm_get_broadcast_timeout <= 0 || kv_cache_config_.kvcm_put_broadcast_timeout <= 0
             || (query_type == 3 && kv_cache_config_.kvcm_sw_size <= 0)
             || (query_type == 4 && (other_group_tags.empty() || has_swa_))
             || !config->sdk_wrapper_config() || !config->sdk_wrapper_config()->drain_on_timeout()
@@ -364,6 +442,9 @@ public:
                     }
                 }
             }
+            if (failed()) {
+                throw UncertainTransfer("KVCM caller already timed out; do not publish late write results");
+            }
             const auto& actual_locations = has_actual_uri ? write_location.locations : empty_locations;
             finish_attempted             = true;
             RTP_LLM_CHECK_WITH_INFO(
@@ -373,6 +454,9 @@ public:
                                              write_location.locations.size(),
                                              actual_locations),
                 "KVCM FinishWrite failed");
+        } catch (const UncertainTransfer&) {
+            // Do not abort/recycle remote destinations while a peer may still write.
+            throw;
         } catch (...) {
             if (!finish_attempted) {
                 try {
@@ -756,19 +840,28 @@ private:
                 batch_blocks.push_back(blocks[index]);
             }
             const auto trace_info = makeTransferTraceInfo(batch_blocks);
-            if (operation == REMOTE_OPERATION_READ) {
-                if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
-                    return false;
+            try {
+                if (operation == REMOTE_OPERATION_READ) {
+                    if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
+                        throw UncertainTransfer("KVCM SDK read failed without confirmed I/O completion");
+                    }
+                } else {
+                    auto [success, result] =
+                        client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
+                    if (!success) {
+                        throw UncertainTransfer("KVCM SDK write failed without confirmed I/O completion");
+                    }
+                    if (!result.empty() && result.size() != batch_uris.size()) {
+                        return false;
+                    }
+                    for (size_t index = 0; index < result.size(); ++index) {
+                        actual_uris[indices[index]] = std::move(result[index]);
+                    }
                 }
-            } else {
-                auto [success, result] =
-                    client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
-                if (!success || (!result.empty() && result.size() != batch_uris.size())) {
-                    return false;
-                }
-                for (size_t index = 0; index < result.size(); ++index) {
-                    actual_uris[indices[index]] = std::move(result[index]);
-                }
+            } catch (const UncertainTransfer&) {
+                throw;
+            } catch (...) {
+                throw UncertainTransfer("KVCM SDK transfer threw without confirmed I/O completion");
             }
         }
         if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
@@ -827,21 +920,25 @@ private:
             return stub->AsyncExecuteFunction(context.get(), request, queue);
         };
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        // A gRPC deadline completes the client while a peer may still use its
-        // physical blocks. Keep the controller's pins until peer I/O drains.
-        auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-            requests, timeout_ms, rpc_call, /*enforce_rpc_deadline=*/false);
-        RTP_LLM_CHECK_WITH_INFO(result != nullptr, "KVCM broadcast dispatch failed");
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        const bool in_budget = remaining > 0 && result->waitDone(static_cast<int>(remaining));
-        if (!in_budget) {
-            RTP_LLM_LOG_WARNING("KVCM broadcast exceeded %d ms; waiting for peer I/O to drain", timeout_ms);
-            result->waitDone();
+        // RPC completion alone cannot release the controller's physical blocks.
+        // Unknown peer completion quarantines the owning operation's pins.
+        try {
+            auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+                requests, timeout_ms, rpc_call, /*enforce_rpc_deadline=*/false);
+            RTP_LLM_CHECK_WITH_INFO(result != nullptr, "KVCM broadcast dispatch failed");
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            const bool in_budget = remaining > 0 && result->waitDone(static_cast<int>(remaining));
+            if (!in_budget || !result->success()) {
+                throw UncertainTransfer("KVCM peer completion unknown; buffers must remain quarantined");
+            }
+            return result->responses();
+        } catch (const UncertainTransfer&) {
+            throw;
+        } catch (...) {
+            // Dispatch may throw after earlier ranks have already started I/O.
+            throw UncertainTransfer("KVCM broadcast failed without confirmed peer completion");
         }
-        RTP_LLM_CHECK_WITH_INFO(in_budget, "KVCM broadcast timed out after peer I/O drained, timeout_ms=%d", timeout_ms);
-        RTP_LLM_CHECK_WITH_INFO(result->success(), "KVCM broadcast transfer failed");
-        return result->responses();
     }
 
     void setCudaDevice() const {
@@ -884,6 +981,9 @@ private:
     std::atomic<uint64_t> write_trace_sequence_{1};
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
     const bool            sdk_check_enabled_;
+    std::atomic<bool> failed_{false};
+    std::atomic<size_t> active_operations_{0};
+    std::shared_ptr<const CacheTopology> topology_owner_;
     const CacheTopology*  topology_ = nullptr;
     bool                  has_swa_ = false;
     int32_t               default_query_type_ = 2;
@@ -898,7 +998,7 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cach
                                        std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
     StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
                                               kv_cache_config.kvcm_asyncwrapper_queue_size)),
-    impl_(std::make_unique<Impl>(cache_config,
+    impl_(std::make_shared<Impl>(cache_config,
                                  kv_cache_config,
                                  runtime_config,
                                  parallelism_config,
@@ -909,29 +1009,40 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cach
 KVCMStorageBackend::~KVCMStorageBackend() = default;
 
 bool KVCMStorageBackend::initImpl() {
-    return impl_->init(
-        topology(),
-        [this](int layer_id, const std::string& tag, int block_id) {
-            return convertIndexToBuffer(layer_id, tag, block_id);
-        },
-        [this](const std::string& tag) -> const DeviceBlockPoolPtr& { return devicePool(tag); });
+    return impl_->init(topology(), bufferResolver(),
+                       [this](const std::string& tag) -> const DeviceBlockPoolPtr& { return devicePool(tag); });
 }
 
 StorageMatchResult KVCMStorageBackend::matchImpl(const StorageRequest& request) {
-    return impl_->match(request);
+    return impl_->run(impl_->timeoutMs(false), [impl = impl_, request] { return impl->match(request); });
 }
 
-void KVCMStorageBackend::readImpl(const StorageRequest&                           request,
+void KVCMStorageBackend::readImpl(const StorageRequest& request,
                                   const std::shared_ptr<StorageBackendMatchMeta>& match_meta) {
-    impl_->read(request, match_meta);
+    auto pins = prepareWrite(request);
+    impl_->run(impl_->timeoutMs(false),
+               [impl = impl_, request, match_meta, pins = std::move(pins)] { impl->read(request, match_meta); });
 }
 
 void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
-    impl_->write(request);
+    auto pins = prepareWrite(request);
+    impl_->run(impl_->timeoutMs(true),
+               [impl = impl_, request, pins = std::move(pins)] { impl->write(request); });
 }
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
-    impl_->shutdown();
+    // Timed-out calls retain their own SDK, pools and pins. Never join them here.
+    if (impl_->failed()) {
+        return;
+    }
+    try {
+        // Invalid configuration can reach init cleanup before any I/O was admitted.
+        const int budget = impl_->timeoutMs(true) > 0 ? impl_->timeoutMs(true)
+                                                      : KVCacheConfig{}.kvcm_put_broadcast_timeout;
+        impl_->run(budget, [impl = impl_] { impl->shutdown(); });
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("KVCM shutdown did not finish: %s", error.what());
+    }
 }
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
@@ -960,7 +1071,15 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
                 pins = prepareWrite(std::move(transfer));
             }
         }
-        return impl_->execute(request, response);
+        // Response and request storage belong to the call, never to the RPC stack.
+        auto result = impl_->run(impl_->timeoutMs(request.op() == REMOTE_OPERATION_WRITE),
+                                 [impl = impl_, request, pins = std::move(pins), pools = std::move(follower_pools)] {
+            RemoteOperationResponsePB result;
+            const bool success = impl->execute(request, result);
+            return std::make_pair(success, std::move(result));
+        });
+        response = std::move(result.second);
+        return result.first;
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("KVCM remote operation failed: %s", error.what());
         return false;
