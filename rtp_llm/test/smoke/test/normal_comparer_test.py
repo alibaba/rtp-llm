@@ -47,6 +47,26 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     self._parse(self._response(status)),
                 )
 
+    def test_finished_is_checked_for_single_and_batch_rows(self):
+        expected = {"response": "same output", "finished": True}
+        for batch in (False, True):
+            self.query = (
+                QueryInfo(prompt_batch=["one", "two"])
+                if batch
+                else QueryInfo(prompt="test")
+            )
+            for actual in (
+                {"response": "same output", "finished": False},
+                {"response": "same output", "finished": None},
+                {"response": "same output"},
+            ):
+                with self.subTest(batch=batch, actual=actual):
+                    self._assert_compare_failed(
+                        {"response_batch": [expected, expected]} if batch else expected,
+                        {"response_batch": [expected, actual]} if batch else actual,
+                        "finished",
+                    )
+
     def test_mismatched_graph_status_is_rejected(self):
         for expected, actual in (
             (REPLAYED, FALLBACK),

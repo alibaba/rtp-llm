@@ -92,6 +92,7 @@ class SmokeResponse(BaseModel):
         arbitrary_types_allowed = True
 
     response: Union[str, List[str]]
+    finished: Optional[bool] = None
     response_alternatives: Optional[List[Union[str, List[str]]]] = None
     hidden_states: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
@@ -472,6 +473,11 @@ class NormalComparer(BaseComparer):
     ) -> None:
         """Compare expect vs actual in full; append all diffs to diffs (no raise)."""
         rtol = atol = 1e-2
+
+        if expect.finished is not None and actual.finished != expect.finished:
+            diffs.append(
+                f"{prefix}finished:\n    expect: {expect.finished}\n    actual: {actual.finished}"
+            )
 
         # response
         if expect.response != actual.response:
