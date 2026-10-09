@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,6 +22,8 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Component
 public class GlobalCacheIndex {
+
+    private static final int CACHE_REMOVE_LOCK_CHUNK_SIZE = 256;
 
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
@@ -102,27 +105,32 @@ public class GlobalCacheIndex {
      * Remove an engine
      *
      * @param engineIp Engine IP
+     * @param blockCacheKeys Detached local keys of this generation; the caller
+     *                       must serialize retirement against updates of the same engine
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
-
-        lock.lock();
-        try {
-            blockToEnginesMap.forEach((blockCacheKey, engines) -> {
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
-                    totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
-                    if (engines.isEmpty()) {
-                        blockToEnginesMap.remove(blockCacheKey);
+        // Use the detached local view; do not scan blocks owned only by other workers.
+        // Bound each critical section so surviving workers can keep updating their indexes.
+        Iterator<Long> keys = blockCacheKeys.iterator();
+        while (keys.hasNext()) {
+            lock.lock();
+            try {
+                for (int count = 0; count < CACHE_REMOVE_LOCK_CHUNK_SIZE && keys.hasNext(); count++) {
+                    Long key = keys.next();
+                    Set<String> engines = blockToEnginesMap.get(key);
+                    if (engines != null && engines.remove(engineIp)) {
+                        totalMappings.decrement();
+                        if (engines.isEmpty()) {
+                            blockToEnginesMap.remove(key);
+                        }
                     }
                 }
-            });
-        } finally {
-            lock.unlock();
+            } finally {
+                lock.unlock();
+            }
         }
     }
 
