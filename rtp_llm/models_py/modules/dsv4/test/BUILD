@@ -375,6 +375,30 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_cep_stage_execution_sm120",
+    srcs = [
+        "test_v41_cep_stage_execution_sm120.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+    ],
+    main = "test_v41_cep_stage_execution_sm120.py",
+    data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [

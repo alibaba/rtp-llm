@@ -4,7 +4,7 @@ import json
 import os
 import socket
 import unittest
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -158,25 +158,33 @@ def call(model, cache, ids, positions, lengths, prefixes, pages, cp=None, hidden
         input_lengths=torch.tensor(local_lengths, device="cuda", dtype=torch.int32),
         prefix_lengths=torch.tensor(prefixes, device="cuda", dtype=torch.int32),
     )
+    prepare = getattr(model, "_test_prefill_scope", None)
     try:
-        return forward_layers(
-            model,
-            cache,
-            ids,
-            positions,
-            cu,
-            pages,
-            inputs,
-            prepare_hidden_fn=None if hidden is None else lambda **kwargs: hidden,
-        )
+        with (
+            nullcontext()
+            if prepare is None
+            else prepare(model, ids, cp, lengths, prefixes)
+        ):
+            return forward_layers(
+                model,
+                cache,
+                ids,
+                positions,
+                cu,
+                pages,
+                inputs,
+                prepare_hidden_fn=None if hidden is None else lambda **kwargs: hidden,
+            )
     finally:
         model._propagate_cp_ctx(None)
         model.set_cp_info(None, 1, 0)
 
 
-def run_controls(rank, group, native_construction=False):
+def run_controls(
+    rank, group, native_construction=False, *, fixture_fn=None, configure_owner=None
+):
     torch.manual_seed(41600 + (rank // 4) * 100)
-    args, weights = wide_fixture()
+    args, weights = (wide_fixture if fixture_fn is None else fixture_fn)()
     cp1, whole = model_for(args, weights), model_for(args, weights)
     if native_construction:
         first, _ = native_stage_for(args, weights, 0)
@@ -184,6 +192,9 @@ def run_controls(rank, group, native_construction=False):
     else:
         first, _ = project_control(model_for(args, weights), 0)
         second, shared = project_control(model_for(args, weights), 1)
+    if configure_owner is not None:
+        for model in (cp1, whole, first, second):
+            configure_owner(model)
     oracle_cache = NativeTaggedCache([l.attn for l in cp1.layers], gen=0, pages=6)
     whole_cache = NativeTaggedCache([l.attn for l in whole.layers], gen=0, pages=6)
     first_cache = NativeTaggedCache([l.attn for l in first.layers], gen=0, pages=6)
@@ -463,6 +474,8 @@ def run_controls(rank, group, native_construction=False):
                     "transport_bytes_exact": True,
                     "selections_exact": True,
                     "native_construction": native_construction,
+                    "ep_size": args.ep_size,
+                    "engram_layer_ids": args.v41_config.get("engram_layer_ids", []),
                 }
             ),
             flush=True,
