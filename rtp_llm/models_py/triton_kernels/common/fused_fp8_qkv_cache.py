@@ -549,3 +549,90 @@ def quantize_fp8_query(
         num_warps=4 if q_dim <= 8192 else 8,
     )
     return out
+
+
+@triton.jit
+def _clear_fp8_value_page_tails_kernel(
+    cache,
+    block_table,
+    seq_lens,
+    cache_page_stride: tl.constexpr,
+    cache_kv_stride: tl.constexpr,
+    cache_head_stride: tl.constexpr,
+    cache_token_stride: tl.constexpr,
+    table_row_stride: tl.constexpr,
+    table_col_stride: tl.constexpr,
+    KV_DIM: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    MAX_PAGES: tl.constexpr,
+    CACHE_PAGES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch = tl.program_id(0)
+    seq_len = tl.load(seq_lens + batch)
+    _clear_value_page_tail(
+        cache,
+        block_table,
+        batch,
+        seq_len,
+        cache_page_stride,
+        cache_kv_stride,
+        cache_head_stride,
+        cache_token_stride,
+        table_row_stride,
+        table_col_stride,
+        KV_DIM,
+        HEAD_DIM,
+        PAGE_SIZE,
+        MAX_PAGES,
+        CACHE_PAGES,
+        BLOCK,
+    )
+
+
+def clear_fp8_value_page_tails(kv_cache, block_table, seq_lens):
+    """Clear recycled V suffixes before BF16-query/FP8-KV TRTLLM decode.
+
+    The native FP8 query conversion already performs this operation. BF16
+    queries bypass that conversion but still need finite V values wherever
+    the attention kernel multiplies masked, zero probabilities by V.
+    Every request must exclusively own its final partial cache page.
+    """
+    if (
+        not kv_cache.is_cuda
+        or kv_cache.dtype != torch.float8_e4m3fn
+        or kv_cache.ndim != 5
+        or kv_cache.shape[1] != 2
+        or kv_cache.stride(-1) != 1
+        or any(stride <= 0 for stride in kv_cache.stride())
+        or block_table.device != kv_cache.device
+        or block_table.dtype != torch.int32
+        or block_table.ndim != 2
+        or any(stride <= 0 for stride in block_table.stride())
+        or seq_lens.device != kv_cache.device
+        or seq_lens.dtype != torch.int32
+        or seq_lens.ndim != 1
+        or not seq_lens.is_contiguous()
+        or seq_lens.numel() != block_table.shape[0]
+    ):
+        raise ValueError("Unsupported FP8 value-tail cache metadata")
+    if seq_lens.numel() == 0:
+        return
+    trace_triton(
+        "fused_fp8_qkv_cache:_clear_fp8_value_page_tails_kernel[batch]",
+        _clear_fp8_value_page_tails_kernel,
+        (seq_lens.numel(),),
+        kv_cache,
+        block_table,
+        seq_lens,
+        *kv_cache.stride()[:4],
+        *block_table.stride(),
+        KV_DIM=kv_cache.shape[2] * kv_cache.shape[4],
+        HEAD_DIM=kv_cache.shape[4],
+        PAGE_SIZE=kv_cache.shape[3],
+        MAX_PAGES=block_table.shape[1],
+        CACHE_PAGES=kv_cache.shape[0],
+        BLOCK=4096,
+        num_warps=4,
+    )

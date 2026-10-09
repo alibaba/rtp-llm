@@ -278,6 +278,7 @@ class NativeFP8GateTest(unittest.TestCase):
                     "quantize_fp8_query",
                     side_effect=AssertionError("Disabled path must retain BF16 Q"),
                 ),
+                patch.object(trtllm_gen, "clear_fp8_value_page_tails") as clear_tail,
                 patch.object(
                     namespace, kernel_name, return_value=query.clone()
                 ) as call,
@@ -294,9 +295,13 @@ class NativeFP8GateTest(unittest.TestCase):
                 self.assertEqual(args["bmm1_scale"], HEAD_DIM**-0.5)
                 self.assertEqual(args["bmm2_scale"], 1.0)
                 if op_class is FlashInferTRTLLMPrefillOp:
+                    clear_tail.assert_not_called()
                     self.assertIs(args["cum_seq_lens_q"], params.cu_seqlens)
                     self.assertIs(args["cum_seq_lens_kv"], params.cu_kv_seqlens)
                 else:
+                    clear_tail.assert_called_once_with(
+                        cache.kv_cache_base, params.block_tables, params.seq_lens
+                    )
                     self.assertEqual(args["q_len_per_req"], 5)
                 del op
 
@@ -511,6 +516,63 @@ class NativeFP8MHAIntegrationTest(unittest.TestCase):
 
     def test_full_video_length_prefill(self):
         self._run_case([16661], [0])
+
+    def test_bf16_query_decode_clears_recycled_value_tails_in_graph(self):
+        config = _config()
+        config.head_num, config.kv_head_num = 32, 2
+        batch, columns = 3, 512
+        table = torch.arange(
+            1, batch * columns + 1, device="cuda", dtype=torch.int32
+        ).reshape(batch, columns)
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.randn(
+            batch * columns + 1,
+            2,
+            2,
+            PAGE_SIZE,
+            HEAD_DIM,
+            device="cuda",
+            dtype=torch.bfloat16,
+        ).to(torch.float8_e4m3fn)
+        query = torch.randn(batch, 32, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+        inputs = SimpleNamespace(
+            is_prefill=False,
+            sequence_lengths=torch.tensor([24598, 8976, 30101], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=table,
+        )
+        with patch.dict(os.environ, {"RTP_QWEN35_NATIVE_FP8_ATTN": "0"}):
+            op = FlashInferTRTLLMDecodeOp(config)
+            params = op.prepare(inputs)
+            params.max_seq_len = 65536
+            op.forward(query, cache, params)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = op.forward(query, cache, params)
+            for iteration in range(2):
+                query.normal_()
+                if iteration:
+                    params.seq_lens.add_(5)
+                    table.copy_(table.flip(1))
+                reference = op.forward(query, cache, params).clone()
+                expected_cache = cache.kv_cache_base.clone()
+                for row, length in enumerate(params.seq_lens.tolist()):
+                    column, offset = divmod(length, PAGE_SIZE)
+                    page = int(table[row, column].item())
+                    cache.kv_cache_base[page, 1, :, offset:].fill_(float("nan"))
+                for _ in range(2):
+                    graph.replay()
+                torch.cuda.synchronize()
+                self.assertTrue(torch.isfinite(captured).all().item())
+                torch.testing.assert_close(captured, reference, rtol=0, atol=0)
+                self.assertTrue(
+                    torch.equal(
+                        cache.kv_cache_base.view(torch.uint8),
+                        expected_cache.view(torch.uint8),
+                    ),
+                    "Only unused V suffixes may change; valid KV and other pages must remain intact",
+                )
+            del graph, captured, op
 
     def test_decode_one_token(self):
         self._run_case([1, 1, 1], [0, 128, 16660], decode=True)

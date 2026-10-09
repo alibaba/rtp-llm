@@ -12,6 +12,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.triton_kernels.common.fused_fp8_qkv_cache import (
+    clear_fp8_value_page_tails,
     fused_fp8_qkv_cache,
     quantize_fp8_query,
 )
@@ -759,6 +760,14 @@ class FlashInferTRTLLMDecodeOp(object):
                 kv_cache=kv_cache.kv_cache_base,
                 block_table=fmha_params.block_tables,
                 seq_lens=fmha_params.seq_lens,
+            )
+        elif (
+            not self.native_fp8 and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
+        ):
+            clear_fp8_value_page_tails(
+                kv_cache.kv_cache_base,
+                fmha_params.block_tables,
+                fmha_params.seq_lens,
             )
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
