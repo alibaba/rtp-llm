@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     combine_topk_swa_indices_cp_varlen,
 )
 from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton
-from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8, PrefillQKV
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.test.test_prefill_fast_path import (
     _FakeLayer,
     _FakeV4,
@@ -128,6 +129,85 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             raise AssertionError("CUDA is required by this dedicated GPU target")
         if torch.cuda.get_device_capability()[0] < 10:
             raise AssertionError("SM100 or newer is required by this GPU target")
+
+    def test_swa_chunk_continuation_reads_previous_chunk(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        cache = _CsaPrefillCache(device)
+        attn = AttentionFP8.__new__(AttentionFP8)
+        nn.Module.__init__(attn)
+        attn.layer_id = 0
+        attn.head_dim = KV_HEAD_DIM
+        attn.n_heads = 1
+        attn.dim = KV_HEAD_DIM
+        attn.window_size = 4
+        attn.compress_ratio = 0
+        attn.softmax_scale = 1.0
+        attn.attn_sink = torch.zeros(1, device=device)
+        attn.tp_size = 1
+        attn._cp_ctx = None
+        attn._kv_cache = cache
+        attn._block_tables_by_type = cache.block_tables
+        attn._pool_spec = cache.specs
+
+        def chunk_meta(start, length):
+            return attn._build_swa_prefill_meta_varlen(
+                seqlen=length,
+                device=device,
+                any_cont=start > 0,
+                batch_size=1,
+                cu_seqlens=torch.tensor([0, length], dtype=torch.int32, device=device),
+                input_lengths=torch.tensor([length], dtype=torch.int32, device=device),
+                prefix_lengths=torch.tensor([start], dtype=torch.int32, device=device),
+                position_ids=torch.arange(start, start + length, device=device),
+                req_id_per_token=torch.zeros(length, dtype=torch.int32, device=device),
+            )
+
+        values = torch.arange(1, 6, device=device, dtype=torch.bfloat16)
+        keys = values[:, None].expand(5, KV_HEAD_DIM).contiguous()
+        first_meta = chunk_meta(0, 3)
+        attn._prefill_write_swa_fp8_paged(
+            SimpleNamespace(swa_meta=first_meta), keys[:3]
+        )
+
+        workspace = PrefillWorkspace(
+            device, q_rows=2, q_dim=KV_HEAD_DIM, reserve_cp=False, align_bytes=1
+        )
+        qkv = PrefillQKV(
+            qr=torch.empty(2, KV_HEAD_DIM, device=device),
+            q=workspace.prefill_q(2).view(2, 1, KV_HEAD_DIM),
+            kv_full=keys[3:].clone(),
+        )
+        common = SimpleNamespace(
+            swa_meta=chunk_meta(3, 2),
+            use_varlen=True,
+            batch_size=1,
+            cp_ctx=None,
+            freqs_cis=torch.empty(2, 1, device=device),
+            workspace=workspace,
+        )
+
+        def sparse_fwd(q, kv, indices, sm_scale, attn_sink, topk_length):
+            torch.testing.assert_close(kv[:, 0], keys)
+            actual = torch.stack(
+                [
+                    kv[indices[row, 0, : int(topk_length[row])], 0].mean(0)
+                    for row in range(q.shape[0])
+                ]
+            )
+            return actual[:, None], None, None
+
+        attn._prefill_output_proj_into = lambda o, freqs_cis, *, out: out.copy_(
+            o[:, 0]
+        )
+        with patch.dict(
+            "sys.modules",
+            {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd)},
+        ):
+            out = attn._attn_fp8_swa_via_concat(qkv, common)
+
+        torch.testing.assert_close(
+            out[:, 0], torch.tensor([2.5, 3.5], dtype=torch.bfloat16, device=device)
+        )
 
     def test_prefill_cu_seqlens_warmup_is_cuda_graph_safe(self):
         device = torch.device("cuda", torch.cuda.current_device())
