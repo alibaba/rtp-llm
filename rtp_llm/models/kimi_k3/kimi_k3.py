@@ -92,6 +92,7 @@ class KimiK3(BaseModel):
     """Kimi K3 text target using RTP's model and cache interfaces."""
 
     WEIGHT_PREFIX = "language_model."
+    supports_startup_real_warmup = True
 
     @classmethod
     def create_dash_sc_request_adapter(cls):
@@ -526,6 +527,8 @@ class KimiK3(BaseModel):
 
 class KimiK3Mtp(KimiK3):
     """The independent, recurrent K3 MTP layer from a draft-only checkpoint."""
+
+    supports_startup_real_warmup = False
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):

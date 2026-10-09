@@ -85,3 +85,14 @@ py_test(
     # Requires the CUDA13 native MLA runtime.
     tags = ["manual"],
 )
+
+py_test(
+    name = "mla_fused_fp8_epilogue_test",
+    srcs = ["test_mla_fused_fp8_epilogue.py"],
+    main = "test_mla_fused_fp8_epilogue.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+)

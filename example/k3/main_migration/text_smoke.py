@@ -197,6 +197,16 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument(
+        "--jit-snapshot-root",
+        type=pathlib.Path,
+        help="Prefill snapshot destination used by this single service startup",
+    )
+    parser.add_argument(
+        "--jit-publish-since-ns",
+        type=int,
+        help="Prefill service startup timestamp, including pre-readiness publication",
+    )
     args = parser.parse_args()
     # The checkpoint chooses one of two fixed runs; phases and MTP cannot be
     # disabled from the command line.
@@ -419,6 +429,8 @@ class Runner:
             ),
             "runtime_evidence_gate": "separate all-rank audit required; HTTP results alone do not certify runtime paths",
             "formal_request_retries": 0,
+            "protocol_requests": getattr(self, "protocol_results", []),
+            "jit_publication": getattr(self, "jit_publication", None),
             "namespace": self.args.namespace,
             "passed": passed,
             "error": error,
@@ -2900,6 +2912,31 @@ def main() -> int:
                 runner._orthogonal_decode_batches,
             ):
                 phase()
+            from request_smoke import (
+                SmokeRequests,
+                run_request_cases,
+            )
+
+            protocol = SmokeRequests(args)
+            try:
+                run_request_cases(protocol)
+                from grammar_smoke import run_grammar_cases
+
+                run_grammar_cases(protocol)
+                from logprobs_smoke import (
+                    run_logprobs_cases,
+                    run_tail_health,
+                )
+
+                run_logprobs_cases(protocol)
+                run_tail_health(protocol)
+            finally:
+                runner.protocol_results = protocol.records
+            from jit_smoke import check_publication
+
+            runner.jit_publication = check_publication(
+                args.jit_snapshot_root, args.jit_publish_since_ns
+            )
         else:
             runner.run_flow()
             runner.run_orthogonal_boundaries()

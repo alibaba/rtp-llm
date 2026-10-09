@@ -97,6 +97,33 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
     return q_out, kv_out
 
 
-@torch.compile(backend="inductor")
+@triton.jit(do_not_specialize=["ROWS", "OUT_S0", "OUT_S1", "GATE_S0", "GATE_S1"])
+def _gate_sigmoid_mul_kernel(
+    Out, Gate, Result, ROWS, WIDTH: tl.constexpr,
+    OUT_S0, OUT_S1, GATE_S0, GATE_S1, BLOCK: tl.constexpr,
+):
+    flat = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row, column = flat // WIDTH, flat % WIDTH
+    valid = row < ROWS
+    value = tl.load(Out + row * OUT_S0 + column * OUT_S1, valid, other=0)
+    gate = tl.load(Gate + row * GATE_S0 + column * GATE_S1, valid, other=0)
+    # Torch materializes sigmoid in the input dtype before multiplying.
+    sigmoid = tl.sigmoid(gate.to(tl.float32)).to(gate.dtype).to(tl.float32)
+    tl.store(Result + flat, (value.to(tl.float32) * sigmoid).to(value.dtype), valid)
+
+
 def gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    return attn_out * gate.sigmoid()
+    if attn_out.shape != gate.shape or attn_out.ndim != 2:
+        raise ValueError("K3 MLA output and gate require the same rank-2 shape")
+    if attn_out.device != gate.device or attn_out.dtype != gate.dtype:
+        raise ValueError("K3 MLA output and gate require the same device and dtype")
+    if not attn_out.is_cuda:
+        return attn_out * gate.sigmoid()
+    rows, width = attn_out.shape
+    result = torch.empty((rows, width), device=attn_out.device, dtype=attn_out.dtype)
+    if rows and width:
+        _gate_sigmoid_mul_kernel[(triton.cdiv(rows * width, 1024),)](
+            attn_out, gate, result, rows, width,
+            *attn_out.stride(), *gate.stride(), 1024,
+        )
+    return result
