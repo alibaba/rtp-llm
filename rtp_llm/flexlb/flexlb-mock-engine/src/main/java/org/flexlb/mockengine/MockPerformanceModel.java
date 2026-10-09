@@ -865,6 +865,15 @@ final class MockPerformanceModel {
                         List<Long> blockKeys,
                         long hitTokens,
                         int hitBlocks, boolean nativeKeys, int memoryHitBlocks) {
+        /** GenerateStream::batchSize(0): beam search starts with one sequence. */
+        int prefillSequenceCount() {
+            var config = input.getGenerateConfig();
+            int maxBeams = config.getVariableNumBeamsCount() > 0
+                    ? config.getVariableNumBeamsList().stream().mapToInt(Integer::intValue).max().orElse(1)
+                    : config.getNumBeams();
+            return maxBeams > 1 ? 1 : Math.max(config.getNumReturnSequences(), 1);
+        }
+
         RequestShape(EngineRpcService.GenerateInputPB input, int inputLen, int outputLen,
                      List<Long> blockKeys, long hitTokens, int hitBlocks, boolean nativeKeys) {
             this(input, inputLen, outputLen, blockKeys, hitTokens, hitBlocks, nativeKeys, 0);

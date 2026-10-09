@@ -578,6 +578,33 @@ The opt-in default is deliberate: Auto-TPM queue-eviction E2E scenarios need
 deep engine-side queues, so the cap must be explicitly requested. Do not
 "fix" the default to fail-fast without revisiting those scenarios.
 
+### FIFO 配置与准入语义
+
+`prefill.fifo` 存在时，引擎使用 FIFO 准入策略，旧的
+`prefill.max_batch_requests`、`prefill.max_batch_tokens` 和
+`prefill.direct_batch_size_max` 不控制该路径的执行批形。
+
+- `max_requests` 限制 stream 数；`max_batch_tokens` 同时限制含命中前缀的
+  完整 token 总量和最长完整序列长度乘总序列数，两项均采用严格小于边界。
+  多返回序列按 `num_return_sequences` 计宽；beam search 的首次 prefill 宽度为 1。
+- 首条候选保留真实 FIFO 的例外：未命中 context 长度小于 `max_seq_len` 时
+  可以超过批 token 预算；独立输入和物理 KV 容量检查仍在入队阶段执行。
+- `max_batch_tokens_without_cache` 是停止继续准入的计算量配额，CP padding
+  逐序列计算后乘宽度；当前候选可以使累计量越过配额，下一条停止准入。
+- `cp_enabled` 指定 CP 是否启用；未声明时由 `cp_size > 1` 推导。
+  未启用 CP 时 `cp_size` 必须为 1；`force_single` 默认 true，仅在 CP 启用时生效，
+  已采集配置中的显式 false 保持有效。
+  请求上限、CP 宽度和模型长度应使用目标真实部署的有效配置。
+- `max_inited_kv_streams` 限制已持有非空 KV lease 的请求数量；达到上限时，
+  已初始化 KV 的请求可以继续推进，空 lease 不占此配额。
+- `max_batch_kv_len`、`max_waiting_requests` 和 `prefill.max_waiting_batches`
+  是 mock 专属约束，FIFO 默认不启用。原始记录可保留这些数值；只有显式设置
+  `prefill.fifo.fault_limits_enabled: true` 时才用于故障实验。额外 KV 约束不能
+  替代真实 token 和矩形预算；实际物理 KV pool 容量始终生效。
+
+FIFO 准入对齐不代表 decode、多序列输出或完整缓存状态机已经与真实引擎等价。
+耗时公式和采集记录保持独立，由相同输入下的执行与性能证据验证。
+
 ### In-engine dual-budget prefill regroup (#8)
 
 Before #8 the engine executed master `EnqueueBatch` batches verbatim —

@@ -159,6 +159,43 @@ class PrefillWaitingQueueCapTest {
 
     // ──────────── Harness ────────────
 
+    @Test
+    void fifoIgnoresArchivedQueueCapsWithoutFaultOptIn() throws Exception {
+        var model = fifoModel(false);
+        var prefill = startPrefill(model);
+        for (int i = 1; i <= 4; i++) {
+            var response = enqueueAndFetch(prefill, batch(4000 + i, slot(0, input(i, 10))));
+            assertEquals(1, response.getSuccessesCount(), "real FIFO queues all candidates");
+            assertEquals(0, response.getErrorsCount());
+        }
+        assertEquals(3, prefill.getWaitingCount());
+        awaitInflightZero(prefill, 5000);
+        assertEquals(4, prefill.getCompletedCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
+    void fifoQueueCapsRemainAvailableForExplicitFaultExperiments() throws Exception {
+        var prefill = startPrefill(fifoModel(true));
+        for (int i = 1; i <= 2; i++) {
+            assertEquals(1, enqueueAndFetch(prefill, batch(5000 + i, slot(0, input(i, 10))))
+                    .getSuccessesCount());
+        }
+        assertEquals(1, enqueueAndFetch(prefill, batch(5003, slot(0, input(3, 10))))
+                .getErrorsCount());
+        awaitInflightZero(prefill, 5000);
+        assertEquals(2, prefill.getCompletedCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    private MockPerformanceModel fifoModel(boolean faults) throws Exception {
+        return MockEngineTestSupport.performanceModel(tempDir, "300", 1.0, 1.0,
+                Map.of("max_waiting_batches", 1, "fifo", Map.of(
+                        "max_requests", 1, "max_batch_tokens", 1000,
+                        "max_batch_kv_len", 1000, "max_seq_len", 10000,
+                        "max_waiting_requests", 1, "fault_limits_enabled", faults)), Map.of());
+    }
+
     private JavaMockEngineCluster.FastRpcService startPrefill(MockPerformanceModel model) {
         JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                 "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,

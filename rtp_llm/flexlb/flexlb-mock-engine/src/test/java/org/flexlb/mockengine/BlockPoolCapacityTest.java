@@ -380,7 +380,7 @@ class BlockPoolCapacityTest {
         var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
         field.setAccessible(true);
         field.set(model, new MockPrefillBatchPolicy(64, 100000, 100000,
-                10000, 8, false, 0, 256, 128));
+                10000, 8, false, 0, 256, 128, false, true));
         var prefill = newService(model, 10);
 
         var first = inputWithBlockKeys(101L, 2 * SPB, List.of(1L, 2L));
@@ -430,12 +430,44 @@ class BlockPoolCapacityTest {
     }
 
     @Test
+    void fifoInitializedWaiterReusesItsLeaseAtTheStreamCap() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "500", 1.0);
+        var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
+        field.setAccessible(true);
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 0,
+                10000, 1, false, 0, 0, 1, false, false));
+        var prefill = newService(model, 10);
+        assertEquals(1, enqueueAndFetch(prefill, batch(107, slot(0,
+                inputWithBlockKeys(107L, 2 * SPB, List.of(1L, 2L))))).getSuccessesCount());
+        assertEquals(1, enqueueAndFetch(prefill, batch(108, slot(0,
+                inputWithBlockKeys(108L, 2 * SPB, List.of(3L, 4L))))).getSuccessesCount());
+        // Model a waiter that already initialized KV before entering this round.
+        var cacheField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("cache");
+        cacheField.setAccessible(true);
+        var cache = (MockLruBlockCache) cacheField.get(prefill);
+        var leasesField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("activeBlockLeases");
+        leasesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var leases = (Map<Long, MockLruBlockCache.BlockLease>) leasesField.get(prefill);
+        var existing = cache.acquire(2, List.of());
+        assertNotNull(existing);
+        leases.put(108L, existing);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+        while (System.nanoTime() < deadline && prefill.getCompletedCount() < 2) Thread.sleep(10);
+        assertEquals(2, prefill.getCompletedCount(), "initialized waiter must advance at cap=1");
+        assertEquals(0, prefill.getWaitingCount());
+        assertEquals(0L, ((Number) prefill.getSnapshot().get("held_blocks")).longValue(),
+                "the existing lease must be reused and released, never overwritten");
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
     void workerStatusReportsConfiguredFifoLimits() throws Exception {
         var model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
         var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
         field.setAccessible(true);
         field.set(model, new MockPrefillBatchPolicy(64, 512000, 3145728,
-                786432, 8, false, 0, 256, 128));
+                786432, 8, false, 0, 256, 128, false, true));
         var service = newService(model, 5);
         var status = MockEngineTestSupport.workerStatus(service, 0);
         assertEquals(512000L, status.getMaxBatchTokensSize());

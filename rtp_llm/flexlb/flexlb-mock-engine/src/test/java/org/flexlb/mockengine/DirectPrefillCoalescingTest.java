@@ -235,13 +235,13 @@ class DirectPrefillCoalescingTest {
         assertNotNull(loaded.forEngine().prefillBatchPolicy(), "engine clone preserves policy");
         var prefill = startPrefill(loaded.forEngine());
         var first = generateAsync(prefill, input(4000, 1));
-        var a = generateAsync(prefill, input(4001, 60));
-        var skipped = generateAsync(prefill, input(4002, 40));
+        var a = generateAsync(prefill, input(4001, 40));
+        var skipped = generateAsync(prefill, input(4002, 60));
         var smaller = generateAsync(prefill, input(4003, 39));
         assertNull(first.get(5, TimeUnit.SECONDS));
         assertNull(a.get(5, TimeUnit.SECONDS));
         assertNull(smaller.get(5, TimeUnit.SECONDS));
-        assertFalse(skipped.isDone(), "40-token candidate must wait; later 39-token candidate fits");
+        assertFalse(skipped.isDone(), "60-token candidate exceeds sum and rectangle; later 39 fits");
         assertNull(skipped.get(5, TimeUnit.SECONDS));
         awaitCompleted(prefill, 4, 5000);
         assertEquals(3, stats.prefillBatches.sum());
@@ -269,9 +269,11 @@ class DirectPrefillCoalescingTest {
         assertNull(second.get(5, TimeUnit.SECONDS));
         assertNull(third.get(5, TimeUnit.SECONDS));
         awaitCompleted(prefill, 3, 5000);
-        assertEquals(2, stats.prefillBatches.sum(),
-                "queued 60+60 now compute only 12+12 after first batch caches 48 tokens");
-        assertEquals(2, stats.maxPrefillBatchSize.get());
+        assertEquals(3, stats.prefillBatches.sum(),
+                "cache reduces compute but full 60+60 and rectangle still exceed the 100-token limit");
+        assertEquals(1, stats.maxPrefillBatchSize.get());
+        assertEquals(96L, ((Number) prefill.getSnapshot().get("hit_tokens_total")).longValue(),
+                "waiting requests still rematch the 48-token prefix at execution");
         assertFalse(prefill.isLeakDetected());
     }
 
