@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -78,7 +79,7 @@ private:
 class V41NativePPTransportTest {
 public:
     V41NativePPTransportTest(ModelConfig config, const ParallelismConfig& parallelism):
-        model_config_(std::move(config)), pp_rank_(parallelism.pp_rank) {
+        model_config_(std::move(config)), parallelism_(parallelism), pp_rank_(parallelism.pp_rank) {
         static std::once_flag runtime_once;
         std::call_once(runtime_once, [&]() {
             AUTIL_ROOT_LOG_CONFIG();
@@ -159,6 +160,65 @@ public:
         return torch_ext::KVCache(manager_->getMainModelGroupedCacheLayerLayout());
     }
 
+    V41PPCacheBatchPtr prepareLocal(const torch::Tensor& spans,
+                                    const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
+        requireOpen();
+        if (!local_cache_) {
+            local_cache_ = std::make_unique<V41PPLocalCache>(manager_, model_config_, parallelism_);
+        }
+        std::vector<KVCacheAllocationLeasePtr> leases;
+        for (const auto& allocation : allocations) {
+            if (!allocation || allocation->manager() != manager_) {
+                throw std::invalid_argument("native PP local fixture requires this manager's root allocation");
+            }
+            leases.push_back(allocation->retain());
+        }
+        return local_cache_->prepare(spans, leases);
+    }
+
+    void commitLocal(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireLocal();
+        local_cache_->commit(batch);
+    }
+
+    void abortLocal(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireLocal();
+        local_cache_->abort(batch);
+    }
+
+    void retireLocal(const std::array<int64_t, 3>& source) {
+        requireOpen();
+        requireLocal();
+        local_cache_->retire(source);
+    }
+
+    size_t activeLocal() const {
+        return local_cache_ ? local_cache_->activeRequests() : 0;
+    }
+
+    void checkLocalConfig(const ModelConfig& model, const ParallelismConfig& parallelism) {
+        requireOpen();
+        V41PPLocalCache candidate(manager_, model, parallelism);
+    }
+
+    void sendLocal(const std::map<std::string, torch::Tensor>& tensors, const V41PPCacheBatchPtr& batch) {
+        if (pp_rank_ != 0) {
+            throw std::invalid_argument("native PP local test send requires the first stage");
+        }
+        retainLocalRound(batch);
+        executor_->asyncSendTensors(PPIntermediateTensors{tensors}, tickets_);
+    }
+
+    std::map<std::string, torch::Tensor> receiveLocal(const V41PPCacheBatchPtr& batch) {
+        if (pp_rank_ != 1) {
+            throw std::invalid_argument("native PP local test receive requires the second stage");
+        }
+        retainLocalRound(batch);
+        return executor_->receiveTensors(tickets_).tensors;
+    }
+
     void send(const std::map<std::string, torch::Tensor>& tensors,
               const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
         if (pp_rank_ != 0) {
@@ -215,12 +275,19 @@ public:
 
     void close() {
         finish();
+        local_cache_.reset();
         executor_.reset();
         manager_->stopMetricsReporting();
         manager_.reset();
     }
 
 private:
+    void requireLocal() const {
+        if (!local_cache_) {
+            throw std::invalid_argument("native PP local fixture has not prepared a dispatch");
+        }
+    }
+
     void requireOpen() const {
         if (!manager_ || !executor_) {
             throw std::invalid_argument("native PP test fixture is closed");
@@ -242,11 +309,21 @@ private:
         round_leases_ = std::move(leases);
     }
 
+    void retainLocalRound(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        if (!local_cache_ || !local_cache_->ownsBatch(batch) || !tickets_.empty() || !round_leases_.empty()) {
+            throw std::invalid_argument("native PP local test requires its admitted batch and a drained round");
+        }
+        round_leases_ = batch->leases();
+    }
+
     ModelConfig                           model_config_;
+    ParallelismConfig                    parallelism_;
     int64_t                               pp_rank_;
     int64_t                               generation_ = 0;
     std::shared_ptr<KVCacheManager>         manager_;
     std::unique_ptr<PPExecutor>            executor_;
+    std::unique_ptr<V41PPLocalCache>       local_cache_;
     PPTickets                             tickets_;
     std::vector<KVCacheAllocationLeasePtr> round_leases_;
 };
@@ -256,6 +333,36 @@ private:
 
 PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     rtp_llm::registerExecCtxOps(m);
+    py::class_<rtp_llm::V41PPCacheBatch, rtp_llm::V41PPCacheBatchPtr>(m, "LocalBatch")
+        .def_property_readonly("block_tables", [](const rtp_llm::V41PPCacheBatch& batch) {
+            std::vector<rtp_llm::KVCacheAllocationLease::BlockTables> tables;
+            for (const auto& binding : batch.bindings()) {
+                tables.push_back(binding.lease->blockTables());
+            }
+            return tables;
+        })
+        .def_property_readonly("local_generations", [](const rtp_llm::V41PPCacheBatch& batch) {
+            std::vector<int64_t> generations;
+            for (const auto& binding : batch.bindings()) {
+                generations.push_back(binding.local_generation);
+            }
+            return generations;
+        })
+        .def_property_readonly("new_requests", [](const rtp_llm::V41PPCacheBatch& batch) {
+            std::vector<bool> fresh;
+            for (const auto& binding : batch.bindings()) {
+                fresh.push_back(binding.newly_admitted);
+            }
+            return fresh;
+        })
+        .def_property_readonly("kernel_block_table", &rtp_llm::V41PPCacheBatch::kernelBlockTable)
+        .def_property_readonly("canonical_columns", [](const rtp_llm::V41PPCacheBatch& batch) {
+            std::map<std::string, size_t> columns;
+            for (const auto& group : batch.bindings().at(0).lease->topologyPtr()->groups()) {
+                columns.emplace(group.tag, group.canonical_idx);
+            }
+            return columns;
+        });
     py::class_<rtp_llm::test::V41PPAllocation, std::shared_ptr<rtp_llm::test::V41PPAllocation>>(m, "Allocation")
         .def_property_readonly("block_tables", &rtp_llm::test::V41PPAllocation::tables)
         .def_property_readonly("identity", &rtp_llm::test::V41PPAllocation::identity)
@@ -264,6 +371,16 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     py::class_<rtp_llm::test::V41NativePPTransportTest>(m, "NativePPTransport")
         .def(py::init<rtp_llm::ModelConfig, const rtp_llm::ParallelismConfig&>())
         .def("allocate", &rtp_llm::test::V41NativePPTransportTest::allocate)
+        .def("prepare_local", &rtp_llm::test::V41NativePPTransportTest::prepareLocal,
+             py::arg("spans"),
+             py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
+        .def("commit_local", &rtp_llm::test::V41NativePPTransportTest::commitLocal)
+        .def("abort_local", &rtp_llm::test::V41NativePPTransportTest::abortLocal)
+        .def("retire_local", &rtp_llm::test::V41NativePPTransportTest::retireLocal)
+        .def_property_readonly("active_local", &rtp_llm::test::V41NativePPTransportTest::activeLocal)
+        .def("check_local_config", &rtp_llm::test::V41NativePPTransportTest::checkLocalConfig)
+        .def("send_local", &rtp_llm::test::V41NativePPTransportTest::sendLocal)
+        .def("receive_local", &rtp_llm::test::V41NativePPTransportTest::receiveLocal)
         .def_property_readonly("cache", &rtp_llm::test::V41NativePPTransportTest::cache)
         .def_property_readonly("free_blocks", &rtp_llm::test::V41NativePPTransportTest::freeBlocks)
         .def_property_readonly("capacity", &rtp_llm::test::V41NativePPTransportTest::capacity)

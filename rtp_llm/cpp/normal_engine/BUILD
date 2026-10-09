@@ -36,6 +36,19 @@ cc_library(
 )
 
 cc_library(
+    name = "v41_pp_local_cache",
+    srcs = ["pipeline/V41PPLocalCache.cc"],
+    hdrs = ["pipeline/V41PPLocalCache.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
