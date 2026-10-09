@@ -20,7 +20,14 @@ from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import (
+    CPRotateMethod,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    RoleType,
+    TaskType,
+)
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -75,21 +82,36 @@ class _RoutedOnlyTensorSource(TensorSource):
 
 
 class MoeConfigPropagationTest(unittest.TestCase):
+    def _prefill_capacity_configs(self, configured_cap=0, chunk_size=0):
+        model_config = ModelConfig()
+        model_config.max_seq_len = 4096
+        model_config.model_name = "test-model"
+        model_config.task_type = TaskType.LANGUAGE_MODEL
+        model_config.attn_config.tokens_per_block = 64
+        engine_config = SimpleNamespace(
+            runtime_config=SimpleNamespace(
+                fifo_scheduler_config=SimpleNamespace(
+                    max_context_batch_size=3,
+                    max_batch_tokens_size=configured_cap,
+                    prefill_chunk_size=chunk_size,
+                ),
+                model_name="",
+                use_batch_decode_scheduler=False,
+                warm_up=False,
+                warm_up_with_loss=False,
+            ),
+            pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=ParallelismConfig(),
+            kv_cache_config=KVCacheConfig(),
+            hw_kernel_config=HWKernelConfig(),
+        )
+        return engine_config, model_config
+
     def test_scheduler_prefill_batch_capacity_reaches_generic_moe(self):
         for configured_cap, expected_cap in ((0, 12288), (7000, 7000)):
             with self.subTest(configured_cap=configured_cap):
-                model_config = ModelConfig()
-                model_config.max_seq_len = 4096
-                model_config.model_name = "test-model"
-                scheduler_config = SimpleNamespace(
-                    max_context_batch_size=3,
-                    max_batch_tokens_size=configured_cap,
-                )
-                engine_config = SimpleNamespace(
-                    runtime_config=SimpleNamespace(
-                        fifo_scheduler_config=scheduler_config,
-                        model_name="",
-                    )
+                engine_config, model_config = self._prefill_capacity_configs(
+                    configured_cap=configured_cap
                 )
 
                 ModelFactory.update_engine_config_from_model_config(
@@ -106,6 +128,89 @@ class MoeConfigPropagationTest(unittest.TestCase):
                 )
                 self.assertEqual(adapter.prefill_max_tokens_per_rank, expected_cap)
                 self.assertEqual(adapter.max_tokens_per_rank, expected_cap)
+
+    def test_chunked_prefill_capacity_reaches_generic_moe(self):
+        for role, chunk, batch_cap, expected_chunk, expected_cap in (
+            (RoleType.PREFILL, 130, 0, 128, 128),
+            (RoleType.PDFUSION, 130, 0, 128, 128),
+            (RoleType.DECODE, 130, 0, 0, 12288),
+            (RoleType.PREFILL, 8192, 7000, 8192, 7000),
+        ):
+            with self.subTest(role=role, chunk=chunk, batch_cap=batch_cap):
+                engine, model = self._prefill_capacity_configs(batch_cap, chunk)
+                engine.pd_sep_config.role_type = role
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                moe_config = MoeConfig()
+                moe_config.ll_num_max_token = 256
+                adapter = MoEConfigAdapter(model, engine.parallelism_config, moe_config)
+
+                scheduler = engine.runtime_config.fifo_scheduler_config
+                self.assertEqual(scheduler.prefill_chunk_size, expected_chunk)
+                self.assertEqual(scheduler.max_batch_tokens_size, batch_cap or 12288)
+                self.assertEqual(model.max_seq_len, 4096)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected_cap)
+                self.assertEqual(adapter.prefill_max_tokens_per_rank, expected_cap)
+                self.assertEqual(adapter.max_tokens_per_rank, max(256, expected_cap))
+
+    def test_page_rr_chunk_capacity_with_standard_warmup(self):
+        for method in (CPRotateMethod.DISABLED, CPRotateMethod.PREFILL_CP):
+            with self.subTest(method=method):
+                engine, model = self._prefill_capacity_configs(1048576, 65536)
+                model.max_seq_len = 1048576
+                scheduler = engine.runtime_config.fifo_scheduler_config
+                scheduler.max_context_batch_size = 1
+                engine.runtime_config.warm_up = True
+                engine.parallelism_config.tp_size = 8
+                cp_config = engine.parallelism_config.prefill_cp_config
+                cp_config.method = method
+                cp_config.kv_cache_sharded = True
+                cp_config.prefill_cp_size = 8
+
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 65536)
+                self.assertEqual(model.max_seq_len, 1048576)
+                self.assertEqual(scheduler.max_batch_tokens_size, 1048576)
+
+    def test_chunk_capacity_preserves_whole_context_and_cp_paths(self):
+        for bypass in (
+            "query_cp",
+            "system_prompt_file",
+            "system_prompt_string",
+            "system_prompt_tokens",
+            "loss_warmup",
+            "cuda_graph",
+            "embedding",
+            "reranker",
+        ):
+            with self.subTest(bypass=bypass):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                if bypass == "query_cp":
+                    engine.parallelism_config.prefill_cp_config.method = (
+                        CPRotateMethod.ALL_GATHER
+                    )
+                elif bypass == "system_prompt_file":
+                    engine.kv_cache_config.multi_task_prompt = "task_prompts.json"
+                elif bypass == "system_prompt_string":
+                    engine.kv_cache_config.multi_task_prompt_str = "[]"
+                elif bypass == "system_prompt_tokens":
+                    engine.kv_cache_config.insertMultiTaskPromptTokens("task", [1])
+                elif bypass == "cuda_graph":
+                    engine.hw_kernel_config.enable_cuda_graph = True
+                elif bypass == "embedding":
+                    model.task_type = TaskType.DENSE_EMBEDDING
+                elif bypass == "reranker":
+                    model.task_type = TaskType.RERANKER
+                else:
+                    engine.runtime_config.warm_up = True
+                    engine.runtime_config.warm_up_with_loss = True
+
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 12288)
+                self.assertEqual(
+                    engine.runtime_config.fifo_scheduler_config.prefill_chunk_size,
+                    128,
+                )
 
     def test_declared_prefill_capacity_reaches_adapter(self):
         config = ModelConfig()

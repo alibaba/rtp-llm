@@ -5,8 +5,6 @@ import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
 
-import torch
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -416,17 +414,48 @@ class ModelFactory:
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
+            role_type=engine_config.pd_sep_config.role_type,
+            use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
+            seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
         # Generic MoE executors allocate their fixed-capacity communication
         # buffers while the Python model is constructed. Preserve the finalized
-        # scheduler prefill bound on the model config so those buffers cover a
-        # full admitted context batch, not just one maximum-length request.
-        model_config.moe_prefill_max_tokens_per_rank = min(
+        # scheduler's execution bound, rather than reserving a whole context
+        # batch when only one chunk can reach the model in each forward.
+        prefill_capacity = min(
             int(scheduler_config.max_context_batch_size)
             * int(model_config.max_seq_len),
             int(scheduler_config.max_batch_tokens_size),
         )
+        # Embedding/reranker engines execute whole inputs without the chunk scheduler.
+        if (
+            scheduler_config.prefill_chunk_size > 0
+            and model_config.task_type == TaskType.LANGUAGE_MODEL
+        ):
+            kv_cache_config = engine_config.kv_cache_config
+            has_system_prompt = bool(
+                kv_cache_config.multi_task_prompt
+                or kv_cache_config.multi_task_prompt_str
+                or kv_cache_config.multi_task_prompt_tokens
+            )
+            whole_context_warmup = (
+                engine_config.runtime_config.warm_up
+                and engine_config.runtime_config.warm_up_with_loss
+            )
+            # System prompts, loss warmup and graph capture can exceed a chunk.
+            # Query CP pads each request separately, and some routers gather
+            # those padded rows before MoE; retain their existing bound.
+            if (
+                not engine_config.parallelism_config.prefill_cp_config.is_enabled()
+                and not has_system_prompt
+                and not whole_context_warmup
+                and not engine_config.hw_kernel_config.enable_cuda_graph
+            ):
+                prefill_capacity = min(
+                    prefill_capacity, int(scheduler_config.prefill_chunk_size)
+                )
+        model_config.moe_prefill_max_tokens_per_rank = prefill_capacity
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
