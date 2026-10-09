@@ -3,6 +3,7 @@ import logging
 import time
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
 import torch
@@ -10,6 +11,10 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl import headwise_fp8
+from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
+    HeadWiseFP8PrefillAttnOp,
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
@@ -216,6 +221,19 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     # -------------------------
     # Test Cases (replaces the old main loop)
     # -------------------------
+    def test_chunk_with_cached_prefix(self):
+        case = self.Case(
+            batch_size=1,
+            kv_len=16384,
+            qo_len=128,
+            window_left=8192,
+            num_kv_heads=1,
+            num_qo_heads=8,
+            head_dim=128,
+            page_size=128,
+        )
+        self._run_correctness_check(case)
+
     def test_long_context_prefill(self):
         """Tests prefill with long context lengths (32k, 65k)."""
         logging.info("\n=== Testing Long Context Prefill ===")
@@ -276,6 +294,56 @@ class TestHeadwisePrefillOp(unittest.TestCase):
             )
             with self.subTest(case=case):
                 self._run_correctness_check(case)
+
+
+class TestHeadwiseFP8Chunk(unittest.TestCase):
+    def test_cached_prefix_fp8_forward_matches_reference(self):
+        if not (headwise_fp8._HAS_FLASH_ATTN_3 and headwise_fp8._HAS_RTP_KERNEL_FP8):
+            self.skipTest("FP8 HeadWise kernels are unavailable")
+
+        torch.manual_seed(42)
+        prefix_len, chunk_len, page_size, head_dim = 64, 16, 64, 128
+        kv_len = prefix_len + chunk_len
+        config = AttentionConfigs()
+        config.head_num = config.kv_head_num = 1
+        config.size_per_head = head_dim
+        config.tokens_per_block = page_size
+        parallel = ParallelismConfig()
+        parallel.tp_rank = 0
+        op = HeadWiseFP8PrefillAttnOp(
+            config,
+            parallel,
+            {"sink_token_num": 4, "swa_token_num": 64, "seqlen_threshold": 64, "0": [1]},
+        )
+        inputs = PyAttentionInputs()
+        inputs.input_lengths = torch.tensor([chunk_len], device="cuda", dtype=torch.int32)
+        inputs.prefix_lengths = torch.tensor([prefix_len], device="cuda", dtype=torch.int32)
+        inputs.kv_cache_block_id_device = torch.tensor([[0, 1]], device="cuda", dtype=torch.int32)
+        op.prepare(inputs)
+        op._get_headwise_config(0)
+        self.assertFalse(op.batch_items[0].use_headwise)
+
+        q = torch.randn((chunk_len, 1, head_dim), device="cuda", dtype=torch.bfloat16) / 4
+        k = (torch.randn((kv_len, 1, head_dim), device="cuda", dtype=torch.bfloat16) / 4).to(torch.float8_e4m3fn)
+        v = (torch.randn_like(k.float()) / 4).to(torch.float8_e4m3fn)
+        cache = torch.zeros((2, 2, 1, page_size, head_dim), device="cuda", dtype=torch.float8_e4m3fn)
+        for page in range(2):
+            start, end = page * page_size, min((page + 1) * page_size, kv_len)
+            cache[page, 0, 0, : end - start] = k[start:end, 0]
+            cache[page, 1, 0, : end - start] = v[start:end, 0]
+        qkv = torch.cat((q, torch.zeros_like(q), torch.zeros_like(q)), dim=1).flatten(1)
+        output = op.forward(qkv, SimpleNamespace(kv_cache_base=cache), None)
+
+        mask = torch.arange(kv_len, device="cuda")[None, :] <= (
+            prefix_len + torch.arange(chunk_len, device="cuda")[:, None]
+        )
+        reference = torch.nn.functional.scaled_dot_product_attention(
+            q.to(torch.float8_e4m3fn).float().transpose(0, 1),
+            k.float().transpose(0, 1),
+            v.float().transpose(0, 1),
+            attn_mask=mask,
+        ).transpose(0, 1).flatten(1)
+        torch.testing.assert_close(output.float(), reference, rtol=0.1, atol=0.05)
 
 
 if __name__ == "__main__":

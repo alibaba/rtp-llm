@@ -41,6 +41,11 @@ py_test (
         "mla_attention_ref.py",
         "mla_reuse_cache_test.py",
     ],
+    args = [
+        "MLATest.test_mlp",
+        "MLATest.test_chunked_forward",
+        "MLATest.test_chunked_batched_forward",
+    ],
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ] + select({
@@ -54,6 +59,32 @@ py_test (
         "open_skip",
     ],
     exec_properties = {"gpu": "A10_CU13"},
+)
+
+py_test (
+    name = "mla_reuse_cache_fp8_test",
+    main = "mla_reuse_cache_test.py",
+    srcs = [
+        "mla_attention_ref.py",
+        "mla_reuse_cache_test.py",
+    ],
+    args = [
+        "MLATest.test_fp8_weight_prefill_keeps_quantized_kv_projection",
+        "MLATest.test_fp8_kv_chunked_batched_gather",
+    ],
+    # Run FP8 KV-B projection on H20 with the per-user DeepGEMM JIT cache.
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": [],
+    }),
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test (

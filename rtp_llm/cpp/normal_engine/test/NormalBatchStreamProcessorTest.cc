@@ -730,6 +730,53 @@ private:
     int64_t accepted_token_len_ = 0;
 };
 
+class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorTest {
+protected:
+    void SetUp() override {
+        DeviceTestBase::SetUp();
+        model_config_.max_seq_len            = 2048;
+        model_config_.vocab_size             = 2048;
+        model_config_.num_layers             = 1;
+        model_config_.has_positional_encoding = true;
+        initFullCacheConfig(cache_config_, model_config_.num_layers);
+        processor_ = make_unique<NormalBatchStreamProcessor>(model_config_,
+                                                             PDSepConfig{},
+                                                             ProfilingDebugLoggingConfig{},
+                                                             cache_config_,
+                                                             false);
+    }
+
+    GenerateStreamPtr makeRunningStream(const std::vector<int32_t>&     input_ids,
+                                        std::shared_ptr<GenerateConfig> generate_config = nullptr) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer(input_ids);
+        query->generate_config = generate_config ? generate_config : make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(
+            query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    }
+
+    GenerateStreamPtr makeMiddleChunkStream(const std::vector<int32_t>&     input_ids,
+                                            std::shared_ptr<GenerateConfig> generate_config = nullptr) {
+        auto stream = makeRunningStream(input_ids, generate_config);
+        stream->setChunkSize(/*chunk_size=*/8);
+        return stream;
+    }
+
+    void setKvCacheBlocks(const GenerateStreamPtr& stream, std::vector<int> blocks) {
+        BatchKVCacheResource kv_cache;
+        kv_cache.resetBatchSize(1);
+        kv_cache.initGroups(cache_config_.topologyPtr());
+        kv_cache.setBatchBlocks(0, "default", blocks);
+        stream->setKVCache(kv_cache);
+    }
+
+    ModelConfig                            model_config_;
+    CacheConfig                            cache_config_;
+    unique_ptr<NormalBatchStreamProcessor> processor_;
+};
+
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
     ModelConfig     model_config;
@@ -2038,6 +2085,122 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
         EXPECT_NE(std::string(e.what()).find("not divisible"), std::string::npos);
     }
     EXPECT_TRUE(threw);
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
+    auto chunk_stream =
+        makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    setKvCacheBlocks(chunk_stream, {1, 2, 3});
+    chunk_stream->setReuseLength(8);
+
+    StreamGroups stream_groups({chunk_stream});
+    TensorHolder holder;
+    auto         merge_input_status = processor_->gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(merge_input_status.ok()) << merge_input_status.status().ToString();
+
+    auto&       model_input        = merge_input_status.value();
+    vector<int> combo_tokens       = {9, 10, 11, 12, 13, 14, 15, 16};
+    vector<int> combo_position_ids = {8, 9, 10, 11, 12, 13, 14, 15};
+
+    EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ(combo_position_ids, toVec<int>(model_input.combo_position_ids));
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSkipsSamplingAndGenerator) {
+    auto chunk_config         = make_shared<GenerateConfig>();
+    chunk_config->do_sample   = true;
+    chunk_config->random_seed = 123;
+    auto chunk_stream = makeMiddleChunkStream(
+        {10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
+
+    auto plain_config         = make_shared<GenerateConfig>();
+    plain_config->do_sample   = true;
+    plain_config->random_seed = 456;
+    auto plain_stream         = makeRunningStream({1, 2, 3}, plain_config);
+
+    StreamGroups    stream_groups({chunk_stream, plain_stream});
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({2, model_config_.vocab_size}, torch::kFloat32);
+
+    auto sampler_input_status = processor_->gatherSamplerInput(stream_groups, GptModelInputs{}, model_output);
+    ASSERT_TRUE(sampler_input_status.ok()) << sampler_input_status.status().ToString();
+    auto& sampler_inputs = sampler_input_status.value();
+
+    auto* do_sample = reinterpret_cast<bool*>(sampler_inputs.do_sample.data_ptr());
+    EXPECT_FALSE(do_sample[0]);
+    EXPECT_FALSE(sampler_inputs.generator[0].defined());
+    EXPECT_TRUE(do_sample[1]);
+    EXPECT_TRUE(sampler_inputs.generator[1].defined());
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
+    autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
+    stream->setChunkSize(4);
+    setKvCacheBlocks(stream, {1});
+
+    EngineInitParams params;
+    params.model_config_                         = model_config_;
+    params.model_config_.has_positional_encoding = false;
+    params.py_model                             = py::none();
+    NormalExecutor executor(params, nullptr, true);
+    NormalBatchStreamProcessor processor(
+        params.model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
+    MergedOutput outputs;
+    outputs.sampler_output.token_ids = torch::tensor({42}, torch::kInt32).reshape({1, 1}).cuda();
+    outputs.sampler_output.success   = torch::tensor({true}, torch::kBool);
+
+    StreamGroups middle_groups({stream});
+    ASSERT_TRUE(stream->isMiddleChunk());
+    executor.publishNormalDeviceState(middle_groups, outputs.sampler_output);
+    EXPECT_FALSE(stream->getNormalAsyncDeviceState().next_seq_len_gpu.defined());
+    ASSERT_TRUE(processor.dispatch(middle_groups, outputs).ok());
+    EXPECT_EQ(stream->seqLength(), 8);
+    EXPECT_EQ(stream->reuseLength(), 4);
+
+    StreamGroups final_groups({stream});
+    ASSERT_FALSE(stream->isMiddleChunk());
+    executor.publishNormalDeviceState(final_groups, outputs.sampler_output);
+    ASSERT_TRUE(processor.dispatch(final_groups, outputs).ok());
+    EXPECT_EQ(stream->seqLength(), 9);
+    EXPECT_EQ(stream->getNormalAsyncDeviceState().next_real_seq_len, 9);
+    EXPECT_EQ(toVec<int32_t>(stream->getNormalAsyncDeviceState().next_seq_len_gpu), (vector<int32_t>{9}));
+
+    StreamGroups decode_groups({stream});
+    TensorHolder holder;
+    auto         inputs = processor.gatherModelInput(decode_groups, holder);
+    ASSERT_TRUE(inputs.ok()) << inputs.status().ToString();
+    ASSERT_TRUE(inputs->sequence_lengths.is_cuda());
+    EXPECT_EQ(toVec<int32_t>(inputs->sequence_lengths), (vector<int32_t>{8}));
+    EXPECT_EQ(toVec<int32_t>(inputs->combo_tokens), (vector<int32_t>{42}));
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDeviceStateAndSamplerRowOrder) {
+    auto middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto plain_stream  = makeRunningStream({1, 2, 3});
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    middle_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 41, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 10, cuda_i32),
+        .last_real_seq_len     = 9,
+        .next_real_seq_len     = 10,
+    });
+
+    EngineInitParams params;
+    params.model_config_ = model_config_;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+    SamplerOutput outputs;
+    outputs.token_ids = torch::tensor({42, 43}, torch::kInt32).reshape({2, 1}).cuda();
+    executor.publishNormalDeviceState(StreamGroups({middle_stream, plain_stream}), outputs);
+
+    const auto& middle_state = middle_stream->getNormalAsyncDeviceState();
+    EXPECT_EQ(middle_state.next_real_seq_len, 10);
+    EXPECT_EQ(toVec<int32_t>(middle_state.next_seq_len_gpu), (vector<int32_t>{10}));
+    EXPECT_EQ(toVec<int32_t>(middle_state.last_sample_token_gpu), (vector<int32_t>{41}));
+    const auto& plain_state = plain_stream->getNormalAsyncDeviceState();
+    EXPECT_EQ(plain_state.next_real_seq_len, 4);
+    EXPECT_EQ(toVec<int32_t>(plain_state.last_sample_token_gpu), (vector<int32_t>{43}));
 }
 
 }  // namespace rtp_llm

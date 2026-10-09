@@ -699,6 +699,11 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 
     int64_t batch_idx_out = 0;
     for (auto& stream : all_streams) {
+        // Middle chunks do not commit a token or advance logits processor state.
+        if (stream->isMiddleChunk()) {
+            batch_idx_out += 1;
+            continue;
+        }
         torch::Tensor last_sample_token_gpu;
         if (token_ids_gpu.dim() == 1) {
             last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
