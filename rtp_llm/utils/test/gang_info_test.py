@@ -13,7 +13,7 @@ class GangInfoTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "custom-annotations"
         self.reader = GangInfoReader.from_config(
-            SimpleNamespace(gang_annocation_path=str(self.path))
+            SimpleNamespace(gang_annotation_path=str(self.path))
         )
 
     def test_reads_existing_annotation_format_and_refreshes_projection(self):

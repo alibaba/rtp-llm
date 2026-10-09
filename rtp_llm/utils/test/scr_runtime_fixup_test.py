@@ -311,7 +311,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         visitor = Mock(source_ip="192.0.2.10")
         configs = NS(
             server_config=NS(),
-            distribute_config=NS(gang_annocation_path="/unused/annotations"),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=NS(world_size=2, local_world_size=1),
             role_config=NS(role_type="PREFILL"),
         )

@@ -112,7 +112,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
     def test_frontend_identity_refreshes_without_publishing_loopback(self):
         configs = NS(
             server_config=object(),
-            distribute_config=NS(gang_annocation_path="/unused/annotations"),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -157,7 +157,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         configs = NS(
             server_config=NS(ip="192.0.2.1"),
-            distribute_config=NS(gang_annocation_path="/unused/annotations"),
+            distribute_config=NS(gang_annotation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )

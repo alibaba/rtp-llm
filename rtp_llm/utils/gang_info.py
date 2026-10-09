@@ -14,7 +14,7 @@ class GangInfoReader:
 
     @classmethod
     def from_config(cls, config: "DistributeConfig") -> "GangInfoReader":
-        return cls(config.gang_annocation_path)
+        return cls(config.gang_annotation_path)
 
     def read(self) -> dict[str, Any]:
         # Keep only the path, not an open file or cached rows: kubelet can replace

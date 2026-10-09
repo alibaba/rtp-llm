@@ -31,7 +31,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom-annotations"
-            configs.distribute_config.gang_annocation_path = str(path)
+            configs.distribute_config.gang_annotation_path = str(path)
             path.write_text(
                 'unrelated="value"\napp.c2.io/biz-detail-ganginfo='
                 + json.dumps(json.dumps(rows))

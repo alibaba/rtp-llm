@@ -178,7 +178,7 @@ class DistributeConfig:
 
     def __init__(self):
         self.fake_gang_env: bool = False
-        self.gang_annocation_path: str = "/etc/podinfo/annotations"
+        self.gang_annotation_path: str = "/etc/podinfo/annotations"
         self.gang_config_string: Optional[str] = None
         self.zone_name: str = ""
         self.distribute_config_file: str = ""
@@ -213,7 +213,7 @@ class DistributeConfig:
     def to_string(self):
         return (
             f"fake_gang_env: {self.fake_gang_env}\n"
-            f"gang_annocation_path: {self.gang_annocation_path}\n"
+            f"gang_annotation_path: {self.gang_annotation_path}\n"
             f"gang_config_string: {self.gang_config_string}\n"
             f"zone_name: {self.zone_name}\n"
             f"distribute_config_file: {self.distribute_config_file}\n"
