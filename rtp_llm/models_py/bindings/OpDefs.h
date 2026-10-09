@@ -103,6 +103,9 @@ public:
         return static_cast<int>(grouped_layout_.topology().group(tag).kernelSeqSizePerBlock());
     }
 
+    // Entry count of the exposed layer-cache view; zero for non-opaque specs.
+    size_t getEntriesPerBlock(const std::string& tag) const;
+
 private:
     void validateLayer(int layer_id) const {
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
@@ -256,6 +259,9 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyContextParallelParams {
+    torch::Tensor prefill_qkv_restore_indice_cpu;
+    torch::Tensor prefill_qkv_padding_mask_cpu;
+    torch::Tensor prefill_mm_spans;
     torch::Tensor prefill_cp_padding_lengths;
     torch::Tensor prefill_cp_chunk_lengths;
     torch::Tensor prefill_shuffle_indices;
@@ -329,6 +335,7 @@ struct PyEmbeddingInputs {
 };
 
 struct PyMultimodalInputs {
+    torch::Tensor              mm_features_spans;
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
     std::vector<torch::Tensor> mm_extra_input;
@@ -347,6 +354,9 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    torch::Tensor        engram_token_windows;
+    bool                 need_all_logits        = true;
+    bool                 need_all_hidden_states = true;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

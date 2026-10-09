@@ -21,6 +21,38 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(CompleteTokenIdsTest, ImageHashIdentityAndShiftedReuseBoundaries) {
+    auto input               = std::make_shared<GenerateInput>();
+    input->input_ids         = torch::arange(16, torch::kInt32);
+    input->generate_config   = std::make_shared<GenerateConfig>();
+    auto          multimodal = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start              = 4;
+    image.types              = torch::zeros({8}, torch::kInt32);
+    image.n_vit_h            = 2;
+    image.n_vit_w            = 2;
+    image.content_sha256     = std::string(64, 'a');
+    image.processor_identity = std::string(64, 'b');
+    multimodal->images.push_back(image);
+    input->v41_inputs = multimodal;
+    CompleteTokenIds tokens(1, 1, 32, 4);
+    tokens.init(input);
+    EXPECT_TRUE(tokens.imageCacheIdentity(0, 4).empty());
+    EXPECT_FALSE(tokens.imageCacheIdentity(4, 4).empty());
+    EXPECT_TRUE(tokens.isValidReuseLength(4));
+    EXPECT_FALSE(tokens.isValidReuseLength(8));
+    EXPECT_TRUE(tokens.isValidReuseLength(12));
+    EXPECT_FALSE(tokens.isValidReuseLength(12, 8));
+    CompleteTokenIds shifted(tokens, true, 2);
+    EXPECT_FALSE(shifted.isValidReuseLength(6));
+    EXPECT_TRUE(shifted.isValidReuseLength(10));
+    EXPECT_EQ(shifted.imageCacheIdentity(2, 4)[1], 2);
+    multimodal->images[0].content_sha256.clear();
+    EXPECT_TRUE(tokens.isValidReuseLength(4));
+    EXPECT_FALSE(tokens.isValidReuseLength(12));
+    EXPECT_FALSE(tokens.isValidReuseLength(16));
+}
+
 TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
     GenerateInput input;
     input.input_ids                    = torch::tensor({7, 8, 9}, torch::kInt32);
@@ -359,7 +391,7 @@ TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {
     stream->reportEvent(StreamEvents::GenerateDone);
 
     std::promise<void> stop_started;
-    auto               stop_ready = stop_started.get_future();
+    auto               stop_ready  = stop_started.get_future();
     auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
         stop_started.set_value();
         return stream->finishOrCancel(1000, "cancel stream");
@@ -381,7 +413,7 @@ TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommi
     stream->generate_status_->status.store(StreamState::RUNNING);
 
     std::promise<void> stop_started;
-    auto               stop_ready = stop_started.get_future();
+    auto               stop_ready  = stop_started.get_future();
     auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
         stop_started.set_value();
         return stream->finishOrCancel(1000, "client closed");
@@ -786,10 +818,10 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSna
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
-    constexpr int       publishes_per_writer = 1000;
-    std::atomic<bool>   start{false};
-    std::atomic<bool>   writers_done{false};
-    std::atomic<bool>   incoherent_snapshot{false};
+    constexpr int            publishes_per_writer = 1000;
+    std::atomic<bool>        start{false};
+    std::atomic<bool>        writers_done{false};
+    std::atomic<bool>        incoherent_snapshot{false};
     std::vector<std::thread> writers;
     for (int writer_id = 0; writer_id < 2; ++writer_id) {
         writers.emplace_back([&, writer_id] {
@@ -797,7 +829,7 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSna
                 std::this_thread::yield();
             }
             for (int i = 1; i <= publishes_per_writer; ++i) {
-                const int marker = writer_id * publishes_per_writer + i;
+                const int                           marker = writer_id * publishes_per_writer + i;
                 GenerateStream::MtpAsyncDeviceState state;
                 state.previous_seq_len_upper_bound = marker;
                 state.next_seq_len_upper_bound     = marker;

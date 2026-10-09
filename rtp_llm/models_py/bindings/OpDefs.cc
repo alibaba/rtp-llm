@@ -1,6 +1,24 @@
 #include "OpDefs.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 namespace torch_ext {
+
+size_t KVCache::getEntriesPerBlock(const std::string& tag) const {
+    const auto& group = grouped_layout_.topology().group(tag);
+    const auto* spec  = dynamic_cast<const rtp_llm::OpaqueKVCacheSpec*>(group.spec.get());
+    if (!spec) {
+        return 0;
+    }
+    size_t entries = spec->entriesPerBlock();
+    if (group.policy.group_type == rtp_llm::CacheGroupType::FULL && spec->type == rtp_llm::KVCacheSpecType::OpaqueKV) {
+        const auto pages = group.kernelBlocksPerKvBlock();
+        RTP_LLM_CHECK_WITH_INFO(
+            pages > 0 && entries % pages == 0, "opaque entries must divide kernel pages for tag=%s", tag.c_str());
+        entries /= pages;
+    }
+    return entries;
+}
+
 namespace {
 
 void registerCacheGroupType(pybind11::module& m) {
@@ -66,7 +84,10 @@ void registerPyOpDefs(pybind11::module& m) {
              "Return the physical sequence size per block for a cache tag")
         .def("get_kernel_seq_size_per_block",
              &KVCache::getKernelSeqSizePerBlock,
-             "Return the kernel sequence size per block for a cache tag");
+             "Return the kernel sequence size per block for a cache tag")
+        .def("get_entries_per_block",
+             &KVCache::getEntriesPerBlock,
+             "Return opaque logical entries per layer-cache block, excluding padding; zero for other specs");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
@@ -120,6 +141,9 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyContextParallelParams>(m, "PyContextParallelParams")
         .def(pybind11::init<>())
+        .def_readwrite("prefill_qkv_restore_indice_cpu", &PyContextParallelParams::prefill_qkv_restore_indice_cpu)
+        .def_readwrite("prefill_qkv_padding_mask_cpu", &PyContextParallelParams::prefill_qkv_padding_mask_cpu)
+        .def_readwrite("prefill_mm_spans", &PyContextParallelParams::prefill_mm_spans)
         .def_readwrite("prefill_cp_padding_lengths", &PyContextParallelParams::prefill_cp_padding_lengths)
         .def_readwrite("prefill_cp_chunk_lengths", &PyContextParallelParams::prefill_cp_chunk_lengths)
         .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices)
@@ -189,6 +213,7 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
         .def(pybind11::init<>())
+        .def_readwrite("mm_features_spans", &PyMultimodalInputs::mm_features_spans)
         .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
         .def_readwrite(
             "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
@@ -229,6 +254,9 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+        .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
+        .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states)
+        .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")

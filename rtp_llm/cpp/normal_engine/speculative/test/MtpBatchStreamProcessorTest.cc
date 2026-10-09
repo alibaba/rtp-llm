@@ -27,6 +27,20 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(EngramHistoryTest, VerifyAndRejectedCandidatesDoNotPolluteNextHistory) {
+    auto anchor   = torch::tensor({{10, 9, 8, 7}, {20, 19, 18, 17}}, torch::kInt32);
+    auto verify   = torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32);
+    auto windows  = MtpBatchStreamProcessor::makeEngramVerifyWindows(anchor, verify);
+    auto expected = torch::tensor(
+        {{10, 9, 8, 7}, {11, 10, 9, 8}, {12, 11, 10, 9}, {20, 19, 18, 17}, {21, 20, 19, 18}, {22, 21, 20, 19}},
+        torch::kInt32);
+    EXPECT_TRUE(torch::equal(windows, expected));
+    auto accepted = torch::tensor({{30, 31, 32}, {40, 41, 42}}, torch::kInt32);
+    auto lengths  = torch::tensor({1, 3}, torch::kInt32);
+    auto next     = MtpBatchStreamProcessor::advanceEngramTokenWindows(anchor, accepted, lengths);
+    EXPECT_TRUE(torch::equal(next, torch::tensor({{30, 10, 9, 8}, {42, 41, 40, 20}}, torch::kInt32)));
+}
+
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
     auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
@@ -433,6 +447,25 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
+}
+
+TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHistory) {
+    ModelConfig model_config;
+    model_config.max_seq_len                         = 128;
+    model_config.vocab_size                          = 8;
+    model_config.num_layers                          = 1;
+    model_config.attn_config.v41_kv_source_layer_ids = {0};
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 3;
+    MtpBatchStreamProcessor processor(model_config, {}, {}, makeProcessorCacheConfig(), sp_config, false);
+    TensorHolder            holder;
+    StreamGroups            empty(std::list<GenerateStreamPtr>{});
+    auto                    input = processor.gatherDecodeModelInput(empty, holder);
+    ASSERT_TRUE(input.ok());
+    EXPECT_EQ(input->combo_tokens.numel(), 0);
+    ASSERT_TRUE(input->engram_token_windows.defined());
+    EXPECT_EQ(input->engram_token_windows.sizes().vec(), (std::vector<int64_t>{0, 4}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

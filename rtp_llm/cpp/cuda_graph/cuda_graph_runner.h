@@ -43,11 +43,9 @@ class CudaGraphRunner: public GraphBase {
 public:
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               max_seq_len,
-                                                size_t               max_reserved_step);
-    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                size_t               fake_physical_block_count);
+    static int64_t
+    captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
@@ -85,6 +83,9 @@ public:
         RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
                                 "CUDA graph requires a positive kernel block table width");
         max_bs_ = graph_params.max_context_batch_size;
+        if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
+            engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
+        }
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
                     is_prefill_cuda_graph_mode_ ?
@@ -267,6 +268,7 @@ private:
     std::vector<std::string>                   kv_cache_group_tags_;
     int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
+    int                                        engram_window_size_{0};
     int                                        generation_prefill_cuda_graph_max_requests_{0};
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
