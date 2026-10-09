@@ -1451,6 +1451,32 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
 }
 
+TEST_F(GenerateStreamTest, testShortMultimodalContextUsesNormalPrefill) {
+    GenerateStreamBuilder builder;
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int input_length : {7, 8, 9}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(input_length);
+            auto stream = builder.createChunkedContextStream(
+                makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
+                    input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+                });
+            EXPECT_FALSE(stream->chunkedPrefillEnabled());
+            EXPECT_EQ(stream->hasError(), input_length > 8);
+            if (input_length > 8) {
+                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: multimodal");
+            } else {
+                markRunning(stream);
+                EXPECT_FALSE(stream->useChunkWindow());
+                EXPECT_EQ(stream->contextLength(), input_length);
+                updateOneToken(stream, 101);
+                EXPECT_FALSE(stream->isContextStream());
+                EXPECT_EQ(stream->seqLength(), input_length + 1);
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);

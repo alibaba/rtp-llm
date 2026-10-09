@@ -1213,6 +1213,63 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     vector<int> expect_combo_tokens = {2, 2, 3, 2, 1, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
+TEST_F(MtpBatchStreamProcessorTest, testCudaPrefillShiftUsesPromptTailOnlyForMiddleChunks) {
+    for (const bool explicit_positions : {false, true}) {
+        for (const bool device_inputs : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "explicit_positions=" << explicit_positions
+                                           << ", device_inputs=" << device_inputs);
+            ModelConfig config;
+            config.max_seq_len = 64;
+            config.vocab_size = 64;
+            config.num_layers = 1;
+            config.mm_model_config.mm_position_ids_style = DEFAULT;
+            config.attn_config.rope_config.index_factor = 1;
+            RuntimeConfig runtime;
+            ResourceContext resources;
+            auto middle = createContextStream(config, runtime, resources, {10, 11, 12, 13, 14, 15}, 1);
+            auto final = createContextStream(config, runtime, resources, {20, 21, 22, 23, 24}, 2);
+            for (const auto& stream : {middle, final}) {
+                stream->setReuseLength(2);
+                stream->setChunkSize(stream == middle ? 2 : 3);
+            }
+            ASSERT_TRUE(middle->isMiddleChunk());
+            ASSERT_FALSE(final->isMiddleChunk());
+
+            SpeculativeExecutionConfig spec;
+            spec.gen_num_per_cycle = 1;
+            MtpBatchStreamProcessor processor(config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                               makeProcessorCacheConfig(), spec, false);
+            auto tensor_device = device_inputs ? torch::kCUDA : torch::kCPU;
+            GptModelInputs input;
+            input.combo_tokens = torch::tensor({12, 13, 22, 23, 24}, torch::kInt32).to(tensor_device);
+            input.input_lengths = torch::tensor({2, 3}, torch::kInt32).to(tensor_device);
+            if (explicit_positions) {
+                input.combo_position_ids = torch::tensor({2, 3, 2, 3, 4}, torch::kInt32).to(tensor_device);
+            }
+            GptModelOutputs output;
+            output.all_hidden_states = torch::zeros({5, 2});
+            SamplerOutput sampled;
+            sampled.token_ids = torch::tensor({{1, 2, 59}, {3, 4, 60}}, torch::kInt32).to(tensor_device);
+            const auto original_samples = sampled.token_ids.clone();
+            TensorHolder holder;
+            processor.updatePrefillPostDraftModelInput(
+                StreamGroups({middle, final}), input, output, sampled, holder);
+
+            // Shift each current window by one. The middle tail is prompt[4]=14;
+            // the final tail is the sample, and its existing DEFAULT position stays 4.
+            EXPECT_EQ((vector<int>{13, 14, 23, 24, 60}), toVec<int>(input.combo_tokens));
+            if (explicit_positions) {
+                EXPECT_EQ((vector<int>{3, 4, 3, 4, 4}), toVec<int>(input.combo_position_ids));
+            } else {
+                EXPECT_FALSE(input.combo_position_ids.defined());
+            }
+            EXPECT_TRUE(torch::equal(sampled.token_ids, original_samples));
+            EXPECT_EQ(middle->reuseLength(), 2);
+            EXPECT_EQ(final->reuseLength(), 2);
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
