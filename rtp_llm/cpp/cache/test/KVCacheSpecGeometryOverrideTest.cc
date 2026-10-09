@@ -46,6 +46,7 @@ ModelConfig makeGemma4GeometryModelConfig() {
     swa_desc.tail           = tail;
     CacheCapacityPolicyDesc capacity;
     capacity.reservable             = false;
+    capacity.bounded_by_active_tail = true;
     swa_desc.capacity               = capacity;
 
     KVCacheSpecDesc full_desc;
@@ -184,6 +185,7 @@ TEST(KVCacheSpecGeometryOverrideTest, WarmupConfigPublishesPerGroupGeometry) {
     EXPECT_EQ(swa_group.policy.sliding_window_size, 1024);
     EXPECT_EQ(swa_group.policy.active_tail_blocks, 129u);
     EXPECT_FALSE(swa_group.policy.reservable);
+    EXPECT_TRUE(swa_group.policy.bounded_by_active_tail);
     EXPECT_EQ(config.layerIdsForGroup("swa"), (std::vector<int>{0}));
 
     const auto& full_group = groups[1];

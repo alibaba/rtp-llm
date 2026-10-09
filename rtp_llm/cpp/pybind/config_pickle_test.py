@@ -25,8 +25,14 @@ def _new_kv_cache_spec_desc():
     return KVCacheSpecDesc.__new__(KVCacheSpecDesc)
 
 
+def _new_cache_capacity_policy_desc():
+    return CacheCapacityPolicyDesc.__new__(CacheCapacityPolicyDesc)
 
 
+class _LegacyCacheCapacityPolicyDesc:
+    def __reduce__(self):
+        legacy_state = (True, 17, False)
+        return _new_cache_capacity_policy_desc, (), legacy_state
 
 
 class _LegacyKVCacheSpecDesc:
@@ -85,6 +91,35 @@ class _LegacyHWKernelConfig:
         return _new_hw_kernel_config, (), legacy_state
 
 
+class CacheCapacityPolicyDescPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        capacity = CacheCapacityPolicyDesc()
+        capacity.reservable = True
+        capacity.explicit_block_num = 23
+        capacity.charge_to_paged_budget = False
+        capacity.bounded_by_active_tail = True
+
+        restored = pickle.loads(pickle.dumps(capacity))
+
+        self.assertTrue(restored.reservable)
+        self.assertEqual(restored.explicit_block_num, 23)
+        self.assertFalse(restored.charge_to_paged_budget)
+        self.assertTrue(restored.bounded_by_active_tail)
+
+    def test_legacy_three_tuple_is_loaded(self):
+        restored = pickle.loads(pickle.dumps(_LegacyCacheCapacityPolicyDesc()))
+
+        self.assertTrue(restored.reservable)
+        self.assertEqual(restored.explicit_block_num, 17)
+        self.assertFalse(restored.charge_to_paged_budget)
+        self.assertIsNone(restored.bounded_by_active_tail)
+
+    def test_unsupported_tuple_size_is_rejected(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "Invalid CacheCapacityPolicyDesc state"
+        ):
+            capacity = _new_cache_capacity_policy_desc()
+            capacity.__setstate__((True,))
 
 
 class KVCacheSpecDescPickleTest(unittest.TestCase):
@@ -102,6 +137,7 @@ class KVCacheSpecDescPickleTest(unittest.TestCase):
         reuse.enable_prefix_reuse = True
         desc.reuse = reuse
         capacity = CacheCapacityPolicyDesc()
+        capacity.bounded_by_active_tail = True
         desc.capacity = capacity
 
         self.assertEqual(len(desc.__getstate__()), 22)
@@ -116,6 +152,7 @@ class KVCacheSpecDescPickleTest(unittest.TestCase):
         self.assertEqual(restored.block_stride_alignment_min_entries, 41)
         self.assertEqual(restored.group_type, CacheGroupType.FULL)
         self.assertTrue(restored.reuse.enable_prefix_reuse)
+        self.assertTrue(restored.capacity.bounded_by_active_tail)
 
     def test_legacy_twenty_tuple_is_loaded(self):
         restored = pickle.loads(pickle.dumps(_LegacyKVCacheSpecDesc()))

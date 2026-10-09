@@ -31,6 +31,26 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
         static_cast<int>(policy.memory_placement));
 }
 
+inline uint32_t boundedActiveTailPhysicalBlockCount(const CacheGroupPolicy& policy,
+                                                    const RuntimeConfig&    runtime_config,
+                                                    const std::string&      tag) {
+    RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::SWA && !policy.enable_prefix_reuse
+                                && policy.active_tail_blocks > 0,
+                            "bounded active-tail pool requires non-reused SWA policy for tag=%s",
+                            tag.c_str());
+    const auto batch_size    = static_cast<uint64_t>(std::max<int64_t>(runtime_config.max_generate_batch_size, 1));
+    const auto growth_blocks = static_cast<uint64_t>(std::max<int64_t>(runtime_config.max_block_size_per_item, 0));
+    // incrMalloc allocates the next extent before removeSkippedBlocks releases the old tail.
+    const auto per_request_blocks = static_cast<uint64_t>(policy.active_tail_blocks) + 2u * growth_blocks;
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= (std::numeric_limits<uint32_t>::max() - 1u) / per_request_blocks,
+                            "bounded active-tail capacity overflows for tag=%s tail=%u growth=%lu batch=%lu",
+                            tag.c_str(),
+                            policy.active_tail_blocks,
+                            growth_blocks,
+                            batch_size);
+    return static_cast<uint32_t>(1u + batch_size * per_request_blocks);
+}
+
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;

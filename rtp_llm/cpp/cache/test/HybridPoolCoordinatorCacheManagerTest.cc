@@ -2049,6 +2049,72 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveRatioExcludesExplicitIndepe
               static_cast<size_t>(reserve_ratio) * all_available / static_cast<size_t>(100));
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, BoundedSwaPoolSupportsConfiguredBatchAndGrowth) {
+    auto                          config = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/64,
+                                                   /*swa_block_num=*/64);
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
+    ASSERT_EQ(policies.size(), 2u);
+    policies[1].enable_prefix_reuse    = false;
+    policies[1].reservable             = false;
+    policies[1].active_tail_blocks     = 3;
+    policies[1].bounded_by_active_tail = true;
+    setTestGroupPolicies(config, policies);
+
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size = 4;
+    runtime_config.max_block_size_per_item = 1;
+
+    auto low_global_config = config;
+    low_global_config.finalizeBlockNums(/*global_block_num=*/5, runtime_config);
+    EXPECT_EQ(low_global_config.group("linear").block_num, 5u);
+    EXPECT_EQ(low_global_config.group("swa").block_num, 21u);
+
+    config.finalizeBlockNums(/*global_block_num=*/64, runtime_config);
+    EXPECT_EQ(config.group("linear").block_num, 64u);
+    EXPECT_EQ(config.group("swa").block_num, 21u);
+
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/50);
+    ASSERT_TRUE(allocator->init());
+    auto swa_pool = poolForTag(*allocator, "swa");
+    ASSERT_NE(swa_pool, nullptr);
+    EXPECT_EQ(swa_pool->totalBlocksNum(), 20u);
+    EXPECT_EQ(swa_pool->freeBlocksNum(), 20u);
+
+    std::vector<BatchKVCacheResourcePtr> resources;
+    for (int request = 0; request < 4; ++request) {
+        auto resource = makeBatchResource(/*batch_size=*/1, config);
+        resource->setBatchCacheKeys(0, CacheKeysType{100 + request});
+        auto token_ids = makeCompleteTokenIds(
+            /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+        token_ids->setReserveStep(1);
+        MallocInfo malloc_info{resource, token_ids};
+        malloc_info.enable_cache_lookup = false;
+        malloc_info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(malloc_info).success) << "request=" << request;
+        EXPECT_EQ(validBlockCount(resource->blocks(0, "swa")), 4u);
+        resources.push_back(resource);
+    }
+    EXPECT_EQ(swa_pool->freeBlocksNum(), 4u);
+
+    for (int request = 0; request < 4; ++request) {
+        auto grown_tokens = makeCompleteTokenIds(
+            /*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+        grown_tokens->setReserveStep(1);
+        MallocInfo growth{resources[request], grown_tokens};
+        growth.enable_cache_lookup = false;
+        growth.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(growth).success) << "request=" << request;
+        const auto& grown_blocks = resources[request]->blocks(0, "swa");
+        ASSERT_EQ(grown_blocks.size(), 5u);
+        EXPECT_TRUE(isNullBlockIdx(grown_blocks[0]));
+        EXPECT_EQ(validBlockCount(grown_blocks), 4u);
+        EXPECT_EQ(swa_pool->freeBlocksNum(), 4u);
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
     auto       config             = makeDSV4HybridPoolConfig(/*block_num=*/50);
     const auto explicit_group_tag = firstExplicitGroup(config);

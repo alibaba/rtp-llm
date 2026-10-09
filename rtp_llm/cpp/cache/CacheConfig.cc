@@ -25,6 +25,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
     os << "{group_type=" << cacheGroupTypeName(policy.group_type) << ", prefix_reuse=" << policy.enable_prefix_reuse
        << ", reservable=" << policy.reservable << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
+       << ", bounded_by_active_tail=" << policy.bounded_by_active_tail
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
@@ -128,7 +129,8 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
+           && lhs.bounded_by_active_tail == rhs.bounded_by_active_tail && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
            && lhs.sliding_window_size == rhs.sliding_window_size;
@@ -463,8 +465,6 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
 
 void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
     RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "cache configuration requires positive baseline block count");
-    // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
-    (void)runtime_config;
     for (auto& sub_cfg : mtp_sub_configs) {
         if (sub_cfg != nullptr) {
             sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
@@ -482,10 +482,12 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
+        } else if (group.policy.bounded_by_active_tail) {
+            rule_blocks = boundedActiveTailPhysicalBlockCount(group.policy, runtime_config, group.tag);
         } else if (group.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        group.block_num = rule_blocks;
+        group.block_num = std::max(rule_blocks, 1u);
     }
     // The published topology already owns frozen Specs; changing capacity does
     // not require cloning their immutable byte layouts again.

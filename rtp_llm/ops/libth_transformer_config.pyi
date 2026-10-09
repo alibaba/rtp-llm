@@ -1007,6 +1007,7 @@ class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
     charge_to_paged_budget: typing.Any
+    bounded_by_active_tail: typing.Any
     def __init__(self) -> None: ...
 
 class CacheMemoryPolicyDesc:

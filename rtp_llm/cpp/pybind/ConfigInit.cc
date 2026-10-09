@@ -1876,17 +1876,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
         .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
         .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
+        .def_readwrite("bounded_by_active_tail", &CacheCapacityPolicyDesc::bounded_by_active_tail)
         .def(py::pickle(
             [](const CacheCapacityPolicyDesc& self) {
-                return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
+                return py::make_tuple(
+                    self.reservable, self.explicit_block_num, self.charge_to_paged_budget, self.bounded_by_active_tail);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 3)
+                if (t.size() != 3 && t.size() != 4)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable             = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
+                if (t.size() == 4) {
+                    c.bounded_by_active_tail = t[3].cast<std::optional<bool>>();
+                }
                 return c;
             }));
 
