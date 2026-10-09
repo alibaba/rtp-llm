@@ -400,10 +400,13 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        ":cache_config_test_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
     env = {},
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
 )
 
 cc_test(

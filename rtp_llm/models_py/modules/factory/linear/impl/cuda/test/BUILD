@@ -9,9 +9,9 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
     ],
+    # Imports the real kernel chain (rtp_llm.ops.compute_ops ->
+    # librtp_compute_ops), so it needs the full testlib and a GPU pool.
     exec_properties = {"gpu": "L20_CU13"},
-    # Mocked contract test: CPU tensors only, fp8_gemm_nt and
-    # sgl_per_token_group_quant_fp8 are patched out, so no DeepGEMM kernel runs.
     tags = ["L20_CU13"],
 )
 
