@@ -81,8 +81,8 @@ private:
 #if USING_CUDA
     std::optional<at::cuda::CUDAGuard> guard_;
 #elif USING_ROCM
-    // This PyTorch header declares HIPGuardMasqueradingAsCUDA itself (as well
-    // as the impl); SleepMemoryUtils and ExecOps use the same public guard.
+    // ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h declares this exact
+    // c10::hip guard type as well as its impl; do not substitute a CUDA guard.
     std::optional<c10::hip::HIPGuardMasqueradingAsCUDA> guard_;
 #endif
 };
@@ -595,25 +595,23 @@ std::shared_ptr<void> LocalRpcServer::registerAbortableStreamForScope(const std:
         return nullptr;
     }
     const auto request_id = stream->streamId();
+    uint64_t   registration_id;
     {
         std::lock_guard<std::mutex> lock(abortable_streams_->mutex);
-        abortable_streams_->streams[request_id] = stream;
+        registration_id = ++abortable_streams_->next_registration_id;
+        abortable_streams_->streams.emplace(registration_id, stream);
     }
     RTP_LLM_LOG_DEBUG("sleep abort registry: registered non-streaming request [%ld]", request_id);
     // Non-owning RAII token: the custom deleter only unregisters; it must not delete the stream.
-    return std::shared_ptr<void>(stream.get(), [registry = std::weak_ptr(abortable_streams_), request_id](void*) {
+    return std::shared_ptr<void>(stream.get(), [registry = std::weak_ptr(abortable_streams_), registration_id](void*) {
         if (auto live_registry = registry.lock()) {
-            live_registry->erase(request_id);
+            live_registry->erase(registration_id);
         }
     });
 }
 
-void LocalRpcServer::unregisterAbortableStream(int64_t request_id) {
-    abortable_streams_->erase(request_id);
-}
-
 size_t LocalRpcServer::cancelAbortableStreams() {
-    std::vector<std::pair<int64_t, std::shared_ptr<GenerateStream>>> streams;
+    std::vector<std::shared_ptr<GenerateStream>> streams;
     {
         std::lock_guard<std::mutex> lock(abortable_streams_->mutex);
         for (auto iter = abortable_streams_->streams.begin(); iter != abortable_streams_->streams.end();) {
@@ -622,18 +620,18 @@ size_t LocalRpcServer::cancelAbortableStreams() {
                 iter = abortable_streams_->streams.erase(iter);
                 continue;
             }
-            streams.emplace_back(iter->first, std::move(stream));
+            streams.emplace_back(std::move(stream));
             ++iter;
         }
     }
 
     size_t cancelled = 0;
-    for (const auto& [request_id, stream] : streams) {
+    for (const auto& stream : streams) {
         if (!stream || stream->isStreaming() || stream->isFinished() || stream->hasError()) {
             continue;
         }
         stream->reportError(ErrorCode::CANCELLED, "request cancelled by sleep abort");
-        RTP_LLM_LOG_WARNING("sleep abort registry: cancelled non-streaming request [%ld]", request_id);
+        RTP_LLM_LOG_WARNING("sleep abort registry: cancelled non-streaming request [%ld]", stream->streamId());
         ++cancelled;
     }
     return cancelled;
@@ -1644,6 +1642,8 @@ LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB*
                      request->reason().c_str(),
                      request->prepare_only(),
                      request->commit_only());
+    // Partial-tag sleep is not a public RPC mode. The controller repeats this
+    // check for non-RPC callers; no tags are copied into SleepOptions here.
     if (!request->tags().empty()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "non-empty sleep tags are unsupported; partial sleep is not implemented");
@@ -1653,7 +1653,6 @@ LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB*
     options.mode                 = request->mode().empty() ? "wait" : request->mode();
     options.timeout_ms           = request->timeout_ms();
     options.reason               = request->reason();
-    options.tags                 = std::vector<std::string>(request->tags().begin(), request->tags().end());
     options.prepare_only         = request->prepare_only();
     options.commit_only          = request->commit_only();
     options.drain_only           = request->drain_only();

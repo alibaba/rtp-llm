@@ -335,7 +335,7 @@ void DecodeRpcServer::initThreadPool() {
 
 DecodeRpcServer::~DecodeRpcServer() {
     if (thread_pool_) {
-        thread_pool_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { thread_pool_->stop(); });
         thread_pool_.reset();
     }
 }

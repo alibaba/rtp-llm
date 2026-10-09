@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <memory>
@@ -142,7 +143,6 @@ protected:
     void                  logSleepMemorySnapshot(const std::string& phase, int64_t epoch) const;
     static bool           validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller);
     std::shared_ptr<void> registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream);
-    void                  unregisterAbortableStream(int64_t request_id);
     size_t                cancelAbortableStreams();
 
     virtual bool isCancelled(grpc::ServerContext* context) const {
@@ -188,10 +188,13 @@ protected:
     std::shared_ptr<VmmBackend>    vmm_backend_;
     struct AbortableStreamRegistry {
         std::mutex                                                 mutex;
-        std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> streams;
-        void                                                       erase(int64_t request_id) {
+        // A client may reuse request_id while an older stream is still alive.
+        // Scope tokens therefore erase by unique registration, not request_id.
+        uint64_t                                                   next_registration_id{0};
+        std::unordered_map<uint64_t, std::weak_ptr<GenerateStream>> streams;
+        void                                                       erase(uint64_t registration_id) {
             std::lock_guard<std::mutex> lock(mutex);
-            streams.erase(request_id);
+            streams.erase(registration_id);
         }
     };
     std::shared_ptr<AbortableStreamRegistry> abortable_streams_ = std::make_shared<AbortableStreamRegistry>();
@@ -217,9 +220,23 @@ protected:
     std::deque<std::string>                  torch_allocator_dump_id_order_;
 };
 
+// Worker-pool stop/join must not hold the GIL: a worker may need Python to
+// finish. Destructors use this around their blocking C++ cleanup, then regain
+// the GIL before Python-owning members are destroyed.
+template<typename Callback>
+void runRpcBlockingCleanupWithoutGil(Callback&& callback) {
+    if (Py_IsInitialized() && PyGILState_Check()) {
+        pybind11::gil_scoped_release release;
+        std::forward<Callback>(callback)();
+    } else {
+        std::forward<Callback>(callback)();
+    }
+}
+
 // A lifecycle callback can hold the final service reference after its caller
 // drops the service. Delete under the GIL so Python-owning members are safe,
-// without making every callback acquire the GIL on its hot path.
+// without making every callback acquire the GIL on its hot path. Production
+// teardown must finish before Python interpreter finalization begins.
 template<typename Server, typename... Args>
 std::shared_ptr<Server> makeGilSafeRpcServer(Args&&... args) {
     static_assert(std::is_base_of_v<LocalRpcServer, Server>);

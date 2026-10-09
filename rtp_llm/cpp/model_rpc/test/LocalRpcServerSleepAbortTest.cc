@@ -239,6 +239,24 @@ TEST(LocalRpcServerSleepAbortTest, LiveCounterDoesNotWaitForPythonGil) {
     EXPECT_EQ(state->calls.load(), 1);
 }
 
+TEST(LocalRpcServerSleepAbortTest, BlockingCleanupLetsWorkerAcquirePythonGil) {
+    std::optional<py::scoped_interpreter> interpreter;
+    if (!Py_IsInitialized()) {
+        interpreter.emplace();
+    }
+    py::gil_scoped_acquire hold_gil;
+    auto worker = std::async(std::launch::async, [] {
+        py::gil_scoped_acquire acquire;
+    });
+    std::future_status wait_status = std::future_status::timeout;
+    runRpcBlockingCleanupWithoutGil([&] { wait_status = worker.wait_for(std::chrono::milliseconds(500)); });
+    EXPECT_EQ(wait_status, std::future_status::ready);
+    {
+        py::gil_scoped_release release_gil;
+        worker.get();
+    }
+}
+
 TEST(LocalRpcServerSleepAbortTest, AbortRegistrationTokenDoesNotTouchExpiredOwner) {
     auto                          state  = std::make_shared<HookOwnerTestState>();
     auto                          server = std::make_shared<HookOwnerTestServer>(state);
@@ -375,6 +393,25 @@ TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) 
 
     non_streaming_guard.reset();
     EXPECT_EQ(server.cancelAbortableStreams(), 0u);
+}
+
+TEST(LocalRpcServerSleepAbortTest, ReusedRequestIdKeepsIndependentAbortRegistrations) {
+    BoundSleepLifecycleController controller(true);
+    LocalRpcServer                server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
+    auto first             = makeStream(123, false);
+    auto second            = makeStream(123, false);
+    auto first_token       = server.registerAbortableStreamForScope(first);
+    auto second_token      = server.registerAbortableStreamForScope(second);
+    ASSERT_NE(first_token, nullptr);
+    ASSERT_NE(second_token, nullptr);
+    ASSERT_EQ(server.abortable_streams_->streams.size(), 2u);
+
+    first_token.reset();
+    ASSERT_EQ(server.abortable_streams_->streams.size(), 1u);
+    EXPECT_EQ(server.cancelAbortableStreams(), 1u);
+    EXPECT_FALSE(first->hasError());
+    EXPECT_TRUE(second->hasError());
 }
 
 TEST(LocalRpcServerSleepAbortTest, DisabledSleepDoesNotRegisterAbortableStreams) {

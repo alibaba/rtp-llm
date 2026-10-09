@@ -863,11 +863,11 @@ PrefillBatchRpcServer::~PrefillBatchRpcServer() {
     beginShutdown();
     deferred_contexts_->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down"));
     if (prepare_resource_worker_pool_) {
-        prepare_resource_worker_pool_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { prepare_resource_worker_pool_->stop(); });
         prepare_resource_worker_pool_.reset();
     }
     if (priority_cancel_executor_) {
-        priority_cancel_executor_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { priority_cancel_executor_->stop(); });
         priority_cancel_executor_.reset();
     }
 }
@@ -1085,8 +1085,9 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
                 admission.complete();
             }
         });
-        // Establish the existing final-cleanup owner before any preparation
-        // can throw; only the notification, never a lease, is handed over.
+        // The scope exit covers failure before ownership transfer. Once
+        // admission.complete moves into deferred, its destructor owns cleanup
+        // even if input copying or slots.push_back throws.
         auto deferred                = std::make_shared<DeferredPrefillContext>();
         deferred->admission_complete = std::exchange(admission.complete, {});
         auto input_copy              = std::make_shared<GenerateInputPB>(*input);
@@ -1099,8 +1100,10 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
         slots.push_back(std::move(slot));
     }
-    // A sleep transition can split admission within this batch. Keep the
-    // group metadata consistent with the requests actually accepted.
+    // A sleep transition can split admission within this batch. group_size
+    // describes this admitted subset, not the original RPC envelope: rejected
+    // inputs already have addBatchError entries, and downstream scheduling
+    // receives only these slots (the FIFO path treats group_size as metadata).
     for (auto& slot : slots) {
         slot.input->set_group_size(static_cast<int>(slots.size()));
     }
