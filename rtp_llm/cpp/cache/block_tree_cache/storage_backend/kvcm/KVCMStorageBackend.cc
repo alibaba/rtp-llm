@@ -2,12 +2,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cstring>
+#include <limits>
+#include <optional>
 #include <future>
 #include <thread>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
@@ -52,6 +57,136 @@ const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& hand
     });
     return it == handles.end() ? nullptr : &*it;
 }
+
+std::optional<size_t> paceUriParameter(std::string_view uri, std::string_view name) {
+    const auto query = uri.find('?');
+    if (query == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::optional<size_t> result;
+    for (size_t start = query + 1; start < uri.size();) {
+        const auto end    = uri.find('&', start);
+        const auto part   = uri.substr(start, end == std::string_view::npos ? end : end - start);
+        const auto equals = part.find('=');
+        if (part.substr(0, equals) == name) {
+            result.reset();
+            if (equals != std::string_view::npos) {
+                const auto value = part.substr(equals + 1);
+                size_t parsed = 0;
+                const auto [last, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+                if (error == std::errc{} && last == value.data() + value.size()) {
+                    result = parsed;
+                }
+            }
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return result;
+}
+
+// Explicit SSD objects require whole-object I/O. Transparent tiering keeps a
+// DRAM URI, so its multi-IOV path is not changed here.
+class PaceSsdBuffer {
+public:
+    static bool needed(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer) {
+        return buffer.iovs.size() > 1 && uri.rfind("pace://", 0) == 0 && paceUriParameter(uri, "media_type") == 5;
+    }
+
+    PaceSsdBuffer(const std::string& uri, const kv_cache_manager::BlockBuffer& source):
+        original_(source) {
+        const auto type       = original_.iovs.front().type;
+        size_t     bytes      = 0;
+        auto       next       = reinterpret_cast<uintptr_t>(original_.iovs.front().base);
+        bool       contiguous = true;
+        for (const auto& iov : original_.iovs) {
+            const auto address = reinterpret_cast<uintptr_t>(iov.base);
+            RTP_LLM_CHECK_WITH_INFO(iov.base && iov.size > 0 && !iov.ignore && iov.type == type
+                                        && (type == kv_cache_manager::MemoryType::CPU
+                                            || type == kv_cache_manager::MemoryType::GPU)
+                                        && iov.size <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) - bytes
+                                        && iov.size <= std::numeric_limits<uintptr_t>::max() - address,
+                                    "invalid KVCM SSD object buffer");
+            contiguous = contiguous && address == next;
+            next = address + iov.size;
+            bytes += iov.size;
+        }
+        RTP_LLM_CHECK_WITH_INFO(paceUriParameter(uri, "size") == bytes, "KVCM SSD object size disagrees with URI");
+        if (contiguous) {
+            buffer_.iovs.push_back({type, original_.iovs.front().base, bytes, false});
+        } else {
+            storage_ = torch::empty(
+                {static_cast<int64_t>(bytes)},
+                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU)
+                    .pinned_memory(type == kv_cache_manager::MemoryType::GPU));
+            buffer_.iovs.push_back({kv_cache_manager::MemoryType::CPU, storage_.data_ptr(), bytes, false});
+        }
+    }
+
+    const kv_cache_manager::BlockBuffer& buffer() const {
+        return buffer_;
+    }
+
+    void gather() {
+        copy(false);
+    }
+
+    void scatter() {
+        copy(true);
+    }
+
+private:
+    void copy(bool read) {
+        if (!storage_.defined()) {
+            return;
+        }
+        const bool gpu    = original_.iovs.front().type == kv_cache_manager::MemoryType::GPU;
+        auto*      packed = storage_.data_ptr<uint8_t>();
+        size_t     offset = 0;
+#if USING_CUDA
+        const auto stream = gpu ? at::cuda::getStreamFromPool().stream() : nullptr;
+#else
+        RTP_LLM_CHECK_WITH_INFO(!gpu, "KVCM SSD GPU packing requires CUDA");
+#endif
+        try {
+            for (const auto& iov : original_.iovs) {
+                auto* source = read ? packed + offset : static_cast<uint8_t*>(iov.base);
+                auto* target = read ? static_cast<uint8_t*>(iov.base) : packed + offset;
+                if (gpu) {
+#if USING_CUDA
+                    check_cuda_value(cudaMemcpyAsync(target,
+                                                     source,
+                                                     iov.size,
+                                                     read ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost,
+                                                     stream));
+#endif
+                } else {
+                    std::memcpy(target, source, iov.size);
+                }
+                offset += iov.size;
+            }
+#if USING_CUDA
+            if (gpu) {
+                check_cuda_value(cudaStreamSynchronize(stream));
+            }
+#endif
+        } catch (...) {
+#if USING_CUDA
+            // Earlier copies may have been submitted before a later copy failed.
+            if (gpu) {
+                cudaStreamSynchronize(stream);
+            }
+#endif
+            throw;
+        }
+    }
+
+    kv_cache_manager::BlockBuffer original_;
+    kv_cache_manager::BlockBuffer buffer_;
+    torch::Tensor                storage_;
+};
 
 }  // namespace
 
@@ -830,38 +965,78 @@ private:
             if (found == indices_by_tag.end()) {
                 continue;
             }
-            const auto&                    indices = found->second;
-            kv_cache_manager::UriStrVec    batch_uris;
-            kv_cache_manager::BlockBuffers batch_buffers;
-            std::vector<int32_t>           batch_blocks;
-            for (size_t index : indices) {
-                batch_uris.push_back(uris[index]);
-                batch_buffers.push_back(std::move(buffers[index]));
-                batch_blocks.push_back(blocks[index]);
-            }
-            const auto trace_info = makeTransferTraceInfo(batch_blocks);
+            struct SsdBuffers {
+                std::vector<std::unique_ptr<PaceSsdBuffer>> buffers;
+                std::shared_ptr<SsdBuffers> quarantine;
+            };
+            auto ssd_buffers = std::make_shared<SsdBuffers>();
             try {
-                if (operation == REMOTE_OPERATION_READ) {
-                    if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
-                        throw UncertainTransfer("KVCM SDK read failed without confirmed I/O completion");
+                // Separate adapted CPU/GPU objects from the unchanged multi-IOV path.
+                std::vector<std::vector<size_t>> batches(3);
+                for (size_t index : found->second) {
+                    auto& buffer = buffers[index];
+                    size_t batch = 0;
+                    if (PaceSsdBuffer::needed(uris[index], buffer)) {
+                        ssd_buffers->buffers.push_back(std::make_unique<PaceSsdBuffer>(uris[index], buffer));
+                        auto& ssd = ssd_buffers->buffers.back();
+                        if (operation == REMOTE_OPERATION_WRITE) {
+                            ssd->gather();
+                        }
+                        buffer = ssd->buffer();
+                        batch = buffer.iovs.front().type == kv_cache_manager::MemoryType::CPU ? 1 : 2;
                     }
-                } else {
-                    auto [success, result] =
-                        client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
-                    if (!success) {
-                        throw UncertainTransfer("KVCM SDK write failed without confirmed I/O completion");
+                    batches[batch].push_back(index);
+                }
+                for (const auto& indices : batches) {
+                    if (indices.empty()) {
+                        continue;
                     }
-                    if (!result.empty() && result.size() != batch_uris.size()) {
-                        return false;
+                    kv_cache_manager::UriStrVec    batch_uris;
+                    kv_cache_manager::BlockBuffers batch_buffers;
+                    std::vector<int32_t>           batch_blocks;
+                    for (size_t index : indices) {
+                        batch_uris.push_back(uris[index]);
+                        batch_buffers.push_back(std::move(buffers[index]));
+                        batch_blocks.push_back(blocks[index]);
                     }
-                    for (size_t index = 0; index < result.size(); ++index) {
-                        actual_uris[indices[index]] = std::move(result[index]);
+                    auto trace_info = makeTransferTraceInfo(batch_blocks);
+                    if (!ssd_buffers->buffers.empty()
+                        && batch_buffers.front().iovs.front().type == kv_cache_manager::MemoryType::CPU) {
+                        if (!trace_info) {
+                            trace_info = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+                        }
+                        trace_info->need_print = false;
+                    }
+                    if (operation == REMOTE_OPERATION_READ) {
+                        if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
+                            throw UncertainTransfer("KVCM SDK read failed without confirmed I/O completion");
+                        }
+                    } else {
+                        auto [success, result] =
+                            client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
+                        if (!success) {
+                            throw UncertainTransfer("KVCM SDK write failed without confirmed I/O completion");
+                        }
+                        if (!result.empty() && result.size() != batch_uris.size()) {
+                            return false;
+                        }
+                        for (size_t index = 0; index < result.size(); ++index) {
+                            actual_uris[indices[index]] = std::move(result[index]);
+                        }
                     }
                 }
-            } catch (const UncertainTransfer&) {
-                throw;
+                if (operation == REMOTE_OPERATION_READ) {
+                    for (const auto& ssd : ssd_buffers->buffers) {
+                        ssd->scatter();
+                    }
+                }
             } catch (...) {
-                throw UncertainTransfer("KVCM SDK transfer threw without confirmed I/O completion");
+                // A stalled call keeps its stack alive. If SDK/CUDA instead reports
+                // an error, retain staging memory before unwinding: I/O may continue.
+                if (!ssd_buffers->buffers.empty()) {
+                    ssd_buffers->quarantine = ssd_buffers;
+                }
+                throw UncertainTransfer("KVCM SDK transfer or SSD copy failed without confirmed I/O completion");
             }
         }
         if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
