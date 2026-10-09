@@ -25,7 +25,7 @@ program: step
 parameters:
   gate:
     target_p: 64
-    warmup_timeout_s: 240
+    warmup_timeout_s: 300
     baseline_s: 60
     observe_s: 240
     sample_s: 1
