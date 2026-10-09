@@ -225,8 +225,6 @@ class Dsv4PlanTest(unittest.TestCase):
             {"cache_geometry": {}},
             {"cache_geometry": {"kernel_tokens_per_block": 1024}},
             {"speculative": True},
-            {"cp_enabled": True},
-            {"reuse_cache": True},
             {"moe_communication": {}},
             {"indexer_cache_mode": "fp8"},
             {
@@ -435,13 +433,8 @@ class Dsv4PlanTest(unittest.TestCase):
         for change in [
             {"tp_size": 8},
             {"ep_size": 8},
-            {"cp_enabled": True},
             {"role": "DECODE"},
             {"speculative": True},
-            {"cuda_graph": True},
-            {"reuse_cache": True},
-            {"lora": True},
-            {"eplb": True},
             {"indexer_cache_mode": "fp8"},
             {"fp8_kv_cache": False},
         ]:
@@ -449,6 +442,30 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx = self.context(selection(**change))
                 with self.assertRaisesRegex(ValueError, "No compatible"):
                     ctx.prepare([request_for("model", ctx.selection)])
+
+    def test_engine_feature_flags_no_longer_disqualify(self):
+        for flagged in (
+            {"cp_enabled": True},
+            {"cuda_graph": True},
+            {"reuse_cache": True},
+            {"lora": True},
+            {"eplb": True},
+        ):
+            with self.subTest(role="PREFILL", flagged=flagged):
+                ctx = self.context(selection(**flagged))
+                ctx.prepare([request_for("model", ctx.selection)])
+                self.assertEqual(len(ctx.bindings), 130)
+        for flagged in (
+            {"cp_enabled": True},
+            {"cuda_graph": False},
+            {"reuse_cache": True},
+            {"lora": True},
+            {"eplb": True},
+        ):
+            with self.subTest(role="DECODE", flagged=flagged):
+                ctx = self.decode_context(**flagged)
+                ctx.prepare([request_for("model", ctx.selection)])
+                self.assertEqual(len(ctx.bindings), 130)
 
     def test_execution_digest_ignores_run_paths_but_detects_numeric_options(self):
         digests = []

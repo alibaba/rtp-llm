@@ -105,15 +105,10 @@ def _supports_ppu_prefill(selection, request, cache_mode):
             and options.get("DSV4_MHC_POST_PDL", "0") == "0",
             "requires TileLang POST without PDL",
         ),
-        (not metadata.get("cp_enabled"), "CP is not qualified"),
         (
             metadata.get("role") in ("PDFUSION", "PREFILL"),
             "requires a Prefill role",
         ),
-        (not metadata.get("cuda_graph"), "graph execution is not qualified"),
-        (not metadata.get("reuse_cache"), "prefix reuse is not qualified"),
-        (not metadata.get("lora"), "LoRA is not supported by PPU weight layouts"),
-        (not metadata.get("eplb"), "EPLB is not qualified"),
         (
             metadata.get("indexer_cache_mode") == cache_mode,
             f"requires {cache_mode.upper()} indexer cache",
@@ -186,10 +181,6 @@ def supports_ppu_fp4_decode(selection, request):
         ),
         (metadata.get("indexer_cache_mode") == "fp4", "requires FP4 indexer cache"),
         (metadata.get("fp8_kv_cache") is True, "requires FP8 KV cache"),
-        (not metadata.get("cp_enabled"), "CP is not supported by this candidate"),
-        (not metadata.get("reuse_cache"), "prefix reuse is not qualified"),
-        (not metadata.get("lora"), "LoRA is not supported by PPU weight layouts"),
-        (not metadata.get("eplb"), "EPLB is not qualified"),
         (
             comm.get("enabled") is True
             and comm.get("low_latency") is True
@@ -201,10 +192,6 @@ def supports_ppu_fp4_decode(selection, request):
             type(comm.get("max_generate_batch_size")) is int
             and 0 < comm["max_generate_batch_size"] <= 128,
             "requires a Decode batch capacity in 1..128",
-        ),
-        (
-            metadata.get("cuda_graph") is True,
-            "requires the measured Decode Graph configuration",
         ),
         (not comm.get("internode", False), "requires single-node DeepEP"),
     )
