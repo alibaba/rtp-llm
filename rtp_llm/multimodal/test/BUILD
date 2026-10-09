@@ -119,3 +119,9 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "cuda_graph_gate_test",
+    srcs = ["cuda_graph_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
