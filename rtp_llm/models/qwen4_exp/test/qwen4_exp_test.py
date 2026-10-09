@@ -71,6 +71,9 @@ def _ckpt_keys(modules):
 
 class Qwen4ExpTest(unittest.TestCase):
     def setUp(self):
+        pd_gate = mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "0"})
+        pd_gate.start()
+        self.addCleanup(pd_gate.stop)
         self._temp_dir = tempfile.TemporaryDirectory()
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(self._config()))
         # Feature gates are process-wide development switches. Keep this suite
@@ -351,6 +354,44 @@ class Qwen4ExpTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "PD-separated"):
                         model.load()
                 parent_load.assert_not_called()
+
+    def test_full_side_cache_pd_opt_in_reaches_parent_loader(self):
+        for role_type in (RoleType.PREFILL, RoleType.DECODE):
+            with self.subTest(role=role_type):
+                model = self._qsa_enabled_model(
+                    enable_qwen4_ple=True,
+                    _qwen4_split_ngram_parts=128,
+                    _qwen4_indexer_compress_ratio=4,
+                    gen_num_per_cycle=3,
+                )
+                model.parallelism_config.role_type = role_type
+                model.parallelism_config.get_attn_tp_size = lambda: 8
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
+                        "RTP_LLM_QWEN4_ENABLE_PD": "1",
+                    },
+                ), mock.patch.object(
+                    Qwen35Moe, "load", return_value="loaded"
+                ) as parent:
+                    self.assertEqual(model.load(skip_python_model=True), "loaded")
+                parent.assert_called_once_with(skip_python_model=True)
+
+    def test_pd_opt_in_does_not_enable_context_parallelism(self):
+        model = self._qsa_enabled_model()
+        model.parallelism_config.role_type = RoleType.PREFILL
+        model.parallelism_config.prefill_cp_config.is_enabled = lambda: True
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
+                "RTP_LLM_QWEN4_ENABLE_PD": "1",
+            },
+        ), mock.patch.object(Qwen35Moe, "load") as parent:
+            with self.assertRaisesRegex(RuntimeError, "context/prefill parallelism"):
+                model.load()
+        parent.assert_not_called()
 
     def test_ple_weight_size_uses_attention_tp_not_ep(self):
         with mock.patch.dict(

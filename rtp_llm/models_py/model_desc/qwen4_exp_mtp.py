@@ -1,6 +1,7 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
 import os
+from collections.abc import Mapping
 from typing import Optional
 
 import torch
@@ -17,6 +18,59 @@ from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
+
+
+def normalize_mtp_pd_positions(inputs, index_factor: int) -> None:
+    """Use the same draft cache coordinates for main and indexer RoPE."""
+    groups = get_attention_inputs_value(inputs)
+    values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+    if not any(
+        getattr(value, "cache_store_inputs", None) is not None for value in values
+    ):
+        return
+    from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+        validate_pd_cache_inputs,
+    )
+
+    validate_pd_cache_inputs(values)
+    anchor = values[0]
+    prefixes = anchor.prefix_lengths_device
+    cu = anchor.cu_seqlens_device
+    token_count = int(inputs.input_ids.numel())
+    if (
+        index_factor <= 0
+        or token_count <= 0
+        or prefixes.ndim != 1
+        or prefixes.numel() == 0
+        or cu.ndim != 1
+        or cu.numel() != prefixes.numel() + 1
+        or any(
+            tensor.dtype != torch.int32 or tensor.device != inputs.input_ids.device
+            for tensor in (prefixes, cu)
+        )
+    ):
+        raise RuntimeError("MTP PD position geometry is invalid")
+    tensors = [inputs.combo_position_ids]
+    tensors.extend(value.combo_position_ids for value in values)
+    if any(
+        tensor.dtype != torch.int32
+        or tensor.device != inputs.input_ids.device
+        or tensor.numel() != token_count * index_factor
+        for tensor in tensors
+    ):
+        raise RuntimeError("MTP PD transported position geometry is invalid")
+    rows = torch.arange(token_count, dtype=torch.int32, device=inputs.input_ids.device)
+    request = torch.bucketize(rows, cu[1:], right=True).clamp_max(prefixes.numel() - 1)
+    # Native metadata is validated by QSA before any cache write. Keep these
+    # gathers in range even if corrupted cumulative lengths reach preparation.
+    positions = (
+        prefixes.index_select(0, request) + rows - cu.index_select(0, request)
+    ).repeat_interleave(index_factor)
+    copied = set()
+    for tensor in tensors:
+        if tensor.data_ptr() not in copied:
+            tensor.copy_(positions.reshape_as(tensor))
+            copied.add(tensor.data_ptr())
 
 
 class Qwen4ExpMTPInputProjection(nn.Module):
@@ -104,6 +158,14 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         )
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        groups = get_attention_inputs_value(inputs)
+        values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+        if any(
+            getattr(value, "cache_store_inputs", None) is not None for value in values
+        ):
+            normalize_mtp_pd_positions(
+                inputs, int(self.config.attn_config.rope_config.index_factor)
+            )
         impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
         groups = get_attention_inputs_value(inputs)
         if (

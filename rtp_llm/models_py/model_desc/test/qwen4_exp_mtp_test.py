@@ -10,9 +10,10 @@ from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
     Qwen4ExpMTPModel,
+    normalize_mtp_pd_positions,
 )
 from rtp_llm.ops import HybridAttentionType
-from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyCacheStoreInputs, PyModelInputs
 
 
 class _Matmul(nn.Module):
@@ -34,6 +35,55 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
+    def test_pd_main_and_indexer_share_normalized_cache_positions(self):
+        writer = SimpleNamespace(write=lambda *_: None)
+        plan = PyCacheStoreInputs()
+        shifted = torch.tensor(
+            [129, 130, 130, 256], dtype=torch.int32
+        ).repeat_interleave(3)
+        groups = {
+            tag: SimpleNamespace(
+                cache_store_inputs=plan,
+                cache_store_writer=writer,
+                is_prefill=True,
+                is_target_verify=False,
+                is_cuda_graph=False,
+                prefix_lengths_device=torch.tensor([128, 256], dtype=torch.int32),
+                cu_seqlens_device=torch.tensor([0, 3, 4], dtype=torch.int32),
+                combo_position_ids=shifted if tag != "full" else shifted.clone(),
+            )
+            for tag in ("full", "indexer_kv", "indexer_state")
+        }
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(4, dtype=torch.int32),
+            combo_position_ids=shifted.clone(),
+            attention_inputs=groups,
+        )
+        pointers = {
+            tag: value.combo_position_ids.data_ptr() for tag, value in groups.items()
+        }
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
+            normalize_mtp_pd_positions(inputs, 3)
+        expected = torch.tensor(
+            [128, 129, 130, 256], dtype=torch.int32
+        ).repeat_interleave(3)
+        torch.testing.assert_close(inputs.combo_position_ids, expected)
+        for tag, value in groups.items():
+            torch.testing.assert_close(value.combo_position_ids, expected)
+            self.assertEqual(value.combo_position_ids.data_ptr(), pointers[tag])
+
+    def test_unpublished_mtp_positions_are_preserved(self):
+        shifted = torch.tensor([129, 130, 130], dtype=torch.int32)
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(3, dtype=torch.int32),
+            combo_position_ids=shifted,
+            attention_inputs={"full": SimpleNamespace(cache_store_inputs=None)},
+        )
+        normalize_mtp_pd_positions(inputs, 1)
+        torch.testing.assert_close(
+            shifted, torch.tensor([129, 130, 130], dtype=torch.int32)
+        )
+
     def test_draft_prefill_graph_requires_explicit_opt_in(self):
         for value, expected in (("0", False), ("1", True)):
             with patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": value}):

@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import (
     select_qsa_paged_tokens,
 )
 from rtp_llm.ops import RopeStyle
+from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
 
 class Qwen4ExpQSARuntimeTest(TestCase):
@@ -1404,6 +1405,92 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         for row, visible in enumerate(range(9, 17)):
             valid = selected[row][selected[row] >= 0]
             self.assertTrue(bool(torch.all(valid < visible)))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged metadata")
+    def test_mtp_prefix_reuse_uses_cache_positions_for_shifted_native_rows(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
+            normalize_mtp_pd_positions,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.indexer import build_base_rope
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        config = self._base_rope_config(3)
+        for length in (1, 3, 4, 8):
+            with self.subTest(length=length):
+                context = self._draft_incremental_context(
+                    torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device),
+                    torch.zeros(
+                        16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+                    ),
+                    prefixes=[8],
+                    lengths=[length],
+                    is_mtp_draft=True,
+                    position_overrides=list(range(9, 8 + length)) + [8 + length - 1],
+                )
+                shifted = context.main_inputs.combo_position_ids.clone()
+                groups = {
+                    "full": context.main_inputs,
+                    "indexer_kv": context.indexer_kv_inputs,
+                    "indexer_state": context.indexer_state_inputs,
+                }
+                publication = PyCacheStoreInputs()
+                shared_positions = shifted.clone()
+                for value in groups.values():
+                    value.combo_position_ids = shared_positions
+                    value.prefix_lengths_device = torch.tensor(
+                        [8], dtype=torch.int32, device=device
+                    )
+                    value.cache_store_inputs = publication
+                    value.cache_store_writer = SimpleNamespace(write=lambda *_: None)
+                inputs = SimpleNamespace(
+                    input_ids=torch.zeros(length, dtype=torch.int32, device=device),
+                    combo_position_ids=context.main_inputs.combo_position_ids,
+                    attention_inputs=groups,
+                )
+                with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
+                    normalize_mtp_pd_positions(inputs, 3)
+                    plan = context._draft_incremental_prefill_geometry(
+                        indexer=indexer,
+                        token_count=length,
+                        device=device,
+                        rope_config=config,
+                        draft=False,
+                        draft_prefix_reuse=True,
+                    )
+                positions = torch.arange(
+                    8, 8 + length, dtype=torch.int32, device=device
+                )
+                expected_cos, expected_sin = build_base_rope(
+                    positions[:, None].expand(-1, 3).reshape(-1),
+                    config,
+                    token_count=length,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                torch.testing.assert_close(plan["current_cos"], expected_cos)
+                torch.testing.assert_close(plan["current_sin"], expected_sin)
+                if length == 3:
+                    for value in groups.values():
+                        value.combo_position_ids.copy_(shifted)
+                        value.cache_store_inputs = None
+                    for rope, draft_prefix_reuse in (
+                        (config, False),
+                        (self.rope_config, True),
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "positions must equal the logical cache positions",
+                        ):
+                            context._draft_incremental_prefill_geometry(
+                                indexer=indexer,
+                                token_count=length,
+                                device=device,
+                                rope_config=rope,
+                                draft=False,
+                                draft_prefix_reuse=draft_prefix_reuse,
+                            )
 
     def test_decode_completes_prefill_tail_then_scores_same_projection(self):
         prefill_raw = torch.randn(7, self.D, dtype=torch.bfloat16)

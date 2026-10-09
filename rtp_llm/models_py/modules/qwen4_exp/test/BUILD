@@ -195,3 +195,9 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "pd_cache_store_test",
+    srcs = ["pd_cache_store_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
