@@ -44,6 +44,9 @@ public:
         std::unordered_set<int64_t>         emitted_preemption_overlays;
         for (auto& [id, entry] : running_streams_) {
             auto task_info  = entry.task_info;
+            if (entry.stream) {
+                task_info.prefix_length = entry.stream->initialReuseLength();
+            }
             task_info.phase = derivePhase(entry.stream);
             auto overlay    = priority_preemption_overlays_.find(id);
             if (overlay != priority_preemption_overlays_.end()) {
@@ -84,7 +87,7 @@ public:
         const auto stream_batch_id = stream->generateInput()->group_id;
         const auto batch_id        = resolveBatchId(identity, stream_batch_id);
         auto       new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id},
-                                     stream->prefixLength(),
+                                     stream->initialReuseLength(),
                                      stream->inputLength(),
                                      time_info.wait_time_us / 1000);
 
@@ -109,9 +112,10 @@ public:
         if (running != running_streams_.end()) {
             task_info = running->second.task_info;
         } else {
-            for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
-                if (it->second.request_id == request_id) {
+            for (auto it = finished_streams_.begin(); it != finished_streams_.end(); ++it) {
+                if (it->second.request_id == identity.request_id && it->second.batch_id == identity.batch_id) {
                     task_info = it->second;
+                    finished_streams_.erase(it);
                     break;
                 }
             }
@@ -203,6 +207,9 @@ public:
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
             task_info = ptr->second.task_info;
+            if (ptr->second.stream) {
+                task_info.prefix_length = ptr->second.stream->initialReuseLength();
+            }
             if (input_length > 0) {
                 task_info.input_length = input_length;
             }
@@ -242,7 +249,7 @@ protected:
         snapshot.end_time_ms     = autil::TimeUtility::currentTimeInMilliSeconds();
         snapshot.begin_time_us   = time_info.begin_time_us;
         snapshot.waiting_time_ms = time_info.wait_time_us / 1000;
-        snapshot.prefix_length   = stream->prefixLength();
+        snapshot.prefix_length   = stream->initialReuseLength();
         snapshot.input_length    = stream->inputLength();
         snapshot.iterate_count   = stream->iterCount();
         snapshot.status          = stream->statusInfo();

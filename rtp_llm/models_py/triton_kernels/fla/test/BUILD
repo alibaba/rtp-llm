@@ -46,6 +46,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
     ] + [
         ":einops",
         ":numpy",
@@ -81,7 +82,10 @@ py_test(
     name = "test_gdn_block_prefill_rocm",
     srcs = ["test_gdn_block_prefill.py"],
     main = "test_gdn_block_prefill.py",
-    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+    ] + [
         ":einops",
         ":numpy",
         ":packaging",
