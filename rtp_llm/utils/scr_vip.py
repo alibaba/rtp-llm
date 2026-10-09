@@ -140,12 +140,8 @@ def configure_network(pc) -> None:
     """Select the platform interface before constructing collective transports."""
     if not enabled(pc):
         return
-    for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"):
-        configured = os.environ.get(name)
-        if configured not in (None, VIP_INTERFACE):
-            raise ValueError(
-                f"SCR VIP requires {name}={VIP_INTERFACE}, got {configured!r}"
-            )
+    # Launchers may default to an underlay interface (maga_start.sh uses eth0).
+    # Once the SCR network is validated, its transports must use the VIP device.
     os.environ["NCCL_SOCKET_IFNAME"] = VIP_INTERFACE
     os.environ["GLOO_SOCKET_IFNAME"] = VIP_INTERFACE
 
