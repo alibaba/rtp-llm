@@ -356,16 +356,25 @@ class KimiK3Model(GptModelBase):
 
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
+        self._initialize_fp8_collective()
+        from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+            warmup_kimi_k3_kernel_jit,
+        )
+
+        warmup_kimi_k3_kernel_jit(self, init_resource)
+        return ready
+
+    def _initialize_fp8_collective(self) -> None:
         if self._fp8_collective is not None:
-            return ready
+            return
         # Native MTP subclasses this model but keeps its projections in BF16.
         if type(self) is not KimiK3Model or self.tp_size == 1:
-            return ready
+            return
         decode_staging = self.parallelism_config.role_type == RoleType.DECODE
         enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
         enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
         if not (enable_ag or enable_rs):
-            return ready
+            return
         for layer in self.layers:
             attention = layer.attention
             if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
@@ -408,7 +417,7 @@ class KimiK3Model(GptModelBase):
             enable_rs,
             max_m,
         )
-        return ready
+        return
 
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None

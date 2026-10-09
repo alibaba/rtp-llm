@@ -48,6 +48,7 @@ class MultimodalMixinFactory:
             vit_config=vit_config,
             device=device,
         )
+        mm_mixin.warmup()
         return MMProcessEngine(
             mm_mixin.mm_part,
             model_config,

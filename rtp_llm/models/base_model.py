@@ -78,6 +78,11 @@ class BaseModel(object):
     fmha_config: FMHAConfig
     moe_config: MoeConfig
 
+    # Real request warmup is opt-in; orchestration owns role/rank and runtime
+    # switches, while the model declares support and any legacy timeout alias.
+    supports_startup_real_warmup: bool = False
+    startup_real_warmup_timeout_env: Optional[str] = None
+
     @classmethod
     def create_dash_sc_request_adapter(cls) -> "DashScRequestAdapter":
         from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter

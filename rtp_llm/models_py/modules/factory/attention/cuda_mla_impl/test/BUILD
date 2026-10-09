@@ -85,3 +85,14 @@ py_test(
     # Requires the approved CUDA13 K3 native runtime and stable-libtorch epilogue.
     tags = ["manual"],
 )
+
+py_test(
+    name = "mla_fused_fp8_epilogue_test",
+    srcs = ["test_mla_fused_fp8_epilogue.py"],
+    main = "test_mla_fused_fp8_epilogue.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+)

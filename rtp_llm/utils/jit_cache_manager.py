@@ -1,4 +1,5 @@
 import importlib.metadata
+import json
 import logging
 import os
 import platform
@@ -26,6 +27,7 @@ from rtp_llm.utils.jit_cache_env import (
     configure_cache_env,
     read_cache_env,
 )
+from rtp_llm.utils.jit_cache_identity import component_identity
 
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
 RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
@@ -123,6 +125,16 @@ Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
 
 
+def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str, ...]:
+    provided = component_identity(item.name, scopes)
+    if provided is not None:
+        return provided
+    return tuple(
+        importlib.metadata.version(part[1:]) if part.startswith("@") else scopes[part]
+        for part in item.scopes
+    )
+
+
 def resolve_scope(
     local_root: Path, cache_env_config: CacheEnvConfig | None = None
 ) -> Scope | None:
@@ -155,14 +167,15 @@ def resolve_scope(
             or item.env_name in cache_env_config.explicit_envs
         ):
             continue
-        with suppress(importlib.metadata.PackageNotFoundError):
-            parts = tuple(
-                importlib.metadata.version(p[1:]) if p.startswith("@") else scopes[p]
-                for p in item.scopes
-            )
+        try:
+            parts = _component_scope_parts(item, scopes)
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
+        except importlib.metadata.PackageNotFoundError:
+            logging.warning("JIT_CACHE_FAIL_OPEN: %s package metadata unavailable", item.name)
+        except (OSError, ValueError) as error:
+            logging.warning("JIT_CACHE_FAIL_OPEN: %s producer identity unavailable: %s", item.name, error)
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
@@ -221,11 +234,14 @@ def setup_jit_cache_env() -> Scope | None:
 
 
 class JitCacheManager(FileSystemEventHandler):
-    def __init__(self, scope: Scope, remote_value: str):
+    def __init__(self, scope: Scope, remote_value: str, publish_event=None):
         self.scope, self._remote_value, self.store = scope, remote_value, None
         self._observer = self._worker = self._prepare_thread = None
         self._seen = self._restored = None
         self._dirty, self._stop = Event(), Event()
+        # The server parent can notify us after real request warmup; compiler
+        # file events and backend-ready notifications use the same serial worker.
+        self._wake = publish_event if publish_event is not None else Event()
 
     def on_any_event(self, event) -> None:
         if event.is_directory or self._stop.is_set():
@@ -237,6 +253,7 @@ class JitCacheManager(FileSystemEventHandler):
                     rel = path.relative_to(item.local_dir).as_posix()
                     if item.should_sync(rel, event.event_type, path.stat().st_size):
                         self._dirty.set()
+                        self._wake.set()
                 return
 
     def _lock_path(self, kind: str) -> Path:
@@ -308,12 +325,25 @@ class JitCacheManager(FileSystemEventHandler):
     def _snapshot_files(self) -> dict[str, Path]:
         files = {}
         for item in self.scope.components:
-            for path in item.local_dir.rglob("*"):
-                with suppress(OSError):
-                    st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
-                    packable = S_ISREG(st.st_mode) and os.access(path, os.R_OK)
-                    if packable and item.should_sync(rel, size=st.st_size):
-                        files[f"{item.name}/{rel}"] = path
+            # A compiler may remove a temporary directory between enumeration
+            # and descent. os.walk skips that vanished subtree and lets the
+            # next poll pick up its finished files.
+            def on_walk_error(error: OSError) -> None:
+                if not isinstance(error, FileNotFoundError):
+                    raise error
+
+            for directory, subdirs, names in os.walk(item.local_dir, onerror=on_walk_error):
+                subdirs[:] = [
+                    name for name in subdirs
+                    if name != "tmp" and not name.startswith("tmp.pid_")
+                ]
+                for name in names:
+                    path = Path(directory) / name
+                    with suppress(OSError):
+                        st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
+                        packable = S_ISREG(st.st_mode) and os.access(path, os.R_OK)
+                        if packable and item.should_sync(rel, size=st.st_size):
+                            files[f"{item.name}/{rel}"] = path
         return files
 
     def publish_pending_snapshot(self) -> None:
@@ -340,13 +370,27 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _sync_loop(self) -> None:
         while True:
-            stopping = self._stop.wait(SYNC_POLL_S)
+            notified = self._wake.wait(SYNC_POLL_S)
+            self._wake.clear()
+            if notified:
+                # A parent process cannot set our process-local dirty flag.
+                self._dirty.set()
+            if notified and not self._stop.is_set():
+                # Producers write related files in succession. Allow the set
+                # to settle before taking the snapshot; the store still checks
+                # for races while packing.
+                self._stop.wait(5.0)
             try:
                 self.publish_pending_snapshot()
             except Exception:
                 logging.exception("JIT_CACHE_FAIL_OPEN: snapshot sync failed")
-            if stopping:
+            if self._stop.is_set():
                 return
+
+    def request_publish(self) -> None:
+        """Wake the publisher after startup preparation finishes."""
+        self._dirty.set()
+        self._wake.set()
 
     def _cleanup(self, deadline: float) -> None:
         for worker in (self._observer, self._worker, self._prepare_thread):
@@ -359,6 +403,7 @@ class JitCacheManager(FileSystemEventHandler):
     def stop(self) -> None:
         """Idempotent and retryable, because the store's own close() is both."""
         self._stop.set()
+        self._wake.set()
         if self._observer:
             self._observer.stop()
         cleanup = Thread(
@@ -370,14 +415,14 @@ class JitCacheManager(FileSystemEventHandler):
             logging.warning("JIT cleanup continues in background")
 
 
-def start_from_config(config):
+def start_from_config(config, publish_event=None):
     if not config.manage_jit_cache:
         logging.info("JIT cache management disabled by configuration")
         return
     remote = str(config.remote_jit_dir or "").strip()
     if (scope := setup_jit_cache_env()) is None or not remote:
         return
-    manager = JitCacheManager(scope, remote)
+    manager = JitCacheManager(scope, remote, publish_event=publish_event)
     try:
         if manager.bootstrap(config.jit_cache_setup_timeout_s):
             return manager

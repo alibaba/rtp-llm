@@ -1,4 +1,5 @@
 import argparse
+import math
 from contextlib import suppress
 
 from rtp_llm.server.server_args.util import str2bool
@@ -9,6 +10,20 @@ def _positive_or_unlimited(value: str) -> int:
         if (timeout := int(value)) == -1 or timeout > 0:
             return timeout
     raise argparse.ArgumentTypeError(f"must be a positive integer or -1, got {value!r}")
+
+
+def _positive_float(value: str) -> float:
+    with suppress(ValueError):
+        if (result := float(value)) > 0 and math.isfinite(result):
+            return result
+    raise argparse.ArgumentTypeError(f"must be a positive number, got {value!r}")
+
+
+def _positive_int(value: str) -> int:
+    with suppress(ValueError):
+        if (result := int(value)) > 0:
+            return result
+    raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
 
 
 def init_jit_group_args(parser, jit_config):
@@ -40,4 +55,20 @@ def init_jit_group_args(parser, jit_config):
         type=str2bool,
         default=True,
         help="默认启用JIT cache统一管理；传0则完全退出该特性",
+    )
+    jit_group.add_argument(
+        "--startup_real_warmup_timeout_s",
+        env_name="STARTUP_REAL_WARMUP_TIMEOUT_S",
+        bind_to=(jit_config, "startup_real_warmup_timeout_s"),
+        type=_positive_float,
+        default=None,
+        help="Prefill 启动 gRPC 预热单请求超时秒数；未设置时 DSV4 兼容旧环境变量，默认 600 秒",
+    )
+    jit_group.add_argument(
+        "--startup_real_warmup_max_len",
+        env_name="STARTUP_REAL_WARMUP_MAX_LEN",
+        bind_to=(jit_config, "startup_real_warmup_max_len"),
+        type=_positive_int,
+        default=None,
+        help="显式限制 Prefill 启动 gRPC 预热输入长度，不超过模型 max_seq_len",
     )
