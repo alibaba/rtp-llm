@@ -181,7 +181,13 @@ def call(model, cache, ids, positions, lengths, prefixes, pages, cp=None, hidden
 
 
 def run_controls(
-    rank, group, native_construction=False, *, fixture_fn=None, configure_owner=None
+    rank,
+    group,
+    native_construction=False,
+    *,
+    fixture_fn=None,
+    configure_owner=None,
+    capture_stage_frame=None,
 ):
     torch.manual_seed(41600 + (rank // 4) * 100)
     args, weights = (wide_fixture if fixture_fn is None else fixture_fn)()
@@ -259,7 +265,17 @@ def run_controls(
         expected_selections = {}
 
         def snapshot(block, inputs, hidden):
-            frame = capture_frame(block, rows, hidden)
+            if (
+                capture_stage_frame is not None
+                and len(block.attn._shared_attention["layers"]) == 21
+            ):
+                spans = [
+                    V41L20Span(identity, step, start, count)
+                    for identity, start, count in zip(identities, prefixes, lengths)
+                ]
+                frame = capture_stage_frame(block, hidden, spans, rows)
+            else:
+                frame = capture_frame(block, rows, hidden)
             frame.topk[~cp.local_is_real] = -1
             captures.append(frame)
 
@@ -476,6 +492,7 @@ def run_controls(
                     "native_construction": native_construction,
                     "ep_size": args.ep_size,
                     "engram_layer_ids": args.v41_config.get("engram_layer_ids", []),
+                    "runtime_frame_export": capture_stage_frame is not None,
                 }
             ),
             flush=True,

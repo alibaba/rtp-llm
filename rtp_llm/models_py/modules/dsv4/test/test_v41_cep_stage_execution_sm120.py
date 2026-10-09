@@ -123,7 +123,7 @@ class EngramControls:
                 assert layer.attn._prefill_meta_shared is None
 
 
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, frame_exporter=None):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -199,6 +199,7 @@ def run_rank(rank, port, config):
                 True,
                 fixture_fn=fixture_fn,
                 configure_owner=controls.configure,
+                capture_stage_frame=frame_exporter,
             )
         controls.require_cleanup()
         torch.cuda.synchronize()
