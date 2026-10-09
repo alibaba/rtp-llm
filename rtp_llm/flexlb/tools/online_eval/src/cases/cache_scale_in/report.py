@@ -120,7 +120,7 @@ def report_panels(curves, presentation):
         if selected and missing:
             caption += " 缺少监控序列：" + "、".join(missing) + "。"
         panels.append(dict(id=descriptor["id"], title=descriptor["title"],
-                           overlay=True, timeX=True, axes=descriptor["axes"],
+                           timeX=True, axes=descriptor["axes"],
                            series=selected, caption=caption))
     return panels
 

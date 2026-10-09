@@ -17,11 +17,8 @@ def event_anchor(events, name):
 def shifted_panel(panel, anchor):
     """Copy a panel and express time coordinates relative to its anchor."""
     result = copy.deepcopy(panel)
-    if anchor is None:
+    if anchor is None or not panel.get("timeX"):
         return result
-    if result.get("xNums"):
-        result["xNums"] = [value - anchor for value in result["xNums"]]
-        result["x"] = [str(value) for value in result["xNums"]]
     for series in result.get("series", []):
         if series.get("points") is not None:
             for point in series["points"]:

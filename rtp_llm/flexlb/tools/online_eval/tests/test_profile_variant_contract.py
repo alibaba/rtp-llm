@@ -12,7 +12,7 @@ from flexlb_cfg import (
     SingleDecision, render_env,
 )
 from scenario import ScenarioError, compile_scenarios, load_scenarios
-from scenario.compiler import (
+from scenario.environment_config import (
     OPTIONAL_SCALARS, environment, environment_fields, optional_scalars,
     variant_environment_fields,
 )

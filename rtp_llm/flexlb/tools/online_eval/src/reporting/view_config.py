@@ -92,7 +92,7 @@ def view(name):
                 for style in metrics.values()
             ):
                 _fail(path, "classified monitoring styles require unit, color and hidden")
-            if data.get("unlisted", "error") not in {"error", "heuristic_diagnostic"}:
+            if data.get("unlisted", "error") != "error":
                 _fail(path, "invalid unlisted monitoring policy")
             diagnostic = data.get("diagnostic_only", [])
             known = {f"{kind}/{metric}" for kind, queries in query_plan["sources"].items()

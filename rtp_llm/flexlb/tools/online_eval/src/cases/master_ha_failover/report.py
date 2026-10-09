@@ -35,7 +35,7 @@ def build_spec(payload, presentation):
                     provenance=row["provenance"]))
         panels.append(dict(
             id=descriptor["id"], title=descriptor["title"], caption=descriptor["caption"],
-            overlay=True, timeX=True, axes={
+            timeX=True, axes={
                 "qps": {"title": "requests / s", "position": "left"},
                 "count": {"title": "requests", "position": "left"},
                 "up": {"title": "HTTP 状态 (0/1)", "position": "right", "min": 0, "max": 1},

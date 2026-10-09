@@ -1,7 +1,13 @@
 """Self-contained input-fidelity report; independent of experiment reporting."""
 import json
 from pathlib import Path
-from reporting.catalog import FIDELITY_THEME
+from reporting.catalog import ACCENT_COLORS, RENDERER_THEME
+
+FIDELITY_THEME = {
+    "BACKGROUND": RENDERER_THEME["BACKGROUND"], "CARD": RENDERER_THEME["CARD"],
+    "REAL": ACCENT_COLORS["blue"], "INDEPENDENT": ACCENT_COLORS["amber"], "JOINT": ACCENT_COLORS["green"],
+    "BAD": ACCENT_COLORS["red"], "GRID": ACCENT_COLORS["gray"],
+}
 
 
 def markdown(report):

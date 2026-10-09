@@ -125,7 +125,7 @@ class MasterConfigContractTest(unittest.TestCase):
                 spec=spec, run_dir=Path(tmp), zk_connect_string="127.0.0.1:2181"
             )
             manager = EnvManager(Path(tmp), verbose=False)
-            result = manager._master_env(env)
+            result = manager.master_lifecycle._master_env(env)
             self.assertTrue({"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG"} <= set(result))
             model = json.loads(result["MODEL_SERVICE_CONFIG"])
             self.assertEqual(
@@ -136,7 +136,7 @@ class MasterConfigContractTest(unittest.TestCase):
                 ["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"]
             )
             spec.zk_consistency = {"zkTimeoutMs": 10000}
-            result = manager._master_env(env, MasterSpec(name="A", http_port=18080))
+            result = manager.master_lifecycle._master_env(env, MasterSpec(name="A", http_port=18080))
             self.assertEqual(
                 {"needConsistency", "zookeeperConfig"},
                 set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])),

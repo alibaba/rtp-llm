@@ -1,20 +1,20 @@
 # 报告契约
 
-报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、配对、spec 规范化、renderer 与 bundle 校验。case 视图种类通过 `cases.registry.VIEW_KINDS` 注册校验和渲染实现；YAML 只能引用视图文件，不能指定 Python 模块。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、配对、spec 校验、renderer 与 bundle 校验。case 视图种类通过 `cases.registry.VIEW_KINDS` 注册校验和渲染实现；YAML 只能引用视图文件，不能指定 Python 模块。
 
 ## 输入与装配
 
-视图 YAML 在 `config/report_views/` 声明曲线、名称、分组、单位、轴、颜色和面板。曲线用 `metric_id` 与 `labels` 选择冻结指标，面板用稳定的 `curve_ids` 选择曲线；展示名不参与判定或身份匹配。通用诊断词汇与颜色在 `reporting/catalog.py`。
+视图 YAML 在 `config/report_views/` 声明曲线、名称、分组、单位、轴、颜色和面板。曲线用 `metric_id` 与 `labels` 选择冻结指标，面板用稳定的 `curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
 
 报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标配置](../../config/monitoring/README.md)，主报告、全量 opt-in 和产物清单见[结果与指标](../development/results.md#收取产物)。
 
-`assembly.py` 统一 panel 结构。它接受 `x`/`xNums` + `series.data` 或 `series.points`，时间曲线派生 points 并保留空值；bar/scatter 保留类目或二维坐标。`pairing.py` 可按归档事件或相对秒平移序列，差值只在同一时刻两侧都有值时产生，不补缺采。
+所有生产器直接输出同一 panel 契约：声明 `axes`，每条 series 携带 `points: [{x, y}]`；`timeX: true` 表示时间坐标，缺采以 `y: null` 保留。类目图的 `x` 是字符串，数值图的 `x` 是数值。`spec.py` 严格校验输入，不接受旧的 `x`/`xNums` + `series.data` 或显示模式标志，也不执行格式转换。`pairing.py` 可按归档事件或相对秒平移序列，差值只在同一时刻两侧都有值时产生，不补缺采。
 
 ## Bundle 与发现
 
 `write_bundle` 写出自包含 HTML、`analysis.json`、`report-spec.json` 和最后写入的 `manifest.json`。`read_bundle` 校验 identity、manifest 与 SHA，`load_analysis` 接受已有分析 JSON 或 bundle，不改写旧归档。
 
-`kind` 为 run、comparison 或 sweep，表示单 run、运行对照或参数扫描；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
+`kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
 
 生产阶段未完成的失败运行生成精简报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
 

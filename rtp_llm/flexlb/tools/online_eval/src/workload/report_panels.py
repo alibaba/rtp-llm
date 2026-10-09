@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 
-from reporting.catalog import PERFORMANCE_COLORS, performance_axes, performance_metric_style
+from reporting.catalog import PALETTE
 from reporting.view_config import DEFAULT_VIEW, view
 
 
@@ -66,8 +66,14 @@ def build_panels(series, sources, presentation=None):
     panels = []
     for (epoch, source, metric, residual), members in sorted(grouped.items()):
         members.sort(key=lambda row: row[0])
-        role = str(members[0][2].get("role", ""))
-        title, category, axis, _ = performance_metric_style(source, metric, role)
+        if any(key not in sources or type(sources[key].get("unit")) is not str
+               or not sources[key]["unit"] for key, _, _ in members):
+            raise ValueError("missing frozen metric unit: " + metric)
+        units = {sources[key]["unit"] for key, _, _ in members}
+        if len(units) != 1:
+            raise ValueError("conflicting frozen metric units: " + metric)
+        unit = units.pop()
+        title, category, axis = metric, "原始序列", "y"
         curves = []
         high_cardinality = len(members) > 1
         limit = presentation["max_points_per_series"]
@@ -77,7 +83,7 @@ def build_panels(series, sources, presentation=None):
             raw = _summarize(members, method)
             curves.append(dict(
                 name=("均值" if method == "mean" else "最大值") + f" · {len(members)} series",
-                group="汇总", axis=axis, color=PERFORMANCE_COLORS[index],
+                group="汇总", axis=axis, unit=unit, color=PALETTE[index],
                 hidden=method not in visible, points=_sample(raw, limit),
                 statistics_points=[dict(x=t, y=v) for t, v in raw],
                 description="缺少任一原始 series 的采样时留空，不补零。",
@@ -88,8 +94,8 @@ def build_panels(series, sources, presentation=None):
         for index, (key, points, labels) in enumerate(members):
             name = json.dumps(labels, sort_keys=True, ensure_ascii=False) if labels else key
             curves.append(dict(
-                name=name, group=category, axis=axis,
-                color=PERFORMANCE_COLORS[(index + len(methods)) % len(PERFORMANCE_COLORS)],
+                name=name, group=category, axis=axis, unit=unit,
+                color=PALETTE[(index + len(methods)) % len(PALETTE)],
                 hidden=high_cardinality,
                 points=_sample(points, limit), description=key,
                 statistics_points=[dict(x=t, y=v) for t, v in points],
@@ -112,7 +118,7 @@ def build_panels(series, sources, presentation=None):
             id="metric-" + hashlib.sha256("/".join((epoch, source, metric, residual)).encode()).hexdigest(),
             title=f"{epoch}/{source} · {title}" + (f" · {residual}" if residual != "{}" else ""),
             caption="同指标同图；明细可从指标选择器检索。仅 HTML 采样，analysis.json 保留原始全集。",
-            overlay=True, timeX=True, axes={axis: performance_axes()[axis]},
+            timeX=True, axes={axis: dict(title=unit, position="left")},
             series=curves, presets=choices,
         ))
     return panels

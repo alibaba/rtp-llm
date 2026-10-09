@@ -2,9 +2,7 @@
 
 
 from monitoring.session import archived_series
-from reporting.catalog import PERFORMANCE_COLORS, performance_axes, performance_metric_style
-
-COLORS = PERFORMANCE_COLORS
+from reporting.catalog import PALETTE
 
 
 def panel(directory, evidence, result, presentation=None):
@@ -16,12 +14,17 @@ def panel(directory, evidence, result, presentation=None):
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
     duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
-    axes = performance_axes(include_hit_pct=True)
+    axes = {}
+    for descriptor in presentation["panels"]:
+        for axis, settings in descriptor["axes"].items():
+            if axis in axes and axes[axis] != settings:
+                raise ValueError("conflicting view axis: " + axis)
+            axes[axis] = dict(settings)
 
     def add(metric_id, name, group, axis, points, description, hidden=True,
             unit=None, apply_style=True):
-        style = presentation["curves"].get(metric_id) if apply_style else None
-        if style:
+        style = presentation["curves"][metric_id]
+        if apply_style:
             name, group, axis = (style[field] for field in ("name", "group", "axis"))
             scale = style.get("scale", 1)
             points = [(t, value * scale if value is not None else None)
@@ -30,14 +33,15 @@ def panel(directory, evidence, result, presentation=None):
         curves.append(
             dict(
                 curve_id=metric_id,
-                metric_id=presentation["curves"].get(metric_id, {}).get("metric_id", metric_id),
+                metric_id=style["metric_id"],
                 name=name,
                 group=group,
                 axis=axis,
                 unit=axes[axis]["title"] if unit is None else unit,
                 points=[dict(x=t, y=v) for t, v in points],
                 hidden=hidden,
-                color=COLORS[len(curves) % len(COLORS)],
+                color=style.get("color") or PALETTE[
+                    list(presentation["curves"]).index(metric_id) % len(PALETTE)],
                 description=description,
             )
         )
@@ -45,7 +49,7 @@ def panel(directory, evidence, result, presentation=None):
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
     for identity, rows in store.document["metrics"].items():
-        if not identity.startswith("request/"):
+        if not identity.startswith("request/") or identity not in presentation["curves"]:
             continue
         style = presentation["curves"][identity]
         for row in rows:
@@ -60,14 +64,9 @@ def panel(directory, evidence, result, presentation=None):
         if metric == "up":
             continue
         labels = json.loads(label_json)
-        role = {"prefill": "P", "decode": "D"}.get(labels.get("role", ""), "")
         from reporting.metric_binding import bindings
         identity = sources[key]["metric_id"]
         selected = bindings(presentation, identity, labels)
-        if not selected:
-            name, group, axis, primary = performance_metric_style(source, metric, role)
-            selected = [(identity + ("/" + role if role else ""), dict(
-                name=name, group=group, axis=axis, primary=primary, scale=1))]
         residual = {k:v for k,v in labels.items() if k != "role"}
         for curve_id, style in selected:
             name, group, axis = (style[field] for field in ("name", "group", "axis"))
@@ -87,14 +86,13 @@ def panel(directory, evidence, result, presentation=None):
     if not any(not c["hidden"] and any(p["y"] is not None for p in c["points"]) for c in curves):
         for c in curves:
             if c["group"] == "客户端吞吐": c["hidden"] = False
-    axes["ratio"].update(min=0, max=1)
     presets = {"核心": [c["name"] for c in curves if not c["hidden"]]}
-    for group in ["Prefill TPS", "Prefill 逐引擎 TPS", "Decode TPS", "Decode 逐引擎 TPS", "客户端吞吐", "延迟", "流量", "队列", "规模", "KV", "模拟执行"]:
+    for group in dict.fromkeys(c["group"] for c in curves):
         presets[group] = [c["name"] for c in curves if c["group"] == group]
     return dict(
         id="performance",
         title="性能与运行状态",
-        overlay=True,
+        timeX=True,
         axes=axes,
         series=curves,
         presets=presets,
@@ -135,13 +133,13 @@ def report_panels(curves, criteria, presentation):
                     selected.append(dict(
                         curve_id=metric_id + "/gate_floor", source_type="configuration",
                         name=name + " 门禁线", group="门禁", axis="forward",
-                        unit="执行 tok/s", color=source["color"] if source else COLORS[len(selected) % len(COLORS)],
+                        unit="执行 tok/s", color=source["color"] if source else presentation["curves"][metric_id].get("color") or PALETTE[len(selected) % len(PALETTE)],
                         dash=[6, 4], hidden=False,
                         points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
                         description="场景配置中的绝对下界；不是实测值",
                     ))
         panels.append(dict(
             id=descriptor["id"], title=descriptor["title"], caption=caption,
-            overlay=True, timeX=True, axes=descriptor["axes"], series=selected,
+            timeX=True, axes=descriptor["axes"], series=selected,
         ))
     return panels

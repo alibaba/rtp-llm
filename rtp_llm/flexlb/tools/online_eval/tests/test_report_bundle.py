@@ -65,7 +65,7 @@ class ReportBundleTest(unittest.TestCase):
         html = render({
             "title": "A/B",
             "panels": [{
-                "id": "ab", "title": "A/B", "overlay": True,
+                "id": "ab", "title": "A/B", "timeX": True,
                 "axes": {"ratio": {"title": "命中率"}},
                 "series": [
                     {"name": "old · hit", "axis": "ratio", "color": "#123456", "dash": [6, 4], "points": [{"x": 0, "y": 0.9}]},
@@ -90,19 +90,10 @@ class ReportBundleTest(unittest.TestCase):
                 ],
             )
             original = copy.deepcopy(spec)
-            from reporting.assembly import normalize_spec
-
-            with patch("reporting.assembly.normalize_spec", wraps=normalize_spec) as normalize:
-                bundle = write_bundle(
-                    root / "original",
-                    "run",
-                    "x",
-                    data,
-                    spec,
-                    meta=run_meta({"id": "x"}),
-                    producer="test",
-                )
-            self.assertEqual(normalize.call_count, 1)
+            bundle = write_bundle(
+                root / "original", "run", "x", data, spec,
+                meta=run_meta({"id": "x"}), producer="test",
+            )
             shutil.copytree(bundle, root / "relocated")
             shutil.rmtree(root / "original")
             moved = read_bundle(root / "relocated")
@@ -155,7 +146,7 @@ class ReportBundleTest(unittest.TestCase):
     def test_shared_pairing_supports_stage_and_event_anchors_without_zero_fill(self):
         self.assertEqual(event_anchor([dict(name="start", t=12)], "start"), 12)
         self.assertIsNone(event_anchor([dict(name="start", t=12), dict(name="start", t=13)], "start"))
-        panel = dict(series=[dict(name="hit", color="#123456",
+        panel = dict(timeX=True, series=[dict(name="hit", color="#123456",
                                   points=[dict(x=12, y=None), dict(x=13, y=2)])])
         aligned = shifted_panel(panel, 12)
         self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
@@ -200,7 +191,7 @@ class ReportBundleTest(unittest.TestCase):
 
     def test_all_bundle_kinds_are_discoverable_and_verified(self):
         with tempfile.TemporaryDirectory() as d:
-            for kind in ("run", "comparison", "sweep"):
+            for kind in ("run", "comparison"):
                 write_bundle(d, kind, "example", {}, dict(panels=[]), role="audit")
                 self.assertEqual(len(discover_reports(d, kind=kind, role="audit")), 1)
                 self.assertEqual(len(discover_reports(d, kind=kind)), 1)
@@ -208,30 +199,39 @@ class ReportBundleTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported report kind"):
                 discover_reports(d, kind="timeline")
 
-    def test_time_panel_adapter_preserves_gaps_and_legacy_coordinates(self):
+    def test_point_contract_preserves_gaps_and_rejects_legacy_data(self):
+        source = dict(title="points", timeAxis=dict(min=0, max=1), panels=[
+            dict(id="time", timeX=True, axes={"y": dict(title="count")},
+                 series=[dict(name="x", points=[dict(x=0, y=3), dict(x=1, y=None)])]),
+        ])
+        original = copy.deepcopy(source)
         with tempfile.TemporaryDirectory() as d:
-            source = dict(title="mixed", panels=[
-                dict(id="legacy", type="line", timeX=True, x=["0", "1"],
-                     xNums=[0, 1], series=[dict(name="x", data=[3, None])]),
-                dict(id="multi", overlay=True, axes={"y": dict(title="count")},
-                     series=[dict(name="y", points=[dict(x=0, y=None)])]),
-            ])
-            bundle = write_bundle(d, "run", "mixed", {}, source)
+            bundle = write_bundle(d, "run", "points", {}, source)
             saved = json.loads((bundle / "report-spec.json").read_text())
-            self.assertEqual(source["panels"][0]["series"][0]["data"], [3, None])
-            self.assertEqual(saved["panels"][0]["series"][0]["points"],
-                             [dict(x=0, y=3), dict(x=1, y=None)])
-            self.assertEqual(saved["panels"][1]["series"][0]["points"],
-                             [dict(x=0, y=None)])
-            self.assertEqual([p["representation"] for p in saved["panels"]],
-                             ["standard", "multi"])
+            self.assertEqual(saved["panels"], source["panels"])
+            self.assertEqual(source, original)
+            self.assertNotIn("representation", saved["panels"][0])
             self.assertIn("FlexMultiCurve.mount", (bundle / "report.html").read_text())
+        for legacy in (dict(xNums=[0, 1]), dict(x=["0", "1"]), dict(overlay=True)):
+            bad = copy.deepcopy(source)
+            bad["panels"][0].update(legacy)
+            with self.assertRaisesRegex(ValueError, "legacy chart fields"):
+                render(bad)
+        bad = copy.deepcopy(source)
+        bad["panels"][0]["series"][0]["data"] = [3, None]
+        with self.assertRaisesRegex(ValueError, "never data"):
+            render(bad)
+        for value in (float("nan"), float("inf"), "3"):
+            bad = copy.deepcopy(source)
+            bad["panels"][0]["series"][0]["points"][0]["y"] = value
+            with self.assertRaisesRegex(ValueError, "invalid points coordinate"):
+                render(bad)
 
     def test_overlay_rejects_undeclared_series_axis(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(ValueError, "undeclared axis"):
                 write_bundle(d, "run", "bad-axis", {}, dict(panels=[
-                    dict(id="queue", overlay=True, axes={"count": {"title": "数量"}},
+                    dict(id="queue", timeX=True, axes={"count": {"title": "数量"}},
                          series=[dict(name="waiting", axis="queue",
                                       points=[dict(x=0, y=1)])]),
                 ]))

@@ -32,6 +32,9 @@ def _load(path):
     spec = json.loads((directory / "report-spec.json").read_text())
     if not isinstance(analysis, dict) or not isinstance(spec, dict):
         raise ValueError("run analysis and report spec must be objects")
+    from reporting.spec import validate
+
+    validate(spec)
     return directory.resolve(), analysis, spec
 
 
@@ -51,7 +54,7 @@ def _signature(panel):
     """Pair only charts with the same declared axes and series units."""
     return {
         key: panel.get(key)
-        for key in ("type", "unit", "axes", "timeX", "overlay")
+        for key in ("type", "unit", "axes", "timeX")
     } | {"series": sorted(
         (s["name"], str(s.get("axis")), str(s.get("unit")))
         for s in panel.get("series", [])
@@ -130,7 +133,7 @@ def compare(paths, output, *, alignment_event=None):
             panel["caption"] = panel.get("caption", "") + " " + caption
             panels.append(panel)
             groups.setdefault(key, []).append((label, panel, spec.get("timeOriginLabel")))
-            if panel.get("timeX") or panel.get("overlay"):
+            if panel.get("timeX"):
                 bounds.extend(p["x"] for s in panel.get("series", [])
                               for p in s.get("points", [])
                               if type(p.get("x")) in (int, float) and math.isfinite(p["x"]))
@@ -140,7 +143,7 @@ def compare(paths, output, *, alignment_event=None):
         if len(group) != len(loaded):
             reasons.append("部分 run 缺少此面板")
         first = group[0][1]
-        if first.get("type", "line") != "line" or not (first.get("timeX") or first.get("overlay")):
+        if first.get("type", "line") != "line" or not first.get("timeX"):
             reasons.append("非时间曲线，保留独立面板")
         if any(_signature(p) != _signature(first) for _, p, _ in group):
             reasons.append("指标集合、单位或坐标轴不同")
@@ -150,9 +153,8 @@ def compare(paths, output, *, alignment_event=None):
             pairing.append(dict(panel=key, status="SEPARATE", reasons=reasons))
             continue
         overlay = copy.deepcopy(first)
-        overlay.update(id="overlay:" + key, title="合图 · " + key, overlay=True)
+        overlay.update(id="overlay:" + key, title="合图 · " + key)
         # The shared multi-curve renderer preserves line styles and presets.
-        overlay["axes"] = overlay.get("axes") or {"y": {"title": overlay.get("unit", "")}}
         overlay["series"], overlay["presets"] = paired_overlay(
             [p for _, p, _ in group], labels=[label for label, _, _ in group],
         )
@@ -173,7 +175,7 @@ def compare(paths, output, *, alignment_event=None):
     )
     spec = dict(
         title="运行报告对照", subtitle="展示归档时冻结的数据与各 run 独立结论。",
-        timeOriginLabel=caption, timeAxis=dict(min=min(bounds, default=0), max=max(bounds, default=1)),
+        timeOriginLabel=caption, timeAxis=dict(min=min(bounds, default=0), max=max(max(bounds, default=1), min(bounds, default=0) + 1)),
         events=[dict(name=alignment_event, t=0)] if aligned else [],
         panels=overlays + panels, kpis=kpis,
         sections=[details("控制变量（以 A 为参照）", result["controls"]),

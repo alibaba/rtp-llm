@@ -318,7 +318,7 @@ class PerformanceGateTest(unittest.TestCase):
                 ["engine-tps", "client-qps", "latency", "cache-hit",
                  "prefill-batch", "prefill-state"])
             for panel in spec["panels"]:
-                self.assertTrue(panel["overlay"])
+                self.assertTrue(panel["timeX"])
                 for series in panel["series"]:
                     self.assertTrue(series["points"])
                     self.assertIn(series["axis"], panel["axes"])
@@ -369,16 +369,18 @@ class PerformanceGateTest(unittest.TestCase):
             )
             chart, audit = panel(root, e, analyze(e))
             self.assertTrue(audit["available"])
-            self.assertEqual(len(chart["presets"]["规模"]), 2)
+            self.assertNotIn("规模", chart["presets"])
             self.assertEqual(len(chart["presets"]["Prefill TPS"]), 1)
-            self.assertEqual(len(chart["presets"]["Prefill 逐引擎 TPS"]), 1)
+            self.assertNotIn("Prefill 逐引擎 TPS", chart["presets"])
             self.assertTrue(set(chart["presets"]["Prefill TPS"]) <= set(chart["presets"]["核心"]))
             self.assertNotIn("完成输入 TPS", chart["presets"]["核心"])
             self.assertIn("完成输入 TPS", chart["presets"]["客户端吞吐"])
             by_name = {c["name"]: c for c in chart["series"]}
-            self.assertEqual(
-                by_name["mock · D engine count"]["points"][0], dict(x=0, y=4)
-            )
+            self.assertNotIn("mock · D engine count", by_name)
+            from monitoring.metric_store import MetricStore
+            store = MetricStore.read(root)
+            self.assertEqual(store.select("mock/engine_count", labels={"role": "decode"})[0]["points"][0], [100, 4])
+            self.assertEqual(store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0], [100, 60000])
             self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
             self.assertEqual(by_name["到达 cohort 成功率"]["points"][0]["y"], 1)
             self.assertEqual(

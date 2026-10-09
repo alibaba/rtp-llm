@@ -1,9 +1,10 @@
+import copy
 import hashlib
 import json
 import re
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from reporting.spec import SCHEMA_VERSION
 
 
 def details(title, value, *, opened=False):
@@ -108,35 +109,14 @@ def _slug(identity):
 
 
 def bundle_path(root, kind, identity):
-    if kind not in {"run", "comparison", "sweep"}:
+    if kind not in {"run", "comparison"}:
         raise ValueError("unsupported report kind: " + kind)
     return Path(root) / "reports" / kind / _slug(identity)
 
 
-def render(spec, *, _normalized=False):
-    if spec.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
-        raise ValueError("unsupported report spec version")
-    ids = set()
-    for panel in spec.get("panels", []):
-        if panel.get("type", "line") not in {"line", "bar", "scatter"}:
-            raise ValueError("unsupported panel type")
-        if panel["id"] in ids:
-            raise ValueError("duplicate panel id: " + panel["id"])
-        ids.add(panel["id"])
-        axes = panel.get("axes", {})
-        if panel.get("overlay") and not axes:
-            raise ValueError("overlay panel lacks axes: " + panel["id"])
-        if axes:
-            for series in panel.get("series", []):
-                axis = series.get("axis", "y")
-                if axis not in axes:
-                    raise ValueError(
-                        f"panel {panel['id']} series {series.get('name', '')!r} "
-                        f"uses undeclared axis {axis!r}"
-                    )
+def render(spec):
     from reporting.renderer import render as render_html
-
-    return render_html(spec, _normalized=_normalized)
+    return render_html(spec)
 
 
 def _json(value):
@@ -151,11 +131,9 @@ def _atomic(path, content):
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
-    from reporting.assembly import normalize_spec
-
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)
-    spec = normalize_spec(spec)
+    spec = copy.deepcopy(spec)
     spec["schema_version"] = SCHEMA_VERSION
     legacy_meta = spec.get("meta") or {}
     spec["run_meta"] = meta or run_meta(
@@ -177,7 +155,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     outputs = {
         "analysis.json": _json(result),
         "report-spec.json": _json(spec),
-        "report.html": render(spec, _normalized=True),
+        "report.html": render(spec),
     }
     # Layout adapters emit links relative to this final bundle directory.
     for name, content in outputs.items():
@@ -202,7 +180,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
 
 def discover_reports(root, *, role=None, kind="run"):
     """Find verified bundles by kind and optional producer-declared role."""
-    if kind not in {"run", "comparison", "sweep"}:
+    if kind not in {"run", "comparison"}:
         raise ValueError("unsupported report kind: " + str(kind))
     reports = []
     for path in sorted((Path(root) / "reports" / kind).glob("*/manifest.json")):

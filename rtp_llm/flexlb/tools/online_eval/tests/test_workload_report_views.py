@@ -20,7 +20,7 @@ def payload(series=None, gates=None):
         id="example", status="PASS", workload={"runtime_validity": "VALID"},
         implementation={}, configuration={}, configuration_sha256=None,
         clock_anchor={"epoch_s": 10}, request_sources=[], series=series or {},
-        statistic_sources={}, checks=[dict(stage="observe", id="cache", status="PASS")],
+        statistic_sources={k: dict(unit="count") for k in series or {}}, checks=[dict(stage="observe", id="cache", status="PASS")],
         iterations=[], traffic_manifests=[], gate_reports=gates or [],
     )
 
@@ -158,13 +158,25 @@ class WorkloadReportViewsTest(unittest.TestCase):
             f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
             for i in range(2)
         }
-        self.assertEqual(len(build_panels(series, {}, view(DEFAULT_VIEW))), 1)
+        self.assertEqual(len(build_panels(series, {k: dict(unit="req/s") for k in series}, view(DEFAULT_VIEW))), 1)
 
     def test_unlabelled_legacy_statistic_is_still_visible(self):
         key = "statistics/1/per_second/e2e_p99"
-        panels = build_panels({key: [[0, 123]]}, {})
+        panels = build_panels({key: [[0, 123]]}, {key: dict(unit="ms")})
         self.assertEqual(len(panels), 1)
         self.assertEqual(panels[0]["series"][0]["provenance"]["source_series_key"], key)
+
+    def test_full_view_uses_frozen_units_without_metric_name_inference(self):
+        key = '1/mock/cache_hit_ratio/{"role":"prefill"}'
+        values = [[0, 123], [1, None]]
+        panels = build_panels({key: values}, {key: dict(unit="ms")})
+        self.assertEqual(panels[0]["axes"], {"y": dict(title="ms", position="left")})
+        self.assertEqual(panels[0]["series"][0]["unit"], "ms")
+        self.assertEqual(panels[0]["series"][0]["points"],
+                         [dict(x=0, y=123), dict(x=1, y=None)])
+        self.assertIn("cache_hit_ratio", panels[0]["title"])
+        with self.assertRaisesRegex(ValueError, "missing frozen metric unit"):
+            build_panels({key: values}, {})
 
     def test_selected_view_links_verified_analyzer_report(self):
         curves = [
@@ -176,7 +188,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             gate = write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS", "threshold": 0.5},
                          dict(title="Gate evidence", timeAxis=dict(min=0, max=2),
                               timeOriginLabel="observation", panels=[dict(
-                                  id="gate", title="All", overlay=True,
+                                  id="gate", title="All", timeX=True,
                                   axes={"count": {}, "ratio": {}, "queue": {}}, series=curves,
                               )]), producer="cache-gate", role="gate")
             data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]},

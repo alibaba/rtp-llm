@@ -32,11 +32,11 @@ class ReportComparisonTest(unittest.TestCase):
                     kpis=[dict(label='run verdict', value=verdict)],
                     sections=[dict(type='details', title='missing samples', value=['latency gap'])],
                     panels=[dict(id='latency', title='Latency', type='line', unit=unit, timeX=True,
-                                 x=['5', '10', '25'], xNums=[5, 10, 25],
-                                 series=[dict(name='latency', data=[value, None, value], color='#1677ff')])])
+                                 axes={'y': dict(title=unit)},
+                                 series=[dict(name='latency', points=[dict(x=t, y=v) for t,v in zip([5, 10, 25], [value, None, value])], color='#1677ff')])])
         if second_panel:
-            spec['panels'].append(dict(id='other', title='Other', type='bar', x=['x'],
-                                       series=[dict(name='bar', data=[2])]))
+            spec['panels'].append(dict(id='other', title='Other', type='bar', axes={'y': dict(title='count')},
+                                       series=[dict(name='bar', points=[dict(x='x', y=2)])]))
         return write_bundle(self.root/name, 'run', 'fixture', result, spec,
                             meta=run_meta(dict(id=name), configuration=configuration or dict(scheduler='same'),
                                           workload=dict(sha256='same'), environment=dict(fetch=True)),
@@ -64,7 +64,7 @@ class ReportComparisonTest(unittest.TestCase):
         for token in ('Tier', 'noise_floor', 'rank_score', 'regression', 'gate passed'):
             self.assertNotIn(token, json.dumps(result))
         self.assertEqual(len(self.spec()['panels']), 4)
-        self.assertEqual(self.spec()['panels'][0]['representation'], 'multi')
+        self.assertEqual(self.spec()['panels'][0]['timeX'], True)
         styles = [s['dash'] for s in self.spec()['panels'][0]['series']]
         self.assertEqual(len({tuple(style) for style in styles}), 3)
         read_bundle(self.output()/'reports/comparison/runs')
@@ -121,8 +121,8 @@ class ReportComparisonTest(unittest.TestCase):
         paths = []
         for name, times in [('a', [1, 2, 12]), ('b', [1.2, 2.2, 12.2])]:
             spec = dict(title=name, timeOriginLabel='run start', panels=[dict(
-                id='metric', title='metric', timeX=True, xNums=times, x=list(map(str, times)),
-                series=[dict(name='metric', data=[3, None, 4])],
+                id='metric', title='metric', timeX=True, axes={'y': dict(title='count')},
+                series=[dict(name='metric', points=[dict(x=t,y=v) for t,v in zip(times,[3,None,4])])],
             )])
             paths.append(write_bundle(self.root/name, 'run', name, {}, spec))
         compare(paths, self.output())
@@ -136,8 +136,8 @@ class ReportComparisonTest(unittest.TestCase):
         for name in ('a', 'b'):
             paths.append(write_bundle(self.root/name, 'run', name, {}, dict(
                 title=name, timeOriginLabel=name, panels=[dict(
-                    id='metric', timeX=True, xNums=[1], x=['1'],
-                    series=[dict(name='metric', data=[1])],
+                    id='metric', timeX=True, axes={'y': dict(title='count')},
+                    series=[dict(name='metric', points=[dict(x=1,y=1)])],
                 )],
             )))
         result = compare(paths, self.output())

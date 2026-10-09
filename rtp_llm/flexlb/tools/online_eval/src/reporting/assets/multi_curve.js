@@ -33,7 +33,7 @@
     const hover = document.createElement('div'); hover.className='multi-hover'; hover.textContent='将鼠标移到曲线上查看样本点详情';
     wrap.appendChild(box); wrap.appendChild(legend); wrap.appendChild(hover); parent.appendChild(wrap);
     const datasets = panel.series.map(s => ({label:s.name, description:s.description||'', group:s.group||'其他',
-      data:s.points || s.data.map((y,i)=>({x:panel.xNums[i],y})), yAxisID:s.axis || 'y', unit:s.unit || '',
+      data:s.points, yAxisID:s.axis || 'y', unit:s.unit || '',
       borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2, pointRadius:0,
       tension:0, spanGaps:false}));
     datasets.forEach((dataset,i)=>dataset.statistics=statistics(panel.series[i].statistics_points||dataset.data));

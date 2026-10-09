@@ -11,7 +11,10 @@ curves:
       role: prefill
     name: P context TPS
     group: Prefill TPS
+    unit: '单引擎平均 tokens/s'
     axis: forward
+    color: '#1677ff'
+    hidden: false
     primary: true
   mock/rtp_llm_context_tps_with_cache_engine_mean/P:
     metric_id: mock/rtp_llm_context_tps_with_cache_engine_mean
@@ -19,7 +22,10 @@ curves:
       role: prefill
     name: P context TPS（含缓存）
     group: Prefill TPS
+    unit: '单引擎平均 tokens/s'
     axis: forward
+    color: '#13c2c2'
+    hidden: false
     primary: true
   mock/rtp_llm_generate_tps_engine_mean/D:
     metric_id: mock/rtp_llm_generate_tps_engine_mean
@@ -27,7 +33,10 @@ curves:
       role: decode
     name: D generate TPS
     group: Decode TPS
+    unit: '单引擎平均 tokens/s'
     axis: forward
+    color: '#fa541c'
+    hidden: false
     primary: true
   mock/cache_hit_ratio/P:
     metric_id: mock/cache_hit_ratio
@@ -38,6 +47,8 @@ curves:
     unit: '%'
     axis: hit_pct
     scale: 100
+    color: '#722ed1'
+    hidden: true
     primary: false
     source_unit: ratio
   mock/simulated_prefill_ms_avg/P:
@@ -46,7 +57,10 @@ curves:
       role: prefill
     name: P model forward 均值
     group: 延迟
+    unit: '毫秒'
     axis: ms
+    color: '#52c41a'
+    hidden: true
     primary: false
   mock/prefill_batch_size_mean/P:
     metric_id: mock/prefill_batch_size_mean
@@ -54,7 +68,10 @@ curves:
       role: prefill
     name: P batch size 均值
     group: Prefill Batch
+    unit: '请求 / 执行批'
     axis: batch
+    color: '#eb2f96'
+    hidden: true
     primary: false
   mock/prefill_batch_size_p50/P:
     metric_id: mock/prefill_batch_size_p50
@@ -62,7 +79,10 @@ curves:
       role: prefill
     name: P batch size P50
     group: Prefill Batch
+    unit: '请求 / 执行批'
     axis: batch
+    color: '#faad14'
+    hidden: true
     primary: false
   mock/prefill_batch_size_p90/P:
     metric_id: mock/prefill_batch_size_p90
@@ -70,7 +90,10 @@ curves:
       role: prefill
     name: P batch size P90
     group: Prefill Batch
+    unit: '请求 / 执行批'
     axis: batch
+    color: '#2f54eb'
+    hidden: true
     primary: false
   mock/prefill_batch_size_p99/P:
     metric_id: mock/prefill_batch_size_p99
@@ -78,7 +101,10 @@ curves:
       role: prefill
     name: P batch size P99
     group: Prefill Batch
+    unit: '请求 / 执行批'
     axis: batch
+    color: '#1677ff'
+    hidden: true
     primary: false
   mock/running_avg/P:
     metric_id: mock/running_avg
@@ -86,7 +112,10 @@ curves:
       role: prefill
     name: P Running / engine
     group: Prefill 状态
+    unit: '请求数 / P 引擎'
     axis: count
+    color: '#13c2c2'
+    hidden: true
     primary: false
   mock/running_max/P:
     metric_id: mock/running_max
@@ -94,7 +123,10 @@ curves:
       role: prefill
     name: P Running max
     group: Prefill 状态
+    unit: '请求数 / P 引擎'
     axis: count
+    color: '#fa541c'
+    hidden: true
     primary: false
   mock/waiting_avg/P:
     metric_id: mock/waiting_avg
@@ -102,7 +134,10 @@ curves:
       role: prefill
     name: P Waiting / engine
     group: Prefill 状态
+    unit: '请求数 / P 引擎'
     axis: count
+    color: '#722ed1'
+    hidden: true
     primary: false
   mock/waiting_max/P:
     metric_id: mock/waiting_max
@@ -110,7 +145,10 @@ curves:
       role: prefill
     name: P Waiting max
     group: Prefill 状态
+    unit: '请求数 / P 引擎'
     axis: count
+    color: '#52c41a'
+    hidden: true
     primary: false
   client/schedule_p99_seconds:
     metric_id: client/schedule_p99_seconds
@@ -120,6 +158,8 @@ curves:
     unit: ms
     axis: ms
     scale: 1000
+    color: '#eb2f96'
+    hidden: true
     primary: false
     source_unit: s
   request/sent_qps:
@@ -127,25 +167,37 @@ curves:
     labels: {}
     name: 发送 QPS
     group: 流量
+    unit: '请求 / 秒'
     axis: qps
+    color: '#faad14'
+    hidden: true
   request/success_qps:
     metric_id: request/success_qps
     labels: {}
     name: 成功 QPS
     group: 流量
+    unit: '请求 / 秒'
     axis: qps
+    color: '#2f54eb'
+    hidden: true
   request/error_qps:
     metric_id: request/error_qps
     labels: {}
     name: 错误 QPS
     group: 流量
+    unit: '请求 / 秒'
     axis: qps
+    color: '#1677ff'
+    hidden: true
   request/ttft_p99_ms:
     metric_id: request/ttft_p99_ms
     labels: {}
     name: TTFT p99
     group: 延迟
+    unit: '毫秒'
     axis: ms
+    color: '#13c2c2'
+    hidden: true
   request/input_tps:
     metric_id: request/input_tps
     labels: {}
@@ -153,6 +205,8 @@ curves:
     group: 客户端吞吐
     unit: tokens/s
     axis: input
+    color: '#fa541c'
+    hidden: true
   request/output_tps:
     metric_id: request/output_tps
     labels: {}
@@ -160,6 +214,8 @@ curves:
     group: 客户端吞吐
     unit: tokens/s
     axis: output
+    color: '#722ed1'
+    hidden: true
   request/inflight:
     metric_id: request/inflight
     labels: {}
@@ -167,6 +223,8 @@ curves:
     group: 队列
     unit: requests
     axis: count
+    color: '#52c41a'
+    hidden: true
   request/completed_qps:
     metric_id: request/completed_qps
     labels: {}
@@ -174,6 +232,8 @@ curves:
     group: 流量
     unit: requests/s
     axis: qps
+    color: '#eb2f96'
+    hidden: true
   request/arrival_success_ratio:
     metric_id: request/arrival_success_ratio
     labels: {}
@@ -181,6 +241,8 @@ curves:
     group: 流量
     unit: ratio
     axis: ratio
+    color: '#faad14'
+    hidden: true
   request/e2e_p99_ms:
     metric_id: request/e2e_p99_ms
     labels: {}
@@ -188,6 +250,8 @@ curves:
     group: 延迟
     unit: ms
     axis: ms
+    color: '#2f54eb'
+    hidden: true
   request/tpot_p99_ms:
     metric_id: request/tpot_p99_ms
     labels: {}
@@ -195,6 +259,8 @@ curves:
     group: 延迟
     unit: ms
     axis: ms
+    color: '#1677ff'
+    hidden: true
   request/input_tokens_mean:
     metric_id: request/input_tokens_mean
     labels: {}
@@ -202,6 +268,8 @@ curves:
     group: 流量
     unit: tokens
     axis: tokens
+    color: '#13c2c2'
+    hidden: true
   request/output_tokens_mean:
     metric_id: request/output_tokens_mean
     labels: {}
@@ -209,6 +277,8 @@ curves:
     group: 流量
     unit: tokens
     axis: tokens
+    color: '#fa541c'
+    hidden: true
 panels:
 - id: engine-tps
   title: 三项引擎 TPS 与门禁线
@@ -293,4 +363,38 @@ criteria_columns:
 - 实际值
 - 标准
 - 结果
-unlisted: heuristic_diagnostic
+diagnostic_only:
+- client/actual_send_qps
+- client/completed_qps
+- client/error_qps
+- client/success_qps
+- client/total_p99_seconds
+- client/ttft_p99_seconds
+- master/arrivals_qps
+- master/dispatch_qps
+- master/flexlb_app_flexlb_batcher_queue_size
+- master/flexlb_app_flexlb_inflight_request_count
+- master/flexlb_app_flexlb_scheduler_inflight_size
+- master/flexlb_auto_tpm_decode_reserved_count
+- master/flexlb_auto_tpm_decode_running_count
+- master/schedule_responses_qps
+- mock/accepted_qps
+- mock/completed_qps
+- mock/context_completed_qps
+- mock/context_execution_tps_avg
+- mock/context_execution_tps_with_cache_avg
+- mock/context_wall_tps
+- mock/engine_count
+- mock/mock_engine_held_blocks
+- mock/mock_engine_referenced_blocks
+- mock/output_wall_tps
+- mock/rtp_llm_context_tps
+- mock/rtp_llm_context_tps_per_engine
+- mock/rtp_llm_context_tps_with_cache
+- mock/rtp_llm_context_tps_with_cache_per_engine
+- mock/rtp_llm_generate_tps
+- mock/rtp_llm_kv_cache_pool_available_blocks
+- mock/rtp_llm_kv_cache_pool_total_blocks
+- mock/running_sum
+- mock/simulated_decode_ms_avg
+- mock/waiting_sum

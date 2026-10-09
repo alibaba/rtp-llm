@@ -328,14 +328,14 @@ class EnvironmentTest(unittest.TestCase):
                 stream.write("ConfigValidationException from owned start\n")
             return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
-        with patch("runtime.environment.API_JAR", jar), patch(
-            "runtime.environment.resolve_java21", return_value="unused-java"
+        with patch("runtime.master_lifecycle.API_JAR", jar), patch(
+            "runtime.master_lifecycle.resolve_java21", return_value="unused-java"
         ), patch(
-            "runtime.environment.port_in_use", return_value=False
+            "runtime.master_lifecycle.port_accepting", return_value=False
         ), patch.object(
-            manager, "_master_env", return_value={}
+            manager.master_lifecycle, "_master_env", return_value={}
         ), patch(
-            "runtime.environment.ProcessOps.start", side_effect=launch
+            "runtime.master_lifecycle.ProcessOps.start", side_effect=launch
         ):
             with self.assertRaises(RuntimeError) as error:
                 manager.start_master(env)
