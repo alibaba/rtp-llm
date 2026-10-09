@@ -2403,9 +2403,17 @@ class AttentionV41FP8(AttentionFP8):
             self.compress_ratio
             and self.kv_source_layer_id not in self._shared_attention["layers"]
         ):
-            raise NotImplementedError(
-                "V4.1 imported PP source execution is not integrated"
+            from rtp_llm.models_py.modules.dsv4.native_l20_prefill import (
+                IMPORT_KEY,
+                NativeL20PrefillSource,
             )
+
+            source = self._shared_attention.get(IMPORT_KEY)
+            if not isinstance(source, NativeL20PrefillSource):
+                raise NotImplementedError(
+                    "V4.1 imported PP source execution is not integrated"
+                )
+            source.require_owner(self)
         if self._kv_cache is not None:
             if self._block_tables_by_type is None:
                 raise ValueError("V4.1 bound prefill requires tagged block tables")
@@ -2553,6 +2561,12 @@ class AttentionV41FP8(AttentionFP8):
             common.input_lengths, common.prefix_lengths, cp_on=common.cp_on
         )
         self._begin_forward()
+        if self.layer_id == min(self._shared_attention["layers"]):
+            from rtp_llm.models_py.modules.dsv4.native_l20_prefill import IMPORT_KEY
+
+            source = self._shared_attention.get(IMPORT_KEY)
+            if source is not None:
+                source.publish(self, common)
         if self.swa_bounded_replay and self.layer_id == 21:
             # L20 has exact cached SWA; decoder replay starts a new SWA domain.
             self._shared_attention.pop("prefill_chunk_meta", None)

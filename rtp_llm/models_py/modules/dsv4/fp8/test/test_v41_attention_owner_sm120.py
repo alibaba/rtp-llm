@@ -66,16 +66,16 @@ class NativeTaggedCache:
         return 256
 
 
-def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1):
+def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512):
     shared = {} if shared is None else shared
     source = layer_id if source is None else source
     weights = {}
     for name, n, k in (
-        ("wq_a", 256, 512),
+        ("wq_a", 256, dim),
         ("wq_b", 2048, 256),
-        ("wkv", 512, 512),
+        ("wkv", 512, dim),
         ("wo_a", 512, 1024),
-        ("wo_b", 512, 512),
+        ("wo_b", dim, 512),
     ):
         weights[getattr(W, f"v4_attn_{name}_w")] = (
             torch.randn(n, k, device="cuda") * 0.025
@@ -88,11 +88,12 @@ def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1):
     weights[W.v4_attn_sink] = torch.linspace(-1, 1, 4, device="cuda")
     if ratio and layer_id == source:
         for key in (W.v4_compressor_wkv, W.v4_compressor_wgate):
-            weights[key] = (torch.randn(512, 512, device="cuda") * 0.025).bfloat16()
+            weights[key] = (torch.randn(512, dim, device="cuda") * 0.025).bfloat16()
         weights[W.v4_compressor_norm] = torch.ones(
             512, device="cuda", dtype=torch.bfloat16
         )
         weights[W.v41_indexer_wk] = (
+            # The indexer consumes the normalized 512-wide KV latent.
             torch.randn(128, 512, device="cuda") * 0.025
         ).bfloat16()
         weights[W.v41_indexer_k_norm] = torch.ones(
@@ -105,12 +106,12 @@ def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1):
             torch.float8_e8m0fnu
         )
         weights[W.v4_indexer_weights_proj_w] = torch.ones(
-            32, 512, device="cuda", dtype=torch.bfloat16
+            32, dim, device="cuda", dtype=torch.bfloat16
         )
     layer = AttentionV41FP8(
         layer_id=layer_id,
         cache_layer_id=layer_id - source,
-        dim=512,
+        dim=dim,
         n_heads=4,
         q_lora_rank=256,
         head_dim=512,

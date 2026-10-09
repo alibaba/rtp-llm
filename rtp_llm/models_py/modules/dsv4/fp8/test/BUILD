@@ -26,6 +26,14 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_library(
+    name = "v41_attention_owner_testlib",
+    srcs = ["test_v41_attention_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "test_v41_mhc_post_precision_sm120",
     srcs = ["test_v41_mhc_post_precision_sm120.py", "v41_mhc_precision.py"],
