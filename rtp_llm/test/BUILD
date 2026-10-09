@@ -18,14 +18,16 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
     name = "start_prompt_generator_test",
     srcs = ["start_prompt_generator_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
