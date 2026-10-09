@@ -4,6 +4,7 @@ from math import gcd
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.attention import linear
@@ -62,6 +63,14 @@ class KimiK3MtpModel(KimiK3Model):
                 )
         return ready
 
+    def _gather_modeling_boundary(self, local_input):
+        if self.tp_size == 1:
+            return local_input
+        collectives = self.layers[0].attention._mtp_bf16_collectives
+        if collectives is not None:
+            return collectives.all_gather_modeling_boundary(local_input)
+        return all_gather(local_input, Group.TP)
+
     def _project_local_mtp_input(self, inputs):
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
@@ -79,7 +88,9 @@ class KimiK3MtpModel(KimiK3Model):
             )
         # The embedding gathers hidden shards across TP. Project only this
         # rank's token rows after that gather, before entering the SP layer.
-        embedded = self.embed_tokens(inputs.input_ids)
+        embedded = self.embed_tokens(
+            inputs.input_ids, tp_gather=self._gather_modeling_boundary
+        )
         embedded = embedded.narrow(0, local_start, local_rows).contiguous()
         local_positions = positions.narrow(0, local_start, local_rows)
         previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
@@ -93,6 +104,7 @@ class KimiK3MtpModel(KimiK3Model):
     def _forward_single(self, inputs, fmha_impl=None):
         hidden = self._project_local_mtp_input(inputs)
         recurrent = self._forward_layers(
-            hidden, inputs, fmha_impl, sequence_parallel_input=True
+            hidden, inputs, fmha_impl, sequence_parallel_input=True, gather_output=False
         )
+        recurrent = self._gather_modeling_boundary(recurrent)
         return PyModelOutputs(self.norm(recurrent), recurrent)

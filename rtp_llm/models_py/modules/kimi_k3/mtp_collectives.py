@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_gather
 from rtp_llm.models_py.distributed.custom_all_gather import create_custom_all_gather
 from rtp_llm.models_py.distributed.push_reduce_scatter import create_push_reduce_scatter
+from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
 from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 
 
@@ -26,6 +27,10 @@ class KimiK3MtpBf16Collectives:
         self.hidden_size = int(hidden_size)
         if self.max_tokens <= 0 or self.max_tokens % self.tp_size:
             raise ValueError("MTP BF16 collective capacity must be divisible by TP")
+        # Fixed feat uses BF16 multimem for embedding and final SP output.
+        # Give MTP its own buffer: the target's FP8 projections and the global
+        # custom-AllReduce policy must not select this model-local backend.
+        self.modeling_gather = TorchSymmMemCommunicator(group, device)
         self.gather = create_custom_all_gather(
             group,
             device,
@@ -50,13 +55,25 @@ class KimiK3MtpBf16Collectives:
             else None
         )
         logging.info(
-            "[K3_MTP_BF16_TP] TP%d max_tokens=%d hidden=%d AG=%s RS=%s",
+            "[K3_MTP_BF16_TP] TP%d max_tokens=%d hidden=%d AG=%s RS=%s modeling_AG=%s",
             self.tp_size,
             self.max_tokens,
             self.hidden_size,
             "custom_staging" if self.gather is not None else "nccl",
             "push" if self.scatter is not None else "nccl",
+            "nccl" if self.modeling_gather.disabled else "bf16_multimem",
         )
+
+    def all_gather_modeling_boundary(self, local_input):
+        if self.modeling_gather.should_torch_symm_mem_allgather(local_input):
+            gathered = self.modeling_gather.all_gather(local_input)
+            if gathered is not None:
+                return gathered.view(
+                    self.tp_size * local_input.shape[0], *local_input.shape[1:]
+                )
+        # Long prompt initialization and unsupported multicast keep the
+        # existing collective. The physical token/request layout is retained.
+        return all_gather(local_input, Group.TP)
 
     def all_gather(self, local_input):
         physical_tokens = local_input.shape[0] * self.tp_size
