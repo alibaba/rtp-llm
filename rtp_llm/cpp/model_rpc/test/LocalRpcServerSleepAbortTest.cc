@@ -187,7 +187,7 @@ TEST(LocalRpcServerSleepAbortTest, InFlightCounterKeepsDerivedOwnerAliveAndRelea
     auto                   engine       = std::make_shared<HookTestEngine>(destructions);
     auto                   state        = std::make_shared<HookOwnerTestState>();
     state->block                        = true;
-    auto server                         = std::make_shared<HookOwnerTestServer>(state);
+    auto server                         = makeGilSafeRpcServer<HookOwnerTestServer>(state);
     server->engine_                     = engine;
     server->installSleepHooks();
     auto                          counter = engine->getScheduler().drainManager().counters_.at("rpc_cache_transfer").fn;
@@ -208,6 +208,35 @@ TEST(LocalRpcServerSleepAbortTest, InFlightCounterKeepsDerivedOwnerAliveAndRelea
     EXPECT_TRUE(weak.expired());
     EXPECT_EQ(state->destructions.load(), 1);
     EXPECT_TRUE(state->destroyed_with_gil.load());
+}
+
+TEST(LocalRpcServerSleepAbortTest, LiveCounterDoesNotWaitForPythonGil) {
+    std::optional<py::scoped_interpreter> interpreter;
+    if (!Py_IsInitialized()) {
+        interpreter.emplace();
+    }
+    ASSERT_TRUE(Py_IsInitialized());
+    py::gil_scoped_acquire hold_gil;
+    int                    destructions = 0;
+    auto                   engine       = std::make_shared<HookTestEngine>(destructions);
+    auto                   state        = std::make_shared<HookOwnerTestState>();
+    state->block                        = true;
+    auto                   server       = makeGilSafeRpcServer<HookOwnerTestServer>(state);
+    server->engine_                     = engine;
+    server->installSleepHooks();
+    auto counter = engine->getScheduler().drainManager().counters_.at("rpc_cache_transfer").fn;
+    auto running = std::async(std::launch::async, [counter] { return counter(); });
+    state->entered.get_future().wait();
+    state->release.set_value();
+
+    // A GIL held by a Python forward must not stall a live C++ status read.
+    const auto wait_status = running.wait_for(std::chrono::milliseconds(500));
+    {
+        py::gil_scoped_release release_gil;
+        EXPECT_EQ(running.get(), 0);
+    }
+    EXPECT_EQ(wait_status, std::future_status::ready);
+    EXPECT_EQ(state->calls.load(), 1);
 }
 
 TEST(LocalRpcServerSleepAbortTest, AbortRegistrationTokenDoesNotTouchExpiredOwner) {

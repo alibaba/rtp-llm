@@ -7,9 +7,12 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+#include <pybind11/pybind11.h>
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
@@ -213,5 +216,21 @@ protected:
     std::unordered_set<std::string>          torch_allocator_dump_ids_;
     std::deque<std::string>                  torch_allocator_dump_id_order_;
 };
+
+// A lifecycle callback can hold the final service reference after its caller
+// drops the service. Delete under the GIL so Python-owning members are safe,
+// without making every callback acquire the GIL on its hot path.
+template<typename Server, typename... Args>
+std::shared_ptr<Server> makeGilSafeRpcServer(Args&&... args) {
+    static_assert(std::is_base_of_v<LocalRpcServer, Server>);
+    return std::shared_ptr<Server>(new Server(std::forward<Args>(args)...), [](Server* server) {
+        if (Py_IsInitialized()) {
+            pybind11::gil_scoped_acquire acquire;
+            delete server;
+        } else {
+            delete server;
+        }
+    });
+}
 
 }  // namespace rtp_llm

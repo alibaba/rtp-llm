@@ -39,19 +39,6 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
-// A lifecycle callback may release the last service reference on an RPC thread.
-// Service members include Python objects, so that release must own the GIL even
-// when the callback itself only reads a counter. No GIL work is needed in a
-// standalone C++ process that has never initialized Python.
-void releaseServiceOwner(std::shared_ptr<LocalRpcServer>& owner) {
-    if (Py_IsInitialized()) {
-        py::gil_scoped_acquire acquire;
-        owner.reset();
-    } else {
-        owner.reset();
-    }
-}
-
 template<typename Callback>
 auto withServiceOwner(std::weak_ptr<LocalRpcServer> weak_owner, Callback callback) {
     return [weak_owner = std::move(weak_owner), callback = std::move(callback)](auto&&... args) -> decltype(auto) {
@@ -59,7 +46,8 @@ auto withServiceOwner(std::weak_ptr<LocalRpcServer> weak_owner, Callback callbac
         if (!owner) {
             throw std::runtime_error("RPC service owner has expired; lifecycle callback is unavailable");
         }
-        auto release_owner = c10::make_scope_exit([&] { releaseServiceOwner(owner); });
+        // The service's final deleter acquires the GIL if necessary. Releasing
+        // this ordinary reference must not block status/counter reads on Python.
         return callback(std::forward<decltype(args)>(args)...);
     };
 }
@@ -93,6 +81,8 @@ private:
 #if USING_CUDA
     std::optional<at::cuda::CUDAGuard> guard_;
 #elif USING_ROCM
+    // This PyTorch header declares HIPGuardMasqueradingAsCUDA itself (as well
+    // as the impl); SleepMemoryUtils and ExecOps use the same public guard.
     std::optional<c10::hip::HIPGuardMasqueradingAsCUDA> guard_;
 #endif
 };
@@ -990,6 +980,9 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
+    // This reads cache-manager state, which sleep can release. Keep a root
+    // lease so draining waits for an in-flight query; a check-only gate would
+    // allow the query to race the transition after admission.
     auto admission = acquireAdmission();
     if (!admission.detail.admitted) {
         return AdmissionGate::toGrpcStatus(admission.detail);
