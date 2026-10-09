@@ -981,6 +981,14 @@ PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB
     switch (result) {
         case PriorityCancelResult::ACCEPTED:
             response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+            if (envValueIsTrue(std::getenv("KIMI_K3_SMOKE_EVIDENCE"))) {
+                const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"prefill_priority_cancel_accepted\","
+                    "\"request_id\":%ld,\"time_ns\":%ld}",
+                    static_cast<long>(request->request_id()), static_cast<long>(time_ns));
+            }
             RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel accepted", request->request_id());
             break;
         case PriorityCancelResult::TOMBSTONED:

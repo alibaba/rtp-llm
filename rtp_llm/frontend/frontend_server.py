@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, Union
@@ -429,6 +431,15 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+        if os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1":
+            smoke_case = raw_request.headers.get("x-k3-smoke-case", "")
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", smoke_case):
+                logging.info(
+                    "[K3_SMOKE_EVENT] %s",
+                    json.dumps({"event": "frontend_request", "case": smoke_case,
+                                "request_id": request_id, "time_ns": time.time_ns()},
+                               sort_keys=True),
+                )
 
         # Trace entry point: only chat completions get an HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.

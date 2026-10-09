@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include <cstdlib>
+#include <chrono>
 #include <string>
 
 using namespace std;
@@ -13,6 +14,20 @@ namespace {
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}
+
+bool k3SmokeEvidenceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return env != nullptr && std::string(env) == "1";
+    }();
+    return enabled;
+}
+
+int64_t smokeTimeNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 }  // namespace
@@ -82,6 +97,15 @@ void GenerateStateMachine::handleWaiting() {
         if (ret) {
             if (stream != nullptr) {
                 stream->recordLoadingCacheStartTime();
+                if (k3SmokeEvidenceEnabled()
+                    && stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+                    && stream_cache_resource_->pendingHostReuseTokens() > 0) {
+                    RTP_LLM_LOG_INFO(
+                        "[K3_SMOKE_EVENT] {\"event\":\"host_cache_load_started\","
+                        "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                        static_cast<long>(stream->streamId()), stream_cache_resource_->pendingHostReuseTokens(),
+                        static_cast<long>(smokeTimeNs()));
+                }
             }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
@@ -120,6 +144,15 @@ void GenerateStateMachine::handleLoading() {
         auto stream = stream_cache_resource_->stream();
         if (stream != nullptr) {
             stream->recordLoadingCacheDoneTime();
+            if (k3SmokeEvidenceEnabled()
+                && stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+                && stream->hostReuseLength() > 0) {
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"host_cache_load_done\","
+                    "\"request_id\":%ld,\"host_reuse_len\":%d,\"time_ns\":%ld}",
+                    static_cast<long>(stream->streamId()), stream->hostReuseLength(),
+                    static_cast<long>(smokeTimeNs()));
+            }
         }
         status.store(StreamState::WAITING, std::memory_order_release);
     }

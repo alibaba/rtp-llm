@@ -1164,6 +1164,21 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         prepareInputData(inputs, state);
     }
+    // Benchmark-only rendezvous after input staging, outside captured model work.
+    // Do not enable this for serving throughput or async scheduling measurements.
+    static const bool modeling_benchmark_ready_sync = [] {
+        const char* value = std::getenv("RTP_LLM_MODELING_BENCHMARK_READY_SYNC");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (modeling_benchmark_ready_sync) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.modeling_ready_sync(outside_model_graph)");
+        cuda_graph::graphDeviceSynchronize();
+        py::gil_scoped_acquire gil;
+        auto                   collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+        collective.attr("barrier")(collective.attr("Group").attr("TP"));
+        cuda_graph::graphGetCurrentStream().synchronize();
+    }
+
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
