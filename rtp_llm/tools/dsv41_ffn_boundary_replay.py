@@ -18,10 +18,12 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4 import v41_routed
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
+    expert_down_reference,
+)
 from rtp_llm.models_py.modules.dsv4.moe import expert as expert_module
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import W13SharedExpert
 from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
-from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import quantize_group32
 from rtp_llm.tools.dsv41_attention_replay import NASReader, history_identities
 from rtp_llm.tools.dsv41_reference_probe import model_args
 from rtp_llm.tools.dsv41_trace_compare import tensor_difference
@@ -51,7 +53,9 @@ def byte_difference(left, right):
 
 
 @contextmanager
-def capture_linears(owner, *, merged=False, native_activation=False):
+def capture_linears(
+    owner, *, merged=False, native_activation=False, reference_module=None
+):
     """Clones only; no transfer, scalar read or synchronization in hooks."""
     captured = {}
 
@@ -82,6 +86,33 @@ def capture_linears(owner, *, merged=False, native_activation=False):
 
             stack.enter_context(
                 patch.object(expert_module, "silu_mul_split", activation)
+            )
+            original_quantized = owner.w2.forward_quantized
+
+            def native_quantized(values, scales, **kwargs):
+                captured["w2.fp8_values"] = values.clone()
+                captured["w2.packed_scales"] = scales.clone()
+                captured["w2.fp8_scales"] = (
+                    scales.clone(memory_format=torch.contiguous_format)
+                    .view(torch.uint8)[:, : owner.w2.K // 32]
+                    .contiguous()
+                )
+                return original_quantized(values, scales, **kwargs)
+
+            stack.enter_context(
+                patch.object(owner.w2, "forward_quantized", native_quantized)
+            )
+        if reference_module is not None:
+            original_quant = reference_module.act_quant
+
+            def reference_quant(*args, **kwargs):
+                result = original_quant(*args, **kwargs)
+                captured["w2.fp8_values"] = result[0].clone()
+                captured["w2.fp8_scales"] = result[1].view(torch.uint8).clone()
+                return result
+
+            stack.enter_context(
+                patch.object(reference_module, "act_quant", reference_quant)
             )
         yield captured
 
@@ -116,8 +147,8 @@ def released_activation(gate, up, limit):
     return F.silu(gate) * up
 
 
-def shared_boundaries(native, reference, x):
-    with capture_linears(reference) as official:
+def shared_boundaries(native, reference, x, reference_module):
+    with capture_linears(reference, reference_module=reference_module) as official:
         expected = reference(x)
     with capture_linears(native, merged=True, native_activation=True) as captured:
         actual = native(x)
@@ -165,11 +196,18 @@ def shared_boundaries(native, reference, x):
                 expected_activation, captured["activation.fp32"]
             ),
             "w2_input_bf16": difference(official["w2.input"], captured["w2.input"]),
+            "w2_input_fp8_bytes": byte_difference(
+                official["w2.fp8_values"], captured["w2.fp8_values"]
+            ),
+            "w2_input_scale_bytes": byte_difference(
+                official["w2.fp8_scales"], captured["w2.fp8_scales"]
+            ),
             "output_bf16": difference(expected, actual),
             "substitutions": {
                 name: difference(expected, value) for name, value in candidates.items()
             },
         },
+        captured,
     )
 
 
@@ -181,6 +219,7 @@ def main():
     parser.add_argument("native_traces", type=Path)
     parser.add_argument("baseline_report", type=Path)
     parser.add_argument("report", type=Path)
+    parser.add_argument("--compare-down", action="store_true")
     args = parser.parse_args()
     if args.report.exists():
         raise ValueError("FFN boundary report must be fresh")
@@ -287,7 +326,7 @@ def main():
             for step, (x, weights, ids) in enumerate(frames):
                 rows, top = torch.where(ids == expert_id)
                 if rows.numel():
-                    with capture_linears(expert) as captured:
+                    with capture_linears(expert, reference_module=official) as captured:
                         output = expert(x[rows], weights[rows, top, None])
                     routed_reference[step][rows] += output
                     per_expert[step][expert_id] = (rows, captured)
@@ -308,9 +347,13 @@ def main():
         layer_results = []
         for step, (x, weights, ids) in enumerate(frames):
             protected = {"x": digest(x), "weights": digest(weights), "ids": digest(ids)}
-            expected_shared, actual_shared, candidates, shared_report = (
-                shared_boundaries(shared, shared_reference, x)
-            )
+            (
+                expected_shared,
+                actual_shared,
+                candidates,
+                shared_report,
+                shared_capture,
+            ) = shared_boundaries(shared, shared_reference, x, official)
             expected = (routed_reference[step] + expected_shared.float()).bfloat16()
             with capture_grouped(routed.experts) as grouped:
                 actual_routed = routed(
@@ -345,9 +388,7 @@ def main():
                 count = rows.numel()
                 projected = grouped["gemms"][0][local, :count].float()
                 g, u = projected.chunk(2, -1)
-                values, scales = quantize_group32(
-                    captured["w2.input"], backend="triton"
-                )
+                values, scales = captured["w2.fp8_values"], captured["w2.fp8_scales"]
                 expert_report[str(expert_id)] = {
                     "source_rows": rows.tolist(),
                     "gate_projection": difference(captured["w1.output"].float(), g),
@@ -378,6 +419,88 @@ def main():
                     for name, value in candidates.items()
                 },
             }
+            if args.compare_down:
+                substitutions = {}
+                for name, shared_down, routed_down in (
+                    ("shared", True, False),
+                    ("routed", False, True),
+                    ("shared_routed", True, True),
+                ):
+                    with expert_down_reference(
+                        True,
+                        shared=shared_down,
+                        routed=routed_down,
+                        kernel=importlib.import_module("kernel"),
+                    ), capture_linears(
+                        shared, merged=True, native_activation=True
+                    ) as shared_inputs, capture_grouped(
+                        routed.experts
+                    ) as routed_inputs:
+                        candidate_shared = shared(x)
+                        candidate_routed = routed(
+                            x, weights, mapping[ids].contiguous(), layout="masked"
+                        )
+                    checks = {
+                        "shared_projection": byte_difference(
+                            shared_capture["w13.output"], shared_inputs["w13.output"]
+                        ),
+                        "shared_activation": byte_difference(
+                            shared_capture["activation.fp32"],
+                            shared_inputs["activation.fp32"],
+                        ),
+                        "shared_fp8_values": byte_difference(
+                            shared_capture["w2.fp8_values"],
+                            shared_inputs["w2.fp8_values"],
+                        ),
+                        "shared_fp8_scales": byte_difference(
+                            shared_capture["w2.fp8_scales"],
+                            shared_inputs["w2.fp8_scales"],
+                        ),
+                        "shared_packed_scales": byte_difference(
+                            shared_capture["w2.packed_scales"],
+                            shared_inputs["w2.packed_scales"],
+                        ),
+                        "routed_projection": byte_difference(
+                            grouped["gemms"][0], routed_inputs["gemms"][0]
+                        ),
+                        "routed_fp8_values": byte_difference(
+                            grouped["quantized_values"],
+                            routed_inputs["quantized_values"],
+                        ),
+                        "routed_fp8_scales": byte_difference(
+                            grouped["quantized_scales"],
+                            routed_inputs["quantized_scales"],
+                        ),
+                    }
+                    if any(check["different_bytes"] for check in checks.values()):
+                        raise AssertionError(
+                            "Output substitution changed upstream expert bytes"
+                        )
+                    substitutions[name] = {
+                        "shared": difference(expected_shared, candidate_shared),
+                        "routed": difference(routed_reference[step], candidate_routed),
+                        "ffn": difference(
+                            expected,
+                            (candidate_routed + candidate_shared.float()).bfloat16(),
+                        ),
+                        "unchanged_upstream": checks,
+                    }
+                    if name == "shared_routed" and any(
+                        not substitutions[name][key]["bitwise_equal"]
+                        for key in ("shared", "routed", "ffn")
+                    ):
+                        raise AssertionError(
+                            "Composed released output GEMMs did not reproduce the official FFN"
+                        )
+                record["down_substitutions"] = substitutions
+                if {
+                    "x": digest(x),
+                    "weights": digest(weights),
+                    "ids": digest(ids),
+                } != protected:
+                    raise AssertionError(
+                        "Output substitution mutated input/route bytes"
+                    )
             layer_results.append(record)
             print(
                 f"L{layer} step={step} shared_input_differences={shared_report['w2_input_bf16']['different_values']} "
@@ -395,6 +518,7 @@ def main():
         repo / "rtp_llm/models_py/modules/dsv4/_silu_mul_split_triton.py",
         repo / "rtp_llm/models_py/modules/dsv4/v41_routed.py",
         repo / "rtp_llm/models_py/modules/dsv4/v41_expert.py",
+        repo / "rtp_llm/models_py/modules/dsv4/fp8/test/v41_expert_precision.py",
         root / "inference/model.py",
         root / "inference/kernel.py",
         args.baseline_report,
