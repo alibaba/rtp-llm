@@ -103,7 +103,8 @@ py_test(
     ],
     # CPU tensor assertions still import the CUDA-linked model bindings.
     env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+    exec_properties = {"gpu": "A10_CU13", "gpu_count": "1"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
