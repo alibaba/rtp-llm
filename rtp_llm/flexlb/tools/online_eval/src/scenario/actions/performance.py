@@ -137,6 +137,10 @@ def finish(ctx, p, deadline):
                 cursor = right
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
+    try:
+        ctx.monitor.archive()
+    except Exception as exc:
+        e["errors"].append("monitor archive: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_evidence(ctx.artifact_dir / "performance-gate-evidence.json", e)
     result = analyze(e)

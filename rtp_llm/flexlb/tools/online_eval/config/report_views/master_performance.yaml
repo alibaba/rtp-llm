@@ -32,6 +32,20 @@ panels:
     hit_pct: {title: 命中率 %, position: left}
   caption: Prefill 的 mock_hit_tokens_total 与 mock_context_tokens_total 在同一 10 秒窗口的速率之比；分母为零或缺采时断线。
   empty_caption: 缺少有效的 Prefill token 命中率采样；不补零，也不使用理论路由命中率替代。
+- id: prefill-batch
+  title: Prefill 实际执行 batch size 分布
+  names: [P batch size 均值, P batch size P50, P batch size P90, P batch size P99]
+  axes:
+    batch: {title: 请求 / 执行批, position: left}
+  caption: 每个 P 执行批更新正式 Prometheus 直方图；均值为 10 秒窗口 sum/count，P50/P90/P99 由同一窗口的直方图桶估算。无执行批或缺采时断线。
+  empty_caption: 缺少 Prefill 执行批直方图，无法绘制 batch size 分布。
+- id: prefill-state
+  title: Prefill Waiting / Running
+  names: [P Waiting / engine, P Waiting max, P Running / engine, P Running max]
+  axes:
+    count: {title: 请求数 / P 引擎, position: left}
+  caption: 每个采样点分别展示 P 引擎等待和执行中请求数的引擎均值与单引擎最大值；不含 Decode 预约。
+  empty_caption: 缺少 Prefill Waiting / Running 监控采样。
 sections:
   criteria: 绝对标准
   monitoring: 监控曲线来源与缺采

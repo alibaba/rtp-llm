@@ -144,6 +144,22 @@ def panel(directory, evidence, result):
                 ("P 实际 token 命中率", "缓存命中率", "hit_pct", 100),
             ("mock", "simulated_prefill_ms_avg", "P"):
                 ("P model forward 均值", "延迟", "ms", 1),
+            ("mock", "prefill_batch_size_mean", "P"):
+                ("P batch size 均值", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p50", "P"):
+                ("P batch size P50", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p90", "P"):
+                ("P batch size P90", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p99", "P"):
+                ("P batch size P99", "Prefill Batch", "batch", 1),
+            ("mock", "running_avg", "P"):
+                ("P Running / engine", "Prefill 状态", "count", 1),
+            ("mock", "running_max", "P"):
+                ("P Running max", "Prefill 状态", "count", 1),
+            ("mock", "waiting_avg", "P"):
+                ("P Waiting / engine", "Prefill 状态", "count", 1),
+            ("mock", "waiting_max", "P"):
+                ("P Waiting max", "Prefill 状态", "count", 1),
             ("client-performance", "schedule_p99_seconds", ""):
                 ("调度等待 p99", "延迟", "ms", 1000),
         }.get((source, metric, role))
@@ -164,29 +180,6 @@ def panel(directory, evidence, result):
                 **sources[key],
             )
         )
-    # Frozen diagnostics also carry exact scrape samples outside queries.json.
-    # In particular, decode generate TPS was absent from older query catalogs.
-    raw_available = False
-    archived_metrics = {key.split("/", 3)[2] for key in series}
-    for name, role in (("rtp_llm_context_tps", "prefill"),
-                       ("rtp_llm_context_tps_with_cache", "prefill"),
-                       ("rtp_llm_generate_tps", "decode")):
-        if name + "_engine_mean" in archived_metrics:
-            continue
-        raw_curves = raw_engine_curves(evidence, name, role)
-        group = "Prefill TPS" if role == "prefill" else "Decode TPS"
-        for label, points, mean in raw_curves:
-            if mean:
-                label = {
-                    "rtp_llm_context_tps": "P context TPS",
-                    "rtp_llm_context_tps_with_cache": "P context TPS（含缓存）",
-                    "rtp_llm_generate_tps": "D generate TPS",
-                }[name]
-            add(label, group if mean else group.replace(" TPS", " 逐引擎 TPS"),
-                "forward", points, "engine_tps_samples: 同一抓取点 priority 求和，再按引擎等权平均；缺失不补零", not mean)
-        if raw_curves:
-            raw_available = True
-            audit.append(dict(name=name, source="evidence.engine_tps_samples", series=len(raw_curves)))
     # Never open an empty chart when only request-level evidence survived.
     if not any(not c["hidden"] and any(p["y"] is not None for p in c["points"]) for c in curves):
         for c in curves:
@@ -203,8 +196,8 @@ def panel(directory, evidence, result):
         series=curves,
         presets=presets,
         caption="Prefill TPS 按引擎/DP 汇总 priority，与线上 context TPS、with cache TPS 口径对应；不对引擎执行速率求集群总和。时间按测量起点对齐。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
-        + (" 本报告缺少监控归档，只有请求级曲线。" if not series and not raw_available else ""),
-    ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series) or raw_available)
+        + (" 本报告缺少监控归档，只有请求级曲线。" if not series else ""),
+    ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series))
 
 
 def report_panels(curves, criteria, presentation):
@@ -246,45 +239,3 @@ def report_panels(curves, criteria, presentation):
             overlay=True, timeX=True, axes=descriptor["axes"], series=selected,
         ))
     return panels
-
-
-def raw_engine_curves(evidence, metric, role):
-    """Plot exact scrape samples without hiding missing priorities/engines or gaps."""
-    lo = evidence.get("window", {}).get("start_epoch_ms", 0) / 1000
-    duration = evidence.get("criteria", {}).get("measure_s", 1)
-    gap = evidence.get("criteria", {}).get("max_gap_s", 3)
-    engines = {}
-    for row in evidence.get("engine_tps_samples", []):
-        labels = row.get("metric", {})
-        if labels.get("__name__") != metric or labels.get("role") != role or not labels.get("engine_name"):
-            continue
-        key = (labels["engine_name"], labels.get("engine_incarnation", ""))
-        values = engines.setdefault(key, {}).setdefault(labels.get("priority", "aggregate"), {})
-        for stamp, value in row.get("values", []):
-            if not 0 <= stamp - lo <= duration: continue
-            value = float(value)
-            value = value if math.isfinite(value) and value >= 0 else None
-            if stamp in values and values[stamp] != value: value = None
-            values[stamp] = value
-    if not engines: return []
-    def points(values):
-        out, previous = [], None
-        for stamp, value in sorted(values.items()):
-            if previous is not None and stamp - previous > gap:
-                out.append(((previous + stamp) / 2 - lo, None))
-            out.append((stamp - lo, value)); previous = stamp
-        return out
-    per_engine = {}
-    for key, priorities in engines.items():
-        stamps = set().union(*(set(v) for v in priorities.values()))
-        per_engine[key] = {t: (sum(v[t] for v in priorities.values())
-            if all(v.get(t) is not None for v in priorities.values()) else None) for t in stamps}
-    expected = evidence.get("provenance", {}).get("topology", {}).get(role)
-    full = len(per_engine) == expected and len({k[0] for k in per_engine}) == expected
-    stamps = set().union(*(set(v) for v in per_engine.values()))
-    means = {t: (sum(v[t] for v in per_engine.values()) / expected
-        if full and all(v.get(t) is not None for v in per_engine.values()) else None) for t in stamps}
-    prefix = ("P" if role == "prefill" else "D") + " · " + metric.removeprefix("rtp_llm_").replace("_", " ")
-    return [(prefix + " · engine mean", points(means), True)] + [
-        (prefix + " · " + key[0] + " · " + key[1], points(values), False)
-        for key, values in sorted(per_engine.items())]

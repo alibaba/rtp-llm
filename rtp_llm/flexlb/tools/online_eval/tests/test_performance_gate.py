@@ -128,25 +128,30 @@ class PerformanceGateTest(unittest.TestCase):
         ]
         return e
 
-    def test_html_raw_engine_curves_and_missing_data_are_visible(self):
-        from workload.performance_views import panel, raw_engine_curves
+    def test_html_engine_curves_use_monitor_archive(self):
+        from workload.performance_views import panel
         e = self.engine_evidence()
         with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps(dict(
+                start=100, end=110, step=1, targets={}, queries={
+                    "mock/rtp_llm_generate_tps_engine_mean": dict(
+                        promql="avg by (role) (rtp_llm_generate_tps{job=\"mock\"})",
+                        result=[dict(metric=dict(role="decode"),
+                                     values=[[100, "120"], [110, "130"]])],
+                    ),
+                },
+            )))
             chart, audit = panel(d, e, analyze(e))
             self.assertTrue(audit["available"])
             self.assertEqual(len(chart["presets"]["Decode TPS"]), 1)
-            self.assertEqual(len(chart["presets"]["Decode 逐引擎 TPS"]), 4)
             self.assertTrue(set(chart["presets"]["Decode TPS"]) <= set(chart["presets"]["核心"]))
-            means = raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]
-            self.assertEqual(means[0], (0, 120))
+            self.assertEqual(next(curve for curve in chart["series"]
+                                  if curve["name"] == "D generate TPS")["points"],
+                             [dict(x=0, y=120), dict(x=10, y=130)])
             self.assertIn("成功 QPS", chart["presets"]["流量"])
-            for row in e["engine_tps_samples"]:
-                row["values"] = [[100, "60"], [110, "60"]]
-            means = raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]
-            self.assertEqual(means, [(0, 120), (5, None), (10, 120)])
-            e["engine_tps_samples"] = [r for r in e["engine_tps_samples"]
-                if r["metric"]["engine_name"] != "decode-0"]
-            self.assertTrue(all(v is None for _, v in raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]))
+            archive.unlink()
             chart, _ = panel(d, evidence(), analyze(evidence()))
             self.assertIn("完成输入 TPS", chart["presets"]["核心"])
             # HTML must still exist for INVALID runs, with embedded plotting code.
@@ -178,6 +183,46 @@ class PerformanceGateTest(unittest.TestCase):
                              ["P 实际 token 命中率"])
             self.assertEqual(hit["series"][0]["points"][:2],
                              [dict(x=0, y=42), dict(x=1, y=None)])
+
+    def test_archived_prefill_batch_and_state_panels(self):
+        from workload.performance_views import panel, report_panels
+        from reporting.view_config import view
+
+        e = evidence()
+        with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            metrics = {
+                "prefill_batch_size_mean": 12.5,
+                "prefill_batch_size_p50": 10,
+                "prefill_batch_size_p90": 18,
+                "prefill_batch_size_p99": 24,
+                "waiting_avg": 3,
+                "waiting_max": 7,
+                "running_avg": 11,
+                "running_max": 18,
+            }
+            archive.write_text(json.dumps(dict(
+                start=100, end=110, step=1, targets={},
+                queries={"mock/" + name: dict(
+                    promql=name,
+                    result=[dict(metric=dict(role="prefill"),
+                                 values=[[100, str(value)]])],
+                ) for name, value in metrics.items()},
+            )))
+            chart, _ = panel(d, e, analyze(e))
+            panels = report_panels(chart["series"], e["criteria"],
+                                   view("master_performance.yaml"))
+            batch, state = panels[4:]
+            self.assertEqual([series["name"] for series in batch["series"]],
+                             ["P batch size 均值", "P batch size P50",
+                              "P batch size P90", "P batch size P99"])
+            self.assertEqual(batch["series"][0]["points"], [dict(x=0, y=12.5)])
+            self.assertEqual(batch["series"][0]["axis"], "batch")
+            self.assertEqual([series["name"] for series in state["series"]],
+                             ["P Waiting / engine", "P Waiting max",
+                              "P Running / engine", "P Running max"])
+            self.assertEqual(state["series"][0]["points"], [dict(x=0, y=3)])
 
     def test_observer_gap_retains_request_metrics_without_promoting_verdict(self):
         e = self.engine_evidence()
@@ -221,7 +266,8 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertTrue((path / "report.html").is_file())
             spec = json.loads((path / "report-spec.json").read_text())
             self.assertEqual([p["id"] for p in spec["panels"]],
-                ["engine-tps", "client-qps", "latency", "cache-hit"])
+                ["engine-tps", "client-qps", "latency", "cache-hit",
+                 "prefill-batch", "prefill-state"])
             for panel in spec["panels"]:
                 self.assertTrue(panel["overlay"])
                 for series in panel["series"]:

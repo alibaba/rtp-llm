@@ -220,7 +220,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([panel["title"] for panel in spec["panels"]],
                              [panel["title"] for panel in presentation["panels"]])
             self.assertEqual([panel["id"] for panel in spec["panels"]],
-                             ["engine-tps", "client-qps", "latency", "cache-hit"])
+                             ["engine-tps", "client-qps", "latency", "cache-hit",
+                              "prefill-batch", "prefill-state"])
 
 
 if __name__ == "__main__":

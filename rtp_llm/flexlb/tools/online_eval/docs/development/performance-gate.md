@@ -101,7 +101,7 @@ python3 tools/online_eval/scripts/commands/compare_runs.py \
 
 ## 报告曲线
 
-单 run 报告用四张独立图展示三项引擎 TPS 与各自门禁线、发送/成功/失败 QPS、TTFT/调度等待/Model forward，以及 Prefill 实际 token 命中率。调度等待取客户端 schedule 耗时 p99，包含调度处理；命中率取 Mock Prefill 的命中 token 与输入 token 计数器速率之比，缺采和零分母保留断线。对比复用归档曲线；同名且坐标轴、单位、指标集合一致的时间面板生成合图，其余独立展示。
+单 run 报告用六张独立图展示三项引擎 TPS 与各自门禁线、发送/成功/失败 QPS、TTFT/调度等待/Model forward、Prefill 实际 token 命中率、P 执行 batch size 分布，以及 P Waiting/Running。batch size 直方图每个执行批更新一次；均值取窗口内 sum/count，分位数由桶估算，不把 Master 派发批大小或当前活跃请求数当作执行批大小。调度等待取客户端 schedule 耗时 p99，包含调度处理；命中率取 Mock Prefill 的命中 token 与输入 token 计数器速率之比，缺采和零分母保留断线。对比复用归档曲线；同名且坐标轴、单位、指标集合一致的时间面板生成合图，其余独立展示。
 A 为第一个输入，B 为第二个输入；A 虚线，B 实线。同指标同色。单 run 各指标仍独立使用绝对标准。
 请求曲线按 1 秒分桶：TPS 按成功完成时刻，延迟/成功率按到达 cohort（包含窗口后终态），不能把桶 p99 当作整个测量窗口 p99。
 监控曲线从 evidence 同级 `telemetry/*/queries.json` 读取，保留 P、D 两种角色和缺采。

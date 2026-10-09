@@ -20,6 +20,21 @@ from monitoring.telemetry import http_text, shared_samples_since
 
 
 class ContractTest(unittest.TestCase):
+    def test_prefill_batch_size_uses_histogram(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = PrometheusSession(tmp, {"mock": "http://unused/metrics"})
+            session.started = time.time() - 1
+            with patch.object(session, "api", return_value={"result": []}):
+                with self.assertRaisesRegex(RuntimeError, "incomplete Prometheus archive"):
+                    session.archive()
+            queries = json.loads((Path(tmp) / "queries.json").read_text())["queries"]
+            expression = queries["mock/prefill_batch_size_mean"]["promql"]
+            self.assertIn("rate(mock_prefill_batch_size_sum{job=\"mock\"}[10000ms])", expression)
+            self.assertIn("rate(mock_prefill_batch_size_count{job=\"mock\"}[10000ms])", expression)
+            self.assertIn("histogram_quantile(0.9", queries["mock/prefill_batch_size_p90"]["promql"])
+            self.assertIn("rate(mock_prefill_batch_size_bucket{job=\"mock\"}[10000ms])",
+                          queries["mock/prefill_batch_size_p90"]["promql"])
+
     def test_schedule_response_query_uses_current_api_timer(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = PrometheusSession(tmp, {"master": "http://unused/prometheus"})

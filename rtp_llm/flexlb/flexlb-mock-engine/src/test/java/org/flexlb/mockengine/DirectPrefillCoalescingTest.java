@@ -100,6 +100,12 @@ class DirectPrefillCoalescingTest {
         assertEquals(6, stats.prefillBatchRequests.sum());
         assertEquals(4, stats.maxPrefillBatchSize.get(),
                 "the coalesced batch should hold 4 requests (direct_batch_size_max)");
+        @SuppressWarnings("unchecked")
+        List<Long> buckets = (List<Long>) prefill.getSnapshot().get("prefill_batch_size_buckets");
+        assertEquals(2L, buckets.get(0)); // two single-request batches
+        assertEquals(2L, buckets.get(1)); // no batch of size 2
+        assertEquals(3L, buckets.get(2)); // the remaining batch has size 4
+        assertEquals(3L, buckets.get(buckets.size() - 1)); // +Inf equals count
         assertFalse(prefill.isLeakDetected());
     }
 

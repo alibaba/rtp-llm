@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -62,6 +63,7 @@ import java.util.concurrent.atomic.LongAdder;
  * engine stop/start, and Prometheus metrics endpoints.
  */
 public final class JavaMockEngineCluster {
+    static final int[] PREFILL_BATCH_SIZE_BUCKETS = {1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128};
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     /** Default PREFILL pool token capacity per engine (Python --prefill/--decode-total-kv-tokens default). */
@@ -1144,6 +1146,8 @@ public final class JavaMockEngineCluster {
         // contamination in shared-stats topologies.
         private final LongAdder prefillBatchesExecuted = new LongAdder();
         private final LongAdder prefillBatchRequestsExecuted = new LongAdder();
+        private final AtomicLongArray prefillBatchSizeCounts =
+                new AtomicLongArray(PREFILL_BATCH_SIZE_BUCKETS.length + 1);
         private final AtomicInteger maxPrefillBatchSizeExecuted = new AtomicInteger();
         private final AtomicInteger pendingRequests = new AtomicInteger();
         private final AtomicInteger waitingPrefillRequests = new AtomicInteger();
@@ -3736,6 +3740,10 @@ public final class JavaMockEngineCluster {
             // Per-engine mirror of the same observation (see field comment).
             prefillBatchesExecuted.increment();
             prefillBatchRequestsExecuted.add(shapes.size());
+            int sizeBucket = 0;
+            while (sizeBucket < PREFILL_BATCH_SIZE_BUCKETS.length
+                    && shapes.size() > PREFILL_BATCH_SIZE_BUCKETS[sizeBucket]) sizeBucket++;
+            prefillBatchSizeCounts.incrementAndGet(sizeBucket);
             maxPrefillBatchSizeExecuted.accumulateAndGet(shapes.size(), Math::max);
             // Per-engine prefill busy: one executionMs per scheduled batch (the
             // execution duration is known at schedule time in the mock model).
@@ -6669,6 +6677,13 @@ public final class JavaMockEngineCluster {
             snap.put("prefill_batches", prefillBatchesExecuted.sum());
             snap.put("prefill_batch_requests", prefillBatchRequestsExecuted.sum());
             snap.put("max_prefill_batch_size", maxPrefillBatchSizeExecuted.get());
+            List<Long> batchSizeBuckets = new ArrayList<>(prefillBatchSizeCounts.length());
+            long cumulativeBatches = 0;
+            for (int i = 0; i < prefillBatchSizeCounts.length(); i++) {
+                cumulativeBatches += prefillBatchSizeCounts.get(i);
+                batchSizeBuckets.add(cumulativeBatches);
+            }
+            snap.put("prefill_batch_size_buckets", batchSizeBuckets);
             // Business completion totals stay cumulative. TPS is an execution
             // window with its own atomic numerator/time ledger (see METRICS.md).
             snap.put("context_compute_tokens_total", lifetimeContextComputeTokens.sum());

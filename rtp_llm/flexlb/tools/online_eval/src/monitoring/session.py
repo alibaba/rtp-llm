@@ -29,8 +29,8 @@ ENGINE_FIELDS = {
     "context_requests_total": "mock_context_requests_total",
     "cache_evictions": "mock_engine_cache_evictions_total",
     "prefill_ms_avg": "mock_engine_prefill_ms_avg",
-    "prefill_batches": "mock_prefill_batches_total",
-    "prefill_batch_requests": "mock_prefill_batch_requests_total",
+    "prefill_batches": "mock_prefill_batch_size_count",
+    "prefill_batch_requests": "mock_prefill_batch_size_sum",
     "cache_key_hits": "mock_engine_cache_key_hits_total",
     "cache_keys_requested": "mock_engine_cache_keys_requested_total",
 }
@@ -341,12 +341,23 @@ class PrometheusSession:
                 queries["mock/cache_hit_ratio"] = (
                     f"sum by (role) (rate(mock_hit_tokens_total{sel}[{window_ms}ms])) / sum by (role) (rate(mock_context_tokens_total{sel}[{window_ms}ms]))"
                 )
+                batch_requests = f"sum by (role) (rate(mock_prefill_batch_size_sum{sel}[{window_ms}ms]))"
+                batches = f"sum by (role) (rate(mock_prefill_batch_size_count{sel}[{window_ms}ms]))"
+                buckets = f"sum by (role, le) (rate(mock_prefill_batch_size_bucket{sel}[{window_ms}ms]))"
+                queries["mock/prefill_batch_size_mean"] = f"({batch_requests}) / ({batches})"
+                for percentile, quantile in (("p50", 0.5), ("p90", 0.9), ("p99", 0.99)):
+                    queries["mock/prefill_batch_size_" + percentile] = (
+                        f"histogram_quantile({quantile}, {buckets})"
+                    )
                 # Online panels sum priority series within each engine/DP.
                 # Keep engines distinct; fleet sums are not execution throughput.
                 for metric in ("rtp_llm_context_tps", "rtp_llm_context_tps_with_cache"):
                     per_engine = f"sum without (priority) ({metric}{sel})"
                     queries["mock/" + metric + "_per_engine"] = per_engine
                     queries["mock/" + metric + "_engine_mean"] = f"avg by (role) ({per_engine})"
+                queries["mock/rtp_llm_generate_tps_engine_mean"] = (
+                    f"avg by (role) (rtp_llm_generate_tps{sel})"
+                )
                 for label, metric in (
                     ("context_execution_tps_avg", "rtp_llm_context_tps"),
                     (

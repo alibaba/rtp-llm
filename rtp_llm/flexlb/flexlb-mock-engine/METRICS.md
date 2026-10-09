@@ -27,6 +27,14 @@ still requires matching block size and topology. No GPU allocation is measured.
 
 ## Deliberately retained mock names
 
+`mock_prefill_batch_size` is a Prometheus histogram of the size of each
+Prefill execution batch after engine-side regrouping. Its `_bucket`, `_count`
+and `_sum` series are available per engine and aggregated by role. The buckets
+represent every executed batch, including batches between scrapes; sampled
+`rtp_llm_context_batch_size` events and the instantaneous active-request
+gauge do not have that property. `/snapshot` retains `prefill_batches`,
+`prefill_batch_requests`, and `max_prefill_batch_size` for lifecycle checks.
+
 | Family | Actual consumer | Why the proposed real name is incorrect |
 |---|---|---|
 | `mock_engine_held_blocks`, `mock_engine_referenced_blocks` | `aggregate_canvas_run.py` → KV block-pool panels | Held means keyless allocations; referenced means indexed cache-key blocks in use. Real request-ref includes both classes; free means unallocated. Neither mock split can be renamed to free/request-ref. In this mock pool, request-held total = held + referenced = total − available. |

@@ -22,6 +22,7 @@ def performance_axes(*, include_hit_pct=False):
     ]
     if include_hit_pct:
         names.append(("hit_pct", "命中率 %"))
+    names.append(("batch", "请求 / 执行批"))
     names.extend((
         ("tokens", "tokens"), ("blocks", "KV blocks"),
         ("seconds", "s"), ("forward", "执行 tok/s"),
@@ -35,8 +36,11 @@ def performance_metric_style(source, metric, role, *, include_hit_pct=False):
     if include_hit_pct and metric == "cache_hit_ratio" and role == "P":
         return "P 实际 token 命中率", "缓存命中率", "hit_pct", True
     primary = metric in {"rtp_llm_context_tps_engine_mean",
-                         "rtp_llm_context_tps_with_cache_engine_mean"}
-    if primary:
+                         "rtp_llm_context_tps_with_cache_engine_mean",
+                         "rtp_llm_generate_tps_engine_mean"}
+    if metric == "rtp_llm_generate_tps_engine_mean":
+        group, axis = "Decode TPS", "forward"
+    elif primary:
         group, axis = "Prefill TPS", "forward"
     elif metric in {"rtp_llm_context_tps_per_engine", "rtp_llm_context_tps_with_cache_per_engine"}:
         group, axis = "Prefill 逐引擎 TPS", "forward"

@@ -65,6 +65,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BlockPoolMetricsObservabilityTest {
 
+    @Test
+    void prefillBatchHistogramIsExportedInBothMetricModes() throws Exception {
+        MockPerformanceModel model = performanceModel(tempDir, "10");
+        JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
+        assertEquals(0, enqueueAndFetch(prefill, batch(99, slot(0,
+                inputWithBlockKeys(990L, SPB, List.of(990L))))).getErrorsCount());
+
+        String perEngine = httpGet(controlPort(), "/metrics?per_engine=true");
+        String aggregate = httpGet(controlPort(), "/metrics");
+        assertTrue(perEngine.contains("mock_prefill_batch_size_bucket{"));
+        assertTrue(perEngine.contains("le=\"1\"} 1"));
+        assertTrue(perEngine.contains("le=\"+Inf\"} 1"));
+        assertTrue(aggregate.contains("mock_prefill_batch_size_count{role=\"prefill\"} 1"));
+        assertTrue(aggregate.contains("mock_prefill_batch_size_sum{role=\"prefill\"} 1"));
+        assertFalse(perEngine.contains("mock_prefill_batches_total"));
+        assertFalse(perEngine.contains("mock_prefill_batch_requests_total"));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final int SPB = 1024;

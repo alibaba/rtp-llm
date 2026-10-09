@@ -1012,8 +1012,7 @@ final class MockControlServer {
                 {"mock_engine_admission_open", "whether new work RPCs may enter", "gauge"},
                 {"mock_engine_admitted_rpcs_total", "work RPCs admitted at entry before removal", "counter"},
                 {"mock_engine_rejected_rpcs_total", "work RPCs rejected by removal admission gate", "counter"},
-                {"mock_prefill_batches_total", "executed prefill batches", "counter"},
-                {"mock_prefill_batch_requests_total", "requests in executed prefill batches", "counter"},
+                {"mock_prefill_batch_size", "executed prefill batch size in requests", "histogram"},
                 {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
                 {"rtp_llm_running_stream_size", "currently executing scheduler streams", "gauge"},
                 {"rtp_llm_wait_stream_size", "scheduler waiting streams (excludes pre-GENERATE decode reservations)", "gauge"},
@@ -1089,9 +1088,7 @@ final class MockControlServer {
                 for (String name : List.of("hit_tokens_total", "context_requests_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
                 }
-                for (String name : List.of("prefill_batches", "prefill_batch_requests")) {
-                    sb.append(String.format("mock_%s_total{%s} %s%n", name, labels, snap.get(name)));
-                }
+                appendPrefillBatchHistogram(sb, labels, List.of(snap));
                 appendPrefillTps(sb, labels, List.of(snap), true);
             } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
@@ -1147,6 +1144,7 @@ final class MockControlServer {
                 for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
                     sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
                 }
+                appendPrefillBatchHistogram(sb, label, group);
                 appendPrefillTps(sb, label, group, false);
             } else {
                 sb.append(String.format("mock_generate_tokens_total{%s} %d%n", label, sumLong(group, "generate_tokens_total")));
@@ -1170,6 +1168,25 @@ final class MockControlServer {
 
             appendLatencyAggregates(sb, label, group, bucket.getKey());
         }
+    }
+
+    private static void appendPrefillBatchHistogram(StringBuilder sb, String labels,
+                                                     List<Map<String, Object>> snapshots) {
+        int finiteBuckets = JavaMockEngineCluster.PREFILL_BATCH_SIZE_BUCKETS.length;
+        for (int i = 0; i <= finiteBuckets; i++) {
+            long count = 0;
+            for (Map<String, Object> snapshot : snapshots) {
+                count += ((Number) ((List<?>) snapshot.get("prefill_batch_size_buckets")).get(i)).longValue();
+            }
+            String bound = i == finiteBuckets ? "+Inf"
+                    : Integer.toString(JavaMockEngineCluster.PREFILL_BATCH_SIZE_BUCKETS[i]);
+            sb.append(String.format("mock_prefill_batch_size_bucket{%s,le=\"%s\"} %d%n",
+                    labels, bound, count));
+        }
+        sb.append(String.format("mock_prefill_batch_size_count{%s} %d%n",
+                labels, sumLong(snapshots, "prefill_batches")));
+        sb.append(String.format("mock_prefill_batch_size_sum{%s} %d%n",
+                labels, sumLong(snapshots, "prefill_batch_requests")));
     }
 
     private static void appendPrefillTps(StringBuilder sb, String labels,
