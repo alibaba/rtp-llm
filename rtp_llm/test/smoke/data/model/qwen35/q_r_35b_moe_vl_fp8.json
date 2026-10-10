@@ -44,7 +44,7 @@
                     "total_tokens": 2873,
                     "completion_tokens": 100,
                     "prompt_tokens_details": {
-                        "cached_tokens": 2048,
+                        "cached_tokens": null,
                         "image_tokens": 2752
                     }
                 }
