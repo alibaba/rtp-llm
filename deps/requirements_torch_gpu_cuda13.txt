@@ -24,7 +24,6 @@ triton==3.6.0
 # CUDA-graph smoke case generation_prefill_cuda_graph_sm120 (cuda13/sm12x).
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_jit_cache-0.6.9%2B8c4f4dcf.cu132-cp39-abi3-manylinux_2_28_x86_64.whl
 
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl

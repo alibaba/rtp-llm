@@ -689,9 +689,6 @@ flash-mla @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang
 flashinfer-cubin @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
     # via -r deps/requirements_cuda13_arm.txt
-flashinfer-jit-cache @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_jit_cache-0.6.9%2B8c4f4dcf.cu132-cp39-abi3-manylinux_2_28_aarch64.whl \
-    --hash=sha256:65e1e44df4529ee7185d4adaddf92b0a803e4e1c4d62aae461519798d0db011d
-    # via -r deps/requirements_cuda13_arm.txt
 flashinfer-python @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl \
     --hash=sha256:80b268711c20b00ff3271953a4c7c7574fe2adb69994792c78e2f6fa026a66d4
     # via
