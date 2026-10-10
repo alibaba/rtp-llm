@@ -1,4 +1,22 @@
 #include <unordered_set>
+#include "autil/Scope.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <unistd.h>
+#include <limits.h>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
@@ -182,6 +200,7 @@ void PrefillRpcServer::batchContextCleanupTick() {
                 if (stream && (stream->hasError() || stream->getStatus() == StreamState::FINISHED)) {
                     finished_handles.push_back(cancel_registry_->find(entry.context->request_id));
                     entry.reserved = false;
+                    entry.context->markRpcHandlingCompleted();
                     completed.push_back(std::move(entry.context));
                 }
             }
@@ -271,6 +290,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     OnflightScope onflight_scope(this, request_id);
     auto          generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
+    const int uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            generate_context.markRpcHandlingCompleted();
+        }
+    });
     auto input                 = QueryConverter::transQuery(request);
     input->request_deadline_ms = local_deadline;
     if (local_deadline <= currentTimeMs() || server_context->IsCancelled()) {
@@ -605,6 +630,22 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                             request->unique_key().c_str());
     }
     return grpc::Status::OK;
+} catch (const std::invalid_argument& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    const auto error_info =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 grpc::Status

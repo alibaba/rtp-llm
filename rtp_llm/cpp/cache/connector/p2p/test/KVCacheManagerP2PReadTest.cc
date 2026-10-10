@@ -10,7 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
@@ -66,9 +66,9 @@ protected:
 
         const auto config = test::makeSimpleMhaCacheConfig(
             /*layer_num=*/2, /*block_num=*/8, /*tokens_per_block=*/1, DataType::TYPE_FP16);
-        allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+        allocator_ = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
         ASSERT_TRUE(allocator_->init());
-        const auto pool = allocator_->getDeviceBlockPool();
+        const auto pool = allocator_->groupBlockPools().front();
         const auto allocated = pool->malloc(5);
         ASSERT_TRUE(allocated.has_value());
         pool->incRef(*allocated);
@@ -76,7 +76,7 @@ protected:
         source.initGroups(config.topologyPtr());
         // Neither key values nor physical IDs encode logical prefix positions.
         source.cacheKeys() = {901, 103, 705, 207, 509};
-        source.mutableBlockIds(0).assign(
+        source.mutableBlockIds(source.groupTags().at(0)).assign(
             {(*allocated)[4], (*allocated)[2], (*allocated)[0], (*allocated)[3], (*allocated)[1]});
         resource_ = allocator_->incrKVCacheRef(source, source.cacheKeys(), /*is_connector=*/false);
         pool->decRef(*allocated);
@@ -142,7 +142,7 @@ protected:
     }
 
     std::unique_ptr<TestRpcServer> worker_, prefill_;
-    std::shared_ptr<SingleTypeKVCacheAllocator> allocator_;
+    std::shared_ptr<CoordinatorCacheManager> allocator_;
     KVCacheResourcePtr resource_;
     std::unique_ptr<KVCacheManager> manager_;
     std::shared_ptr<MockGenerateStream> stream_;
@@ -188,7 +188,7 @@ TEST_P(KVCacheManagerP2PReadTest, TreePrefixDeterminesWireRoutes) {
 
     std::map<int64_t, int> expected;
     for (size_t i = scenario.expected_start; i < scenario.expected_start + scenario.expected_count; ++i) {
-        expected.emplace(resource_->cacheKeys()[i], resource_->blocks(0)[i]);
+        expected.emplace(resource_->cacheKeys()[i], resource_->blocks(resource_->groupTags().at(0))[i]);
     }
     std::set<int> layers;
     for (const auto& layer : route.layer_blocks()) {

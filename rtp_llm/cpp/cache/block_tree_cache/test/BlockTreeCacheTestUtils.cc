@@ -152,9 +152,7 @@ makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBloc
 bool cudaAvailable() {
     try {
         return torch::cuda::is_available();
-    } catch (const std::exception&) {
-        return false;
-    }
+    } catch (const std::exception&) { return false; }
 }
 
 DeviceBlockPoolPtr
@@ -310,10 +308,10 @@ void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNod
     for (const MultiNodeResource& resource : resources) {
         RTP_LLM_CHECK(resource.tier == Tier::DEVICE);
         RTP_LLM_CHECK(resource.group_set_id < group_sets.size());
-        const GroupSetPtr& group_set = group_sets[resource.group_set_id];
-        const auto&        group_ids = group_set->groupIds();
-        const auto&        pools     = group_set->devicePools();
-        RTP_LLM_CHECK(group_ids.size() == pools.size());
+        const GroupSetPtr& group_set  = group_sets[resource.group_set_id];
+        const auto&        group_tags = group_set->groupTags();
+        const auto&        pools      = group_set->devicePools();
+        RTP_LLM_CHECK(group_tags.size() == pools.size());
         for (const auto& [_, blocks] : resource.node_blocks) {
             RTP_LLM_CHECK(blocks.size() == pools.size());
             for (size_t member_group_id = 0; member_group_id < blocks.size(); ++member_group_id) {
@@ -375,17 +373,17 @@ namespace {
 
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     const bool has_uninitialized = std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
-        return group_set != nullptr && group_set->groupIds().empty();
+        return group_set != nullptr && group_set->groupTags().empty();
     });
     if (!has_uninitialized) {
         return;
     }
 
-    std::vector<GroupBase> groups;
+    std::vector<block_transfer_engine_test::TestGroupConfig> groups;
     groups.reserve(group_sets.size());
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets[group_set_id];
-        RTP_LLM_CHECK(group_set != nullptr && group_set->groupIds().empty());
+        RTP_LLM_CHECK(group_set != nullptr && group_set->groupTags().empty());
 
         CacheGroupType type               = CacheGroupType::FULL;
         size_t         seq_size_per_block = 1;
@@ -412,7 +410,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {group_set_id});
+        group_sets[group_set_id]->initialize(group_set_id, topology, {topology->groupTags()[group_set_id]});
     }
 }
 
@@ -432,24 +430,23 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         storage_backend = nullptr;
     }
     std::shared_ptr<const CacheTopology> storage_topology;
-    std::vector<DeviceBlockPoolPtr>      storage_device_pools;
+    StorageBackend::PoolsByTag           storage_pools;
     StorageBackend::BufferResolver       storage_buffer_resolver;
     if (storage_backend != nullptr) {
         storage_topology = group_sets.front()->topologyPtr();
-        std::vector<DeviceBlockPoolPtr> device_pools(storage_topology->groups().size());
         for (const auto& group_set : group_sets) {
-            for (size_t member = 0; member < group_set->groupIds().size(); ++member) {
-                device_pools[group_set->groupIds()[member]] = group_set->devicePools()[member];
+            for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                RTP_LLM_CHECK(
+                    storage_pools.emplace(group_set->groupTags()[member], group_set->devicePools()[member]).second);
             }
         }
-        storage_device_pools    = device_pools;
-        storage_buffer_resolver = [topology     = storage_topology,
-                                   device_pools = std::move(device_pools)](int layer_id, int group_id, int block_id) {
-            const auto& layers = topology->groupById(static_cast<size_t>(group_id)).layer_ids;
-            const auto  layer  = std::find(layers.begin(), layers.end(), layer_id);
+        storage_buffer_resolver = [topology = storage_topology,
+                                   pools    = storage_pools](int layer_id, const std::string& tag, int block_id) {
+            const auto layers = topology->layerIdsForGroup(tag);
+            const auto layer  = std::find(layers.begin(), layers.end(), layer_id);
             RTP_LLM_CHECK(layer != layers.end());
-            return device_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
-                static_cast<int>(std::distance(layers.begin(), layer)), block_id);
+            return pools.at(tag)->convertIndexToBuffer(static_cast<int>(std::distance(layers.begin(), layer)),
+                                                       block_id);
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
@@ -478,7 +475,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
-                                                              std::move(storage_device_pools),
+                                                              std::move(storage_pools),
                                                               std::move(storage_buffer_resolver)),
                                 "StorageBackend init failed");
     }
@@ -697,9 +694,7 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
-    } catch (...) {
-        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
-    }
+    } catch (...) { ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception"; }
     cache.task_pool_.reset();
     return false;
 }
@@ -796,7 +791,7 @@ void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t
 void expectDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
     for (const auto& buffer : pool->convertIndexToBuffer(0, block)) {
         auto                view = torch::from_blob(buffer.addr,
-                                                    {static_cast<int64_t>(buffer.size_bytes)},
+                                     {static_cast<int64_t>(buffer.size_bytes)},
                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         const torch::Tensor host = view.cpu();
         const auto*         data = host.data_ptr<uint8_t>();
@@ -869,14 +864,14 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     auto full =
         block_transfer_engine_test::makeTestGroupSet(0,
                                                      environment->topology,
-                                                     {0, 1},
+                                                     {"group0", "group1"},
                                                      {environment->device_pools[0], environment->device_pools[1]},
                                                      environment->host_pools[0],
                                                      options.enable_disk ? environment->disk_pools[0] : nullptr);
     auto swa            = block_transfer_engine_test::makeTestGroupSet(1,
                                                             environment->topology,
-                                                                       {2},
-                                                                       {environment->device_pools[2]},
+                                                            {"group2"},
+                                                            {environment->device_pools[2]},
                                                             environment->host_pools[1],
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};

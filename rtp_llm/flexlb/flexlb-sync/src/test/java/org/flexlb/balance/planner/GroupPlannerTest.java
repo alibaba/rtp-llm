@@ -38,6 +38,27 @@ class GroupPlannerTest {
                 enqueuedAtMs, /* expiresAtMs */ BIG, seqLen, /* hitCache */ 0L);
     }
 
+    @Test
+    void selectionShapePreservesOverflowAndRejectedGrowthBoundaries() {
+        var huge = item(1, Long.MAX_VALUE / 2 + 1, 10);
+        var tiny = item(2, 1, 0);
+        var selected = GroupPlanner.select(List.of(huge, tiny), GroupPlanner.itemAccess(),
+                new Constraints(1024, Long.MAX_VALUE, Long.MAX_VALUE, 0, 0), null);
+        assertEquals(List.of(huge), selected.items());
+        assertEquals(Shape.empty().add(huge.seqLen()), selected.shape());
+        assertEquals(10, selected.windowOpenedAtMs(), "rejected items cannot open the window earlier");
+
+        var first = item(3, 10, 20);
+        var second = item(4, 20, 10);
+        var third = item(5, 100, 0);
+        var budgeted = GroupPlanner.select(List.of(first, second, third), GroupPlanner.itemAccess(),
+                new Constraints(1024, BIG, BIG, 250, 0), HUNDRED_PER_MEMBER);
+        assertEquals(List.of(first, second), budgeted.items());
+        assertEquals(new Shape(2, 20, 40, 30), budgeted.shape());
+        assertEquals(10, budgeted.windowOpenedAtMs());
+        assertEquals(200, budgeted.selectedPredictionMs().orElseThrow());
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     @Nested
     @DisplayName("Item validation")

@@ -47,6 +47,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private static final String MASTER_NAMESPACE = "whale-master";
     private static final String MASTER_LEADER_PATH = "/master_lb_leader/";
+    @Getter
     @Setter
     private LBConsistencyConfig lbConsistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
@@ -98,7 +99,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private void initializeRoleId() {
         roleId = System.getenv("HIPPO_ROLE");
         if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("Environment variable HIPPO_ROLE is not set or is blank");
+            throw new IllegalArgumentException("HIPPO_ROLE is required when needConsistency=true");
         }
     }
 

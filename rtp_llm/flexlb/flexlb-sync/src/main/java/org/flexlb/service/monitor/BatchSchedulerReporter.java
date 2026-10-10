@@ -280,28 +280,6 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report the count of inflight entries evicted from the scheduler's own
-     * request-slot ledger by the TTL maintenance sweep via
-     * {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Tagged role=SCHEDULER + engineIp="scheduler" — the ledger that
-     * evicted — plus a reason bucket. The former method tagged these
-     * scheduler-level evictions with a hardcoded role=PREFILL and no reason,
-     * mislabelling them as an endpoint series; one tag schema with the
-     * endpoint series lets a single role='*' grouping compare scheduler and
-     * endpoint ledgers.
-     *
-     * @param reason eviction reason bucket ({@code ttl} for the scheduler
-     *               stale-inflight sweep)
-     * @param count  number of entries evicted in this maintenance cycle
-     */
-    public void reportSchedulerInflightTtlExpired(String reason, int count) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
-                "role", SCHEDULER_ROLE,
-                "reason", reason);
-        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
-    }
-
-    /**
      * Report inflight entries evicted from an endpoint ledger (prefill/decode
      * orphan sweeps via {@link org.flexlb.balance.endpoint.EndpointRegistry}
      * and friends) via the same {@code app.flexlb.inflight.ttl.expired.qps}

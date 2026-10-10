@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,25 +39,31 @@ public:
 
     virtual ~GroupSet() = default;
 
-    void initialize(size_t group_set_id, std::shared_ptr<const CacheTopology> topology, std::vector<size_t> group_ids);
+    void initialize(size_t                               group_set_id,
+                    std::shared_ptr<const CacheTopology> topology,
+                    std::vector<std::string>             group_tags,
+                    size_t                               physical_payload_bytes = 0);
 
     size_t groupSetId() const {
         return group_set_id_;
     }
-    const std::vector<size_t>& groupIds() const {
-        return group_ids_;
+    const std::vector<std::string>& groupTags() const {
+        return group_tags_;
     }
     std::shared_ptr<const CacheTopology> topologyPtr() const {
         return topology_;
     }
-    const GroupBase& groupAt(size_t member_group_id) const {
-        return topology_->groupById(group_ids_[member_group_id]);
+    const GroupBase& group(std::string_view tag) const {
+        return topology_->group(tag);
     }
     size_t payloadBytes() const {
         return payload_bytes_;
     }
+    bool usesPhysicalPayloadGeometry() const {
+        return uses_physical_payload_geometry_;
+    }
     CacheGroupType groupType() const {
-        return groupAt(0).policy.group_type;
+        return group(groupTags().front()).policy.group_type;
     }
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
@@ -89,8 +97,9 @@ private:
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
     size_t                                  group_set_id_{0};
     std::shared_ptr<const CacheTopology>    topology_;
-    std::vector<size_t>                     group_ids_;
+    std::vector<std::string>                group_tags_;
     size_t                                  payload_bytes_{0};
+    bool                                    uses_physical_payload_geometry_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

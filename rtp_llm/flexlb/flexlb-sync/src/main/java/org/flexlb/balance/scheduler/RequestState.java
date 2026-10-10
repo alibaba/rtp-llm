@@ -28,6 +28,11 @@ public record RequestState(
         }
     }
 
+    /** An expected batch ID of zero accepts any batch, including route delivery. */
+    public boolean matchesBatch(long expectedBatchId) {
+        return expectedBatchId == 0L || batchId == expectedBatchId;
+    }
+
     public enum Phase {
         QUEUED,
         DISPATCHING,

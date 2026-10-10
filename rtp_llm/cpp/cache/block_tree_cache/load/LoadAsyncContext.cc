@@ -147,6 +147,9 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                   && storage_request_.local_matched_blocks_num == local_matched_blocks_
                   && matched_blocks_num >= local_matched_blocks_
                   && matched_blocks_num <= storage_request_.handles.size());
+    while (matched_blocks_num > local_matched_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
+        --matched_blocks_num;
+    }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {
         storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),
@@ -163,7 +166,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                                      handles.end(),
                                      [&](const StorageBlockHandle& handle) {
                                          return !storage_backend_->isHandleRequired(
-                                             key_index, matched_blocks_num, handle.group_id);
+                                             key_index, matched_blocks_num, handle.tag);
                                      }),
                       handles.end());
     }

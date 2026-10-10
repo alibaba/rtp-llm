@@ -1,6 +1,5 @@
 from typing import Optional, Tuple
 
-import flashinfer
 import torch
 from torch import nn
 
@@ -19,13 +18,16 @@ class RMSNorm(BaseNorm):
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        stream_id = torch.cuda.current_stream().cuda_stream
-        if output is None:
-            output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
+        # Lazy import: this module is also imported where flashinfer is
+        # absent (e.g. ppu/rocm), so importing it must not require flashinfer.
+        import flashinfer
+
+        return flashinfer.norm.rmsnorm(
+            hidden_states,
+            self.weight.data,
+            eps=self.variance_epsilon,
+            out=output,
         )
-        return output
 
 
 class RMSResNorm(BaseResNorm):
@@ -35,9 +37,13 @@ class RMSResNorm(BaseResNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
+        import flashinfer
+
+        flashinfer.norm.fused_add_rmsnorm(
+            hidden_states,
+            residual,
+            self.weight.data,
+            eps=self.variance_epsilon,
         )
         return hidden_states, residual
 
@@ -103,6 +109,8 @@ class FusedQKRMSNorm(nn.Module):
         self.enable_pdl = enable_pdl
 
     def forward(self, hidden_states: torch.Tensor):
+        import flashinfer
+
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
         qkv = hidden_states.reshape(

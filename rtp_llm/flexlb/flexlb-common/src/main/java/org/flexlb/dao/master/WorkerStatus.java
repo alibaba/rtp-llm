@@ -70,6 +70,14 @@ public class WorkerStatus {
             long executionTimeMs,
             PriorityPreemptionProgress priorityPreemptionProgress) {
 
+        /** A pending observation that reports only priority cancellation progress. */
+        @JsonIgnore
+        public boolean isPriorityCancelOverlayOnly() {
+            return (priorityPreemptionProgress == PriorityPreemptionProgress.CANCELING
+                    || priorityPreemptionProgress == PriorityPreemptionProgress.CANCELED)
+                    && phase == TaskPhase.PENDING;
+        }
+
         private static TaskObservation copyOf(TaskInfo task) {
             return new TaskObservation(
                     task.getRequestId(),

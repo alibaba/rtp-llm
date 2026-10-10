@@ -4,6 +4,7 @@ from typing import Optional
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.ops import TaskType
+from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
 
 
 def create_custom_module(
@@ -11,20 +12,31 @@ def create_custom_module(
     tokenizer: Optional[BaseTokenizer],
 ):
     task_type = config.task_type
-    if task_type == TaskType.LANGUAGE_MODEL:
+    # An absent provider is optional; a broken installed generation provider is not.
+    if (
+        task_type == TaskType.LANGUAGE_MODEL
+        and not import_optional_internal_source_entrypoint(
+            "models.downstream_modules.utils"
+        )
+    ):
         return None
-
     # try import internal module
     try:
         from internal_source.rtp_llm.models.downstream_modules.utils import (
-            create_custom_module,
+            create_custom_module as create_internal_module,
         )
 
-        internal_module = create_custom_module(config, tokenizer)
+        internal_module = create_internal_module(config, tokenizer)
         if internal_module is not None:
             return internal_module
     except ImportError:
+        # Non-generation tasks retain their existing external-module fallback.
+        if task_type == TaskType.LANGUAGE_MODEL:
+            raise
         logging.exception("internal module not found, using external module")
+
+    if task_type == TaskType.LANGUAGE_MODEL:
+        return None
 
     model_type = config.model_type
     assert tokenizer is not None, "tokenizer should not be None"

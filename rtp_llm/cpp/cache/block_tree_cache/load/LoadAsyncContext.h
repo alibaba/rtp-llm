@@ -60,6 +60,9 @@ public:
     size_t   matchedBlocks(Tier tier) const;
     bool     needBackendMatch() const;
 
+    void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
+        valid_prefix_ = std::move(valid_prefix);
+    }
     void setMatchCallback(MatchCallback callback);
     void setSettlementReadyCallback(SettlementReadyCallback callback);
     void startBackendMatch();
@@ -107,6 +110,7 @@ private:
 
     std::shared_ptr<StorageBackend> storage_backend_;
     StorageRequest                  storage_request_;
+    std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};

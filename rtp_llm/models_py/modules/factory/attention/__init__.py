@@ -135,7 +135,8 @@ elif device_type == DeviceType.Cuda:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
-else:
+elif device_type == DeviceType.Ppu:
+    # PPU uses the CUDA-flavored attention implementations.
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,
@@ -153,6 +154,9 @@ else:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+else:
+    # Cpu / Yitian / ArmCpu: no accelerator attention backend to register.
+    pass
 
 # Out-of-tree backends registered a hook before this module existed. Ordering in
 # these lists is priority (earlier wins), so a backend inserts rather than

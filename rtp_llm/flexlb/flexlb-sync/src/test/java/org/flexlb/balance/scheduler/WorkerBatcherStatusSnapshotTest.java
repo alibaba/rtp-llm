@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -33,7 +32,7 @@ class WorkerBatcherStatusSnapshotTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
         WorkerBatcher runtime = new WorkerBatcher(
-                "snapshot-test", endpoint, new FlexlbConfig(),
+                "snapshot-test", endpoint, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
                 mock(EndpointEventProjector.class));
 
@@ -68,7 +67,7 @@ class WorkerBatcherStatusSnapshotTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "snapshot-test",
                 endpoint,
-                new FlexlbConfig(),
+                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
                 mock(EndpointEventProjector.class));
 

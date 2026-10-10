@@ -57,11 +57,34 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
     requires_shared = True
 
     @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        if config.moe_strategy == "auto":
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+                _mega_moe_se_available,
+            )
+
+            # Preserve automatic selection: without fused shared experts,
+            # the ordinary Mega strategy owns routed + separate shared work.
+            checker.check(_mega_moe_se_available())
+
+    @classmethod
     def get_executor_class(cls) -> Type:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
             MegaMoeSEExecutor,
+            _mega_moe_se_available,
         )
 
+        if not _mega_moe_se_available():
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+                MegaMoeExecutor,
+            )
+
+            # Current upstream Mega removed the legacy shared_recipe API.
+            # Keep explicit mega_moe_se configurations usable with the same
+            # shared weights/quantization: includes_shared_expert=False makes
+            # Fp8Fp4MoELayer build its existing standalone shared executor.
+            return MegaMoeExecutor
         return MegaMoeSEExecutor
 
 

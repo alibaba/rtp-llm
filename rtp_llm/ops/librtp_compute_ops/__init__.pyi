@@ -131,7 +131,6 @@ class LayerKVCache:
         kv_cache_base: torch.Tensor,
         seq_size_per_block: int,
         layer_id: int = -1,
-        group_id: int = -1,
         tag: str = "default",
         kv_scale_base: torch.Tensor | None = None,
     ) -> None: ...
@@ -155,12 +154,6 @@ class LayerKVCache:
     def layer_id(self) -> int:
         """
         Global layer id
-        """
-
-    @property
-    def group_id(self) -> int:
-        """
-        Cache group id (-1 = default)
         """
 
     @property
@@ -198,6 +191,10 @@ class KVCache:
         ...
     def get_kernel_seq_size_per_block(self, arg0: str) -> int:
         """Return the kernel sequence size per block for a cache tag."""
+        ...
+
+    def get_entries_per_block(self, arg0: str) -> int:
+        """Opaque logical entries per layer-cache block, excluding padding; zero for other specs."""
         ...
 
 class ParamsBase:
@@ -263,6 +260,9 @@ class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
 class PyContextParallelParams:
+    prefill_qkv_restore_indice_cpu: torch.Tensor
+    prefill_qkv_padding_mask_cpu: torch.Tensor
+    prefill_mm_spans: torch.Tensor
     prefill_actual_input_lengths_cpu: torch.Tensor
     prefill_prefix_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
@@ -307,6 +307,9 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    need_all_hidden_states: bool
+    need_all_logits: bool
+    engram_token_windows: torch.Tensor
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -336,6 +339,14 @@ class PyModelInputs:
 
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None: ...
+    @property
+    def capture_hidden_states(self) -> bool:
+        """
+        Capture configured hidden states for this homogeneous target-prefill batch
+        """
+
+    @capture_hidden_states.setter
+    def capture_hidden_states(self, arg0: bool) -> None: ...
     @property
     def combo_position_ids(self) -> torch.Tensor:
         """
@@ -419,6 +430,7 @@ class PyModelOutputs:
     def mtp_target_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
 
 class PyMultimodalInputs:
+    mm_features_spans: torch.Tensor
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property

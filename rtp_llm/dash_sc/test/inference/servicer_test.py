@@ -283,6 +283,7 @@ class _FakeTokenizer:
 
 
 class _GenerateEnvCfg:
+    max_thinking_tokens = None
     think_mode = "adaptive"
     think_end_token_id = -1
     think_start_tag = "<think>\n"
@@ -442,6 +443,104 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
+
+    async def test_v41_canonical_ids_and_image_count_reach_backend_and_response(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageInput,
+            V41PreparedInputs,
+        )
+
+        image = V41ImageInput(
+            1,
+            torch.zeros(1, 3, 14, 14, dtype=torch.bfloat16),
+            1,
+            1,
+            torch.tensor([0, 1, 2, 3]),
+            "a" * 64,
+            "b" * 64,
+        )
+        prepared = V41PreparedInputs(
+            "", (7, 129264, 129264, 129264, 129264, 8), (-1, 0, 1, 2, 3, -1), (image,)
+        )
+        output = GenerateOutput(
+            output_ids=torch.tensor([9]),
+            finished=True,
+            aux_info=AuxInfo(input_len=6, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 129264, 8],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                v41_inputs=prepared,
+                max_seq_len=32,
+            )
+        )
+        submitted = visitor.last_generate_input
+        self.assertIs(submitted.v41_inputs, prepared)
+        self.assertEqual(
+            submitted.token_ids.flatten().tolist(), list(prepared.token_ids)
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["image_tokens"].int64_param, 4
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["prompt_token_num"].int64_param, 6
+        )
+
+    async def test_v41_expansion_over_limit_rejects_before_enqueue(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41PreparedInputs,
+        )
+
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        prepared = V41PreparedInputs("", (1, 2, 3), (-1, -1, -1), ())
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [1],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                v41_inputs=prepared,
+                max_seq_len=3,
+            )
+        )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(_finish_reason(chunks[0]), DASH_ERROR_TOO_LONG.finish_reason)
+
+    async def test_v41_download_failure_returns_protocol_error_before_enqueue(self):
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        request = self._minimal_request()
+        request.parameters["payload"].string_param = "{}"
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer._prepare_v41_image_request",
+            side_effect=FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "invalid image payload"
+            ),
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    request,
+                    [1],
+                    SamplingParams(),
+                    DashScRequestControls(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    v41_processor_config=object(),
+                )
+            )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(
+            _finish_reason(chunks[0]), DASH_ERROR_BAD_REQUEST.finish_reason
+        )
 
     async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:
         req = self._minimal_request()
@@ -1592,6 +1691,76 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_logging_consent_only_hides_input_in_both_phases(self) -> None:
+        for allowed in (True, False):
+            with self.subTest(log_input_output=allowed):
+                visitor = _MultiStreamVisitor(
+                    [
+                        _FakeAsyncStream(
+                            [
+                                GenerateOutputs(
+                                    generate_outputs=[
+                                        GenerateOutput(
+                                            output_ids=torch.tensor(
+                                                [10, 1], dtype=torch.int32
+                                            ),
+                                            finished=False,
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                        _FakeAsyncStream(
+                            [
+                                GenerateOutputs(
+                                    generate_outputs=[
+                                        GenerateOutput(
+                                            output_ids=torch.tensor(
+                                                [20, 21], dtype=torch.int32
+                                            ),
+                                            finished=True,
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                    ]
+                )
+                tokenizer = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                with self.assertLogs(level=logging.DEBUG) as logs:
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [7, 8, 128821],
+                            SamplingParams(),
+                            DashScRequestControls(
+                                enable_thinking=True, log_input_output=allowed
+                            ),
+                            visitor,
+                            rtp_llm_request_id=100,
+                            echo_prefix_ids=[128821, 198],
+                            tokenizer=tokenizer,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(
+                                tokenizer, env_cfg, "deepseek_v4"
+                            ),
+                            phase2_request_id_factory=lambda: 200,
+                        )
+                    )
+                self.assertEqual(visitor.enqueue_called, 2)
+                phase2_chunks = [
+                    c for c in chunks if c.infer_response.id.endswith("-2")
+                ]
+                self.assertEqual(len(phase2_chunks), 1)
+                self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+                input_logs = [
+                    record for record in logs.records if "generate_input:" in record.msg
+                ]
+                self.assertEqual(len(input_logs), 2)
+                for record, generate_input in zip(input_logs, visitor.generate_inputs):
+                    self.assertIs(record.args[-1], generate_input if allowed else None)
+
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(
@@ -2736,6 +2905,37 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["aux_info"]["remote_reuse_len"], 1)
         self.assertEqual(payload["aux_info"]["aux_string"], "backend-diagnostic")
 
+    async def test_access_log_uses_handled_request_consent(self) -> None:
+        for consents in (("all", "none"), ("none", "all"), ("all", "all")):
+            with self.subTest(consents=consents):
+                requests = []
+                for consent in consents:
+                    request = self._valid_infer_request()
+                    request.parameters["ds_header_attributes"].string_param = (
+                        json.dumps({"X-DashScope-LoggingConsent": consent})
+                    )
+                    requests.append(request)
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                with patch.object(
+                    logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+                ) as info:
+                    responses = await _drain(
+                        servicer.ModelStreamInfer(
+                            _areq_iter(requests), _FakeGrpcContext()
+                        )
+                    )
+                # The frontend finishes the RPC after handling its first request.
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(visitor.enqueue_called, 1)
+                info.assert_called_once()
+                payload = json.loads(info.call_args.args[0])
+                self.assertEqual(payload["req_count"], 1)
+                allowed = consents[0] == "all"
+                self.assertEqual(payload["input_ids"], [42] if allowed else None)
+                self.assertEqual(payload["generated_ids"], [9] if allowed else None)
+                self.assertEqual(payload["output_token_len"], 1)
+
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [
             RoleAddr(
@@ -3221,7 +3421,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.max_new_tokens, 3)
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
-        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+        self.assertEqual(generate_config.max_thinking_tokens, 3)
+
+    async def test_dash_generation_env_thinking_budget_is_default_only(self) -> None:
+        for request_budget, expected_budget in ((None, 64), (10, 10)):
+            with self.subTest(request_budget=request_budget):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.max_thinking_tokens = 64
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                )
+                req = self._valid_infer_request()
+                req.parameters["max_new_tokens"].int64_param = 3
+                if request_budget is not None:
+                    req.parameters["thinking_budget"].int64_param = request_budget
+
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(generate_config.max_thinking_tokens, expected_budget)
 
     async def test_dash_generation_without_explicit_mode_inherits_env(
         self,

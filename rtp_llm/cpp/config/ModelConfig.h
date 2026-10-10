@@ -37,6 +37,7 @@ public:
     bool                              is_multimodal         = false;
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
+    int64_t                           mm_padding_size       = 0;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 };
 
@@ -45,6 +46,10 @@ public:
     // model variant params used in ft
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
+
+    // Startup-only target-prefill capture profile. An empty layer list disables capture.
+    std::vector<int64_t>    hidden_state_capture_layer_ids = {};
+    HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
 
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;
@@ -139,6 +144,9 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Model policy for prefix recomputation; live P/D transfers are unaffected.
+    int     cache_min_replay_tokens = 1;
+    int64_t cache_key_hash_seed     = 0;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

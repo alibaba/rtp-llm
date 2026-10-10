@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -7,18 +8,23 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_groups,
+    select_fmha_impl_for_group,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
     FakeBalanceExpert,
-    FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
     SelectTopk,
@@ -338,8 +344,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: Any,
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -383,6 +389,11 @@ class GenericMoeModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if model_config.mm_model_config.is_multimodal
+            else None
+        )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -408,29 +419,139 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
+
+    def _uses_sparse_mla(self) -> bool:
+        return bool(
+            self.config.attn_config.use_mla and self.config.attn_config.is_sparse
+        )
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self._uses_sparse_mla():
+            return ["default", "indexer_kv"]
+        return None
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ) -> Any:
+        if self._uses_sparse_mla():
+            attention_inputs = get_attention_inputs_value(inputs)
+            if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
+                # Cacheless warmup shares one input and skips the indexer.
+                fmha_impl = super().prepare_fmha_impl(
+                    inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
+                return {"default": fmha_impl, "indexer_kv": fmha_impl}
+            raw_tags = (
+                list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
+            )
+            required_tags = {"default", "indexer_kv"}
+            if len(raw_tags) != len(required_tags) or set(raw_tags) != required_tags:
+                raise RuntimeError(
+                    "sparse MLA requires exactly attention input tags "
+                    f"{sorted(required_tags)}; available tags={raw_tags}"
+                )
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+
+    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build token embeddings and inject features for an MM request.
+
+        The model-level flag controls whether the injector is constructed;
+        the request-level feature list controls whether this invocation uses
+        the multimodal path. This keeps text-only requests on the original
+        embedding kernel even when a VL model serves a mixed workload.
+        """
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
+        injector = getattr(self, "multimodal_embedding_injector", None)
+        if injector is None or not multimodal_features:
+            return self.embed_tokens(inputs.input_ids)
+
+        inputs_embeds = self.embed_tokens(
+            inputs.input_ids,
+            inputs.combo_position_ids,
+            inputs.embedding_inputs.combo_tokens_type_ids,
+            inputs.embedding_inputs.text_tokens_mask,
+        )
+        return injector(
+            inputs_embeds,
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+        capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
+        is_sparse_mla = self._uses_sparse_mla()
+        if is_sparse_mla:
+            required_tags = {"default", "indexer_kv"}
+            if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
+                available_tags = (
+                    list(fmha_impl) if isinstance(fmha_impl, Mapping) else []
+                )
+                raise RuntimeError(
+                    "sparse MLA requires exactly FMHA tags "
+                    f"{sorted(required_tags)}; available tags={available_tags}"
+                )
+            sparse_fmha_impl = {
+                group_tag: select_fmha_impl_for_group(fmha_impl, group_tag)
+                for group_tag in ("default", "indexer_kv")
+            }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            if is_sparse_mla:
+                layer_fmha_impl = sparse_fmha_impl
+                layer_kv_cache = (
+                    get_layer_caches_for_groups(
+                        self.kv_cache, i, ("default", "indexer_kv")
+                    )
+                    if self.kv_cache is not None
+                    else None
+                )
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                layer_kv_cache = (
+                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                )
             output = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            capture.capture_layer(i, hidden_states, residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states, residual)
 
 
 __all__ = [

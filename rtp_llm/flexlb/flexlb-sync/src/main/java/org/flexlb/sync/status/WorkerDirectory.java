@@ -148,7 +148,7 @@ public final class WorkerDirectory {
     }
 
     /**
-     * Await endpoint cleanup, clear the address-only cache, and remove the
+     * Await endpoint cleanup, clear any detailed cache index, and remove the
      * exact RETIRING status identity. No replacement can publish in between.
      */
     public void completeRetirement(
@@ -199,7 +199,9 @@ public final class WorkerDirectory {
                 return;
             }
             try {
-                cacheAwareService.removeEngineBlockCache(address);
+                if (role.requiresCacheKeys()) {
+                    cacheAwareService.removeEngineBlockCache(address);
+                }
             } catch (Throwable cacheCleanupFailure) {
                 logger.error(
                         "Cache cleanup failed while retiring generation {} for {}",

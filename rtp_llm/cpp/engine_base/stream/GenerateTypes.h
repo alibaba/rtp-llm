@@ -1,8 +1,10 @@
 #pragma once
+#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -25,6 +27,10 @@ struct RequestInfo {
     }
 };
 
+struct MultimodalTokenLayout {
+    std::vector<std::pair<int32_t, int32_t>> spans;
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -38,6 +44,12 @@ public:
 
     std::map<int, int> multimodalLengths() const {
         std::map<int, int> lengths;
+        if (v41_inputs && multimodal_features) {
+            for (const auto& feature : *multimodal_features) {
+                lengths[1] += feature.size(0);  // MMUrlType::IMAGE
+            }
+            return lengths;
+        }
         if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
             return {};
         } else {
@@ -70,6 +82,9 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (custom_output_token_position >= 0) {
+            custom_output_token_position += prefix_length;
+        }
     }
 
 public:
@@ -81,11 +96,13 @@ public:
     bool                            fake_query            = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+    std::optional<MultimodalTokenLayout>        multimodal_token_layout;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -95,6 +112,9 @@ public:
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
     int64_t request_deadline_ms = 0;  // Local P2P deadline.
+
+    // Selected position in input_ids; -1 means no custom output.
+    int custom_output_token_position = -1;
 
     // Batch grouping params
     int     group_size = 1;
@@ -160,6 +180,8 @@ public:
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;
+    // Output of the deployment-registered post-layers CustomHandler.
+    std::optional<torch::Tensor> custom_output;
 };
 
 class GenerateOutputs {
@@ -202,6 +224,7 @@ public:
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
         PrefillHandoffReady = 1 << 4,  // Prefill output is ready for Decode handoff
+        CachePrepared = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {
@@ -217,8 +240,8 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
-                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ =
+            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
     }
 
 private:

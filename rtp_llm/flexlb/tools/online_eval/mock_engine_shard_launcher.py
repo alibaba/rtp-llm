@@ -260,15 +260,16 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
             engine_routes[eng["name"]] = shard_url
 
     # Build env (mirrors MockEngineCluster.service_discovery_env).
-    prefill_addrs = ",".join(
+    prefill_addrs = [
         f"{e['ip']}:{e['http_port']}" for e in all_engines if e["role"] == "prefill"
-    )
-    decode_addrs = ",".join(
+    ]
+    decode_addrs = [
         f"{e['ip']}:{e['http_port']}" for e in all_engines if e["role"] == "decode"
-    )
+    ]
     model_service_config = {
         "service_id": "aigc.text-generation.generation.engine_service",
         "load_balance": True,
+        "hosts": {args.prefill_domain: prefill_addrs, args.decode_domain: decode_addrs},
         "role_endpoints": [
             {
                 "group": "mock",
@@ -287,8 +288,6 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
     }
     env = {
         "MODEL_SERVICE_CONFIG": json.dumps(model_service_config, separators=(",", ":")),
-        f"DOMAIN_ADDRESS:{args.prefill_domain}": prefill_addrs,
-        f"DOMAIN_ADDRESS:{args.decode_domain}": decode_addrs,
     }
 
     # Write endpoints.json
@@ -307,8 +306,7 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_lines = [
         "# Start flexlb-api with these environment variables.",
-        "# DOMAIN_ADDRESS:* contains ':' and cannot be exported by bash directly;",
-        "# pass it via env as shown below.",
+        "# MODEL_SERVICE_CONFIG includes the domain-to-host mappings.",
         "",
         "env \\",
     ]

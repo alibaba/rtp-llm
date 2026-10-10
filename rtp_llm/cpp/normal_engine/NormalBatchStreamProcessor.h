@@ -22,20 +22,25 @@ public:
                                const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
-                               bool                               warm_up);
+                               bool                               warm_up,
+                               int                                async_worker_count = 0);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
+    virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,
+                                             GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
+                                                 GenerationPrefillCudaGraphStatus::NOT_REQUESTED) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
                                                             TensorHolder&       host_holder) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
 
-    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
+    // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no stream->step() and no other fields.
     // Empty input returns an undefined tensor.
-    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                     TensorHolder&       host_holder) const;
+    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups&             stream_groups,
+                                                                     const std::vector<std::string>& group_tags,
+                                                                     TensorHolder&                   host_holder) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

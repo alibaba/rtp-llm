@@ -386,10 +386,11 @@ void DecodeLoadHelper::Result::complete(bool ok) {
             error_code    = error.code();
             error_message = error.ToString();
         } else if (response.error_code() != ErrorCodePB::NONE_ERROR) {
+            const std::string wire_error_message = response.error_message();
             error_code    = transRPCErrorCode(response.error_code());
             error_message =
-                response.error_message()
-                + " [received_at location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer="
+                (wire_error_message.empty() ? std::string() : wire_error_message + " ")
+                + "[received_at location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer="
                 + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key
                 + " wire_code=" + std::to_string(static_cast<int>(response.error_code())) + "]";
         } else {

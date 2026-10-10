@@ -2,6 +2,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 
 #define private public
@@ -12,12 +13,184 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
+    for (const bool enable_disk_cache : {false, true}) {
+        SCOPED_TRACE(enable_disk_cache);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(0);
+        config_pb->set_prefill_only(true);
+        config_pb->set_reuse_cache(true);
+        config_pb->set_enable_disk_cache(enable_disk_cache);
+
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+        EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 0);
+        EXPECT_EQ(config->max_new_tokens, 0);
+        EXPECT_TRUE(config->isPrefillOnly());
+        EXPECT_TRUE(config->reuse_cache);
+        EXPECT_EQ(config->enable_disk_cache, enable_disk_cache);
+    }
+}
+
+TEST_F(QueryConverterTest, BareProtoAbsentOrZeroMaxNewTokensPreservesInternalZero) {
+    for (const bool assign_zero : std::array<bool, 2>{false, true}) {
+        SCOPED_TRACE(assign_zero ? "explicit legacy zero" : "absent");
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        if (assign_zero) {
+            config_pb->set_max_new_tokens(0);
+        }
+        ASSERT_EQ(config_pb->max_new_tokens(), 0);
+        ASSERT_FALSE(config_pb->prefill_only());
+
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+        EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 0);
+        EXPECT_EQ(config->max_new_tokens, 0);
+        EXPECT_TRUE(config->isPrefillOnly());
+    }
+}
+
+TEST_F(QueryConverterTest, RawGrpcPromptScoringAlwaysNormalizesGenerationSettings) {
+    for (const int wire_max_new_tokens : {0, 7}) {
+        SCOPED_TRACE(wire_max_new_tokens);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(wire_max_new_tokens);
+        ASSERT_FALSE(config_pb->prefill_only());
+        config_pb->set_return_prompt_logits(true);
+        config_pb->set_is_streaming(true);
+        config_pb->set_reuse_cache(true);
+        config_pb->set_can_use_pd_separation(true);
+
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+        EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 1);
+        EXPECT_TRUE(config->return_prompt_logits);
+        EXPECT_EQ(config->max_new_tokens, 1);
+        EXPECT_FALSE(config->isPrefillOnly());
+        EXPECT_FALSE(config->is_streaming);
+        EXPECT_FALSE(config->reuse_cache);
+        EXPECT_FALSE(config->can_use_pd_separation);
+    }
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyFlagRejectsReturnPromptLogits) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config_pb = input.mutable_generate_config();
+    config_pb->set_max_new_tokens(0);
+    config_pb->set_prefill_only(true);
+    config_pb->set_return_prompt_logits(true);
+
+    for (const bool convert_query : std::array<bool, 2>{false, true}) {
+        SCOPED_TRACE(convert_query ? "converter" : "resolver");
+        try {
+            if (convert_query) {
+                QueryConverter::transQuery(&input);
+            } else {
+                QueryConverter::resolveMaxNewTokens(*config_pb);
+            }
+            FAIL() << "prefill_only with return_prompt_logits should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("prefill_only"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("return_prompt_logits"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyFlagRejectsNonZeroMaxNewTokens) {
+    for (const int max_new_tokens : {7, -1}) {
+        SCOPED_TRACE(max_new_tokens);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(max_new_tokens);
+        config_pb->set_prefill_only(true);
+
+        try {
+            QueryConverter::transQuery(&input);
+            FAIL() << "prefill_only with nonzero max_new_tokens should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("prefill_only"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("max_new_tokens"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PositiveMaxNewTokensRemainsNormalGeneration) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(7);
+
+    const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+    EXPECT_EQ(QueryConverter::resolveMaxNewTokens(input.generate_config()), 7);
+    EXPECT_EQ(config->max_new_tokens, 7);
+    EXPECT_FALSE(config->isPrefillOnly());
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyUnsupportedConfigsAreRejectedDuringConversion) {
+    struct InvalidConfigCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<InvalidConfigCase, 11> cases{{
+        {"min_new_tokens", [](GenerateConfigPB* config) { config->set_min_new_tokens(1); }},
+        {"num_beams", [](GenerateConfigPB* config) { config->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* config) { config->add_variable_num_beams(1); }},
+        {"num_return_sequences", [](GenerateConfigPB* config) { config->set_num_return_sequences(2); }},
+        {"return_logits", [](GenerateConfigPB* config) { config->set_return_logits(true); }},
+        {"calculate_loss", [](GenerateConfigPB* config) { config->set_calculate_loss(1); }},
+        {"return_softmax_probs", [](GenerateConfigPB* config) { config->set_return_softmax_probs(true); }},
+        {"return_all_probs", [](GenerateConfigPB* config) { config->set_return_all_probs(true); }},
+        {"return_cum_log_probs", [](GenerateConfigPB* config) { config->set_return_cum_log_probs(true); }},
+        {"return_hidden_states", [](GenerateConfigPB* config) { config->set_return_hidden_states(true); }},
+        {"return_all_hidden_states", [](GenerateConfigPB* config) { config->set_return_all_hidden_states(true); }},
+    }};
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config = input.mutable_generate_config();
+        config->set_max_new_tokens(0);
+        config->set_prefill_only(true);
+        test_case.configure(config);
+
+        try {
+            QueryConverter::transQuery(&input);
+            FAIL() << test_case.name << " should be rejected for max_new_tokens == 0";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(test_case.name), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, NegativeMaxNewTokensIsRejected) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(-1);
+
+    try {
+        QueryConverter::transQuery(&input);
+        FAIL() << "negative max_new_tokens should be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("max_new_tokens"), std::string::npos);
+    }
+}
 
 TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(GenerateConfig().enable_disk_cache);
@@ -34,6 +207,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
     generate_config_pb->set_max_new_tokens(5);
+    ASSERT_FALSE(generate_config_pb->prefill_only());
     generate_config_pb->set_num_beams(1);
     generate_config_pb->set_num_return_sequences(1);
     generate_config_pb->set_top_k(6);
@@ -70,6 +244,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
+    ASSERT_FALSE(generate_config->isPrefillOnly());
     ASSERT_EQ(generate_config->num_beams, 1);
     ASSERT_EQ(generate_config->num_return_sequences, 1);
     ASSERT_EQ(generate_config->top_k, 6);
@@ -113,6 +288,76 @@ TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
         GenerateConfigPB config;
         config.set_enable_memory_cache(enabled);
         EXPECT_EQ(QueryConverter::transGenerateConfig(&config)->enable_memory_cache, enabled);
+    }
+}
+
+TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) {
+    for (const int aux_mode : {-1, 0, 1}) {
+        for (const bool streaming : {false, true}) {
+            for (const bool return_all_probs : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "aux_mode=" << aux_mode << " streaming=" << streaming
+                                                  << " all_probs=" << return_all_probs);
+                GenerateInputPB request;
+                request.add_token_ids(1);
+                request.add_token_ids(2);
+                auto* config = request.mutable_generate_config();
+                config->set_max_new_tokens(2);
+                config->set_min_new_tokens(2);
+                config->set_num_return_sequences(2);
+                config->set_is_streaming(streaming);
+                if (aux_mode >= 0) {
+                    config->mutable_aux_info()->set_value(aux_mode == 1);
+                }
+                if (return_all_probs) {
+                    config->set_return_all_probs_mode(2);
+                }
+                GenerateInputPB received;
+                ASSERT_TRUE(received.ParseFromString(request.SerializeAsString()));
+                auto input = QueryConverter::transQuery(&received);
+                ASSERT_EQ(input->generate_config->aux_info, aux_mode != 0);
+
+                ModelConfig model;
+                model.max_seq_len = 32;
+                model.vocab_size  = 128;
+                auto stream =
+                    std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+                stream->generate_status_->status.store(StreamState::RUNNING);
+                stream->step();
+                const auto tokens = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2});
+                const auto scores = torch::tensor({-1.0f, -2.0f});
+                const auto probs  = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({2, 2});
+                stream->update(StreamUpdateInfo{.new_tokens     = tokens,
+                                                .num_new_tokens = 2,
+                                                .cum_log_probs  = scores,
+                                                .all_probs      = return_all_probs ? probs : torch::Tensor()});
+                EXPECT_TRUE(torch::equal(stream->cumLogProbs(), scores));
+                auto result = stream->nextOutput();
+                ASSERT_TRUE(result.ok());
+                for (const auto& row : result.value().generate_outputs) {
+                    EXPECT_EQ(row.aux_info.cum_log_probs.has_value(), aux_mode != 0);
+                }
+                GenerateOutputsPB output;
+                QueryConverter::transResponse(&output, &result.value(), input->generate_config->aux_info, "", 0);
+                const auto& flat = output.flatten_output();
+                ASSERT_EQ(flat.finished_size(), 2);
+                EXPECT_TRUE(flat.finished(0));
+                EXPECT_TRUE(flat.finished(1));
+                ASSERT_EQ(flat.output_ids().shape_size(), 3);
+                EXPECT_EQ(flat.output_ids().shape(0), 2);
+                EXPECT_EQ(flat.output_ids().shape(1), 1);
+                EXPECT_EQ(flat.output_ids().shape(2), 2);
+                EXPECT_EQ(flat.output_ids().int32_data(),
+                          std::string(static_cast<const char*>(tokens.data_ptr()), tokens.nbytes()));
+                EXPECT_EQ(flat.aux_info_size(), aux_mode == 0 ? 0 : 2);
+                if (return_all_probs) {
+                    EXPECT_EQ(flat.all_probs().fp32_data(),
+                              std::string(static_cast<const char*>(probs.data_ptr()), probs.nbytes()));
+                }
+                auto drained = stream->nextOutput();
+                ASSERT_FALSE(drained.ok());
+                EXPECT_EQ(drained.status().code(), ErrorCode::FINISHED);
+            }
+        }
     }
 }
 
@@ -197,6 +442,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
+    res.custom_output                                 = torch::tensor({{2147483647, -16777217}}, torch::kInt32);
     res.output_ids                                    = output_token_ids;
     res.finished                                      = true;
     res.aux_info.cost_time_us                         = 1000;
@@ -242,6 +488,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 3; ++i) {
         ASSERT_EQ(output_ids_vector[i], i);
     }
+    ASSERT_TRUE(output_pb.has_custom_output());
+    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(output_pb.custom_output()), res.custom_output->unsqueeze(0)));
     ASSERT_TRUE(output_pb.has_hidden_states());
     auto hidden_states_pb = output_pb.hidden_states();
     ASSERT_EQ(hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
@@ -256,6 +504,25 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 6; ++i) {
         ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
     }
+}
+
+TEST_F(QueryConverterTest, TransResponsePreservesPrefillOnlyEmptyOutputIdsShape) {
+    GenerateOutputs outputs;
+    GenerateOutput  output;
+    output.output_ids = torch::empty({1, 0}, torch::kInt32);
+    output.finished   = true;
+    outputs.generate_outputs.push_back(output);
+
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
+
+    const auto& output_ids_pb = outputs_pb.flatten_output().output_ids();
+    EXPECT_EQ(output_ids_pb.data_type(), TensorPB::INT32);
+    ASSERT_EQ(output_ids_pb.shape_size(), 3);
+    EXPECT_EQ(output_ids_pb.shape(0), 1);
+    EXPECT_EQ(output_ids_pb.shape(1), 1);
+    EXPECT_EQ(output_ids_pb.shape(2), 0);
+    EXPECT_TRUE(output_ids_pb.int32_data().empty());
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
@@ -394,6 +661,7 @@ TEST_F(QueryConverterTest, GrammarWithMultipleSequencesIsRejectedByFactory) {
         GenerateInputPB input;
         input.add_token_ids(0);
         auto* config = input.mutable_generate_config();
+        config->set_max_new_tokens(1);
         config->mutable_regex()->set_value("[a-z]+");
         test_case.configure(config);
 
@@ -413,6 +681,60 @@ TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::DEADLINE_EXCEEDED), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::WAIT_TO_RUN_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+}
+
+namespace {
+
+GenerateInputPB v41ImageRequest() {
+    GenerateInputPB request;
+    request.mutable_generate_config()->set_max_new_tokens(256);
+    auto* prepared = request.mutable_v41_inputs();
+    prepared->set_schema_version(1);
+    for (int32_t token : {7, 8, 9, 129264, 129264, 129264, 129264, 10, 11, 12, 13}) {
+        request.add_token_ids(token);
+    }
+    for (int32_t kind : {-1, -1, -1, 0, 1, 2, 3, -1, -1, -1, -1}) {
+        prepared->add_token_types(kind);
+        prepared->add_image_mask(kind != -1);
+    }
+    auto* image = prepared->add_images();
+    image->set_start(3);
+    image->set_n_vit_h(1);
+    image->set_n_vit_w(1);
+    image->set_content_sha256(std::string(64, 'a'));
+    image->set_processor_identity(std::string(64, 'b'));
+    for (int32_t kind : {0, 1, 2, 3}) {
+        image->add_types(kind);
+    }
+    QueryConverter::transTensorPB(image->mutable_patches(), torch::ones({1, 3, 14, 14}, torch::kBFloat16));
+    return request;
+}
+
+}  // namespace
+
+TEST_F(QueryConverterTest, RejectUnsupportedV41SchemaBeforeConvertingImages) {
+    for (int version : {0, -1, 2}) {
+        auto wire = v41ImageRequest();
+        wire.mutable_v41_inputs()->set_schema_version(version);
+        EXPECT_THROW(QueryConverter::transQuery(&wire), std::invalid_argument);
+    }
+    auto wire = v41ImageRequest();
+    EXPECT_NO_THROW(QueryConverter::transQuery(&wire));
+}
+
+TEST_F(QueryConverterTest, V41TypedMetadataRoundTripPreservesCanonicalTokensAndPatches) {
+    auto wire  = v41ImageRequest();
+    auto input = QueryConverter::transQuery(&wire);
+    ASSERT_TRUE(input->v41_inputs);
+    EXPECT_EQ(input->input_ids.numel(), wire.token_ids_size());
+    EXPECT_EQ(input->input_ids[3].item<int32_t>(), 129264);
+    ASSERT_EQ(input->v41_inputs->images.size(), 1);
+    const auto& image = input->v41_inputs->images[0];
+    EXPECT_EQ(image.content_sha256, std::string(64, 'a'));
+    EXPECT_EQ(image.processor_identity, std::string(64, 'b'));
+    EXPECT_EQ(image.patches.scalar_type(), torch::kBFloat16);
+    EXPECT_TRUE(torch::equal(image.types, torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->v41_inputs->image_mask, input->v41_inputs->token_types.ne(-1)));
 }
 
 }  // namespace rtp_llm

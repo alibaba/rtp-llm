@@ -3,6 +3,8 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -22,7 +24,7 @@ struct ReusableGroupLocation {
     size_t member_group_id{0};
 };
 
-using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
+using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
@@ -57,6 +59,7 @@ public:
                                      bool                                              is_resident);
 
     bool      isRemovable(TreeNode* node) const;
+    void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
     TreeNode* root() const {
@@ -65,12 +68,16 @@ public:
     const std::vector<GroupSetPtr>& groupSets() const {
         return group_sets_;
     }
-    const ReusableGroupLocation* reusableGroupLocation(size_t group_id) const;
+    const ReusableGroupLocation* reusableGroupLocation(std::string_view group_tag) const;
     size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
     }
     size_t size() const {
         return node_pool_.size();
+    }
+    CacheKeysType cacheKeys() const;
+    int64_t keyVersion() const {
+        return key_version_;
     }
 
     // Diagnostic-only bounded walk over node_pool_[cursor, min(cycle_end_index, size())).
@@ -82,7 +89,7 @@ public:
 
     // All publication operations require the owning BlockTreeCache mutex.
     // Only complete, matchable DEVICE values in every required group are advertised.
-    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
 
@@ -108,6 +115,10 @@ private:
     ReusableGroupLocations                reusable_group_locations_;
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
+    std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
+    // Indexed together with node_pool_ for contiguous snapshot copies.
+    CacheKeysType cache_keys_;
+    int64_t       key_version_{-1};
 };
 
 }  // namespace rtp_llm

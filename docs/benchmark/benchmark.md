@@ -51,7 +51,7 @@ Example for a new prefill model:
 
 ```shell
 bazelisk test //rtp_llm/test/perf_test:model_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_arg=--model_type=deepseek_v4 \
     --test_arg=--checkpoint_path=/models/DeepSeek-V4 \
     --test_arg=--tokenizer_path=/models/DeepSeek-V4 \
@@ -93,26 +93,26 @@ the output directory for diagnosis. The generic target does not infer a
 model-specific topology: pass every required engine flag explicitly and keep
 `test_info.json` with the result.
 
-Example (SM90; adjust configs for your stack e.g. `cuda12_9` + `sm9x`):
+Example (SM90; adjust configs for your stack e.g. `cuda13`):
 
 ```shell
 # Grid: override sizes and run decode + prefill (partial=0) or decode-only
 bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_arg=--batch_size=1,2,4,8 \
     --test_arg=--input_len=128,1024,2048 \
     --test_arg=--partial=0
 
 # Grid: custom local checkpoint and model type
 bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_arg=--checkpoint_path=/path/to/local/ckpt \
     --test_arg=--tokenizer_path=/path/to/local/tokenizer \
     --test_arg=--model_type=qwen35_moe
 
 # Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
 bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_arg=--model_type=qwen35_moe
 ```
 
@@ -120,7 +120,7 @@ Optional environment for the engine, e.g. `INT8_MODE=1`:
 
 ```shell
 bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_env=INT8_MODE=1
 ```
 
@@ -130,7 +130,7 @@ When prefill and decode need different engine configs, restrict phases with **`-
 
 ```shell
 bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+    --config=cuda13 \
     --test_arg=--partial=1
 ```
 
@@ -171,7 +171,7 @@ build_config:
   # open_source_url: "git@github.com:alibaba/rtp-llm.git"
   open_source_ref: "origin/feature/yiyin_multi_benchmark"
   ft_sub_dir: "rtp_llm_perf_test"
-  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda13 "'
 ```
 
 Fifth part is the common configuration shared across all benchmarks.

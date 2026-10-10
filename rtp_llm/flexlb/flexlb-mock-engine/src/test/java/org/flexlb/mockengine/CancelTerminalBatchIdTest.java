@@ -107,7 +107,7 @@ class CancelTerminalBatchIdTest {
 
         // Tracked request: cancelRequest while the batch is running. The
         // tracked branch routes through the priority-preemption cancel path,
-        // which also arms the tombstone for later re-cancels.
+        // which also arms the terminal record for later re-cancels.
         long requestId = 200L;
         enqueue(prefill, batch(88L, slot(0, input(requestId, 16))));
         JavaMockEngineCluster.CancelResult tracked = prefill.cancelRequest(requestId);
@@ -115,13 +115,13 @@ class CancelTerminalBatchIdTest {
         assertEquals(1L, stats.cancelCensusTracked.sum(),
                 "tracked-branch cancel must be counted");
 
-        // Re-cancel of the same id hits the priority-cancel tombstone armed by
+        // Re-cancel of the same id hits the priority-cancel terminal record armed by
         // the tracked branch (the engine keeps its one-shot cancel semantics).
-        JavaMockEngineCluster.CancelResult tombstone = prefill.cancelRequest(requestId);
-        assertTrue(tombstone.found() && tombstone.alreadyFinished(),
-                "tombstone re-cancel must report found + already-finished");
-        assertEquals(1L, stats.cancelCensusTombstone.sum(),
-                "tombstone-branch re-cancel must be counted");
+        JavaMockEngineCluster.CancelResult terminalRecord = prefill.cancelRequest(requestId);
+        assertTrue(terminalRecord.found() && terminalRecord.alreadyFinished(),
+                "terminal record re-cancel must report found + already-finished");
+        assertEquals(1L, stats.cancelCensusAlreadyCancelled.sum(),
+                "terminal record-branch re-cancel must be counted");
 
         // And the typed terminal from the tracked branch carries the batch id.
         EngineRpcService.TaskInfoPB terminal = completionOf(requestId);
@@ -130,7 +130,7 @@ class CancelTerminalBatchIdTest {
                 "tracked-branch CANCELLED terminal must carry the batch identity");
 
         // Already-finished: a request that ran to its NATURAL completion, then
-        // received a late cancel (no tombstone was ever armed).
+        // received a late cancel (no terminal record was ever armed).
         MockPerformanceModel fastModel = model("10");
         newPrefillService(fastModel);
         long finishedId = 300L;

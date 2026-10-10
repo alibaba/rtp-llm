@@ -81,19 +81,18 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_rank,
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
-                                                            size_t                  cache_key_count = 0) {
+                                                            size_t                  cache_key_count              = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
     }
 
-    const bool block_round_robin = policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    const bool compact_last_rank = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
-    const bool sharded_full      = cp_size > 1 && block_round_robin;
-    const bool compact_swa_by_cp = cp_size > 1 && compact_last_rank;
-    const size_t key_projection_scale =
-        compact_swa_by_cp ? 1 : std::max<size_t>(1, key_blocks_per_logical_block);
-    const auto keyIndexForLogicalBlock = [&](size_t logical_index) {
+    const bool   block_round_robin       = policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    const bool   compact_last_rank       = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+    const bool   sharded_full            = cp_size > 1 && block_round_robin;
+    const bool   compact_swa_by_cp       = cp_size > 1 && compact_last_rank;
+    const size_t key_projection_scale    = compact_swa_by_cp ? 1 : std::max<size_t>(1, key_blocks_per_logical_block);
+    const auto   keyIndexForLogicalBlock = [&](size_t logical_index) {
         size_t endpoint = (logical_index + 1) * key_projection_scale;
         if (cache_key_count > 0) {
             endpoint = std::min(endpoint, cache_key_count);
@@ -109,8 +108,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                           std::min(reuse_block_size, canonical_blocks);
         plan.reserve(canonical_blocks - start);
         for (size_t compact_idx = start; compact_idx < canonical_blocks; ++compact_idx) {
-            const size_t logical_key_index =
-                std::min((compact_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);
+            const size_t logical_key_index = std::min((compact_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);
             plan.push_back({keyIndexForLogicalBlock(logical_key_index), static_cast<int>(compact_idx)});
         }
         return plan;
@@ -128,8 +126,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
         if (sharded_full && block_pos % cp_size != cp_rank) {
             continue;
         }
-        plan.push_back(
-            {keyIndexForLogicalBlock(pos), sharded_full ? block_pos / cp_size : block_pos});
+        plan.push_back({keyIndexForLogicalBlock(pos), sharded_full ? block_pos / cp_size : block_pos});
     }
     return plan;
 }
@@ -166,16 +163,6 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
 // would suppress publication for almost every key.
 inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
     return policy.enable_prefix_reuse && policy.active_tail_blocks == 0;
-}
-
-inline std::vector<int> reuseParticipatingGroupIdsFromPolicies(const std::vector<CacheGroupPolicy>& policies) {
-    std::vector<int> group_ids;
-    for (size_t gid = 0; gid < policies.size(); ++gid) {
-        if (cacheGroupPublishesPrefixChain(policies[gid])) {
-            group_ids.push_back(static_cast<int>(gid));
-        }
-    }
-    return group_ids;
 }
 
 }  // namespace rtp_llm

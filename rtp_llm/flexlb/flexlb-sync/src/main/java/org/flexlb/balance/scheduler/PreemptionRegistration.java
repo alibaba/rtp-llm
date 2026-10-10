@@ -16,6 +16,7 @@ import java.util.concurrent.CompletionStage;
  * lifecycle decisions.</p>
  */
 public final class PreemptionRegistration {
+    private final RequestSlot owner;
     private final long requestId;
     private final long attemptToken;
     private final String detail;
@@ -23,20 +24,26 @@ public final class PreemptionRegistration {
             new CompletableFuture<>();
 
     private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
-    private boolean settled;
+    private boolean finished;
     private DeferredTerminal pendingTerminal;
     private boolean pendingDeliveryConfirmation;
     private long pendingConfirmationBatchId;
-    private String postDeliveryFenceDetail;
 
     PreemptionRegistration(
-            long requestId,
+            RequestSlot owner, long requestId,
             long attemptToken,
             String detail) {
+        this.owner = owner;
         this.requestId = requestId;
         this.attemptToken = attemptToken;
         this.detail = detail == null ? "priority preemption" : detail;
     }
+
+    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.updatePreemption(this, phase); }
+
+    public boolean release() { return owner.releasePreemption(this); }
+
+    public boolean completePreemption(String detail) { return owner.completePreemption(this, detail); }
 
     public long requestId() {
         return requestId;
@@ -58,14 +65,6 @@ public final class PreemptionRegistration {
         return detail;
     }
 
-    String postDeliveryFenceDetail() {
-        return postDeliveryFenceDetail;
-    }
-
-    void requirePostDeliveryFence(String fenceDetail) {
-        postDeliveryFenceDetail = fenceDetail;
-    }
-
     DeferredTerminal pendingTerminal() {
         return pendingTerminal;
     }
@@ -79,51 +78,44 @@ public final class PreemptionRegistration {
     }
 
     boolean advanceTo(PreemptionCancelPhase next) {
-        if (settled || !phase.canTransitionTo(next)) {
+        if (finished || !phase.canTransitionTo(next)) {
             return false;
         }
         phase = next;
         return true;
     }
 
-    boolean settle() {
-        if (settled) {
+    /** Record protocol completion once; resource cleanup and terminal notification still belong to the slot. */
+    boolean tryFinish() {
+        if (finished) {
             return false;
         }
-        settled = true;
+        finished = true;
         return true;
     }
 
     boolean isReleasable() {
-        return !settled && phase.isLocallyReleasable();
-    }
-
-    boolean isFenceTransferable() {
-        return !settled && phase.isFenceTransferable();
+        return !finished && phase.isLocallyReleasable();
     }
 
     boolean isNotFound() {
-        return !settled && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
+        return !finished && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
     }
 
     boolean isUnknown() {
-        return !settled && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
+        return !finished && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
     }
 
-    boolean isSettled() {
-        return settled;
+    boolean isFinished() {
+        return finished;
     }
 
-    boolean canSettleTombstone() {
-        return !settled && phase.acceptsTombstone();
+    boolean canCompletePreemption() {
+        return !finished && phase.acceptsRequestFenced();
     }
 
-    void retainTerminal(DeferredTerminal candidate) {
-        if (pendingTerminal == null
-                || (!pendingTerminal.authoritativeWorker()
-                    && candidate.authoritativeWorker())) {
-            pendingTerminal = candidate;
-        }
+    void storeTerminal(DeferredTerminal selected) {
+        pendingTerminal = selected;
     }
 
     void recordDeliveryConfirmation(long batchId) {

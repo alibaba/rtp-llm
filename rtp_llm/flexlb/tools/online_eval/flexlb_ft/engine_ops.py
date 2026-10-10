@@ -724,15 +724,7 @@ class EngineOps:
         )
 
     def master_scheduler_inflight(self) -> int:
-        """Global scheduler inflight request count (-1 on endpoint failure).
-
-        Unlike the per-endpoint view, this survives engine eviction: when a
-        dead engine is 3-strike-evicted its endpoint row disappears from
-        ``prefill_endpoints`` (per-endpoint lookups return -1) while the
-        scheduler-level inflight bookkeeping lingers until the stale-inflight
-        TTL / eviction cleanup drains it — which is exactly what the TTL
-        cleanup cases need to observe.
-        """
+        """Canonical Master request count; -1 means the endpoint could not be read."""
         data = self.master_inflight()
         if data is None:
             return -1
@@ -846,62 +838,6 @@ class EngineOps:
             result[key] = value
         return result
 
-    def master_ttl_eviction_counts(
-        self, engine_ip: Optional[str] = None
-    ) -> Optional[dict]:
-        """TTL-eviction counters aggregated by ledger role — the assertion
-        channel for TTL cases (no G3 timeline file involved).
-
-        Master counter: Java ``app.flexlb.inflight.ttl.expired.qps``, a
-        Counter exposed as
-        ``flexlb_app_flexlb_inflight_ttl_expired_qps_total`` with tags
-        {role, engineIp, reason}, reported at the 60s maintenance-sweep
-        granularity, two levels:
-
-          * role=SCHEDULER, engineIp="scheduler" — the scheduler's own
-            request-slot ledger sweep (ExpirationTimer);
-          * role=PREFILL/DECODE, engineIp=<real engine IP> — per-endpoint
-            ledger orphan sweeps (EndpointRegistry).
-
-        Returns ``{"scheduler": v, "prefill": Σ, "decode": Σ}``.  A
-        role's value is None when its series is absent — the
-        sparse-counter "never happened" state, which delta callers
-        treat as a 0 baseline (see master_prometheus_metric).  Overall
-        None means the exposition endpoint was unreachable — NOT zero
-        evictions; assertions must fail rather than compute a delta
-        from it.  ``engine_ip`` restricts PREFILL/DECODE aggregation to
-        one engine's series (the scheduler series, tagged
-        engineIp="scheduler", only survives that filter when
-        engine_ip="scheduler" is passed explicitly).
-
-        Case usage (before/after delta):
-
-            before = ops.master_ttl_eviction_counts()
-            ...  # park a request past its inflight TTL
-            after = ops.master_ttl_eviction_counts()
-            delta = after["decode"] - (before["decode"] or 0)
-            assert delta >= 1  # after waiting out the 60s sweep
-
-        The 60s maintenance-sweep granularity means the counter lags
-        the eviction event: after-side assertions must poll (wait_for)
-        instead of sampling once.
-        """
-        body = self.master_prometheus_text()
-        if body is None:
-            return None
-        label_filter = {"engineIp": engine_ip} if engine_ip is not None else None
-        counts: dict = {"scheduler": None, "prefill": None, "decode": None}
-        for _, label_values, value in parse_prometheus_samples(
-            body, "flexlb_app_flexlb_inflight_ttl_expired", label_filter
-        ):
-            role = label_values.get("role", "")
-            if role == "SCHEDULER":
-                counts["scheduler"] = (counts["scheduler"] or 0.0) + value
-            elif role == "PREFILL":
-                counts["prefill"] = (counts["prefill"] or 0.0) + value
-            elif role == "DECODE":
-                counts["decode"] = (counts["decode"] or 0.0) + value
-        return counts
 
     # -- composite request helper ------------------------------------------
 
@@ -1034,20 +970,11 @@ def engine_inflight_clean(
 def _fence_residue_stable(
     ops: "EngineOps", max_residue: int, settle_s: float = 20.0
 ) -> tuple:
-    """Cross-process contract for an empty-ack (uncertain) enqueue batch.
+    """Uncertain dispatch must not amplify ownership records.
 
-    The master installs a BATCH_ACK_UNCERTAIN engine fence
-    (PriorityScheduler.fenceEntryForUncertainBatchDelivery).  In the
-    cross-process production wiring the cancel channel is
-    UnsupportedEngineCancelChannel, whose UNSUPPORTED ack is NOT a safe
-    release fact (handleEngineFenceOutcome groups it with FAILED /
-    NOT_FOUND), so the entry parks in the 60s quarantined-fence sweep
-    indefinitely; cleanupInflight explicitly skips engineFence entries
-    from the stale TTL.  A bounded, non-growing scheduler-ledger residue
-    is therefore the EXPECTED production behaviour, not a leak: assert
-    residue <= max_residue (the uncertain batches themselves) and that a
-    later sample does not grow (no amplification).
-    """
+    Check that at most the dispatched population remains and that the residue
+    does not grow. The caller separately verifies authoritative closure; silence
+    or a timer alone cannot prove Engine release."""
     http = f"http://127.0.0.1:{ops.master_http_port}"
     first = None
     deadline = time.monotonic() + settle_s

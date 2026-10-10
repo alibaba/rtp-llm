@@ -17,7 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -134,24 +134,26 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
         policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<size_t>    group_ids;
+    std::vector<block_transfer_engine_test::TestGroupConfig> groups;
     groups.reserve(device_pools.size());
-    group_ids.reserve(device_pools.size());
     for (size_t group_id = 0; group_id < device_pools.size(); ++group_id) {
         groups.push_back(block_transfer_engine_test::makeTestGroupBase(
             policy, {0}, logical_layer_bytes, 0, 128, seq_size_per_block));
-        group_ids.push_back(group_id);
     }
-    group_set->initialize(
-        group_set_id, block_transfer_engine_test::makeTestTopology(std::move(groups)), std::move(group_ids));
+    auto                     topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
+    std::vector<std::string> group_tags;
+    group_tags.reserve(topology->groups().size());
+    for (const auto& group : topology->groups()) {
+        group_tags.push_back(group.tag);
+    }
+    group_set->initialize(group_set_id, topology, group_tags);
 }
 
 void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        group_sets,
                                      const std::vector<DeviceBlockPoolPtr>& device_pools,
                                      size_t                                 logical_layer_bytes = 1) {
     RTP_LLM_CHECK(!group_sets.empty() && group_sets.size() == device_pools.size());
-    std::vector<GroupBase> groups;
+    std::vector<block_transfer_engine_test::TestGroupConfig> groups;
     groups.reserve(group_sets.size());
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets[group_set_id];
@@ -173,8 +175,10 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
             policy, {static_cast<int>(group_set_id)}, logical_layer_bytes, 0, 128, seq_size_per_block));
     }
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
-    for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {group_set_id});
+    size_t group_set_id = 0;
+    for (const auto& tag : topology->groupTags()) {
+        group_sets[group_set_id]->initialize(group_set_id, topology, {tag});
+        ++group_set_id;
     }
 }
 
@@ -273,12 +277,14 @@ TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
 
     BlockTreeMatchResult full_result = cache_->match({100, 200, 300});
     EXPECT_EQ(full_result.matched_device_blocks, 3u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, full_result.matched_device_resources), (BlockIndicesType{42, 43, 44}));
+    EXPECT_EQ(cache_->matchedBlocksForGroup("group0", full_result.matched_device_resources),
+              (BlockIndicesType{42, 43, 44}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, full_result.matched_device_resources);
 
     BlockTreeMatchResult partial_result = cache_->match({100, 200, 999});
     EXPECT_EQ(partial_result.matched_device_blocks, 2u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, partial_result.matched_device_resources), (BlockIndicesType{42, 43}));
+    EXPECT_EQ(cache_->matchedBlocksForGroup("group0", partial_result.matched_device_resources),
+              (BlockIndicesType{42, 43}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, partial_result.matched_device_resources);
 }
 
@@ -619,7 +625,7 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     second_resources[0][0].device_blocks = {43};
     cache_->insert({200}, second_resources, Tier::DEVICE);
 
-    EXPECT_EQ(cache_->evictForGroup(/*group_id=*/0, /*num_blocks=*/2), 2);
+    EXPECT_EQ(cache_->evictForGroup("group0", /*num_blocks=*/2), 2);
 
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);
@@ -654,7 +660,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
 }
 
-TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndReturnsAllKeys) {
+TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
     const BlockTreeKeySnapshot empty = cache_->getKeySnapshot();
     EXPECT_EQ(empty.version, -1);
     EXPECT_TRUE(empty.keys.empty());
@@ -672,6 +678,14 @@ TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndReturnsAllKeys) {
     const BlockTreeKeySnapshot repeated = cache_->getKeySnapshot();
     EXPECT_EQ(repeated.version, snapshot.version);
     EXPECT_EQ(repeated.keys, snapshot.keys);
+
+    const BlockTreeKeySnapshot unchanged = cache_->getKeySnapshot(snapshot.version);
+    EXPECT_EQ(unchanged.version, snapshot.version);
+    EXPECT_TRUE(unchanged.keys.empty());
+
+    const BlockTreeKeySnapshot changed = cache_->getKeySnapshot(empty.version);
+    EXPECT_EQ(changed.version, snapshot.version);
+    EXPECT_EQ(changed.keys, snapshot.keys);
 }
 
 TEST_F(BlockTreeCacheTest, MatchPartialPath) {
@@ -683,7 +697,7 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
 
     BlockTreeMatchResult result = cache_->match({100, 200, 300});
     EXPECT_EQ(result.matched_device_blocks, 1u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10}));
+    EXPECT_EQ(cache_->matchedBlocksForGroup("group0", result.matched_device_resources), (BlockIndicesType{10}));
 
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
 }
@@ -746,10 +760,11 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusySwaResourceWithoutTruncatingFullPrefix)
 
         BlockTreeMatchResult result = multi_cache->match({100, 200, 300, 400});
         EXPECT_EQ(result.matched_device_blocks, 4u);
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources),
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup("group0", result.matched_device_resources),
                   (BlockIndicesType{10, 11, 12, 13}));
         // SWA locks only the trailing window; the busy middle resource stays untouched.
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22, 23}));
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup("group1", result.matched_device_resources),
+                  (BlockIndicesType{22, 23}));
         const auto& swa_pool = multi_cache->groupSets()[1]->devicePools()[0];
         EXPECT_EQ(swa_pool->refCount(21), 1u);  // cache hold only, no match reference
         EXPECT_EQ(swa_pool->refCount(22), 2u);
@@ -781,7 +796,7 @@ TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtBusyFullResource) {
 
     BlockTreeMatchResult result = multi_cache->match({100, 200, 300});
     EXPECT_EQ(result.matched_device_blocks, 1u);
-    EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10}));
+    EXPECT_EQ(multi_cache->matchedBlocksForGroup("group0", result.matched_device_resources), (BlockIndicesType{10}));
 
     block_tree_cache_test::releaseRequestRefsForTest(*multi_cache, result.matched_device_resources);
     busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
@@ -811,9 +826,10 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusyLinearResourceAndReusesTailState) {
 
         BlockTreeMatchResult result = multi_cache->match({100, 200, 300});
         EXPECT_EQ(result.matched_device_blocks, 3u);
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources),
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup("group0", result.matched_device_resources),
                   (BlockIndicesType{10, 11, 12}));
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22}));
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup("group1", result.matched_device_resources),
+                  (BlockIndicesType{22}));
         const auto& linear_pool = multi_cache->groupSets()[1]->devicePools()[0];
         EXPECT_EQ(linear_pool->refCount(21), 1u);  // busy middle resource not referenced
         EXPECT_EQ(linear_pool->refCount(22), 2u);
@@ -1194,7 +1210,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
 
     // Stage C: host/disk tiers are disabled and evictForGroup force-drops, so the joint eviction
     // completes synchronously without any transfer task.
-    EXPECT_EQ(cache->evictForGroup(full->groupIds().front(), 1), 1);
+    EXPECT_EQ(cache->evictForGroup(full->groupTags().front(), 1), 1);
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
     expect_joint_stage("after_joint_eviction",
@@ -1236,8 +1252,8 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
                 cache_->insert({100, fork_key}, fork_resources, Tier::DEVICE);
 
                 for (const CacheKeysType& keys : {CacheKeysType{100, 200}, CacheKeysType{100, fork_key}}) {
-                    BlockTreeMatchResult match  = cache_->match(keys);
-                    const auto           blocks = cache_->matchedBlocksForGroup(0, match.matched_device_resources);
+                    BlockTreeMatchResult match = cache_->match(keys);
+                    const auto blocks = cache_->matchedBlocksForGroup("group0", match.matched_device_resources);
                     if (match.matched_device_blocks != 2 || blocks.size() != 2 || blocks[0] != 10) {
                         consistent.store(false);
                     }
@@ -1430,8 +1446,10 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
 
     BlockTreeMatchResult result = cache->match({100, 200});
     EXPECT_EQ(result.matched_device_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{a_pool0, b_pool0}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{a_pool1, b_pool1}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources),
+              (BlockIndicesType{a_pool0, b_pool0}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group1", result.matched_device_resources),
+              (BlockIndicesType{a_pool1, b_pool1}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 2, Tier::DEVICE), 2);
@@ -1610,7 +1628,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
 
     BlockTreeMatchResult result = cache->match({100});
     EXPECT_EQ(result.matched_device_blocks, 1u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{block}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources), (BlockIndicesType{block}));
     ASSERT_EQ(result.matched_device_resources.size(), 1u);
     EXPECT_EQ(result.matched_device_resources[0].group_set_id, 0);
     EXPECT_EQ(result.matched_device_resources[0].tier, Tier::DEVICE);
@@ -1752,9 +1770,9 @@ TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
 
     BlockTreeMatchResult result = cache->match({100, 200, 300});
     EXPECT_EQ(result.matched_device_blocks, 3u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10, 11, 12}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(2, result.matched_device_resources), (BlockIndicesType{31, 32}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources), (BlockIndicesType{10, 11, 12}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group1", result.matched_device_resources), (BlockIndicesType{22}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group2", result.matched_device_resources), (BlockIndicesType{31, 32}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 }
 
@@ -1791,8 +1809,8 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
 
     BlockTreeMatchResult result = cache->match({100, 200});
     EXPECT_EQ(result.matched_device_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), group0_blocks);
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), group1_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources), group0_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup("group1", result.matched_device_resources), group1_blocks);
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 }
 
@@ -1804,7 +1822,7 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {0}, 1)});
     auto device_pools = makeStructuralDevicePools(2, "reordered_membership");
     auto full         = std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
-    full->initialize(0, topology, {1, 0});
+    full->initialize(0, topology, {"group1", "group0"});
 
     std::vector<GroupSetPtr> group_sets = {full};
     auto                     cache      = makeBlockTreeCacheForTest(std::move(group_sets));
@@ -1822,8 +1840,8 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
 
     BlockTreeMatchResult result = cache->match({100, 200});
     EXPECT_EQ(result.matched_device_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), group0_blocks);
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), group1_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources), group0_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup("group1", result.matched_device_resources), group1_blocks);
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 }
 
@@ -2749,6 +2767,62 @@ public:
     PublishResult             result{PublishResult::ACCEPTED};
 };
 
+TEST_F(BlockTreeCacheTest, PendingNodeBlocksInsertUntilLoadAbortWithoutAffectingNewParent) {
+    auto device_pool = makeStructuralDevicePool(0);
+    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = true;
+    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto publisher           = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {"group0"});
+
+    const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_source));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {10};
+    resources[1][0].host_block    = host_source;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+    auto result  = cache->match({100, 200});
+    auto context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    ASSERT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+
+    resources[0][0].device_blocks = {11};
+    resources[1][0]               = GroupSetResource{};
+    resources[1][0].device_blocks = {12};
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    const auto version             = cache->getKeySnapshot().version;
+    const auto publication_version = cache->logicalCacheSnapshot().version;
+    const auto event_count         = publisher->events.size();
+
+    // The pending key also blocks lower-tier insertion.
+    const BlockIdxType replacement = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(replacement));
+    std::vector<std::vector<GroupSetResource>> host_resources(2, std::vector<GroupSetResource>(1));
+    host_resources[1][0].host_block = replacement;
+    EXPECT_FALSE(insertGroupSetResources(*cache, {100, 200}, host_resources));
+    EXPECT_FALSE(host_pool->isAllocated(replacement));
+
+    ASSERT_TRUE(cache->abortPendingLoad(context));
+    EXPECT_FALSE(host_pool->isAllocated(host_source));
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
+    EXPECT_EQ(cache->getKeySnapshot().version, version);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().version, publication_version);
+    EXPECT_EQ(publisher->events.size(), event_count);
+
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100, 200}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100, 200}));
+}
+
 TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -2758,7 +2832,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache({device_pool});
 
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {0});
+    cache->setEventPublisher(publisher, {"group0"});
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
 
     BlockTreeMatchResult              result       = cache->match({200});
@@ -2792,7 +2866,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
 
 TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache_->setEventPublisher(publisher, {0});
+    cache_->setEventPublisher(publisher, {"group0"});
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
@@ -2803,7 +2877,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction)
     EXPECT_EQ(cache_->logicalCacheSnapshot().version, version);
     ASSERT_EQ(publisher->events.size(), 2u);
     EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
-    EXPECT_EQ(cache_->evictForGroup(0, 2), 2);
+    EXPECT_EQ(cache_->evictForGroup("group0", 2), 2);
     EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
     ASSERT_EQ(publisher->events.size(), 4u);
     EXPECT_EQ(publisher->events[2].type, KVCacheEventType::BLOCK_DELETE);
@@ -2819,7 +2893,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
     initializeSingleMemberGroupSets(groups, pools);
     auto cache     = makeBlockTreeCacheForTest(std::move(groups));
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {0, 1});
+    cache->setEventPublisher(publisher, {"group0", "group1"});
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources, Tier::DEVICE);
@@ -2829,13 +2903,13 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
     cache->insert({100}, resources, Tier::DEVICE);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
     ASSERT_EQ(publisher->events.size(), 1u);
-    EXPECT_THROW(cache->setEventPublisher(publisher, {99}), std::invalid_argument);
+    EXPECT_THROW(cache->setEventPublisher(publisher, {"missing"}), std::invalid_argument);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
 }
 
 TEST_F(BlockTreeCacheTest, EventPublicationWithdrawsDuringDemotionAndRestoresAfterFailure) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache_->setEventPublisher(publisher, {0});
+    cache_->setEventPublisher(publisher, {"group0"});
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
@@ -2862,10 +2936,10 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
     cache_->insert({100}, resources, Tier::DEVICE);
     auto publisher    = std::make_shared<RecordingCachePublisher>();
     publisher->result = PublishResult::QUEUE_FULL;
-    cache_->setEventPublisher(publisher, {0});
+    cache_->setEventPublisher(publisher, {"group0"});
     EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
     const auto version = cache_->logicalCacheSnapshot().version;
-    cache_->evictForGroup(0, 1);
+    cache_->evictForGroup("group0", 1);
     EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
     EXPECT_GT(cache_->logicalCacheSnapshot().version, version);
     cache_->setEventPublisher(nullptr, {});
@@ -2878,7 +2952,7 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
 TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     auto cache     = makeHostOnlyLoadCache(makeStructuralDevicePools(1, "event_host"));
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {0});
+    cache->setEventPublisher(publisher, {"group0"});
     EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
     auto result  = cache->match({200});

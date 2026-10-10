@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
@@ -83,6 +83,12 @@ class CustomHandler(object):
     # specify required args for extended_forward
     def extend_forward_args(self) -> List[str]:
         return ["input_lengths", "input_ids", "hidden_states"]
+
+    def select_token_position(
+        self, input_ids: torch.Tensor, text_tokens_mask: Optional[torch.Tensor] = None
+    ) -> int:
+        """Select on expanded CPU prompt tokens; -1 opts out. Called once per request."""
+        raise NotImplementedError
 
     # extended_forward
     # input_lengths: [batch_size]

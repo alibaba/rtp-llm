@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -119,7 +120,7 @@ public:
     ~BlockTreeCache();
     bool init();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys);
+    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -130,17 +131,17 @@ public:
                   bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
-    int evictForGroup(size_t group_id, size_t num_blocks);
+    int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot() const;
-    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
-    bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
-    BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
+    BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     bool executeTransfer(TransferTask task);
@@ -180,7 +181,7 @@ public:
 private:
     void checkWatermark();
     // Caller holds mutex_.
-    void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
+    void onWorkflowSettledLocked(bool check_watermark);
 
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
@@ -191,9 +192,6 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    // Preserve the historical empty-cache wire value. The first successful
-    // topology mutation advances the version to zero.
-    int64_t                                     mutation_version_{-1};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

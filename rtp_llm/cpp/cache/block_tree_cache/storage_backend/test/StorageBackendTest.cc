@@ -325,12 +325,12 @@ public:
         return write_handle_count_;
     }
 
-    std::vector<BlockInfo> resolve(int layer_id, int group_id, int block_id) const {
-        return convertIndexToBuffer(layer_id, group_id, block_id);
+    std::vector<BlockInfo> resolve(int layer_id, const std::string& tag, int block_id) const {
+        return convertIndexToBuffer(layer_id, tag, block_id);
     }
 
-    std::string groupTag(size_t group_id) const {
-        return topology().groupById(group_id).tag;
+    const std::vector<std::string>& poolTags() const {
+        return topology().groupTags();
     }
 
     size_t initCalls() const {
@@ -348,7 +348,7 @@ public:
 protected:
     bool initImpl() override {
         ++init_calls_;
-        init_resolved_address_ = convertIndexToBuffer(0, 0, 0).front().addr;
+        init_resolved_address_ = convertIndexToBuffer(0, topology().groupTags().front(), 0).front().addr;
         return init_result_;
     }
 
@@ -406,39 +406,32 @@ private:
 };
 
 std::shared_ptr<const CacheTopology> makeTopology() {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
+    auto      spec = std::make_shared<MHAKVCacheSpec>("default", 1, 1, 1);
     GroupBase group;
-    group.tag                       = spec->tag;
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = {0};
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
+    group.tag    = spec->tag;
+    group.spec   = std::move(spec);
+    group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     return CacheTopology::create({std::move(group)}, {{0, {"default"}}});
 }
 
 std::shared_ptr<const CacheTopology> makeSharedPoolTopology() {
     std::vector<GroupBase> groups;
     for (size_t group_id = 0; group_id < 2; ++group_id) {
-        auto spec = std::make_shared<MHAKVCacheSpec>();
-        spec->tag = "group_" + std::to_string(group_id);
+        auto      spec = std::make_shared<MHAKVCacheSpec>("group_" + std::to_string(group_id), 1, 1, 1);
         GroupBase group;
-        group.tag                       = spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
+        group.tag    = spec->tag;
+        group.spec   = std::move(spec);
+        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         groups.push_back(std::move(group));
     }
     return CacheTopology::create(std::move(groups), {{0, {"group_0", "group_1"}}});
 }
 
 bool initBackend(TestBackend& backend, const DeviceBlockPoolPtr& pool) {
-    return backend.init(makeTopology(), {pool}, [](int layer_id, int group_id, int block_id) {
+    return backend.init(makeTopology(), {{"default", pool}}, [](int layer_id, const std::string& tag, int block_id) {
+        RTP_LLM_CHECK(tag == "default");
         auto address = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
-        return std::vector<BlockInfo>{{false, layer_id, group_id, address, 16}};
+        return std::vector<BlockInfo>{{false, layer_id, 0, address, 16}};
     });
 }
 
@@ -449,9 +442,102 @@ StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
     handles.reserve(key_count);
     for (size_t i = 0; i < key_count; ++i) {
         keys.push_back(i + 1);
-        handles.push_back({{0, block}});
+        handles.push_back({{"default", block}});
     }
     return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
+}
+
+TEST(StorageBackendTest, InvalidHandlesFailBeforePinOrIoSubmission) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(/*init_result=*/true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+
+    auto unknown                        = makeRequest(block);
+    unknown.handles.front().front().tag = "missing";
+    EXPECT_ANY_THROW(backend.prepareWrite(unknown));
+    EXPECT_ANY_THROW(backend.read(unknown, nullptr, {}));
+    unknown.handles.front().front().block = NULL_BLOCK_IDX;
+    EXPECT_ANY_THROW(backend.match(unknown, {}));
+
+    auto late_unknown                       = makeRequest(block, 2);
+    late_unknown.handles.back().front().tag = "missing";
+    EXPECT_ANY_THROW(backend.prepareWrite(late_unknown));
+
+    auto duplicate = makeRequest(block);
+    duplicate.handles.front().push_back({"default", block});
+    EXPECT_ANY_THROW(backend.prepareWrite(duplicate));
+
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(backend.readCalls(), 0u);
+    EXPECT_EQ(backend.writeHandleCount(), 0u);
+    pool->decRef(block);
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, ReorderedPoolInputsPreserveTagIdentityAndTopologyLifetime) {
+    auto first_pool   = std::make_shared<TestBlockPool>();
+    auto second_pool  = std::make_shared<TestBlockPool>();
+    auto first_block  = first_pool->malloc().value();
+    auto second_block = second_pool->malloc().value();
+    first_pool->incRef(first_block);
+    second_pool->incRef(second_block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    auto        topology   = makeSharedPoolTopology();
+    const auto* bound_tags = &topology->groupTags();
+    ASSERT_TRUE(
+        backend.init(topology, {{"group_1", second_pool}, {"group_0", first_pool}}, [](int, const std::string&, int) {
+            return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+        }));
+    topology.reset();
+    EXPECT_EQ(&backend.poolTags(), bound_tags);
+    EXPECT_EQ(backend.poolTags(), (std::vector<std::string>{"group_0", "group_1"}));
+    StorageRequest first{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{"group_0", first_block}}}};
+    auto           task = backend.prepareWrite(std::move(first));
+    EXPECT_EQ(first_pool->refCount(first_block), 2u);
+    EXPECT_EQ(second_pool->refCount(second_block), 1u);
+    task = {};
+    StorageRequest second{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{"group_1", second_block}}}};
+    backend.read(std::move(second), nullptr, [](bool success) { EXPECT_TRUE(success); });
+    EXPECT_EQ(first_pool->refCount(first_block), 1u);
+    EXPECT_EQ(second_pool->refCount(second_block), 2u);
+    EXPECT_EQ(executor->runAll(), 1u);
+    EXPECT_EQ(second_pool->refCount(second_block), 1u);
+    backend.shutdown();
+    first_pool->decRef(first_block);
+    second_pool->decRef(second_block);
+}
+
+TEST(StorageBackendTest, InvalidPoolBindingsFailBeforeDerivedInitOrIo) {
+    CoreDumpGuard guard;
+    auto          pool  = std::make_shared<TestBlockPool>();
+    auto          block = pool->malloc().value();
+    pool->incRef(block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    auto        topology    = makeSharedPoolTopology();
+    size_t      resolutions = 0;
+    const auto  resolver    = [&](int, const std::string&, int) {
+        ++resolutions;
+        return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+    };
+    EXPECT_ANY_THROW(backend.init(topology, {{"group_0", pool}}, resolver));
+    EXPECT_ANY_THROW(backend.init(topology, {{"group_0", pool}, {"group_1", pool}}, resolver));
+    EXPECT_ANY_THROW(backend.init(topology, {{"group_0", pool}, {"missing", pool}}, resolver));
+    EXPECT_ANY_THROW(backend.init(topology, {{"group_0", pool}, {"", pool}}, resolver));
+    EXPECT_ANY_THROW(backend.init(topology, {{"group_0", pool}, {"group_1", nullptr}}, resolver));
+    EXPECT_EQ(backend.initCalls(), 0u);
+    EXPECT_EQ(resolutions, 0u);
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    ASSERT_TRUE(backend.init(topology, {{"group_1", std::make_shared<TestBlockPool>()}, {"group_0", pool}}, resolver));
+    EXPECT_EQ(backend.initCalls(), 1u);
+    backend.shutdown();
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, RejectsSharedExecutorBeforeInitializingSecondBackend) {
@@ -862,9 +948,7 @@ TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
         EXPECT_TRUE(success);
         try {
             backend.shutdown();
-        } catch (...) {
-            rejected = true;
-        }
+        } catch (...) { rejected = true; }
     });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_TRUE(rejected);
@@ -876,7 +960,7 @@ TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     auto block = pool->malloc().value();
     pool->incRef(block);
     TestBackend backend;
-    ASSERT_TRUE(backend.init(makeTopology(), {pool}, [](int, int, int) {
+    ASSERT_TRUE(backend.init(makeTopology(), {{"default", pool}}, [](int, const std::string&, int) {
         return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
     }));
     backend.shutdown();
@@ -893,7 +977,7 @@ TEST(StorageBackendTest, UnsubmittedWriteTasksReleasePinsAcrossShutdown) {
     auto block = pool->malloc().value();
     pool->incRef(block);
     TestBackend backend;
-    ASSERT_TRUE(backend.init(makeTopology(), {pool}, [](int, int, int) {
+    ASSERT_TRUE(backend.init(makeTopology(), {{"default", pool}}, [](int, const std::string&, int) {
         return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
     }));
 
@@ -925,7 +1009,7 @@ TEST(StorageBackendTest, InitPopulatesBaseResourcesBeforeCallingDerivedImplement
 
     EXPECT_TRUE(initBackend(backend, pool));
     EXPECT_EQ(backend.initCalls(), 1u);
-    EXPECT_EQ(backend.groupTag(0), "default");
+    EXPECT_EQ(backend.poolTags().front(), "default");
     EXPECT_EQ(backend.initResolvedAddress(), reinterpret_cast<void*>(1));
     backend.shutdown();
 }
@@ -943,10 +1027,10 @@ TEST(StorageBackendTest, InitPropagatesDerivedFailure) {
 TEST(StorageBackendTest, InvalidArgumentsDoNotConsumeInitializationAttempt) {
     auto        pool = std::make_shared<TestBlockPool>();
     TestBackend backend;
-    const auto  resolver = [](int, int, int) { return std::vector<BlockInfo>{}; };
+    const auto  resolver = [](int, const std::string&, int) { return std::vector<BlockInfo>{}; };
     EXPECT_ANY_THROW(backend.init(nullptr, {}, resolver));
     EXPECT_ANY_THROW(backend.init(makeTopology(), {}, resolver));
-    EXPECT_ANY_THROW(backend.init(makeTopology(), {nullptr}, resolver));
+    EXPECT_ANY_THROW(backend.init(makeTopology(), {{"default", nullptr}}, resolver));
     EXPECT_EQ(backend.initCalls(), 0u);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.shutdown();
@@ -981,22 +1065,28 @@ TEST(StorageBackendTest, WritePinsEachPhysicalBlockOnceUntilCompletion) {
     backend.shutdown();
 }
 
-TEST(StorageBackendTest, SharedPoolPinsAndReleasesPhysicalBlockOnce) {
-    auto pool  = std::make_shared<TestBlockPool>();
-    auto block = pool->malloc().value();
-    pool->incRef(block);
-    auto        executor = std::make_shared<HoldingExecutor>();
-    TestBackend backend(/*init_result=*/true, executor);
-    ASSERT_TRUE(backend.init(makeSharedPoolTopology(), {pool, pool}, [](int, int, int) {
-        return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
-    }));
-
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{0, block}, {1, block}}}};
-    backend.write(backend.prepareWrite(std::move(request)));
-    EXPECT_EQ(pool->refCount(block), 2u);
-    EXPECT_EQ(executor->runAll(), 1u);
-    EXPECT_EQ(pool->refCount(block), 1u);
-    pool->decRef(block);
+TEST(StorageBackendTest, IndependentPoolsPinSameBlockIdSeparately) {
+    auto       first  = std::make_shared<TestBlockPool>();
+    auto       second = std::make_shared<TestBlockPool>();
+    const auto block  = first->malloc().value();
+    ASSERT_EQ(second->malloc().value(), block);
+    first->incRef(block);
+    second->incRef(block);
+    TestBackend backend;
+    ASSERT_TRUE(backend.init(
+        makeSharedPoolTopology(), {{"group_1", second}, {"group_0", first}}, [](int, const std::string&, int) {
+            return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+        }));
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
+                           {{{"group_0", block}, {"group_1", block}}, {{"group_0", block}}}};
+    auto           task = backend.prepareWrite(request);
+    EXPECT_EQ(first->refCount(block), 2u);
+    EXPECT_EQ(second->refCount(block), 2u);
+    task = {};
+    EXPECT_EQ(first->refCount(block), 1u);
+    EXPECT_EQ(second->refCount(block), 1u);
+    first->decRef(block);
+    second->decRef(block);
     backend.shutdown();
 }
 
@@ -1044,8 +1134,8 @@ TEST(StorageBackendTest, ResolvesGpuBufferAndGroupMetadataFromBoundResources) {
     TestBackend backend;
     ASSERT_TRUE(initBackend(backend, pool));
 
-    EXPECT_EQ(backend.groupTag(0), "default");
-    const auto buffers = backend.resolve(0, 0, 3);
+    EXPECT_EQ(backend.poolTags().front(), "default");
+    const auto buffers = backend.resolve(0, "default", 3);
     ASSERT_EQ(buffers.size(), 1u);
     EXPECT_EQ(buffers.front().addr, reinterpret_cast<void*>(4));
     backend.shutdown();

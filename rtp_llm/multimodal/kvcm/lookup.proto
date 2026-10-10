@@ -1,0 +1,26 @@
+// Wire-compatible read-only subset of KVCM kv_meta_service.proto at cfb3de4592.
+// A private package avoids descriptor conflicts with the optional KVCM wheel.
+// RPC path remains /kv_cache_manager.proto.kv_meta.MetaService/Get.
+syntax = "proto3";
+package rtp_llm.multimodal.kvcm.lookup;
+message Status { int32 code = 1; string message = 2; }
+message Header { Status status = 1; string request_id = 2; string tracer_result = 3; }
+message LocationSpec { string name = 1; string uri = 2; }
+message ValueLocation {
+  int32 type = 1;
+  int32 spec_size = 2;
+  repeated LocationSpec location_specs = 3;
+  uint64 value_size = 4;
+}
+message KeyMask { repeated bool values = 1; }
+message GetRequest {
+  string trace_id = 1;
+  string instance_id = 2;
+  int32 query_type = 3;
+  repeated string keys = 4;
+}
+message GetResponse {
+  Header header = 1;
+  repeated ValueLocation locations = 2;
+  KeyMask hit_mask = 3;
+}

@@ -22,7 +22,7 @@ final class MockEngineTestCluster implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     // Cluster-level stats shared by every engine (matches the production
     // single-cluster stats shape) so tests can census-assert across the
-    // cancel surfaces (injected / tracked / finished / unknown / tombstone).
+    // cancel surfaces (injected / tracked / finished / unknown / terminal record).
     private final JavaMockEngineCluster.ClusterStats stats =
             new JavaMockEngineCluster.ClusterStats();
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =

@@ -1,5 +1,5 @@
 
-#ifdef USING_CUDA12
+#if defined(USING_CUDA12) || defined(USING_CUDA13)
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"

@@ -5,6 +5,8 @@ import threading
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
+import torch.profiler
+
 from rtp_llm.multimodal.mm_profiler import MMProfiler, _build_top_operations
 
 
@@ -47,6 +49,103 @@ class MMProfilerTest(TestCase):
         self.assertEqual(self.profiler._profile_cfg["record_shapes"], False)
         self.assertEqual(self.profiler._profile_cfg["with_stack"], True)
         self.assertEqual(self.profiler._profile_cfg["profile_memory"], False)
+
+    # ------------------------------------------------------------------
+    # start_profile: per-process profiler stack warmup
+    # ------------------------------------------------------------------
+
+    def test_start_profile_warms_profiler_stack_once_per_process(self):
+        saved = MMProfiler._STACK_WARMED
+        MMProfiler._STACK_WARMED = False
+        try:
+            with patch("torch.cuda.is_available", return_value=False), patch(
+                "torch.profiler.profile"
+            ) as mock_prof:
+                mock_prof.return_value = MagicMock()
+                self.profiler.start_profile(count=1)
+                self.assertTrue(MMProfiler._STACK_WARMED)
+
+                # A different instance in the SAME process must not warm
+                # again: the guard is per-process, not per-profiler.
+                other = MMProfiler()
+                other._output_path = self.tmp_dir
+                other_result = other.start_profile(count=1)
+        finally:
+            MMProfiler._STACK_WARMED = saved
+
+        self.assertEqual(other_result["status"], "started")
+        # Exactly one warmup session, with the cheap flags.
+        mock_prof.assert_called_once()
+        kwargs = mock_prof.call_args.kwargs
+        self.assertEqual(kwargs["activities"], [torch.profiler.ProfilerActivity.CPU])
+        self.assertFalse(kwargs["record_shapes"])
+        self.assertFalse(kwargs["profile_memory"])
+        self.assertFalse(kwargs["with_stack"])
+        # The warmup is pure process init: no session side effects, no files.
+        self.assertEqual(self.profiler._profiled_count, 0)
+        self.assertEqual(os.listdir(self.tmp_dir), [])
+
+    def test_start_profile_arms_even_when_warmup_fails(self):
+        saved = MMProfiler._STACK_WARMED
+        MMProfiler._STACK_WARMED = False
+        try:
+            with patch("torch.cuda.is_available", return_value=False), patch(
+                "torch.profiler.profile",
+                side_effect=RuntimeError("kineto unavailable"),
+            ):
+                result = self.profiler.start_profile(count=1)
+        finally:
+            MMProfiler._STACK_WARMED = saved
+
+        self.assertEqual(result["status"], "started")
+        self.assertTrue(self.profiler._armed)
+        # A failed warmup counts as attempted: no retry on the next arm.
+        self.assertTrue(MMProfiler._STACK_WARMED)
+
+    def test_warmup_does_not_block_status_or_forward_pass_through(self):
+        """The warmup runs before start_profile takes _lock, so the executor
+        hot path (profile_forward's arming check) and get_status stay
+        responsive while a slow first warmup is in flight."""
+        saved = MMProfiler._STACK_WARMED
+        MMProfiler._STACK_WARMED = False
+        warmup_entered = threading.Event()
+        release_warmup = threading.Event()
+
+        class _SlowWarmup:
+            def __enter__(self):
+                warmup_entered.set()
+                if not release_warmup.wait(5.0):
+                    raise TimeoutError("test did not release warmup")
+
+            def __exit__(self, *exc):
+                return False
+
+        try:
+            with patch("torch.cuda.is_available", return_value=False), patch(
+                "torch.profiler.profile", return_value=_SlowWarmup()
+            ):
+                armer = threading.Thread(target=self.profiler.start_profile, kwargs={"count": 1})
+                armer.start()
+                self.assertTrue(warmup_entered.wait(5.0))
+
+                # While the warmup session is still in flight: _armed is
+                # still False, so a forward passes through un-profiled and
+                # status reads are not blocked behind _lock.
+                with self.profiler.profile_forward():
+                    pass
+                status = self.profiler.get_status()
+                self.assertFalse(status["is_profiling"])
+                self.assertEqual(status["profiled_count"], 0)
+                self.assertEqual(self.profiler._profiled_count, 0)
+                self.assertEqual(os.listdir(self.tmp_dir), [])
+
+                release_warmup.set()
+                armer.join(5.0)
+                self.assertFalse(armer.is_alive())
+            # The arm is accepted only after the warmup completed.
+            self.assertTrue(self.profiler._armed)
+        finally:
+            MMProfiler._STACK_WARMED = saved
 
     # ------------------------------------------------------------------
     # end_profile

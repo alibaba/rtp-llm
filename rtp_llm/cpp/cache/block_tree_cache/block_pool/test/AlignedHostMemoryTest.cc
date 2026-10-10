@@ -17,6 +17,9 @@ TEST(AlignedHostMemoryTest, AllocatesAlignedWritablePinnedMemory) {
     EXPECT_EQ(reinterpret_cast<uintptr_t>(memory.data()) % kAlignment, 0);
     const auto tensor = torch::from_blob(memory.data(), {kUsableBytes}, torch::TensorOptions().dtype(torch::kUInt8));
     EXPECT_TRUE(tensor.is_pinned());
+#if USING_ROCM
+    EXPECT_EQ(torch::count_nonzero(tensor).item<int64_t>(), 0);
+#endif
 
     memory.data()[0]                = 0x12;
     memory.data()[kUsableBytes - 1] = 0x34;

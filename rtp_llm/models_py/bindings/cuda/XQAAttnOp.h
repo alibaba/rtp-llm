@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef USING_CUDA12
+#if defined(USING_CUDA12) || defined(USING_CUDA13)
 
 #include <torch/extension.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"

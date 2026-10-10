@@ -19,12 +19,14 @@ py_test(
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//rtp_kernel:pkg"],
         "//conditions:default": [],
     }),
-    tags = ["H20", "cuda12_9"],
+    tags = [
+        "H20_CU13",
+    ],
     # Stays on H20 for VRAM, not compute capability: op.support() returns True on
     # sm86 and flashinfer + rtp_kernel.sparse_attention both work there, but
     # test_long_context_prefill's flex-attention reference mask needs one 32 GiB
     # allocation, which OOMs on any 24 GB card (A10 included).
     exec_properties = {
-        "gpu": "H20",
+        "gpu": "H20_CU13",
     },
 )

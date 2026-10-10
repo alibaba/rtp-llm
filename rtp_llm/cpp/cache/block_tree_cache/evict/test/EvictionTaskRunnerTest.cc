@@ -44,8 +44,12 @@ makeRunnerTestGroupSet(size_t group_set_id, const std::string& pool_name, BlockT
     auto topology    = makeTestTopology({makeTestGroupBase()});
     auto device_pool = makeTestDevicePool({{16, 0}}, 4, pool_name + "_device");
     auto host_pool   = makeHostPool(16, 4);
-    return makeTestGroupSet(
-        group_set_id, std::move(topology), {0}, {std::move(device_pool)}, std::move(host_pool), std::move(disk_pool));
+    return makeTestGroupSet(group_set_id,
+                            std::move(topology),
+                            {"group0"},
+                            {std::move(device_pool)},
+                            std::move(host_pool),
+                            std::move(disk_pool));
 }
 
 BlockTreeDiskBlockPoolPtr makeRunnerTestDiskPool(const std::string& pool_name) {

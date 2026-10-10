@@ -11,6 +11,19 @@ class RequestTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void readsNewAndLegacyCacheAffinityRequests() throws Exception {
+        for (String payload : new String[] {
+                "{\"cache_affinity_keys\":[\"image\"],\"vit_route_only\":true}",
+                "{\"media_keys\":[\"image\"],\"vit_route_only\":true}"}) {
+            Request request = objectMapper.readValue(payload, Request.class);
+            assertEquals(java.util.List.of("image"), request.getCacheAffinityKeys());
+            org.junit.jupiter.api.Assertions.assertTrue(request.isVitRouteOnly());
+            String output = objectMapper.writeValueAsString(request);
+            assertFalse(output.contains("media_keys"));
+        }
+    }
+
+    @Test
     void should_deserialize_frontend_schedule_payload() throws Exception {
         Request request = objectMapper.readValue("""
                 {
@@ -46,5 +59,12 @@ class RequestTest {
         request.setApiKey("secret-api-key");
 
         assertFalse(request.toString().contains("secret-api-key"));
+    }
+
+    @Test
+    void should_use_default_timeout_when_payload_omits_generate_timeout() throws Exception {
+        Request request = objectMapper.readValue("{\"request_id\":123}", Request.class);
+
+        assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS, request.getGenerateTimeout());
     }
 }
