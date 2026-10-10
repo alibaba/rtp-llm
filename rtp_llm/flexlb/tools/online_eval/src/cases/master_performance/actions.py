@@ -4,7 +4,8 @@ import json
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from cases.master_performance.analysis import analyze, validate, for_profile
+from cases.master_performance.analysis import analyze
+from cases.master_performance.inputs import validate, for_profile
 from workload.gate_evidence import compact_flow, write_evidence, new_evidence
 from cases.master_performance.publication import publish_performance
 from cases.master_performance.inputs import engine_roles
@@ -30,8 +31,8 @@ def observe_validate(params, plan):
 def provenance(ctx, flow, criteria):
     from runtime.paths import MOCK_JAR
     from workload.run_provenance import gate_provenance
-    from cases.master_performance import analysis, program
-    value = gate_provenance(ctx, flow, source_files=(__file__, analysis.__file__, program.__file__))
+    from cases.master_performance import analysis, program, inputs
+    value = gate_provenance(ctx, flow, source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__))
     value.update(benchmark_id=criteria["benchmark_id"],
                  mock_jar_sha256=value["files"][str(MOCK_JAR)],
                  analyzer_sha256=value["files"][str(analysis.__file__)])

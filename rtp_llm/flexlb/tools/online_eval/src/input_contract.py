@@ -11,3 +11,8 @@ def mapping_fields(value, allowed, path, *, required=(), error=ValueError):
     if missing:
         raise error(f"missing YAML parameter {path}.{sorted(missing)[0]}")
     return value
+
+
+def finite_number(value):
+    import math
+    return type(value) in (int, float) and math.isfinite(value)

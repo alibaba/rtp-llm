@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cases.master_performance.analysis import analyze, validate
+from cases.master_performance.analysis import analyze
+from cases.master_performance.inputs import validate
 from cases.master_performance.publication import publish_performance as report
 from workload.gate_evidence import trace_workload_sha
 from scenario import compile_scenarios, load_scenarios

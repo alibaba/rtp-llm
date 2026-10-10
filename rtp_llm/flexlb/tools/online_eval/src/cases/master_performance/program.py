@@ -4,7 +4,7 @@ from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
 from traffic.playback_config import normalize
-from cases.master_performance.analysis import validate
+from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
 from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow

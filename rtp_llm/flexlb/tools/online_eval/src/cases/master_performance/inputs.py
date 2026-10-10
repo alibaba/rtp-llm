@@ -1,6 +1,7 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
 from cases.metric_inputs import metric_fields
+from input_contract import finite_number as finite
 
 OBSERVATION_FIELDS = frozenset({"benchmark_id", "sample_s", "max_gap_s"})
 CHECK_FIELDS = frozenset({
@@ -91,3 +92,72 @@ def observation_contract(data):
         raise ValueError("measurement cannot start before observation")
     capture_limits(data["capture"], "parameters.observation.capture")
     return dict(warmup_s=bounds["from"], measure_s=bounds["until"]-bounds["from"])
+
+
+NUMERIC = (OBSERVATION_FIELDS - {"benchmark_id"}) | CHECK_FIELDS | {"qps", "warmup_s", "measure_s"}
+
+
+def validate(criteria, gate_input=None):
+    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps", "engine_tps_by_profile"} != NUMERIC | {"benchmark_id"}:
+        raise ValueError(
+            "performance criteria must explicitly supply every contract field"
+        )
+    if (
+        not isinstance(criteria["benchmark_id"], str)
+        or not criteria["benchmark_id"].strip()
+    ):
+        raise ValueError("benchmark_id required")
+    for k in NUMERIC:
+        if not finite(criteria[k]) or criteria[k] < 0:
+            raise ValueError(k + " must be finite and nonnegative")
+    for k in (
+        "qps",
+        "measure_s",
+        "min_requests",
+        "min_input_tps",
+        "min_output_tps",
+        "min_goodput_rps",
+        "slo_ttft_ms",
+        "slo_e2e_ms",
+        "slo_tpot_ms",
+        "max_ttft_p99_ms",
+        "max_e2e_p99_ms",
+        "max_tpot_p99_ms",
+    ):
+        if criteria[k] <= 0:
+            raise ValueError(k + " must be positive")
+    if type(criteria["min_requests"]) is not int:
+        raise ValueError("min_requests must be an integer")
+    for k in ("qps_tolerance", "min_slo_fraction", "max_error_rate"):
+        if criteria[k] > 1:
+            raise ValueError(k + " must be a fraction")
+    if not 0 < criteria["sample_s"] <= criteria["max_gap_s"] <= criteria["measure_s"]:
+        raise ValueError("invalid sample coverage budget")
+    if criteria["max_error_rate"] != 0:
+        raise ValueError("performance gate requires 100% request success")
+    if "engine_tps" in criteria:
+        bounds = criteria["engine_tps"]
+        if (not isinstance(bounds, dict) or not bounds
+                or any(not finite(v) or v <= 0 for v in bounds.values())):
+            raise ValueError("engine_tps requires positive absolute floors")
+        engine_tps(gate_input, bounds)
+    overrides = criteria.get("engine_tps_by_profile", {})
+    if (not isinstance(overrides, dict)
+            or any(type(k) is not str or not k for k in overrides)):
+        raise ValueError("engine_tps_by_profile requires registered profiles")
+    for bounds in overrides.values():
+        if (not isinstance(bounds, dict) or not bounds
+                or "engine_tps" not in criteria or set(bounds) - set(criteria["engine_tps"])
+                or any(not finite(v) or v <= 0 for v in bounds.values())):
+            raise ValueError("invalid profile engine TPS floors")
+    return criteria
+
+
+def for_profile(criteria, profile, gate_input=None):
+    """Freeze effective floors before observation and evidence collection."""
+    import copy
+    result = copy.deepcopy(validate(criteria, gate_input))
+    overrides = result.pop("engine_tps_by_profile", {})
+    if profile in overrides:
+        result["engine_tps"].update(overrides[profile])
+    return validate(result, gate_input)

@@ -39,7 +39,11 @@ def gate_provenance(ctx, flow, *, source_files):
     trace = dict(flow.trace_manifest)
     trace["workload_sha256"] = trace_workload_sha(trace["path"])
     client = json.loads((flow.directory / "flow-input.json").read_text())
-    files = {str(path): sha256_file(path) for path in (API_JAR, MOCK_JAR, *source_files)}
+    from runtime import observation
+    from cases import windows, metric_inputs
+    import input_contract
+    common = (Path(__file__), observation.__file__, windows.__file__, metric_inputs.__file__, input_contract.__file__)
+    files = {str(path): sha256_file(path) for path in (API_JAR, MOCK_JAR, *source_files, *common)}
     return dict(instance=ctx.instance["id"],
         configuration_sha256=ctx.instance["implementation"]["configuration_sha256"],
         topology=dict(prefill=ctx.env.spec.n_prefill, decode=ctx.env.spec.n_decode),

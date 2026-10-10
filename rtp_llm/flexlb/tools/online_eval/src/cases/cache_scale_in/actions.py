@@ -69,7 +69,7 @@ def observe(ctx, p, deadline):
         post_end=0,
         max_pacing_lag_ms=None,
     )
-    from cases.cache_scale_in import analysis as cache_gate, program
+    from cases.cache_scale_in import analysis as cache_gate, program, inputs
     path = ctx.artifact_dir / "cache-gate-evidence.json"
     futures = []
     intermediate_removals = []
@@ -105,7 +105,7 @@ def observe(ctx, p, deadline):
     pool = None
     futures = []
     try:
-        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__)))
+        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__, inputs.__file__)))
         first = sample()
         initial = sorted(first["engines"])
         evidence["initial_engines"] = initial
