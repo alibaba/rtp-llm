@@ -1524,6 +1524,61 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ManagerLayoutsPreserveSingleTypeGr
     EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(2), std::runtime_error);
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockIdCopyMatchesRawKVAndScaleBytes) {
+#if USING_CUDA
+    for (auto dtype : {DataType::TYPE_FP16, DataType::TYPE_INT8}) {
+        auto config = makeSimpleMhaCacheConfig(3, 10, 8, dtype, 2, 16);
+        allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator_->init());
+        ASSERT_NE(allocator_->gpu_block_copy_, nullptr);
+        std::vector<std::pair<torch::Tensor, torch::Tensor>> checks;
+        for (int layer = 0; layer < 3; ++layer) {
+            for (int block = 0; block < 10; ++block) {
+                const auto buffers = allocator_->convertIndexToBuffer(layer, block);
+                for (size_t plane = 0; plane < buffers.size(); ++plane) {
+                    const auto& info  = buffers[plane];
+                    auto        bytes = torch::from_blob(
+                        info.addr,
+                        {static_cast<int64_t>(info.size_bytes)},
+                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, info.device_index));
+                    const int value = block * 17 + layer * 3 + plane;
+                    bytes.fill_(value);
+                    const int expected_block = block == 4 || block == 5 ? 0 : block == 6 ? 1 : block;
+                    checks.push_back({bytes,
+                                      torch::full({static_cast<int64_t>(info.size_bytes)},
+                                                  expected_block * 17 + layer * 3 + plane,
+                                                  torch::kUInt8)});
+                }
+            }
+        }
+        auto ids = torch::tensor({0, 0, 4, 0, 0, 5, 0, 1, 6}, torch::kInt32).reshape({3, 3});
+        allocator_->blockBatchCopyForForward(ids, config.groupTags());
+        for (const auto& check : checks) {
+            EXPECT_TRUE(torch::equal(check.first.cpu(), check.second));
+        }
+    }
+#endif
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockCopyFallsBackForHostStorage) {
+    auto config = createSingleTypeTestConfig();
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_EQ(allocator_->gpu_block_copy_, nullptr);
+    const auto src = allocator_->convertIndexToBuffer(0, 0).front();
+    const auto dst = allocator_->convertIndexToBuffer(0, 1).front();
+    std::memset(src.addr, 0x5a, src.size_bytes);
+    std::memset(dst.addr, 0, dst.size_bytes);
+    // Payload row 1 deliberately differs from the coordinator's only group index 0.
+    const auto ids = torch::tensor({1, 0, 1}, torch::kInt32).reshape({1, 3});
+    allocator_->blockBatchCopyForForward(ids, {"unused", config.groupTags().front()});
+    EXPECT_ANY_THROW(allocator_->blockBatchCopyForForward(ids, config.groupTags()));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopyForForward(ids, {"unused", "unknown"}));
+    EXPECT_ANY_THROW(
+        allocator_->blockBatchCopyForForward(ids, {config.groupTags().front(), config.groupTags().front()}));
+    EXPECT_EQ(std::memcmp(src.addr, dst.addr, src.size_bytes), 0);
+}
+
 // Test block copy
 TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockCopySingle) {
     auto config = createSingleTypeTestConfig();
