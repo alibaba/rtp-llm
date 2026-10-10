@@ -213,7 +213,10 @@ test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
+# Bare passthrough: the client's LD_LIBRARY_PATH (seeded by
+# internal_source/ci/nvidia_runtime_env.sh with the bazel-fetched nvidia
+# wheels) is handed to the test processes.  The image ships no nccl/cudnn.
+test:cuda13_arm --test_env=LD_LIBRARY_PATH
 test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
@@ -221,7 +224,10 @@ test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64
+# Bare passthrough: the client's LD_LIBRARY_PATH (seeded by
+# internal_source/ci/nvidia_runtime_env.sh with the bazel-fetched nvidia
+# wheels) is handed to the test processes.  The image ships no nccl/cudnn.
+test:cuda13 --test_env=LD_LIBRARY_PATH
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
 
 build:cpu --copt="-DENABLE_BF16=1"
