@@ -22,20 +22,15 @@ import traceback
 CONFIG = Path(__file__).resolve().parents[1]
 FLEXLB = CONFIG.parents[1]
 sys.path.insert(0, str(FLEXLB / "tools/online_eval"))
+sys.path.insert(0, str(FLEXLB / "tools/online_eval/src"))
 
-from flexlb_ft.harness import (  # noqa: E402
-    API_JAR,
-    MOCK_JAR,
-    JAVA_MODULE_OPTS,
-    EnvManager,
-    EnvSpec,
-    flexlb_config_for_profile,
-    http_get_json,
-    http_post_json,
-    resolve_java21,
-    wait_for,
-)
-from flexlb_ft.engine_ops import EngineOps  # noqa: E402
+from flexlb_cfg import ConfigOverride, render_env  # noqa: E402
+from runtime.paths import API_JAR, MOCK_JAR  # noqa: E402
+from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21  # noqa: E402
+from runtime.environment import EnvManager  # noqa: E402
+from runtime.environment_config import EnvSpec  # noqa: E402
+from runtime.network import http_get_json, http_post_json, wait_for  # noqa: E402
+from runtime.engine_ops import EngineOps  # noqa: E402
 from google.protobuf.json_format import MessageToDict  # noqa: E402
 
 
@@ -96,27 +91,28 @@ def main():
                 for jar in (API_JAR, MOCK_JAR)
             },
         )
+        # The independent mock consumes the same config as the packaged Master;
+        # "none" suppresses the manager's Master launch, not config rendering.
+        config = json.loads(render_env("single-batch", ConfigOverride(decode_max_engine_requests=1)))
+        config.setdefault("grpcServer", {})["shutdownQuietPeriodMs"] = args.quiet_period_ms
+        config_json = json.dumps(config)
         env = manager.ensure(
             EnvSpec(
                 label="term",
                 n_prefill=1,
                 n_decode=1,
                 master_profile="none",
+                raw_config=config_json,
                 mock_heap="512m",
                 event_loop_threads=2,
                 completion_threads=2,
             )
         )
-        config = json.loads(flexlb_config_for_profile("single-batch"))
         # A real long decode occupies the sole decode slot. Subsequent Schedule
         # RPCs remain queued inside the real scheduler when TERM arrives.
-        config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
-        config.setdefault("grpcServer", {})[
-            "shutdownQuietPeriodMs"
-        ] = args.quiet_period_ms
         save("flexlb-config.json", config)
-        launch_env = dict(os.environ, **manager._master_env(env))
-        launch_env["FLEXLB_CONFIG"] = json.dumps(config)
+        launch_env = dict(os.environ, **manager.master_lifecycle._master_env(env))
+        launch_env["FLEXLB_CONFIG"] = config_json
         launch_env["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = '{"needConsistency":false}'
         launch_env["APP_NAME"] = "FlexLB"
         bin_dir = root / "bin"
