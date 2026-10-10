@@ -226,6 +226,14 @@ py_test(
     timeout = "long",
 )
 
+py_library(
+    name = "v41_loader_worker_testlib",
+    srcs = ["test_v41_loader_worker_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_worker_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "test_v41_loader_worker_sm120",
     srcs = [

@@ -73,7 +73,7 @@ def verify_outputs(actual, expected, request_ids, prompts, full_outputs):
             assert row["all_hidden"] is None
 
 
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, worker_factory=None, head_is_sharded=False):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -133,7 +133,7 @@ def run_rank(rank, port, config):
                     gate_armed = threading.Event()
                     gate_entered = threading.Event()
                     gate_release = threading.Event()
-                    worker = make_worker(rank, config)
+                    worker = (worker_factory or make_worker)(rank, config)
                     assert not worker._materialized and worker.v4 is None
                     initialize = worker.initialize
                     original_execute = worker._execute_native_pp_engine
@@ -141,8 +141,11 @@ def run_rank(rank, port, config):
                         # This bounded fixture supplies a full head. The real
                         # loader already shards it and must not be sliced again.
                         head = worker.weight.global_weights[W.lm_head]
-                        width = head.size(0) // 4
-                        head = head.narrow(0, rank % 4 * width, width).contiguous()
+                        if head_is_sharded:
+                            assert head.size(0) * 4 == worker._v4_args.vocab_size
+                        else:
+                            width = head.size(0) // 4
+                            head = head.narrow(0, rank % 4 * width, width).contiguous()
                     else:
                         head = torch.empty(0)
 

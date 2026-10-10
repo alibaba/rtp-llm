@@ -32,7 +32,7 @@ from rtp_llm.utils.model_weight import W
 
 
 def save_checkpoint(root, args, weights):
-    engram = checkpoint(root, full_schedule=True)
+    engram = checkpoint(root, full_schedule=True, hidden_size=args.dim)
     text = {
         **args.v41_config,
         **engram,
