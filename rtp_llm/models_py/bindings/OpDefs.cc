@@ -128,6 +128,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu)
         .def_readwrite("prefill_prefix_lengths_cpu", &PyContextParallelParams::prefill_prefix_lengths_cpu);
 
+    pybind11::class_<HostInputMetadataBuilder, std::shared_ptr<HostInputMetadataBuilder>>(m, "HostInputMetadataBuilder")
+        .def("build", &HostInputMetadataBuilder::build);
+
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
@@ -160,6 +163,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def_readwrite("host_model_metadata", &PyAttentionInputs::host_model_metadata)
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
@@ -198,6 +202,8 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
+        .def_readwrite("input_ids_host", &PyModelInputs::input_ids_host)
+        .def_readwrite("text_tokens_mask_host", &PyModelInputs::text_tokens_mask_host)
         .def(pybind11::init([](torch::Tensor       input_ids,
                                torch::Tensor       input_hiddens,
                                torch::Tensor       combo_position_ids,

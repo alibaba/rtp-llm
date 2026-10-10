@@ -159,6 +159,7 @@ private:
     py::object                 py_model_;
     py::object                 py_forward_method_;
     py::object                 held_attn_pyobj_;
+    std::shared_ptr<torch_ext::HostInputMetadataBuilder> host_input_metadata_builder_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -355,6 +356,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
+    if (py::hasattr(py_model_, "host_input_metadata_builder")) {
+        host_input_metadata_builder_ =
+            py_model_.attr("host_input_metadata_builder").cast<std::shared_ptr<torch_ext::HostInputMetadataBuilder>>();
+        RTP_LLM_CHECK_WITH_INFO(!host_input_metadata_builder_
+                                   || (!enable_cuda_graph_ && !params.device_resource_config.enable_layer_micro_batch),
+                               "native host input metadata requires graphs and layer microbatching disabled");
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

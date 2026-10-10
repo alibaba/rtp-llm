@@ -60,7 +60,8 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
                                     const torch::Tensor&                             token_ids,
                                     const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
                                     torch::Tensor                                    token_type_ids,
-                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
+                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes,
+                                    bool                                             hash_features) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
@@ -111,17 +112,19 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
         }
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
-        auto* target = expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len;
-        if (feature_hashes.has_value()) {
-            const auto& hashes = feature_hashes->at(i);
-            if (!hashes.defined() || !hashes.device().is_cpu() || hashes.scalar_type() != torch::kInt32
-                || hashes.dim() != 1 || hashes.numel() != mm_embedding[i].size(0)) {
-                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hashes");
+        if (hash_features) {
+            auto* target = expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len;
+            if (feature_hashes.has_value()) {
+                const auto& hashes = feature_hashes->at(i);
+                if (!hashes.defined() || !hashes.device().is_cpu() || hashes.scalar_type() != torch::kInt32
+                    || hashes.dim() != 1 || hashes.numel() != mm_embedding[i].size(0)) {
+                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hashes");
+                }
+                auto contiguous_hashes = hashes.contiguous();
+                memcpy(target, contiguous_hashes.data_ptr<int32_t>(), contiguous_hashes.nbytes());
+            } else {
+                RETURN_IF_STATUS_ERROR(getFeatureHash(target, mm_embedding[i]));
             }
-            auto contiguous_hashes = hashes.contiguous();
-            memcpy(target, contiguous_hashes.data_ptr<int32_t>(), contiguous_hashes.nbytes());
-        } else {
-            RETURN_IF_STATUS_ERROR(getFeatureHash(target, mm_embedding[i]));
         }
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
@@ -296,15 +299,14 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     return ErrorInfo::OkStatus();
 }
 
-ErrorResult<MultimodalFeature>
-MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                           const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
+ErrorResult<MultimodalFeature> MultimodalProcessor::getMultimodalFeatures(
+    const torch::Tensor& input_ids, const std::vector<rtp_llm::MultimodalInput>& mm_inputs, bool hash_features) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(
         expanded_ids,
-        expandTokenIds(mm_features.features, input_ids, mm_inputs, {}, mm_embedding_res.mm_feature_hashes));
+        expandTokenIds(mm_features.features, input_ids, mm_inputs, {}, mm_embedding_res.mm_feature_hashes, hash_features));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

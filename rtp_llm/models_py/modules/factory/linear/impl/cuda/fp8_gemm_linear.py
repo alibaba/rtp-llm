@@ -11,13 +11,33 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
 
 
 class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+    supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
+
+    @classmethod
+    def _is_fp8_per_block_candidate(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+    ) -> bool:
+        return (
+            weight_scales is not None
+            and quant_config is not None
+            and weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
 
     @classmethod
     def can_handle(
@@ -29,11 +49,42 @@ class CudaFp8GEMMLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is None or quant_config is None:
+        if not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales):
             return False
-        if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-            return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        return not (
+            is_sm12x(weight.device) and resolve_sm120_fp8_backend() == "cutlass"
+        )
+
+    @classmethod
+    def rejection_reason(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        if (
+            not is_sm12x(weight.device)
+            or resolve_sm120_fp8_backend() != "cutlass"
+            or not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales)
+        ):
+            return None
+        # The SM120 strategy can be absent from the registry when its binding
+        # was not compiled. Preserve its public diagnostic in that case.
+        try:
+            from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
+        except ImportError as error:
+            return (
+                "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
+                "with --config=cuda12_9 or --config=cuda13, plus "
+                f"--config=sm12x (ENABLE_FP8_SM120): {error}"
+            )
+
+        return CudaFp8VllmBlockwiseLinear.rejection_reason(
+            quant_config, weight, weight_scales
+        )
 
     @torch.inference_mode()
     def __init__(
@@ -72,6 +123,12 @@ class CudaFp8GEMMLinear(LinearBase):
         self.K = self._deepgemm_linear.K
         self.N = self._deepgemm_linear.N
         self.scale_ue8m0 = getattr(self._deepgemm_linear, "scale_ue8m0", False)
+        # The BERT fused LayerNorm produces packed UE8M0, not Hopper's
+        # float32 activation scales. Ordinary forward dispatch is unchanged.
+        self.supports_prequantized_activation = self.scale_ue8m0
+        self.fused_activation_quant_format = (
+            "fp8_ue8m0_block128_colmajor" if self.scale_ue8m0 else None
+        )
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0
@@ -140,3 +197,37 @@ class CudaFp8GEMMLinear(LinearBase):
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_without_bias(input)
+        return self._flashinfer_linear.forward_without_bias(input)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_with_bias_gelu(input)
+        return self._flashinfer_linear.forward_with_bias_gelu(input)
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if self._should_use_flashinfer(input):
+            return None
+        return self._deepgemm_linear.forward_with_bias_gelu_quantized(input)
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_quantized(
+            input, input_scales, apply_bias=apply_bias
+        )
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        return self._deepgemm_linear.forward_quantized_with_bias_gelu_quantized(
+            input, input_scales
+        )

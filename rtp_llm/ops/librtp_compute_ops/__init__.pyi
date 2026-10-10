@@ -241,6 +241,7 @@ class PyAttentionInputs:
     sequence_lengths_plus_1_device: torch.Tensor
     total_tokens: int
     headwise_config: dict | None
+    host_model_metadata: list[torch.Tensor]
     kv_cache_kernel_block_id: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_block_id: torch.Tensor
@@ -251,6 +252,10 @@ class PyAttentionInputs:
     def prefix_lengths_device(self) -> torch.Tensor: ...
     def __repr__(self) -> str: ...
     def __copy__(self) -> PyAttentionInputs: ...
+
+class HostInputMetadataBuilder:
+    def build(self, input_ids: torch.Tensor, input_lengths: torch.Tensor,
+              text_mask: torch.Tensor | None, cu_seqlens: torch.Tensor) -> list[torch.Tensor]: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
@@ -300,6 +305,8 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    input_ids_host: torch.Tensor | None
+    text_tokens_mask_host: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload

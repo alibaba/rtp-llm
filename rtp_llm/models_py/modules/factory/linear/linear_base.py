@@ -20,6 +20,11 @@ class LinearBase(nn.Module, ABC):
     It inherits from nn.Module and implements forward() directly.
     """
 
+    supports_deferred_bias = False
+    supports_fused_bias_gelu_quant = False
+    supports_prequantized_activation = False
+    fused_activation_quant_format: Optional[str] = None
+
     @classmethod
     @abstractmethod
     def can_handle(
@@ -44,6 +49,19 @@ class LinearBase(nn.Module, ABC):
             Whether this configuration can be handled
         """
         pass
+
+    @classmethod
+    def rejection_reason(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        """Return an actionable reason after ``can_handle`` returned False."""
+        return None
 
     @abstractmethod
     def __init__(
@@ -96,6 +114,33 @@ class LinearBase(nn.Module, ABC):
         The default implementation preserves existing device behavior.
         """
         return F.gelu(self.forward(input))
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward while deferring bias to a following fused epilogue."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deferred bias"
+        )
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """Return fused GELU output in backend-native quantized form when supported."""
+        return None
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not accept pre-quantized activations"
+        )
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        return None
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""

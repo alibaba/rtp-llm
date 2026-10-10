@@ -359,6 +359,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.sequence_lengths);
     }
 
+    if (host_input_metadata_builder_) {
+        RTP_LLM_PROFILE_SCOPE("py_model.buildHostInputMetadata");
+        RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.is_prefill, "native host input metadata requires prefill");
+        py_attn_inputs.host_model_metadata = host_input_metadata_builder_->build(
+            inputs.combo_tokens, py_attn_inputs.input_lengths, inputs.text_tokens_mask, py_attn_inputs.cu_seqlens);
+    }
     return py_attn_inputs;
 }
 
@@ -825,6 +831,12 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_                         = CudaGraphState();
     generation_prefill_cuda_graph_state_ = CudaGraphState();
+    // Non-graph execution consumes attention_inputs_ directly in forward().
+    // Avoid copying it into a temporary graph-only wrapper after the H2D flush.
+    if (!enable_cuda_graph_) {
+        prepared_guard.commit();
+        return;
+    }
     auto empty                           = torch::Tensor();
     // buildPyAttentionInputs() has already copied combo_position_ids to the
     // device.  Keep the top-level PyModelInputs field consistent with the
@@ -966,6 +978,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
+        if (inputs.combo_tokens.defined() && inputs.combo_tokens.device().is_cpu()) {
+            py_model_inputs.input_ids_host = inputs.combo_tokens;
+        }
+        if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.device().is_cpu()) {
+            py_model_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
