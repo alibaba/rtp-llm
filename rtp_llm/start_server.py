@@ -6,6 +6,7 @@ import tempfile
 import time
 import traceback
 
+from rtp_llm.utils.startup_timing import startup_event, startup_stage
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -683,12 +684,17 @@ def start_server(py_env_configs: PyEnvConfigs):
         _start_parent_scr_arrival(scr_manifest)
 
         # Start parallel health checks and wait for completion
-        if not process_manager.run_health_checks():
-            logging.error("Health checks failed")
-            raise Exception("Health checks failed")
+        with startup_stage("launcher.health_checks"):
+            if not process_manager.run_health_checks():
+                logging.error("Health checks failed")
+                raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(py_env_configs)
-        _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        with startup_stage("launcher.real_warmup"):
+            warmup_ok = _maybe_run_startup_real_warmup(py_env_configs)
+        startup_event("launcher.real_warmup", "result", completed=warmup_ok)
+        with startup_stage("launcher.health_gate"):
+            _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        startup_event("launcher.health_gate", "ready")
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -956,10 +962,17 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     max_new_tokens,
                     reserve_step,
                 )
-                async for outputs in client.enqueue(generate_input):
-                    chunk_count += 1
-                    if outputs.generate_outputs:
-                        last_aux = outputs.generate_outputs[0].aux_info
+                with startup_stage(
+                    "launcher.warmup_request",
+                    addr=addr,
+                    request_id=request_id,
+                    target_token_len=token_len,
+                    request_token_len=request_token_len,
+                ):
+                    async for outputs in client.enqueue(generate_input):
+                        chunk_count += 1
+                        if outputs.generate_outputs:
+                            last_aux = outputs.generate_outputs[0].aux_info
                 if last_aux is not None:
                     logging.info(
                         "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
