@@ -28,6 +28,12 @@ public:
     // Clear fresh requests only, after worker readiness and WORLD agreement.
     // A fatal failure retains pending leases; drain GPU work before aborting.
     void initializeFresh(const V41PPCacheBatchPtr& batch);
+    // Begin before layer execution/activation receives. The returned transfer
+    // round counts successful executions independently of rejected admissions.
+    int64_t beginExecution(const V41PPCacheBatchPtr& batch);
+    // The caller must drain GPU work and transport/consumers before completion.
+    // Any failed completion poisons WORLD and retains the batch until abort.
+    void completeExecution(const V41PPCacheBatchPtr& batch, bool successful);
     void commit(const V41PPCacheBatchPtr& batch);
     void abort(const V41PPCacheBatchPtr& batch);
     void retire(const std::array<int64_t, 3>& source);
@@ -45,6 +51,7 @@ private:
     bool           root_;
     bool           failed_ = false;
     int64_t        round_ = 0;
+    int64_t        execution_round_ = 0;
     V41PPCacheBatchPtr writing_batch_;
 };
 

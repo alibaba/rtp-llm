@@ -38,6 +38,7 @@ class NativePPPrefillDispatch:
     spans: tuple[V41L20Span, ...]
     rows: torch.Tensor
     tables: dict[str, torch.Tensor]
+    worker_owner: Any
 
     @property
     def schedule(self):
@@ -322,4 +323,5 @@ def prepare_native_pp_prefill_dispatch(
         spans,
         rows,
         {tag: table.clone() for tag, table in tables.items()},
+        worker._native_pp_owner,
     )

@@ -87,6 +87,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._worker_stream = None
         self._dp_group = None
         self._stage_agreement = None
+        self._native_pp_owner = object()
 
     def _configure_dp_group(self):
         args = self._v4_args
@@ -578,6 +579,32 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 # inputs. Break the saved-exception cycle so rejected leases
                 # release during unwinding rather than waiting for cyclic GC.
                 error = None
+
+    @torch.inference_mode()
+    def _execute_native_pp_prefill(
+        self, dispatch, contract, transfer_round, *, receiver=None, tensors=None
+    ):
+        """Run after native WORLD begin; the caller drains and agrees completion.
+
+        This private adapter composes qualified owners. Public PP forwarding
+        still requires executor admission, retained slots and scheduler wiring.
+        """
+        from rtp_llm.models_py.modules.dsv4.native_pp_execution import (
+            execute_native_pp_prefill,
+        )
+
+        with self._worker_lock:
+            self._check_worker()
+            if self._worker_state != "ready":
+                raise RuntimeError("V4.1 worker is not initialized")
+            return execute_native_pp_prefill(
+                self,
+                dispatch,
+                contract,
+                transfer_round,
+                receiver=receiver,
+                tensors=tensors,
+            )
 
     def _validate_decode(self, inputs, attn):
         from rtp_llm.models_py.modules.dsv4.decode.forward import (

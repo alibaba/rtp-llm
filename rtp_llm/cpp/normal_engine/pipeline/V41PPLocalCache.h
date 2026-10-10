@@ -71,6 +71,8 @@ private:
     bool                                      committed_ = false;
     bool                                      worker_ready_ = false;
     bool                                      initialized_ = false;
+    bool                                      execution_started_ = false;
+    bool                                      execution_completed_ = false;
 };
 
 using V41PPCacheBatchPtr = std::shared_ptr<V41PPCacheBatch>;

@@ -302,9 +302,76 @@ void V41PPAdmission::initializeFresh(const V41PPCacheBatchPtr& batch) {
     }
 }
 
+int64_t V41PPAdmission::beginExecution(const V41PPCacheBatchPtr& batch) {
+    if (failed_) {
+        throw std::runtime_error("V4.1 PP execution cannot enter a failed session");
+    }
+    auto packet = torch::tensor({int64_t{1}, int64_t{6}, round_, execution_round_}, torch::kInt64);
+    std::string error;
+    try {
+        local_.requirePending(batch);
+        if (!batch->worker_ready_ || !batch->initialized_ || batch->execution_started_) {
+            throw std::invalid_argument("V4.1 PP execution requires a new initialized worker-ready batch");
+        }
+        if (execution_round_ == std::numeric_limits<int64_t>::max()) {
+            throw std::overflow_error("V4.1 PP execution rounds exhausted");
+        }
+    } catch (const std::invalid_argument& exception) {
+        packet.data_ptr<int64_t>()[0] = 0;
+        error = exception.what();
+    } catch (const std::exception& exception) {
+        packet.data_ptr<int64_t>()[0] = 2;
+        error = exception.what();
+    }
+    try {
+        if (worldRejected(packet, error)) {
+            throw V41InputRejected(error.empty() ? "V4.1 peer rejected execution begin" : error);
+        }
+    } catch (const V41InputRejected&) {
+        throw;
+    } catch (...) {
+        failed_ = true;
+        throw;
+    }
+    writing_batch_ = batch;
+    batch->execution_started_ = true;
+    return execution_round_;
+}
+
+void V41PPAdmission::completeExecution(const V41PPCacheBatchPtr& batch, bool successful) {
+    if (failed_) {
+        throw std::runtime_error("V4.1 PP completion cannot enter a failed session");
+    }
+    auto packet = torch::tensor({int64_t{successful ? 1 : 2}, int64_t{7}, round_, execution_round_}, torch::kInt64);
+    std::string error;
+    try {
+        local_.requirePending(batch);
+        if (writing_batch_ != batch || !batch->execution_started_ || batch->execution_completed_) {
+            throw std::runtime_error("V4.1 PP completion requires its current executing batch");
+        }
+    } catch (const std::exception& exception) {
+        packet.data_ptr<int64_t>()[0] = 2;
+        error = exception.what();
+    }
+    try {
+        if (worldRejected(packet, error)) {
+            throw std::runtime_error("V4.1 PP execution completion disagrees");
+        }
+        batch->execution_completed_ = true;
+        ++execution_round_;
+        writing_batch_.reset();
+    } catch (...) {
+        failed_ = true;
+        throw;
+    }
+}
+
 void V41PPAdmission::commit(const V41PPCacheBatchPtr& batch) {
     if (failed_) {
         throw std::runtime_error("V4.1 global PP admission cannot commit a failed session");
+    }
+    if (batch && batch->execution_started_ && !batch->execution_completed_) {
+        throw std::invalid_argument("V4.1 PP execution must complete across WORLD before cursor commit");
     }
     local_.commit(batch);
 }

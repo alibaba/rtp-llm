@@ -336,6 +336,18 @@ public:
         admission_->abort(batch);
     }
 
+    int64_t beginGlobalExecution(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireAdmission();
+        return admission_->beginExecution(batch);
+    }
+
+    void completeGlobalExecution(const V41PPCacheBatchPtr& batch, bool successful) {
+        requireOpen();
+        requireAdmission();
+        admission_->completeExecution(batch, successful);
+    }
+
     void retireGlobal(const std::array<int64_t, 3>& source) {
         requireOpen();
         requireAdmission();
@@ -638,6 +650,8 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def("prepare_global_worker", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalWorker)
         .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
         .def("initialize_global", &rtp_llm::test::V41NativePPTransportTest::initializeGlobal)
+        .def("begin_global_execution", &rtp_llm::test::V41NativePPTransportTest::beginGlobalExecution)
+        .def("complete_global_execution", &rtp_llm::test::V41NativePPTransportTest::completeGlobalExecution)
         .def("abort_global", &rtp_llm::test::V41NativePPTransportTest::abortGlobal)
         .def("retire_global", &rtp_llm::test::V41NativePPTransportTest::retireGlobal)
         .def_property_readonly("active_global", &rtp_llm::test::V41NativePPTransportTest::activeGlobal)

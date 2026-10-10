@@ -319,6 +319,7 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
     attn_inputs_by_tag: Optional[Dict[str, PyAttentionInputs]] = None,
+    after_layers_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """Run stage-local layers over flat tokens with per-request cu_seqlens.
 
@@ -698,6 +699,10 @@ def forward_layers(
                             h[layer_tail_mask].contiguous(),
                         )
                     _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+            if after_layers_fn is not None:
+                # The stage frame needs live delayed-HC and attention metadata.
+                # Snapshot after either callable chain and before cleanup.
+                after_layers_fn(h)
     finally:
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
@@ -848,6 +853,7 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
+    after_layers_fn: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Dispatch flat prefill metadata and per-tag block tables to stage-local layers.
 
@@ -923,6 +929,10 @@ def forward_prefill(
             total_tokens=int(input_ids.numel()),
         )
 
+    # Native attention inputs may retain host position mirrors. CP metadata
+    # and its length tensors must follow the token device in forward_layers.
+    positions = positions.to(device=input_ids.device, non_blocking=True)
+
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
 
     # Non-first stages resume [T, hc, dim] activations instead of embedding.
@@ -954,6 +964,7 @@ def forward_prefill(
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
         attn_inputs_by_tag=attn_inputs_by_tag,
+        after_layers_fn=after_layers_fn,
     )  # [T_total, dim], or [T_total, hc, dim] on a non-last PP stage
     outputs = PyModelOutputs(hidden)
     if v4.norm is None:
