@@ -72,6 +72,16 @@ py_library(
         "3rdparty/tile_kernels/*.py",
         "3rdparty/tile_kernels/**/*.py",
     ]),
+    # The mhc kernels import tilelang at module scope; carry the wheel (and
+    # its z3-solver/apache-tvm-ffi closure, via the pip pkg deps) in runfiles
+    # instead of relying on the image's site-packages. Only the locks used by
+    # the DSv4 lanes ship tilelang.
+    deps = select({
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -197,6 +207,16 @@ py_library(
         "@//:using_rocm": [
             ":modules_rocm"
         ],
+        "//conditions:default": [],
+    }) + select({
+        # deepseek_v4_model.py lazily imports modules/dsv4/tilelang_kernels and
+        # the DSv4 warmup reaches the mhc TileLang kernels; declare tilelang on
+        # the owning library so its runfiles do not depend on the image's
+        # site-packages install. z3-solver/apache-tvm-ffi ride along through the
+        # tilelang pip pkg deps.
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
