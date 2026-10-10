@@ -23,7 +23,7 @@ class EngineServer:
             "USE_BATCH_DECODE_SCHEDULER": os.environ.get(
                 "PERF_USE_BATCH_DECODE_SCHEDULER", "1"
             ),
-            "FAKE_BALANCE_EXPERT": "1",
+            "FAKE_BALANCE_EXPERT": os.environ.get("PERF_FAKE_BALANCE_EXPERT", "1"),
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
                 "0" if self._args.partial in (0, 1) else "1"
             ),
