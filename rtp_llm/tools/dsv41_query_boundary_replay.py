@@ -115,6 +115,22 @@ def reference_norm(value, weight, eps):
     ).to(torch.bfloat16)
 
 
+def quantized_difference(left, right):
+    # CPU isfinite is unavailable for these float8 formats. Preserve their
+    # actual byte comparison while measuring numeric errors in FP32.
+    result = difference(left.float(), right.float())
+    result.update(
+        reference_dtype=str(left.dtype),
+        candidate_dtype=str(right.dtype),
+        bitwise_equal=left.dtype == right.dtype
+        and torch.equal(
+            left.contiguous().reshape(-1).view(torch.uint8),
+            right.contiguous().reshape(-1).view(torch.uint8),
+        ),
+    )
+    return result
+
+
 def linear_pair(native, released, value, official, kernel):
     """Evaluate the same BF16 input through both quantizers and output GEMMs."""
     quant, packed = native._quantize_input(value)
@@ -136,8 +152,8 @@ def linear_pair(native, released, value, official, kernel):
         substituted,
         restored,
         {
-            "activation_values": difference(quant, reference_quant),
-            "activation_scales": difference(
+            "activation_values": quantized_difference(quant, reference_quant),
+            "activation_scales": quantized_difference(
                 scales.view(torch.float8_e8m0fnu), reference_scales
             ),
             "output": difference(reference, baseline),
