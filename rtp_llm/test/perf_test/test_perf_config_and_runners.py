@@ -16,7 +16,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner import (
+    CacheGridRunner,
+)
+from rtp_llm.test.perf_test.dataclass import PerfTestConfig, TableType
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
     auto_generate_bs_list as _auto_generate_bs_list,
@@ -120,13 +123,84 @@ class TestPrepareConfig(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# CacheGridRunner.run_cartesian_grid
+# ---------------------------------------------------------------------------
+class TestCartesianGridRunner(unittest.TestCase):
+    @patch(
+        "rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner.create_metrics_table"
+    )
+    @patch("rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner.tqdm")
+    @patch("rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner.BatchPerfImpl")
+    def test_preserves_legacy_grid_execution(
+        self, mock_batch_perf, mock_tqdm, mock_create_table
+    ):
+        instances = [MagicMock() for _ in range(5)]
+        for index, instance in enumerate(instances):
+            instance.run.return_value = f"metric-{index}"
+            instance.log_flush_offset = 10 + index
+        mock_batch_perf.side_effect = instances
+        mock_create_table.return_value = "table"
+
+        with patch.dict(os.environ, {"PERF_GRID_WARMUP_RUNS": "2"}):
+            metrics = CacheGridRunner.run_cartesian_grid(
+                8000,
+                2,
+                [1, 4],
+                [128, 256],
+                {128: "q128", 256: "q256"},
+                is_decode=True,
+                dump_json_path="/tmp/out",
+                decode_test_length=20,
+                tp_size=4,
+                generate_config={"top_k": 1},
+                num_measures=5,
+                log_path="/tmp/server.log",
+            )
+
+        self.assertEqual(
+            [(item.input_len, item.batch_size) for item in metrics],
+            [(128, 1), (256, 1), (128, 4), (256, 4)],
+        )
+        self.assertEqual(mock_batch_perf.call_count, 5)
+        warmup = mock_batch_perf.call_args_list[0]
+        self.assertEqual(warmup.args[2:5], (2, "q128", True))
+        self.assertEqual(warmup.kwargs["measure_runs"], 2)
+        self.assertEqual(warmup.kwargs["profile_runs"], 0)
+
+        formal = mock_batch_perf.call_args_list[1:]
+        self.assertEqual([item.args[2] for item in formal], [2, 2, 8, 8])
+        self.assertEqual(
+            [item.args[3] for item in formal], ["q128", "q256", "q128", "q256"]
+        )
+        self.assertEqual(
+            [item.args[9] for item in formal],
+            [
+                "bs1_seq128_decode",
+                "bs1_seq256_decode",
+                "bs4_seq128_decode",
+                "bs4_seq256_decode",
+            ],
+        )
+        self.assertEqual(
+            [item.kwargs["log_flush_offset"] for item in formal], [0, 11, 12, 13]
+        )
+        for instance in instances[1:]:
+            instance.run.assert_called_once_with(num_measures=5)
+
+        table_call = mock_create_table.call_args
+        self.assertEqual(table_call.args[0], TableType.Decode)
+        self.assertEqual(table_call.args[2], "/tmp/out")
+        self.assertEqual(table_call.args[3], {"dp_size": 2, "tp_size": 4})
+        self.assertEqual(table_call.args[4], "Decode Result")
+        mock_tqdm.return_value.__enter__.return_value.update.assert_called_with(1)
+
+
+# ---------------------------------------------------------------------------
 # _run_prefill
 # ---------------------------------------------------------------------------
 class TestRunPrefill(unittest.TestCase):
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
-    def test_grid_prefill(self, MockGridRunner):
-        mock_runner = MagicMock()
-        MockGridRunner.return_value = mock_runner
+    @patch.object(CacheGridRunner, "run_cartesian_grid")
+    def test_grid_prefill(self, mock_run_grid):
 
         config = PerfTestConfig(
             is_distribution=False,
@@ -139,7 +213,7 @@ class TestRunPrefill(unittest.TestCase):
         query_dict = {128: "q128", 256: "q256"}
         _run_prefill(8000, 1, config, query_dict, dump_json_path="/tmp")
 
-        MockGridRunner.assert_called_once_with(
+        mock_run_grid.assert_called_once_with(
             8000,
             1,
             [1],
@@ -148,10 +222,9 @@ class TestRunPrefill(unittest.TestCase):
             is_decode=False,
             dump_json_path="/tmp",
         )
-        mock_runner.run.assert_called_once()
 
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
-    def test_distribution_prefill_skipped(self, MockGridRunner):
+    @patch.object(CacheGridRunner, "run_cartesian_grid")
+    def test_distribution_prefill_skipped(self, mock_run_grid):
         """Distribution mode: prefill is skipped (empty input_len_list)."""
         config = PerfTestConfig(
             is_distribution=True,
@@ -162,7 +235,7 @@ class TestRunPrefill(unittest.TestCase):
             max_concurrency=8,
         )
         _run_prefill(8000, 1, config, {128: "q"})
-        MockGridRunner.assert_not_called()
+        mock_run_grid.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +266,8 @@ class TestRunDecode(unittest.TestCase):
         )
 
     # --- Mode 1: decode × grid ---
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
-    def test_decode_grid(self, MockGridRunner):
-        mock_runner = MagicMock()
-        MockGridRunner.return_value = mock_runner
+    @patch.object(CacheGridRunner, "run_cartesian_grid")
+    def test_decode_grid(self, mock_run_grid):
 
         args = _make_args(target_tpot=0)
         config = self._grid_config()
@@ -208,19 +279,19 @@ class TestRunDecode(unittest.TestCase):
             8000, 1, args, config, query_dict, engine_meta, dump_json_path="/tmp"
         )
 
-        self.assertEqual(MockGridRunner.call_count, 2)
+        self.assertEqual(mock_run_grid.call_count, 2)
         # input_len=128: all BS fit
-        c1 = MockGridRunner.call_args_list[0]
+        c1 = mock_run_grid.call_args_list[0]
         self.assertEqual(c1[0][2], [1, 8, 16])
         self.assertEqual(c1[0][3], [128])
         self.assertTrue(c1[1]["is_decode"])
         # input_len=256: only [1, 8]
-        c2 = MockGridRunner.call_args_list[1]
+        c2 = mock_run_grid.call_args_list[1]
         self.assertEqual(c2[0][2], [1, 8])
         self.assertEqual(c2[0][3], [256])
 
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
-    def test_decode_grid_kv_skip(self, MockGridRunner):
+    @patch.object(CacheGridRunner, "run_cartesian_grid")
+    def test_decode_grid_kv_skip(self, mock_run_grid):
         """All BS filtered out -> input_len is skipped entirely."""
         args = _make_args(target_tpot=0)
         config = PerfTestConfig(
@@ -235,7 +306,7 @@ class TestRunDecode(unittest.TestCase):
         _run_decode(
             8000, 1, args, config, {}, {"max_kv_tokens": 1000}, dump_json_path="/tmp"
         )
-        MockGridRunner.assert_not_called()
+        mock_run_grid.assert_not_called()
 
     # --- Mode 2: decode × distribution ---
     @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner")

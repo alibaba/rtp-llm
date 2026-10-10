@@ -59,3 +59,43 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
         }
     )
     return name
+
+def cache_grid_ci_test(name, profile, grid, gpu_type, gpu_count, envs = {}, measure_runs = None):
+    """Define one independently schedulable cache-grid shard."""
+    test_args = [
+        "--profile=$(location " + profile + ")",
+        "--cache_grid_json=$(location " + grid + ")",
+        "--partial=2",
+        "--decode_test_length=1",
+        "--batch_size=1",
+        "--cache_request_transport=dashsc_input_ids",
+    ]
+    if measure_runs != None:
+        test_args.append("--cache_measure_runs=" + str(measure_runs))
+
+    test_env = {}
+    test_env.update(envs)
+    test_env["WORLD_SIZE"] = str(gpu_count)
+    native.py_test(
+        name = name,
+        main = "//rtp_llm/test/perf_test:batch_decode_test.py",
+        srcs = ["//rtp_llm/test/perf_test:batch_decode_test.py"],
+        timeout = "eternal",
+        deps = [
+            "//rtp_llm:pyodps",
+            "//rtp_llm:testlib",
+            "//rtp_llm/test/perf_test:perf_test_lib",
+        ],
+        data = [
+            "//rtp_llm:sdk",
+            profile,
+            grid,
+        ],
+        args = test_args,
+        tags = ["manual", gpu_type],
+        exec_properties = {
+            "gpu": gpu_type,
+            "gpu_count": str(gpu_count),
+        },
+        env = test_env,
+    )

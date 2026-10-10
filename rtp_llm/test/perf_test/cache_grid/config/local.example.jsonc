@@ -1,0 +1,33 @@
+{
+  // Copy this file and set the registered model type and local model paths.
+  "schema_version": 1,
+  "model_label": "My model",
+  "engine": {
+    "model_type": "YOUR_REGISTERED_MODEL_TYPE",
+    "checkpoint_path": "/path/to/model",
+    "tokenizer_path": "/path/to/model",
+    "tp_size": 1,
+    "dp_size": 1,
+    "world_size": 1,
+    "max_seq_len": 32768,
+    "seq_size_per_block": 64
+  },
+  "engine_args": {
+    "--reuse_cache": 1,
+    "--enable_device_cache": 1,
+    "--act_type": "BF16"
+  },
+  "cache_grid": {
+    // Match the engine's logical reuse block size, including any CP sharding.
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "measure_runs": 3
+  },
+  "engine_env": {},
+  "runtime_env": {},
+  "bazel": {
+    // Set build configs for the actual GPU/toolchain; no platform is implied.
+    "configs": ["cuda12"],
+    "executable": "bazelisk"
+  }
+}
