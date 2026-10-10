@@ -273,7 +273,10 @@ cc_library(
 
 cc_library(
     name = "mla_quant_kernel",
-    srcs = ["mla_quant_kernel.cu"],
+    srcs = [
+        "mla_quant_kernel.cu",
+        "mla_decode_epilogue.cu",
+    ],
     hdrs = ["mla_quant_kernel.h"],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",

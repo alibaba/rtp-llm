@@ -16,17 +16,8 @@ To add a new op family:
 from typing import Callable, Dict
 
 
-def _kda_generate(device):
-    from rtp_llm.models_py.triton_kernels.autotune_cache.scripts.generators.kda import (
-        KDACacheGenerator,
-    )
-
-    KDACacheGenerator(head_dim=128, device=device).generate_kda()
-
-
-REGISTRY: Dict[str, Callable] = {
-    "kda": _kda_generate,
-}
+# cuLA owns KDA prefill tuning; recurrent decode is not autotuned.
+REGISTRY: Dict[str, Callable] = {}
 
 
 def available_ops() -> tuple[str, ...]:

@@ -15,7 +15,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/triton_kernels:kda",
     ] + [
         ":einops",
         ":numpy",
