@@ -19,6 +19,7 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateRequest;
 import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
+import org.flexlb.kvcm.grpc.StorageType;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.springframework.stereotype.Component;
 
@@ -195,8 +196,12 @@ public class KvcmGrpcClient {
                 .setQueryType(queryType)
                 .addAllBlockCacheKeys(blockCacheKeys)
                 .addAllMedium(config.getMedium())
-                .setGlobalKvsHostCount(Math.max(0, config.getGlobalKvsHostCount()))
-                .setEnableP2P(config.isEnableP2p())
+                .setTopKHostCount(Math.max(0, config.getTopKHostCount()))
+                .addAllBackendTypes(config.getBackendTypes().stream()
+                        .map(backendType -> switch (backendType) {
+                            case ST_TAIRMEMPOOL -> StorageType.ST_TAIRMEMPOOL;
+                            case ST_EVENT_REPORT_L2 -> StorageType.ST_EVENT_REPORT_L2;
+                        }).toList())
                 .build();
 
         long startTimeNanos = System.nanoTime();

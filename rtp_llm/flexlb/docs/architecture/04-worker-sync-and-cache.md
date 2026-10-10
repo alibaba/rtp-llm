@@ -176,11 +176,13 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
   global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
   请求侧 `medium` 默认空列表（空表示匹配全部介质，取值原样透传给 KVCM）；
-  `globalKvsHostCount` 默认 3，映射到 PB 的 `global_kvs_host_count = 7`（int32），按 local
-  降序取前 N 个逻辑引擎计算远端命中，0 表示只算本地；`enableP2p` 默认 `false`，
-  映射到 PB 的 `enable_p2p = 8`（bool）。PB 与已部署 KVCM 的
-  `alibaba/tair-kvcache@f9196aaff4f0dad3520b9523ae55721eb4955b2f` 保持一致。
-  PB 不再声明 `p2p_host_count`、`p2p_1_fetch`、`p2p_1_total_match`；返回结果只消费 `local/global`。
+  `topKHostCount` 默认 3，映射到 PB 的 `top_k_host_count = 7`（int32），按 local
+  降序取前 N 个逻辑引擎计算其他来源的联合命中，不限制返回 host 数量，0 表示只算本地。
+  `backendTypes` 默认空列表，映射到 PB 的 `backend_types = 8`（repeated StorageType）；
+  只接受 `ST_TAIRMEMPOOL`（TairMempool）和 `ST_EVENT_REPORT_L2`（其他节点可通过 P2P
+  获取的 Vineyard 缓存），可同时选择，顺序无关，不影响 local 的计算。
+  空列表原样发送，不在客户端补默认来源。返回结果只消费 `local/global`。
+  FlexLB 与 KVCM 一起升级，不兼容旧 `globalKvsHostCount` / `enableP2p` 配置或旧协议。
   查询失败重试至 `maxQueryRetryCount`。一次主查询及其所有重试共享同一个绝对 gRPC Deadline，
   总等待预算为 `requestTimeoutMs`（默认 500ms），重试不重新增加完整超时；预算耗尽后直接进入
   查询失败/本地兜底路径。主查询仍同步等待应答，异步改造不包含在这一预算限制中。

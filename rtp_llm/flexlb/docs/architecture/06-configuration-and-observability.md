@@ -209,7 +209,7 @@ UniConfig / Nacos 的 v3 部分更新示例：
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
   持续空结果保留已有地址，不按空结果次数或持续时间撤销 worker。
 - `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
-  （`medium` / `globalKvsHostCount` / `enableP2p`）和 Local Standby 参数。
+  （`medium` / `topKHostCount` / `backendTypes`）和 Local Standby 参数。
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
@@ -222,6 +222,31 @@ UniConfig / Nacos 的 v3 部分更新示例：
 
 `DIRECT + BATCH` 非法；可选配置应省略，不能写 `null`。完整示例和 selector
 矩阵见根目录 [README](../../README.md)。
+
+### KVCM 查询参数热更新
+
+KVCM 模式下，Nacos v3 配置可设置并热更新查询参数：
+
+```json
+{
+  "schemaVersion": 3,
+  "cacheMatching": {
+    "type": "KVCM",
+    "topKHostCount": 3,
+    "backendTypes": []
+  }
+}
+```
+
+`topKHostCount` 为非负整数，默认 3；0 只计算本地命中。
+`backendTypes` 默认空列表，只接受 `ST_TAIRMEMPOOL` 和 `ST_EVENT_REPORT_L2`，
+例如 `["ST_TAIRMEMPOOL", "ST_EVENT_REPORT_L2"]`。空列表原样发送给 KVCM。
+运行时省略字段保留当前值；显式配置 `[]` 清空来源列表。非法值或 JSON `null`
+会拒绝整次更新，保留上一份有效配置。旧 `globalKvsHostCount` / `enableP2p` 不再接受。
+
+Nacos 监听更新通过 `ConfigService` 校验并发布到 `CacheMatchConfiguration`；
+下一次查询使用新配置，同一次查询的重试继续使用原配置快照和原绝对 Deadline。
+查询线程只读取内存快照，不访问 Nacos。`cacheMatching.type` 仍需重启才能切换。
 
 ## MODEL_SERVICE_CONFIG
 

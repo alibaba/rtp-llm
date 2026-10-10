@@ -109,15 +109,17 @@ class CacheMatchConfigurationTest {
         verify(configService).addUpdateListener(listener.capture());
 
         FlexlbConfig updated = kvcmConfig(false);
-        updated.kvcmCacheMatching().setGlobalKvsHostCount(7);
-        updated.kvcmCacheMatching().setEnableP2p(true);
+        updated.kvcmCacheMatching().setTopKHostCount(7);
+        updated.kvcmCacheMatching().setBackendTypes(List.of(
+                KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2));
         updated.kvcmCacheMatching().setMedium(List.of("kvs"));
         listener.getValue().accept(updated);
 
         assertNotSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
         assertSame(updated.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
-        assertEquals(7, configuration.getKvcmRuntimeConfig().getGlobalKvsHostCount());
-        assertTrue(configuration.getKvcmRuntimeConfig().isEnableP2p());
+        assertEquals(7, configuration.getKvcmRuntimeConfig().getTopKHostCount());
+        assertEquals(List.of(KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2),
+                configuration.getKvcmRuntimeConfig().getBackendTypes());
         assertEquals(List.of("kvs"), configuration.getKvcmRuntimeConfig().getMedium());
         assertEquals(initial.kvcmCacheMatching().getLocalStandby(),
                 configuration.getLocalStandbyConfig(),

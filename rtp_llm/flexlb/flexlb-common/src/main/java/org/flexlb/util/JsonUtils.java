@@ -66,10 +66,10 @@ public class JsonUtils {
             "maxQueryRetryCount",
             "recovery_success_threshold",
             "recoverySuccessThreshold",
-            "global_kvs_host_count",
-            "globalKvsHostCount",
-            "enable_p2p",
-            "enableP2p",
+            "top_k_host_count",
+            "topKHostCount",
+            "backend_types",
+            "backendTypes",
             "local_standby",
             "localStandby");
 
