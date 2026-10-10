@@ -22,20 +22,21 @@ import traceback
 CONFIG = Path(__file__).resolve().parents[1]
 FLEXLB = CONFIG.parents[1]
 sys.path.insert(0, str(FLEXLB / "tools/online_eval"))
+sys.path.insert(0, str(FLEXLB / "tools/online_eval/src"))
 
-from flexlb_ft.harness import (  # noqa: E402
+from runtime.harness import (  # noqa: E402
     API_JAR,
     MOCK_JAR,
     JAVA_MODULE_OPTS,
     EnvManager,
     EnvSpec,
-    flexlb_config_for_profile,
     http_get_json,
     http_post_json,
     resolve_java21,
     wait_for,
 )
-from flexlb_ft.engine_ops import EngineOps  # noqa: E402
+from runtime.engine_ops import EngineOps  # noqa: E402
+from flexlb_cfg import render_env
 from google.protobuf.json_format import MessageToDict  # noqa: E402
 
 
@@ -102,12 +103,13 @@ def main():
                 n_prefill=1,
                 n_decode=1,
                 master_profile="none",
+                raw_config=render_env("single-batch"),
                 mock_heap="512m",
                 event_loop_threads=2,
                 completion_threads=2,
             )
         )
-        config = json.loads(flexlb_config_for_profile("single-batch"))
+        config = json.loads(render_env("single-batch"))
         # A real long decode occupies the sole decode slot. Subsequent Schedule
         # RPCs remain queued inside the real scheduler when TERM arrives.
         config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1

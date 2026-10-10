@@ -37,6 +37,8 @@ class TrafficDatasetsTest(unittest.TestCase):
         fixture = derive(path)
         profile = json.loads(datasets.profile_path().read_text())
         self.assertEqual(digest, fixture['source_sha256'])
+        java_fixture = ROOT.parents[1] / 'flexlb-api/src/test/resources/master-request-templates.json'
+        self.assertEqual(fixture, json.loads(java_fixture.read_text()))
         self.assertEqual(digest, profile['calibration']['model_sha256'])
         self.assertEqual(path, (datasets.profile_path().parent / profile['source_capture']).resolve())
         self.assertEqual('synthetic', profile['data_kind'])

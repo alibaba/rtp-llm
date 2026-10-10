@@ -68,15 +68,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.mock.env.MockEnvironment;
 import reactor.netty.resources.LoopResources;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.math.BigInteger;
 import java.net.ServerSocket;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -84,7 +80,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.SplittableRandom;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -154,8 +149,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final MethodDescriptor<
             byte[], FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
             PRE_SERIALIZED_SCHEDULE_METHOD = preSerializedScheduleMethod();
-    private static final long TOKEN_ID_REMAP_SEED =
-            Long.getLong("flexlb.perf.e2e.token-id-remap-seed", 0x5EED_F1E5L);
     private static final int REQUEST_COUNT =
             Integer.getInteger("flexlb.perf.e2e.requests", 8_192);
     private static final long MEASUREMENT_REQUEST_ID_BASE = 1_000_000L;
@@ -243,34 +236,33 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private record CompletedRoute(long requestId, AcceptedRequest accepted) { }
 
     @BeforeAll
-    static void loadLogDerivedRequests() throws IOException {
+    static void loadAnonymousRequests() throws IOException {
         suppressRequestPathLogs();
-        Path onlineLogs = findOnlineLogsDirectory();
         ObjectMapper mapper = new ObjectMapper();
-        JsonNode accessLog = mapper.readTree(onlineLogs.resolve("sample_access.json").toFile());
-        assertTrue(accessLog.path("sanitized").asBoolean(),
-                "sample access fixture must be sanitized before it is committed");
-        int[] loggedTokenCorpus = readTokenCorpus(accessLog.path("input_ids"));
-        int[] obfuscatedTokenCorpus = obfuscatedCopy(loggedTokenCorpus, TOKEN_ID_REMAP_SEED);
-        String model = accessLog.path("request_controls")
-                .path("ds_header_attributes").path("model").asText("mock-model");
-        JsonNode loggedGenerateConfig = accessLog.path("generate_config");
-        List<TraceShape> shapes = readTraceShapes(
-                mapper, onlineLogs.resolve("trace_30min.jsonl"));
-        realRequestTemplates = buildRequestTemplates(
-                shapes, obfuscatedTokenCorpus, model, loggedGenerateConfig,
-                accessLog.path("output_token_len").asInt(1));
-
-        assertEquals(REAL_REQUEST_TEMPLATE_COUNT, realRequestTemplates.size());
+        JsonNode fixture;
+        try (var stream = MasterBatchEndToEndPerformanceTest.class
+                .getResourceAsStream("/master-request-templates.json")) {
+            if (stream == null) {
+                throw new IOException("Missing anonymous master request fixture");
+            }
+            fixture = mapper.readTree(stream);
+        }
+        assertEquals(1, fixture.path("schema_version").asInt());
+        assertEquals(512, fixture.path("block_size").asInt());
+        List<TraceShape> shapes = new ArrayList<>();
+        for (JsonNode node : fixture.path("templates")) {
+            List<Long> blockKeys = new ArrayList<>();
+            for (JsonNode label : node.path("labels")) {
+                blockKeys.add(label.longValue());
+            }
+            shapes.add(new TraceShape(node.path("il").asInt(), node.path("ol").asInt(),
+                    List.copyOf(blockKeys)));
+        }
+        assertEquals(REAL_REQUEST_TEMPLATE_COUNT, shapes.size());
+        realRequestTemplates = buildRequestTemplates(shapes, "mock-model", mapper.createObjectNode());
         assertTrue(realRequestTemplates.stream()
                 .mapToInt(RealRequestTemplate::seqLen).distinct().count() >= 32,
-                "log-derived requests must retain a varied input-length distribution");
-        assertTrue(Arrays.stream(obfuscatedTokenCorpus).distinct().limit(100).count() == 100,
-                "real input token corpus unexpectedly collapsed to synthetic IDs");
-        assertTrue(tokenIdsDifferAtEveryPosition(loggedTokenCorpus, obfuscatedTokenCorpus),
-                "every logged token ID must be obfuscated before replay");
-        assertTrue(tokenIdSetsAreDisjoint(loggedTokenCorpus, obfuscatedTokenCorpus),
-                "obfuscated requests must not contain any logged token ID value");
+                "anonymous requests must retain a varied input-length distribution");
     }
 
     @AfterAll
@@ -521,7 +513,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertEquals(1, batches.maxBatchSize());
         }
         assertTrue(batches.distinctInputLengths() >= 32,
-                "engine traffic must retain the log-derived input-length distribution");
+                "engine traffic must retain the trace-derived input-length distribution");
 
         int processors = Runtime.getRuntime().availableProcessors();
         long defaultMinimumQps = Math.min(5_000L, Math.max(500L, processors * 250L));
@@ -1398,7 +1390,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         RealRequestTemplate template = realRequestTemplates.get(
                                 Math.floorMod(requestIndex, realRequestTemplates.size()));
                         assertEquals(template.seqLen(), inputLength,
-                                "engine input length must match the log-derived schedule request");
+                                "engine input length must match the trace-derived schedule request");
                         inputLengths.add(inputLength);
                         totalInputTokens += inputLength;
                     }
@@ -1412,145 +1404,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 averageInputTokens, inputLengths.size(), activeWorkerCount, requestIds);
     }
 
-    private static Path findOnlineLogsDirectory() throws IOException {
-        Path current = Path.of("").toAbsolutePath();
-        for (int depth = 0; depth < 6 && current != null; depth++) {
-            Path candidate = current.resolve("tools/online_eval/data/online_logs");
-            if (Files.isRegularFile(candidate.resolve("sample_access.json"))
-                    && Files.isRegularFile(candidate.resolve("trace_30min.jsonl"))) {
-                return candidate;
-            }
-            current = current.getParent();
-        }
-        throw new IOException("Cannot locate tools/online_eval/data/online_logs from "
-                + Path.of("").toAbsolutePath());
-    }
-
-    private static int[] readTokenCorpus(JsonNode inputIds) throws IOException {
-        if (!inputIds.isArray() || inputIds.isEmpty()) {
-            throw new IOException("sample_access.json does not contain input_ids");
-        }
-        int[] result = new int[inputIds.size()];
-        for (int index = 0; index < inputIds.size(); index++) {
-            result[index] = inputIds.get(index).intValue();
-        }
-        return result;
-    }
-
-    private static int[] obfuscatedCopy(int[] source, long seed) {
-        int[] sourceVocabulary = Arrays.stream(source).distinct().toArray();
-        if (sourceVocabulary.length == 0) {
-            throw new IllegalArgumentException("at least one token ID is required");
-        }
-
-        SplittableRandom random = new SplittableRandom(seed);
-        for (int index = sourceVocabulary.length - 1; index > 0; index--) {
-            int other = random.nextInt(index + 1);
-            int value = sourceVocabulary[index];
-            sourceVocabulary[index] = sourceVocabulary[other];
-            sourceVocabulary[other] = value;
-        }
-
-        long pseudonymBase = (long) Arrays.stream(source).max().orElseThrow() + 1L;
-        if (pseudonymBase + sourceVocabulary.length - 1L > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("not enough integer IDs for token obfuscation");
-        }
-
-        Map<Integer, Integer> tokenIdRemap = new HashMap<>(sourceVocabulary.length);
-        for (int index = 0; index < sourceVocabulary.length; index++) {
-            tokenIdRemap.put(sourceVocabulary[index], (int) (pseudonymBase + index));
-        }
-
-        int[] obfuscated = new int[source.length];
-        for (int index = 0; index < source.length; index++) {
-            obfuscated[index] = tokenIdRemap.get(source[index]);
-        }
-        return obfuscated;
-    }
-
-    private static boolean tokenIdsDifferAtEveryPosition(int[] source, int[] obfuscated) {
-        if (source.length != obfuscated.length) {
-            return false;
-        }
-        for (int index = 0; index < source.length; index++) {
-            if (source[index] == obfuscated[index]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean tokenIdSetsAreDisjoint(int[] source, int[] obfuscated) {
-        Set<Integer> sourceIds = new HashSet<>();
-        for (int tokenId : source) {
-            sourceIds.add(tokenId);
-        }
-        for (int tokenId : obfuscated) {
-            if (sourceIds.contains(tokenId)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static List<TraceShape> readTraceShapes(ObjectMapper mapper, Path tracePath)
-            throws IOException {
-        List<TraceShape> shapes = new ArrayList<>();
-        try (BufferedReader reader = Files.newBufferedReader(tracePath)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
-                }
-                JsonNode node = mapper.readTree(line);
-                if (node.has("rid") || node.has("request_id")) {
-                    throw new IOException("trace fixture contains an unsanitized request ID");
-                }
-                int inputLength = node.path("il").asInt();
-                int outputLength = node.path("ol").asInt();
-                if (inputLength <= 0 || outputLength <= 0) {
-                    continue;
-                }
-                List<Long> blockKeys = new ArrayList<>();
-                for (JsonNode blockKey : node.path("bh")) {
-                    blockKeys.add(new BigInteger(blockKey.asText()).longValue());
-                }
-                shapes.add(new TraceShape(
-                        inputLength,
-                        outputLength,
-                        List.copyOf(blockKeys)));
-            }
-        }
-        if (shapes.size() < REAL_REQUEST_TEMPLATE_COUNT) {
-            throw new IOException("Not enough usable requests in " + tracePath);
-        }
-        return shapes;
-    }
-
     private static List<RealRequestTemplate> buildRequestTemplates(
             List<TraceShape> shapes,
-            int[] realTokenCorpus,
             String model,
-            JsonNode loggedGenerateConfig,
-            int rawAccessOutputLength) {
+            JsonNode loggedGenerateConfig) {
         List<RealRequestTemplate> templates = new ArrayList<>(REAL_REQUEST_TEMPLATE_COUNT);
         for (int templateIndex = 0; templateIndex < REAL_REQUEST_TEMPLATE_COUNT; templateIndex++) {
-            TraceShape shape;
-            if (templateIndex == 0) {
-                shape = new TraceShape(realTokenCorpus.length,
-                        Math.max(1, rawAccessOutputLength), List.of());
-            } else {
-                int shapeIndex = (int) ((long) (templateIndex - 1) * shapes.size()
-                        / (REAL_REQUEST_TEMPLATE_COUNT - 1));
-                shape = shapes.get(shapeIndex);
-            }
-            int seqLen = Math.min(shape.inputLength(), realTokenCorpus.length);
-            int corpusOffset = templateIndex == 0
-                    ? 0 : Math.floorMod(templateIndex * 997, realTokenCorpus.length);
-            int maxNewTokens = templateIndex == 0
-                    ? loggedGenerateConfig.path("max_new_tokens")
-                            .asInt(Math.max(1, shape.outputLength()))
-                    : Math.max(1, shape.outputLength());
+            TraceShape shape = shapes.get(templateIndex);
+            int seqLen = shape.inputLength();
+            int maxNewTokens = Math.max(1, shape.outputLength());
 
             EngineRpcService.GenerateConfigPB.Builder generateConfig =
                     EngineRpcService.GenerateConfigPB.newBuilder()
@@ -1590,8 +1452,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                     .setSourceRole("flexlb_e2e_ut")
                                     .build());
             for (int tokenIndex = 0; tokenIndex < seqLen; tokenIndex++) {
-                input.addTokenIds(realTokenCorpus[
-                        (corpusOffset + tokenIndex) % realTokenCorpus.length]);
+                // Anonymous block labels preserve shared prefixes without original token IDs.
+                long label = shape.blockCacheKeys().get(tokenIndex / 512);
+                input.addTokenIds(Math.toIntExact(label * 512 + tokenIndex % 512));
             }
             templates.add(new RealRequestTemplate(
                     input.build(), shape.blockCacheKeys(), seqLen,
