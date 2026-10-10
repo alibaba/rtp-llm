@@ -64,6 +64,54 @@ def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
     return re.compile("^" + r"\d+".join(re.escape(p) for p in parts) + "$")
 
 
+# Layer indices the ``re:`` ignore patterns are probed with. A template stands
+# for *every* layer, so a pattern only covers it when it matches at every one of
+# these widths. A single fixed probe cannot tell "matches any layer" from
+# "matches a layer with this many digits": ``model\.layers\.[0-9]\.`` matches
+# layer 0 but not layer 12, so it does not stand for the whole template.
+_LAYER_INDEX_PROBES = (
+    "0",
+    "1",
+    "12",
+    "123",
+    "123456789",
+)
+
+
+def _regex_ignore_covers_template(pattern: str, base_name_template: str) -> bool:
+    r"""Return whether a ``re:`` ignore pattern covers the whole weight template.
+
+    The template is rendered with each of ``_LAYER_INDEX_PROBES`` and the
+    pattern has to match every rendering, which is the same whole-template
+    question ``_exclude_pattern_for`` answers for the compressed-tensors paths.
+
+    A pattern that matches only some renderings - a bounded quantifier such as
+    ``model\.layers\.\d{1,2}\.`` - cannot be classified here, because whether it
+    covers every layer depends on how many layers the checkpoint actually has.
+    Both readings are wrong in some configuration (reading it as "covers"
+    de-quantizes every layer, reading it as "does not cover" quantizes layers
+    the operator asked to exclude), so say so instead of deciding quietly.
+    """
+    matched = [
+        probe
+        for probe in _LAYER_INDEX_PROBES
+        if re.search(pattern, base_name_template.replace("{i}", probe))
+    ]
+    if matched and len(matched) != len(_LAYER_INDEX_PROBES):
+        logging.warning(
+            "compressed-tensors ignore %r matches the weight template %r at only "
+            "%d of %d probed layer widths; whether it covers every layer depends "
+            "on the layer count of this checkpoint. Use an unbounded quantifier "
+            "such as \\d+ if every layer is meant to be excluded.",
+            pattern,
+            base_name_template,
+            len(matched),
+            len(_LAYER_INDEX_PROBES),
+        )
+        return False
+    return len(matched) == len(_LAYER_INDEX_PROBES)
+
+
 def _ckpt_base_matches_quant_exclude(
     base_name_template: str, exclude_modules: set
 ) -> bool:
@@ -99,8 +147,9 @@ def _ckpt_base_matches_quant_exclude(
     for exclude in exclude_modules:
         if exclude.startswith("re:"):
             try:
-                candidate = base_name_template.replace("{i}", "0")
-                if re.search(exclude[3:], candidate):
+                if _regex_ignore_covers_template(
+                    exclude[3:], base_name_template
+                ):
                     return True
             except re.error as error:
                 raise ValueError(
@@ -113,12 +162,11 @@ def _ckpt_base_matches_quant_exclude(
 
 def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: set) -> bool:
     """Return whether a regex ignore matches the whole weight template."""
-    candidate = base_name_template.replace("{i}", "0")
     for exclude in exclude_modules:
         if not exclude.startswith("re:"):
             continue
         try:
-            if re.search(exclude[3:], candidate):
+            if _regex_ignore_covers_template(exclude[3:], base_name_template):
                 return True
         except re.error as error:
             raise ValueError(
