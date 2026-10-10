@@ -91,6 +91,26 @@ class BlockNormReferenceTest(unittest.TestCase):
             self.assertIs(RMSNorm.forward, outer)
         self.assertIs(RMSNorm.forward, original)
 
+    def test_explicit_fixture_width_and_inplace_output(self):
+        norm = RMSNorm(torch.ones(512, device="cuda", dtype=torch.bfloat16))
+        value = self.x[:, :512].contiguous().clone()
+        original = RMSNorm.forward
+        with block_norm_reference(True, norms=[norm], dim=512):
+            expected = norm(value)
+            inplace = value.clone()
+            self.assertIs(norm(inplace, output=inplace), inplace)
+            self.assertTrue(torch.equal(expected, inplace))
+            with self.assertRaisesRegex(ValueError, "token rows"):
+                norm(self.x)
+        self.assertIs(RMSNorm.forward, original)
+        with self.assertRaisesRegex(ValueError, "checkpoint norms"):
+            with block_norm_reference(True, norms=[norm]):
+                pass
+        for width in (True, 512.0, 1024):
+            with self.subTest(width=width), self.assertRaisesRegex(ValueError, "width"):
+                with block_norm_reference(True, norms=[norm], dim=width):
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()

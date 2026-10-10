@@ -11,12 +11,14 @@ from rtp_llm.models_py.modules.dsv4.v41_cache import _shares_storage
 
 
 @contextmanager
-def block_norm_reference(enabled, *, norms=()):
+def block_norm_reference(enabled, *, norms=(), dim=5120):
     if type(enabled) is not bool:
         raise ValueError("Block normalization selection requires a bool")
     if not enabled:
         yield
         return
+    if type(dim) is not int or dim not in (512, 5120):
+        raise ValueError("Block normalization requires an admitted checkpoint width")
     norms = tuple(norms)
     selected = {id(norm) for norm in norms}
     if not norms or len(selected) != len(norms):
@@ -24,7 +26,7 @@ def block_norm_reference(enabled, *, norms=()):
     for norm in norms:
         if (
             type(norm) is not RMSNorm
-            or norm.weight.shape != (5120,)
+            or norm.weight.shape != (dim,)
             or norm.weight.dtype != torch.bfloat16
             or not norm.weight.is_cuda
             or not norm.weight.is_contiguous()
@@ -40,7 +42,7 @@ def block_norm_reference(enabled, *, norms=()):
             return original(norm, hidden_states, output=output)
         if (
             hidden_states.ndim != 2
-            or hidden_states.shape[-1] != 5120
+            or hidden_states.shape[-1] != dim
             or hidden_states.dtype != torch.bfloat16
             or hidden_states.device != norm.weight.device
             or not hidden_states.is_contiguous()

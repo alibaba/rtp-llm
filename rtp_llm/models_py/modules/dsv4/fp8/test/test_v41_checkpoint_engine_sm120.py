@@ -26,6 +26,9 @@ from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as nativ
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_block_norm_reference as block_norm_provider,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
     make_loader,
@@ -127,6 +130,11 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     )
     compare_collapse = os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
     compare_tilelang = os.environ.get("DSV41_TEST_COMPARE_DECODE_TILELANG") == "1"
+    compare_block_norm = os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
+    if compare_block_norm and not compare_tilelang:
+        raise ValueError(
+            "Block normalization requires the qualified decode composition"
+        )
     if compare_collapse and not compare_sparse_prefill:
         raise ValueError(
             "mHC collapse diagnostic requires the scoped prefill composition"
@@ -167,6 +175,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_sparse_prefill
         or compare_collapse
         or compare_tilelang
+        or compare_block_norm
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -235,6 +244,13 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         profiles.append(f"{profiles[-1]}_mhc_collapse_reference")
     if compare_tilelang:
         profiles.append(f"{profiles[-1]}_decode_tilelang_reference")
+    if compare_block_norm:
+        profiles.append(f"{profiles[-1]}_block_norm_reference")
+    block_norm_source_hash = (
+        hashlib.sha256(Path(block_norm_provider.__file__).read_bytes()).hexdigest()
+        if compare_block_norm
+        else None
+    )
     tilelang_source_hash = (
         hashlib.sha256(Path(tilelang_kernels.__file__).read_bytes()).hexdigest()
         if compare_tilelang
@@ -360,8 +376,12 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                tilelang_decode = profile.endswith("_decode_tilelang_reference")
-                tilelang_base = profile.removesuffix("_decode_tilelang_reference")
+                block_norm = profile.endswith("_block_norm_reference")
+                block_norm_base = profile.removesuffix("_block_norm_reference")
+                tilelang_decode = block_norm_base.endswith("_decode_tilelang_reference")
+                tilelang_base = block_norm_base.removesuffix(
+                    "_decode_tilelang_reference"
+                )
                 collapse = tilelang_base.endswith("_mhc_collapse_reference")
                 collapse_base = tilelang_base.removesuffix("_mhc_collapse_reference")
                 sparse_prefill = collapse_base.endswith("_sparse_prefill_reference")
@@ -460,6 +480,16 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             **({"mhc_collapse_reference": True} if collapse else {}),
                             **(
                                 {
+                                    "block_norm_reference": True,
+                                    "block_norm_reference_scope": "explicit-blocks",
+                                    "block_norm_reference_dim": config.hidden_size,
+                                    "block_norm_provider_sha256": block_norm_source_hash,
+                                }
+                                if block_norm
+                                else {}
+                            ),
+                            **(
+                                {
                                     "decode_tilelang_reference": True,
                                     "decode_tilelang_reference_scope": "single-token-planar",
                                     "decode_tilelang_provider_sha256": tilelang_source_hash,
@@ -504,6 +534,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     collapse,
                 ), decode_tilelang_reference(
                     tilelang_decode,
+                ), block_norm_provider.block_norm_reference(
+                    block_norm,
+                    norms=(
+                        tuple(
+                            norm
+                            for layer in model.v4.layers
+                            for norm in (layer.attn_norm, layer.ffn_norm)
+                        )
+                        if block_norm
+                        else ()
+                    ),
+                    dim=config.hidden_size,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -667,7 +709,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_decode_tilelang_reference")
+                                or profile.removesuffix("_block_norm_reference")
+                                .removesuffix("_decode_tilelang_reference")
                                 .removesuffix("_mhc_collapse_reference")
                                 .removesuffix("_sparse_prefill_reference")
                                 .removesuffix("_output_reference")
@@ -679,7 +722,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_decode_tilelang_reference")
+                        or profile.removesuffix("_block_norm_reference")
+                        .removesuffix("_decode_tilelang_reference")
                         .removesuffix("_mhc_collapse_reference")
                         .removesuffix("_sparse_prefill_reference")
                         .removesuffix("_output_reference")
