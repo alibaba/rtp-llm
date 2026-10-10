@@ -804,9 +804,19 @@ message RemoteOperationRequestPB {
     repeated string group_tags = 6;
 }
 
+enum RemoteTransferStatusPB {
+    REMOTE_TRANSFER_STATUS_UNSPECIFIED = 0;
+    REMOTE_TRANSFER_STATUS_SUCCESS = 1;
+    REMOTE_TRANSFER_STATUS_FAILED = 2;
+    REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
+}
+
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
+    // Application-level transfer result. UNSPECIFIED is accepted as success
+    // from an older TP worker when the RPC itself completed successfully.
+    RemoteTransferStatusPB transfer_status = 3;
 }
 
 message FunctionResponsePB {

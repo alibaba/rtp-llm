@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <unistd.h>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -293,6 +294,8 @@ const DeviceBlockPoolConfig& DeviceBlockPool::config() const {
 
 void DeviceBlockPool::initializeCacheBuffer() {
     const auto& cfg = config();
+    allocation_size_bytes_            = 0;
+    uses_dedicated_device_allocation_ = false;
     RTP_LLM_CHECK_WITH_INFO(
         cfg.total_size_bytes > 0, "device block pool [%s] total_size_bytes must be > 0", cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(!(cfg.use_pinned_cpu_backing && cfg.use_device_malloc_backing),
@@ -306,6 +309,7 @@ void DeviceBlockPool::initializeCacheBuffer() {
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        allocation_size_bytes_ = cfg.total_size_bytes;
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr,
@@ -358,12 +362,19 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                             "cudaGetDevice failed before cudaMalloc block pool allocation, error=%s",
                             cudaGetErrorString(device_err));
 
+    const long page_size = sysconf(_SC_PAGESIZE);
+    RTP_LLM_CHECK_WITH_INFO(page_size > 0, "failed to query host page size for GDR allocation");
+    const size_t allocation_size =
+        (cfg.total_size_bytes + static_cast<size_t>(page_size) - 1) / static_cast<size_t>(page_size)
+        * static_cast<size_t>(page_size);
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, cfg.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, allocation_size);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
-                            "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
+                            "cudaMalloc block pool failed, pool_name=%s, logical_size=%zu bytes, "
+                            "allocation_size=%zu bytes, error=%s",
                             cfg.pool_name.c_str(),
                             cfg.total_size_bytes,
+                            allocation_size,
                             cudaGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -384,10 +395,14 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                          {static_cast<int64_t>(cfg.total_size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
-    RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
+    allocation_size_bytes_ = allocation_size;
+    uses_dedicated_device_allocation_ = true;
+    RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, logical_size=%zu bytes, "
+                     "allocation_size=%zu bytes, device=%d",
                      cfg.pool_name.c_str(),
                      ptr,
                      cfg.total_size_bytes,
+                     allocation_size,
                      device_id);
 #elif USING_ROCM
     RTP_LLM_CHECK_WITH_INFO(!cfg.use_pinned_cpu_backing,
@@ -426,6 +441,8 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                          {static_cast<int64_t>(cfg.total_size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+    allocation_size_bytes_ = cfg.total_size_bytes;
+    uses_dedicated_device_allocation_ = true;
     RTP_LLM_LOG_INFO("hipMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      cfg.pool_name.c_str(),
                      ptr,

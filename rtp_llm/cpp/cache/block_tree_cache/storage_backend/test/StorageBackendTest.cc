@@ -502,7 +502,7 @@ TEST(StorageBackendTest, ReorderedPoolInputsPreserveTagIdentityAndTopologyLifeti
     EXPECT_EQ(second_pool->refCount(second_block), 1u);
     task = {};
     StorageRequest second{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{"group_1", second_block}}}};
-    backend.read(std::move(second), nullptr, [](bool success) { EXPECT_TRUE(success); });
+    backend.read(std::move(second), nullptr, [](ErrorInfo error) { EXPECT_TRUE(error.ok()); });
     EXPECT_EQ(first_pool->refCount(first_block), 1u);
     EXPECT_EQ(second_pool->refCount(second_block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
@@ -567,7 +567,7 @@ TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
             ++callbacks;
             throw std::runtime_error("match callback failure");
         });
-        backend.read(makeRequest(block), nullptr, [&](bool) {
+        backend.read(makeRequest(block), nullptr, [&](ErrorInfo) {
             ++callbacks;
             throw 42;
         });
@@ -627,8 +627,8 @@ TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) 
         backend->releaseMatch();
         FAIL() << "match did not occupy the worker";
     }
-    backend->read(makeRequest(block), nullptr, [completions](bool success) {
-        EXPECT_TRUE(success);
+    backend->read(makeRequest(block), nullptr, [completions](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         completions->fetch_add(1);
     });
     backend->write(backend->prepareWrite(makeRequest(block)));
@@ -688,9 +688,9 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
 
     executor->setReject(true);
     size_t read_completions = 0;
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
         ++read_completions;
-        EXPECT_FALSE(success);
+        EXPECT_FALSE(error.ok());
     });
     EXPECT_EQ(read_completions, 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
@@ -726,7 +726,7 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
 
     backend.failNextRead();
     bool read_success = true;
-    backend.read(makeRequest(block), nullptr, [&](bool success) { read_success = success; });
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(read_success);
     EXPECT_EQ(pool->refCount(block), 1u);
@@ -856,7 +856,7 @@ TEST(StorageBackendTest, AsyncWriteFromOwnCallbacksQueuesWithoutBlocking) {
             called = true;
         };
         if (read) {
-            backend.read(makeRequest(block), nullptr, done);
+            backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { done(error.ok()); });
         } else {
             backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { done(success); });
         }
@@ -881,8 +881,8 @@ TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     size_t completions = 0;
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
-        EXPECT_TRUE(success);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         ++completions;
     });
     EXPECT_EQ(executor->runAll(), 1u);
@@ -966,7 +966,7 @@ TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     backend.shutdown();
 
     bool success = true;
-    backend.read(makeRequest(block), nullptr, [&](bool current_success) { success = current_success; });
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { success = error.ok(); });
     EXPECT_FALSE(success);
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
@@ -1115,8 +1115,8 @@ TEST(StorageBackendTest, ReadPinsTargetsUntilCompletion) {
     ASSERT_TRUE(initBackend(backend, pool));
     bool completed = false;
 
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
-        EXPECT_TRUE(success);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         completed = true;
     });
     EXPECT_FALSE(completed);

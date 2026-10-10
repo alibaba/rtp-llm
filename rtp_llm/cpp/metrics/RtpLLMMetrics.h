@@ -1241,6 +1241,25 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMRemoteCacheQuarantineMetricsCollector final {
+public:
+    int64_t quarantined_lease_count = 0;
+    int64_t quarantined_block_count = 0;
+};
+
+class RtpLLMRemoteCacheQuarantineMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* quarantined_lease_count_metric = nullptr;
+    kmonitor::MutableMetric* quarantined_block_count_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheReuseMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;

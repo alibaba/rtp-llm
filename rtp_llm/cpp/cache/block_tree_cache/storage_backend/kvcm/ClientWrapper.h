@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <optional>
 #include <thread>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
@@ -29,6 +30,7 @@ public:
     struct PoolRegistration {
         kv_cache_manager::RegistSpan span;
         std::string                  location_spec_name;
+        std::optional<kv_cache_manager::ClientMemoryRegistrations> memory_registrations;
     };
     virtual bool initForPools(const ConfigMap&                     config_map,
                               kv_cache_manager::RoleType           role,
@@ -62,11 +64,22 @@ public:
                                     const kv_cache_manager::UriStrVec&                          uris,
                                     kv_cache_manager::BlockBuffers&                             buffers,
                                     const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    virtual kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
                        const kv_cache_manager::BlockBuffers&                       buffers,
                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(
+        const std::string&                                          tag,
+        const kv_cache_manager::UriStrVec&                          uris,
+        const kv_cache_manager::BlockBuffers&                       buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,
