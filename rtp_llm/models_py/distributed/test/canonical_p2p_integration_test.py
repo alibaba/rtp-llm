@@ -15,6 +15,8 @@ from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
 
 def _worker():
     rank = int(os.environ["LOCAL_RANK"])
+    verify_batch = os.getenv("RTP_LLM_CANONICAL_P2P_VERIFY_BATCH") == "1"
+    os.environ["RTP_LLM_CANONICAL_P2P_VERIFY_BATCH"] = "0"
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
     group = dist.group.WORLD
@@ -57,7 +59,22 @@ def _worker():
         del unpipelined
         with patch.dict(
             os.environ,
-            {"RTP_LLM_CANONICAL_P2P_LARGE": "1", "RTP_LLM_CANONICAL_P2P_PINGPONG": "1"},
+            {
+                "RTP_LLM_CANONICAL_P2P_LARGE": "1",
+                "RTP_LLM_CANONICAL_P2P_VERIFY_BATCH": "1" if rank != 7 else "0",
+            },
+        ):
+            mixed_verify = init_canonical_p2p(group, device)
+        if mixed_verify is None or mixed_verify.max_elements != 40960:
+            raise RuntimeError("verify flag mismatch must retain the existing capacity")
+        del mixed_verify
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CANONICAL_P2P_LARGE": "1",
+                "RTP_LLM_CANONICAL_P2P_PINGPONG": "1",
+                "RTP_LLM_CANONICAL_P2P_VERIFY_BATCH": "1" if verify_batch else "0",
+            },
         ):
             communicator = init_canonical_p2p(group, device)
     if communicator is None:
@@ -131,16 +148,26 @@ def _worker():
         raise RuntimeError("full-tile peer reads were not vectorized")
     rows = []
     generator = torch.Generator(device=device).manual_seed(12433 + rank)
-    for count in (1, 257, 2560, 10240, 20480, 40960):
+    counts = (1, 257, 2560, 10240, 20480, 40960)
+    if verify_batch:
+        counts += (81920,)
+    for count in counts:
         for inplace in (True, False):
             x = torch.randn(
                 count, dtype=torch.bfloat16, device=device, generator=generator
             )
+            if not communicator.should_use(x):
+                raise RuntimeError(f"supported count {count} rejected")
             old = x.clone()
             shards = [torch.empty_like(x) for _ in range(8)]
             dist.all_gather(shards, x)
             reference = torch.stack(shards).float().sum(0).bfloat16()
-            output = collective.all_reduce(x, collective.Group.TP, inplace=inplace)
+            with patch.object(
+                communicator, "all_reduce", wraps=communicator.all_reduce
+            ) as selected:
+                output = collective.all_reduce(x, collective.Group.TP, inplace=inplace)
+            if selected.call_count != 1:
+                raise RuntimeError(f"supported count {count} used the fallback")
             torch.testing.assert_close(output, reference, atol=0.001, rtol=0.001)
             if inplace and output is not x:
                 raise RuntimeError("inplace identity changed")
@@ -162,16 +189,25 @@ def _worker():
         for path in ("python", "cpp"):
             for inplace in (True, False):
                 x = torch.zeros(count, dtype=torch.bfloat16, device=device)
+                if not communicator.should_use(x):
+                    raise RuntimeError(f"graph count {count} rejected")
                 barrier = torch.zeros(1, device=device)
                 dest = torch.empty_like(x)
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    dist.all_reduce(barrier)
-                    output = (
-                        collective.all_reduce(x, collective.Group.TP, inplace=inplace)
-                        if path == "python"
-                        else cpp_sum(x, 0, 0, None if inplace else dest)
-                    )
+                with patch.object(
+                    communicator, "all_reduce", wraps=communicator.all_reduce
+                ) as selected:
+                    with torch.cuda.graph(graph):
+                        dist.all_reduce(barrier)
+                        output = (
+                            collective.all_reduce(
+                                x, collective.Group.TP, inplace=inplace
+                            )
+                            if path == "python"
+                            else cpp_sum(x, 0, 0, None if inplace else dest)
+                        )
+                if selected.call_count != 1:
+                    raise RuntimeError(f"graph {path} count {count} used the fallback")
                 for iteration in range(16):
                     x.fill_((rank + iteration) % 9 - 4)
                     expected = sum((r + iteration) % 9 - 4 for r in range(8))
@@ -186,14 +222,14 @@ def _worker():
     import time
 
     captures = {}
-    for count in (1, 257, 2560, 10240, 20480, 40960):
+    for count in counts:
         x = torch.empty(count, dtype=torch.bfloat16, device=device)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = collective.all_reduce(x, collective.Group.TP, inplace=False)
         captures[count] = (x, output, graph)
     for iteration in range(96):
-        count = (40960, 1, 10240, 257, 20480, 2560)[iteration % 6]
+        count = counts[iteration % len(counts)]
         x, output, graph = captures[count]
         x.fill_((rank + iteration) % 9 - 4)
         if rank == iteration % 8:
@@ -207,11 +243,21 @@ def _worker():
     del captures
     # Unsupported inputs retain the existing backend, including its errors.
     fallback_contracts = []
-    for x in (
+    unsupported = [
         torch.full((257,), rank + 1.0, device=device),
-        torch.full((40961,), rank + 1.0, dtype=torch.bfloat16, device=device),
+        torch.full(
+            (communicator.max_elements + 1,),
+            rank + 1.0,
+            dtype=torch.bfloat16,
+            device=device,
+        ),
         torch.full((2, 257), rank + 1.0, dtype=torch.bfloat16, device=device).t(),
-    ):
+    ]
+    if verify_batch:
+        unsupported.append(
+            torch.full((81919,), rank + 1.0, dtype=torch.bfloat16, device=device)
+        )
+    for x in unsupported:
         if communicator.should_use(x):
             raise RuntimeError("unsupported input selected")
         outputs, errors = [], []
@@ -254,14 +300,15 @@ def _worker():
                     ranks=8,
                     full_tile_vector_load_bits=32,
                     rows=all_rows,
-                    changing_graph_replays=384,
+                    changing_graph_replays=64 * len(counts),
                     initialization_fallback_cases=4,
                     large_mismatch_cases=1,
                     pingpong_mismatch_cases=1,
+                    verify_batch_mismatch_cases=1,
                     pingpong=True,
                     changing_shape_skew_replays=96,
                     max_elements=communicator.max_elements,
-                    unsupported_cases=3,
+                    unsupported_cases=len(unsupported),
                     cpp_sum_cases=2,
                     cpp_other_op_mode_cases=2,
                     fallback_contracts=fallback_contracts,
@@ -284,6 +331,18 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
         "requires eight visible SM120 GPUs",
     )
     def test_precision_graph_reuse_and_fallback(self):
+        self._run_integration(verify_batch=False)
+
+    @unittest.skipUnless(
+        torch.cuda.device_count() == 8
+        and torch.version.hip is None
+        and all(torch.cuda.get_device_capability(r) == (12, 0) for r in range(8)),
+        "requires eight visible SM120 GPUs",
+    )
+    def test_verify_batch_capacity_graph_reuse_and_fallback(self):
+        self._run_integration(verify_batch=True)
+
+    def _run_integration(self, verify_batch):
         import subprocess
         import sys
         import tempfile
@@ -291,6 +350,7 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ.copy()
+            env["RTP_LLM_CANONICAL_P2P_VERIFY_BATCH"] = "1" if verify_batch else "0"
             env["RTP_CANONICAL_P2P_TEST_OUT"] = str(Path(directory) / "result.json")
             subprocess.run(
                 [
@@ -309,6 +369,7 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
             result = json.loads(Path(env["RTP_CANONICAL_P2P_TEST_OUT"]).read_text())
             self.assertTrue(result["passed"])
             self.assertEqual(result["ranks"], 8)
+            self.assertEqual(result["max_elements"], 81920 if verify_batch else 40960)
 
 
 if __name__ == "__main__":
