@@ -78,6 +78,11 @@ public:
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }
+        if (input_embeddings_locs) {
+            for (auto& loc : input_embeddings_locs.value()) {
+                loc += prefix_length;
+            }
+        }
     }
 
 public:
@@ -95,6 +100,9 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    std::optional<std::vector<int32_t>>       input_embeddings_locs;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -166,8 +174,10 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor>      hidden_states;
-    std::optional<torch::Tensor>      all_hidden_states;
+    std::optional<torch::Tensor> hidden_states;
+    std::optional<torch::Tensor> all_hidden_states;
+    // Internal metadata for the shared wire field; legacy states stay untouched.
+    int64_t                           shared_all_hidden_states_length = 0;
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;

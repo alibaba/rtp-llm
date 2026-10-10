@@ -44,12 +44,17 @@ def trans_tensor(t: TensorPB):
         raise Exception("unkown error type")
 
 
-def trans_from_tensor(t: torch.Tensor):
+def trans_from_tensor(t: torch.Tensor, res: TensorPB | None = None):
+    """Serialize a tensor into ``res`` when supplied, avoiding a message CopyFrom."""
+    if res is None:
+        res = TensorPB()
+    else:
+        res.Clear()
     if t is None or t.numel() == 0:
-        return TensorPB()
-    res = TensorPB()
+        return res
     with cuda_graph_gate.operation():
-        t = t.cpu()
+        # RPC serialization is an inference boundary; autograd state is not sent.
+        t = t.detach().cpu()
     res.shape.extend(list(t.shape))
     if t.dtype == torch.float32:
         res.data_type = TensorPB.DataType.FP32

@@ -213,6 +213,8 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
+    # Share prompt states and pack softmax on the wire; does not enable return_*.
+    accept_compact_output: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []

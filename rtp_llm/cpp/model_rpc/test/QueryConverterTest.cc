@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include <algorithm>
 #include <array>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -7,7 +9,10 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -18,6 +23,127 @@ using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+class TestLocalRpcServer: public LocalRpcServer {
+public:
+    using LocalRpcServer::prepareInput;
+
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+class QueryConverterTestEngine final: public EngineBase {
+public:
+    QueryConverterTestEngine(): EngineBase(EngineInitParams()) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used by QueryConverterTest");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+class TestPrefillRpcServer: public PrefillRpcServer {
+public:
+    TestPrefillRpcServer() {
+        engine_ = std::make_shared<QueryConverterTestEngine>();
+    }
+
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+enum class ParseFault {
+    INVALID,
+    CPU_OOM,
+    GPU_OOM,
+    INTERNAL
+};
+
+template<typename Server>
+class ParsingFailureServer: public Server {
+public:
+    ParseFault                     fault;
+    int                            calls = 0;
+    std::shared_ptr<GenerateInput> convertGenerateInput(const GenerateInputPB*) override {
+        ++calls;
+        switch (fault) {
+            case ParseFault::INVALID:
+                throw RequestValidationError("invalid wire input");
+            case ParseFault::CPU_OOM:
+                throw std::bad_alloc();
+            case ParseFault::GPU_OOM:
+                TORCH_CHECK_WITH(OutOfMemoryError, false, "allocator failure");
+            default:
+                throw std::runtime_error("internal conversion failure");
+        }
+    }
+};
+
+TEST_F(QueryConverterTest, ParsingFailuresPreserveClassificationAcrossRpcEntrypoints) {
+    for (auto fault : {ParseFault::INVALID, ParseFault::CPU_OOM, ParseFault::GPU_OOM, ParseFault::INTERNAL}) {
+        SCOPED_TRACE(static_cast<int>(fault));
+        const auto                               expected = fault == ParseFault::INVALID  ? ErrorCode::INVALID_PARAMS :
+                                                            fault == ParseFault::INTERNAL ? ErrorCode::UNKNOWN_ERROR :
+                                                                                            ErrorCode::MALLOC_FAILED;
+        GenerateInputPB                          input;
+        ParsingFailureServer<TestLocalRpcServer> local;
+        local.fault = fault;
+        std::shared_ptr<GenerateInput> output;
+        EXPECT_EQ(local.prepareInput(input, output).code(), expected);
+        EXPECT_EQ(local.calls, 1);
+        EXPECT_EQ(output, nullptr);
+
+        grpc::ServerContext                        context;
+        kmonitor::MetricsReporterPtr               reporter;
+        auto                                       meta = std::make_shared<RpcServerRuntimeMeta>();
+        ParsingFailureServer<TestPrefillRpcServer> prefill;
+        prefill.fault = fault;
+        RPCContext             rpc{&input, nullptr};
+        PrefillGenerateContext prefill_context(&prefill.resource(), rpc, 1000, &context, reporter, meta);
+        prefill.getRpcConnection(prefill_context);
+        EXPECT_EQ(prefill.calls, 1);
+        EXPECT_EQ(prefill_context.error_info.code(), expected);
+        EXPECT_EQ(prefill_context.error_status.error_code(), transErrorCodeToGrpc(expected));
+        EXPECT_EQ(prefill_context.shouldRetry(), fault != ParseFault::INVALID);
+        EXPECT_EQ(prefill_context.generate_input, nullptr);
+
+        ParsingFailureServer<DecodeRpcServer> decode;
+        decode.fault = fault;
+        DecodeRpcContext      decode_rpc{nullptr};
+        DecodeGenerateContext decode_context(decode_rpc, 1000, &context, reporter, meta);
+        decode.allocateResource(decode_context);
+        EXPECT_EQ(decode.calls, 1);
+        EXPECT_EQ(decode_context.error_info.code(), expected);
+        EXPECT_EQ(decode_context.error_status.error_code(), transErrorCodeToGrpc(expected));
+        EXPECT_EQ(decode_context.shouldRetry(), fault != ParseFault::INVALID);
+    }
+}
+
+static void fillValidInputEmbeddingsRequest(GenerateInputPB& input) {
+    input.set_request_id(123);
+    input.mutable_generate_config()->set_max_new_tokens(1);
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+}
 
 TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(GenerateConfig().enable_disk_cache);
@@ -111,6 +237,22 @@ TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
         GenerateConfigPB config;
         config.set_enable_memory_cache(enabled);
         EXPECT_EQ(QueryConverter::transGenerateConfig(&config)->enable_memory_cache, enabled);
+    }
+}
+
+TEST_F(QueryConverterTest, CompactOutputAcceptanceDefaultsToLegacy) {
+    GenerateConfigPB empty;
+    const auto       defaults = QueryConverter::transGenerateConfig(&empty);
+    EXPECT_FALSE(defaults->accept_compact_output);
+    EXPECT_EQ(GenerateConfigPB::kAcceptCompactOutputFieldNumber, 75);
+    for (const bool enabled : {false, true}) {
+        GenerateInputPB input;
+        auto*           config = input.mutable_generate_config();
+        config->set_accept_compact_output(enabled);
+        const auto parsed = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_EQ(parsed->accept_compact_output, enabled);
+        EXPECT_FALSE(parsed->return_all_hidden_states);
+        EXPECT_FALSE(parsed->return_softmax_probs);
     }
 }
 
@@ -211,6 +353,12 @@ TEST_F(QueryConverterTest, testTransOutput) {
         hidden_states_data[i] = i;
     }
     res.hidden_states.emplace(hidden_states_tensor);
+    auto all_hidden_states_tensor = torch::empty({4, 2}, torch::kFloat32);
+    auto all_hidden_states_data   = all_hidden_states_tensor.data_ptr<float>();
+    for (int i = 0; i < 8; ++i) {
+        all_hidden_states_data[i] = i + 10;
+    }
+    res.all_hidden_states.emplace(all_hidden_states_tensor);
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
@@ -256,6 +404,122 @@ TEST_F(QueryConverterTest, testTransOutput) {
     std::memcpy(hidden_states_vector.data(), hidden_states_string.data(), hidden_states_string.size());
     for (int i = 0; i < 6; ++i) {
         ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
+    }
+    ASSERT_TRUE(output_pb.has_all_hidden_states());
+    auto all_hidden_states_pb = output_pb.all_hidden_states();
+    ASSERT_EQ(all_hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
+    ASSERT_EQ(all_hidden_states_pb.shape_size(), 3);
+    ASSERT_EQ(all_hidden_states_pb.shape(0), 1);
+    ASSERT_EQ(all_hidden_states_pb.shape(1), 4);
+    ASSERT_EQ(all_hidden_states_pb.shape(2), 2);
+    auto          all_hidden_states_string = all_hidden_states_pb.fp32_data();
+    vector<float> all_hidden_states_vector;
+    all_hidden_states_vector.resize(all_hidden_states_string.size() / sizeof(float));
+    std::memcpy(all_hidden_states_vector.data(), all_hidden_states_string.data(), all_hidden_states_string.size());
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_FLOAT_EQ(all_hidden_states_vector[i], i + 10);
+    }
+}
+
+TEST_F(QueryConverterTest, SharedPromptCapabilityKeepsLegacyStatesUnlessAccepted) {
+    for (const int num_outputs : {1, 2, 4}) {
+        for (const bool shared : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "num_outputs=" << num_outputs << " shared=" << shared);
+            GenerateOutputs outputs;
+            // Two executed prompt rows; only opted-in requests get the shared first row.
+            const auto states = torch::arange(28, torch::kFloat32).reshape({14, 2});
+            for (int i = 0; i < num_outputs; ++i) {
+                GenerateOutput output;
+                output.finished                        = true;
+                output.all_hidden_states               = states + i;
+                output.shared_all_hidden_states_length = 7;
+                outputs.generate_outputs.push_back(output);
+            }
+            GenerateOutputsPB response;
+            QueryConverter::transResponse(&response, &outputs, false, "", 10000, shared);
+            const auto actual = QueryConverter::transTensor(response.flatten_output().all_hidden_states());
+            ASSERT_EQ(actual.dim(), 3);
+            EXPECT_EQ(actual.size(0), shared ? 1 : num_outputs);
+            EXPECT_EQ(actual.size(1), shared ? 7 : 14);
+            EXPECT_EQ(actual.size(2), 2);
+            for (int i = 0; i < actual.size(0); ++i) {
+                EXPECT_TRUE(torch::equal(actual[i], shared ? states.narrow(0, 0, 7) : states + i));
+            }
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PackedSoftmaxCapabilityReusesFirstAuxFieldWithoutDuplicatingPayloads) {
+    for (const int num_outputs : {1, 2, 4}) {
+        for (const bool packed : {false, true}) {
+            for (const bool dump_aux : {false, true}) {
+                for (const bool with_probs : {false, true}) {
+                    SCOPED_TRACE(testing::Message() << "outputs=" << num_outputs << " packed=" << packed
+                                                    << " aux=" << dump_aux << " probs=" << with_probs);
+                    GenerateOutputs            outputs;
+                    std::vector<torch::Tensor> expected;
+                    for (int i = 0; i < num_outputs; ++i) {
+                        GenerateOutput output;
+                        output.finished            = true;
+                        output.aux_info.input_len  = 7;
+                        output.aux_info.output_len = 2;
+                        expected.push_back(torch::tensor({0.1f + i, 0.9f + i}, torch::kFloat32));
+                        if (with_probs) {
+                            output.aux_info.softmax_probs = expected.back();
+                        }
+                        outputs.generate_outputs.push_back(std::move(output));
+                    }
+                    GenerateOutputsPB response;
+                    QueryConverter::transResponse(&response, &outputs, dump_aux, "", 10000, packed);
+                    const auto& flatten = response.flatten_output();
+                    ASSERT_EQ(flatten.aux_info_size(), dump_aux ? num_outputs : 0);
+                    for (int i = 0; i < flatten.aux_info_size(); ++i) {
+                        const auto& aux = flatten.aux_info(i);
+                        EXPECT_EQ(aux.input_len(), 7);
+                        EXPECT_EQ(aux.output_len(), 2);
+                        const bool has_probs = with_probs && (!packed || i == 0);
+                        ASSERT_EQ(aux.has_softmax_probs(), has_probs);
+                        if (has_probs) {
+                            const auto probs = QueryConverter::transTensor(aux.softmax_probs());
+                            EXPECT_TRUE(torch::equal(probs, packed ? torch::stack(expected, 0) : expected[i]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, UnequalOrEmptySoftmaxLengthsKeepPerOutputTensors) {
+    for (const auto& lengths : std::vector<std::vector<int64_t>>{{2, 3}, {0, 2}, {2, 0}, {0, 0}}) {
+        for (const bool packed : {false, true}) {
+            for (const bool dump_aux : {false, true}) {
+                SCOPED_TRACE(testing::Message() << "lengths=" << lengths[0] << "," << lengths[1] << " packed=" << packed
+                                                << " aux=" << dump_aux);
+                GenerateOutputs            outputs;
+                std::vector<torch::Tensor> expected;
+                for (size_t i = 0; i < lengths.size(); ++i) {
+                    GenerateOutput output;
+                    output.finished            = true;
+                    output.aux_info.input_len  = 7;
+                    output.aux_info.output_len = lengths[i];
+                    expected.push_back(torch::arange(lengths[i], torch::kFloat32) + i);
+                    output.aux_info.softmax_probs = expected.back();
+                    outputs.generate_outputs.push_back(std::move(output));
+                }
+                GenerateOutputsPB response;
+                QueryConverter::transResponse(&response, &outputs, dump_aux, "", 10000, packed);
+                const auto& flatten = response.flatten_output();
+                ASSERT_EQ(flatten.aux_info_size(), dump_aux ? static_cast<int>(lengths.size()) : 0);
+                for (int i = 0; i < flatten.aux_info_size(); ++i) {
+                    const auto& aux = flatten.aux_info(i);
+                    EXPECT_EQ(aux.input_len(), 7);
+                    EXPECT_EQ(aux.output_len(), lengths[i]);
+                    ASSERT_TRUE(aux.has_softmax_probs());
+                    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(aux.softmax_probs()), expected[i]));
+                }
+            }
+        }
     }
 }
 
@@ -330,7 +594,9 @@ TEST_F(QueryConverterTest, TransTensorPB_NonContiguous) {
 TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, torch::ones({2}, torch::kInt32));
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+    EXPECT_EQ(tensor_pb.SerializeAsString(), TensorPB().SerializeAsString());
 }
 
 // Typed grammar fields wire as google.protobuf.StringValue → Optional<string>.
@@ -414,6 +680,520 @@ TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::DEADLINE_EXCEEDED), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::WAIT_TO_RUN_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+}
+
+TEST_F(QueryConverterTest, TransTensorPBClearsPreviousPayloadOnReuse) {
+    TensorPB tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, torch::ones({2, 2}, torch::kFloat32));
+    ASSERT_EQ(tensor_pb.shape_size(), 2);
+    ASSERT_FALSE(tensor_pb.fp32_data().empty());
+
+    QueryConverter::transTensorPB(&tensor_pb, torch::ones({1}, torch::kInt32));
+    EXPECT_EQ(tensor_pb.data_type(), TensorPB::INT32);
+    ASSERT_EQ(tensor_pb.shape_size(), 1);
+    EXPECT_EQ(tensor_pb.shape(0), 1);
+    EXPECT_TRUE(tensor_pb.fp32_data().empty());
+    EXPECT_FALSE(tensor_pb.int32_data().empty());
+    EXPECT_NO_THROW(QueryConverter::transTensor(tensor_pb));
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsNegativeDim) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(-1);
+    float data = 1.0f;
+    tensor_pb.set_fp32_data(reinterpret_cast<const char*>(&data), sizeof(float));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsPayloadTooShort) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(2);
+    tensor_pb.add_shape(2);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
+    tensor_pb.set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsPayloadTooLong) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::INT32);
+    tensor_pb.add_shape(1);
+    std::vector<int32_t> data = {1, 2};
+    tensor_pb.set_int32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(int32_t));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsShapeOverflow) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP16);
+    tensor_pb.add_shape(std::numeric_limits<int64_t>::max());
+    tensor_pb.add_shape(2);
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsInactivePayload) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(1);
+    float data = 1.0f;
+    tensor_pb.set_fp32_data(reinterpret_cast<const char*>(&data), sizeof(float));
+    c10::Half inactive_data = c10::Half(1.0f);
+    tensor_pb.set_fp16_data(reinterpret_cast<const char*>(&inactive_data), sizeof(c10::Half));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
+    GenerateInputPB input;
+    // Need enough tokens so that embedding_locs + emb_length <= token_ids_size
+    // emb1: loc=5, length=2 => need >=7; emb2: loc=10, length=1 => need >=11
+    for (int i = 0; i < 12; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+
+    // 添加第一个 embedding (FP32, shape [2, 3])
+    auto* embedding1_pb = input_embeddings_pb->add_embeddings();
+    embedding1_pb->set_data_type(TensorPB::FP32);
+    embedding1_pb->add_shape(2);
+    embedding1_pb->add_shape(3);
+    std::vector<float> embedding1_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    embedding1_pb->set_fp32_data(reinterpret_cast<const char*>(embedding1_data.data()),
+                                 embedding1_data.size() * sizeof(float));
+
+    // 添加第二个 embedding (FP32, shape [1, 4])
+    auto* embedding2_pb = input_embeddings_pb->add_embeddings();
+    embedding2_pb->set_data_type(TensorPB::FP32);
+    embedding2_pb->add_shape(1);
+    embedding2_pb->add_shape(4);
+    std::vector<float> embedding2_data = {7.0f, 8.0f, 9.0f, 10.0f};
+    embedding2_pb->set_fp32_data(reinterpret_cast<const char*>(embedding2_data.data()),
+                                 embedding2_data.size() * sizeof(float));
+
+    // 添加 embedding_locs
+    input_embeddings_pb->add_embedding_locs(5);
+    input_embeddings_pb->add_embedding_locs(10);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    // 验证 input_embeddings 转换
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    ASSERT_TRUE(generate_input->input_embeddings_locs.has_value());
+
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 2);
+    ASSERT_EQ(locs.size(), 2);
+
+    // 验证第一个 embedding
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    ASSERT_EQ(embeddings[0].size(0), 2);
+    ASSERT_EQ(embeddings[0].size(1), 3);
+    auto embedding1_ptr = embeddings[0].data_ptr<float>();
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_FLOAT_EQ(embedding1_ptr[i], embedding1_data[i]);
+    }
+
+    // 验证第二个 embedding
+    ASSERT_EQ(embeddings[1].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[1].dim(), 2);
+    ASSERT_EQ(embeddings[1].size(0), 1);
+    ASSERT_EQ(embeddings[1].size(1), 4);
+    auto embedding2_ptr = embeddings[1].data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(embedding2_ptr[i], embedding2_data[i]);
+    }
+
+    // 验证 embedding_locs
+    EXPECT_EQ(locs[0], 5);
+    EXPECT_EQ(locs[1], 10);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
+    GenerateInputPB input;
+    // Need enough tokens: loc=3, emb_length=2 => need >=5
+    for (int i = 0; i < 5; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings (FP16)
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP16);
+    embedding_pb->add_shape(2);
+    embedding_pb->add_shape(2);
+
+    std::vector<c10::Half> embedding_data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp16_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(c10::Half));
+
+    input_embeddings_pb->add_embedding_locs(3);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat16);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    EXPECT_EQ(locs[0], 3);
+}
+
+TEST_F(QueryConverterTest, testTransInputWith1DInputEmbeddingAsSingleToken) {
+    GenerateInputPB input;
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
+
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(4);
+    std::vector<float> embedding_data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(2);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    EXPECT_EQ(embeddings[0].size(0), 1);
+    EXPECT_EQ(embeddings[0].size(1), 4);
+    EXPECT_EQ(locs[0], 2);
+    auto embedding_ptr = embeddings[0].data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(embedding_ptr[i], embedding_data[i]);
+    }
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_BF16) {
+    GenerateInputPB input;
+    // Need enough tokens: loc=2, emb_length=1 => need >=3
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings (BF16)
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::BF16);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(3);
+
+    std::vector<c10::BFloat16> embedding_data = {1.0f, 2.0f, 3.0f};
+    embedding_pb->set_bf16_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(c10::BFloat16));
+
+    input_embeddings_pb->add_embedding_locs(2);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kBFloat16);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithoutInputEmbeddings) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    // 验证没有 input_embeddings 时，字段为空
+    ASSERT_FALSE(generate_input->input_embeddings.has_value());
+    ASSERT_FALSE(generate_input->input_embeddings_locs.has_value());
+}
+
+TEST_F(QueryConverterTest, testTransInputWithEmbeddingsCountMismatch) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+
+    // 添加 2 个 embeddings
+    for (int i = 0; i < 2; ++i) {
+        auto* embedding_pb = input_embeddings_pb->add_embeddings();
+        embedding_pb->set_data_type(TensorPB::FP32);
+        embedding_pb->add_shape(1);
+        embedding_pb->add_shape(4);
+        std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+        embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    }
+
+    // 只添加 1 个 embedding_loc，制造数量不一致
+    input_embeddings_pb->add_embedding_locs(0);
+
+    try {
+        QueryConverter::transQuery(&input);
+        FAIL() << "expected embedding/location count mismatch";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("count"), std::string::npos);
+    }
+}
+
+TEST_F(QueryConverterTest, testTransInputRejectsLocsWithoutEmbeddings) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_input_embeddings()->add_embedding_locs(0);
+
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
+}
+
+TEST_F(QueryConverterTest, LocalRpcServerPrepareInputConvertsMalformedInputEmbeddingsToErrorInfo) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+
+    TestLocalRpcServer             server;
+    std::shared_ptr<GenerateInput> output;
+    auto                           err = server.prepareInput(input, output);
+
+    EXPECT_FALSE(err.ok());
+    EXPECT_EQ(err.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(err.ToString().find("Request parsing error"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, LocalRpcServerPrepareInputRejectsInputEmbeddingsWithTpGreaterThanOne) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 2;
+    TestLocalRpcServer server;
+    server.setParallelismConfig(parallelism_config);
+
+    std::shared_ptr<GenerateInput> output;
+    auto                           err = server.prepareInput(input, output);
+
+    EXPECT_FALSE(err.ok());
+    EXPECT_EQ(err.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(err.ToString().find("tp_size > 1"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, LocalRpcServerPrepareInputRejectsInputEmbeddingsWithContextParallel) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    TestLocalRpcServer server;
+    server.setParallelismConfig(parallelism_config);
+
+    std::shared_ptr<GenerateInput> output;
+    auto                           err = server.prepareInput(input, output);
+
+    EXPECT_FALSE(err.ok());
+    EXPECT_EQ(err.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(err.ToString().find("context parallel"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, BatchGenerateCallReturnsOneErrorPerInputOnPrepareInputFailure) {
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->add_token_ids(0);
+    auto* bad_input           = batch.add_inputs();
+    auto* input_embeddings_pb = bad_input->mutable_input_embeddings();
+    input_embeddings_pb->add_embedding_locs(0);
+
+    TestLocalRpcServer     server;
+    grpc::ServerContext    context;
+    BatchGenerateOutputsPB response;
+    auto                   status = server.BatchGenerateCall(&context, &batch, &response);
+
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_TRUE(response.results(0).has_error_info());
+    EXPECT_TRUE(response.results(1).has_error_info());
+    EXPECT_NE(response.results(1).error_info().error_message().find("Request parsing error"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, PrefillRpcServerConvertsMalformedInputEmbeddingsToInvalidArgument) {
+    GenerateInputPB input;
+    input.set_request_id(123);
+    input.add_token_ids(0);
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+
+    TestPrefillRpcServer         server;
+    RPCContext                   rpc_context{&input, nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+
+    auto prefill_context = PrefillGenerateContext(
+        &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+    server.getRpcConnection(prefill_context);
+
+    EXPECT_EQ(prefill_context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(prefill_context.error_status.error_message().find("Request parsing error"), std::string::npos);
+    EXPECT_NE(prefill_context.error_status.error_message().find("payload size does not match"), std::string::npos);
+
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(prefill_context.error_status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST_F(QueryConverterTest, PrefillRpcServerRejectsInputEmbeddingsWithTpGreaterThanOne) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    TestPrefillRpcServer server;
+    ParallelismConfig    parallelism_config;
+    parallelism_config.tp_size = 2;
+    server.setParallelismConfig(parallelism_config);
+
+    RPCContext                   rpc_context{&input, nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta            = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         prefill_context = PrefillGenerateContext(
+        &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+
+    server.getRpcConnection(prefill_context);
+
+    EXPECT_EQ(prefill_context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(prefill_context.error_status.error_message().find("tp_size > 1"), std::string::npos);
+
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(prefill_context.error_status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST_F(QueryConverterTest, testTransInputAllowsBothMultimodalAndInputEmbeddings) {
+    // With multimodal_inputs the final token sequence is produced after QueryConverter,
+    // so QueryConverter validates shape/order and lets the mm processor remap locs.
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+    input.add_token_ids(2);
+
+    // 添加 multimodal_inputs
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();  // 默认值即可
+
+    // 同时添加 input_embeddings
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(2);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(generate_input->multimodal_inputs.has_value());
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    ASSERT_TRUE(generate_input->input_embeddings_locs.has_value());
+    EXPECT_EQ(generate_input->multimodal_inputs->size(), 1);
+    EXPECT_EQ(generate_input->input_embeddings->size(), 1);
+    EXPECT_EQ(generate_input->input_embeddings_locs->size(), 1);
+    EXPECT_EQ(generate_input->input_embeddings_locs->at(0), 2);
+}
+
+TEST_F(QueryConverterTest, testTransInputAllowsMultimodalAlone) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();
+
+    auto generate_input = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(generate_input->multimodal_inputs.has_value());
+    ASSERT_FALSE(generate_input->input_embeddings.has_value());
+}
+
+TEST_F(QueryConverterTest, TransOutputPreservesFixedLengthBeamTokenOrder) {
+    for (int64_t beam_count : {1, 30, 2000}) {
+        SCOPED_TRACE(beam_count);
+        // Non-contiguous per-beam views also exercise transResponse's input normalization.
+        auto            storage  = torch::arange(beam_count * 6, torch::kInt32).reshape({beam_count, 6});
+        auto            expected = storage.slice(1, 0, 6, 2).unsqueeze(1).contiguous();
+        GenerateOutputs outputs;
+        outputs.request_id = 123;
+        for (int64_t i = 0; i < beam_count; ++i) {
+            GenerateOutput output;
+            output.output_ids = storage.slice(0, i, i + 1).slice(1, 0, 6, 2);
+            output.finished   = true;
+            outputs.generate_outputs.push_back(std::move(output));
+        }
+
+        GenerateOutputsPB result;
+        QueryConverter::transResponse(&result, &outputs, false, "", 6);
+        EXPECT_EQ(result.request_id(), 123);
+        EXPECT_EQ(result.flatten_output().finished_size(), beam_count);
+        TensorPB expected_pb;
+        QueryConverter::transTensorPB(&expected_pb, expected);
+        EXPECT_EQ(result.flatten_output().output_ids().SerializeAsString(), expected_pb.SerializeAsString());
+    }
+}
+
+TEST_F(QueryConverterTest, TransOutputPreservesPaddingAndEmptyTokenSequences) {
+    const std::vector<std::vector<int64_t>> cases = {{3, 1, 0, 3}, {0, 0}, {3, 3}};
+    for (const auto& lengths : cases) {
+        for (bool mixed_dtype : {false, true}) {
+            SCOPED_TRACE(mixed_dtype);
+            const auto max_len  = *std::max_element(lengths.begin(), lengths.end());
+            auto       expected = torch::full({static_cast<int64_t>(lengths.size()), 1, max_len}, 99, torch::kInt32);
+            GenerateOutputs outputs;
+            for (size_t i = 0; i < lengths.size(); ++i) {
+                GenerateOutput output;
+                const auto     dtype = mixed_dtype && i > 0 ? torch::kInt64 : torch::kInt32;
+                output.output_ids    = torch::arange(lengths[i], dtype).reshape({1, lengths[i]}) + i * 10;
+                output.finished      = true;
+                for (int64_t j = 0; j < lengths[i]; ++j) {
+                    expected.data_ptr<int32_t>()[i * max_len + j] = i * 10 + j;
+                }
+                outputs.generate_outputs.push_back(std::move(output));
+            }
+
+            GenerateOutputsPB result;
+            QueryConverter::transResponse(&result, &outputs, false, "", 99);
+            TensorPB expected_pb;
+            QueryConverter::transTensorPB(&expected_pb, expected);
+            // Mixed input dtypes must retain the original first-tensor dtype,
+            // rather than torch::cat's type promotion.
+            EXPECT_EQ(result.flatten_output().output_ids().SerializeAsString(), expected_pb.SerializeAsString());
+        }
+    }
 }
 
 }  // namespace rtp_llm
