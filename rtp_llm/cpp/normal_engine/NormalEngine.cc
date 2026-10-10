@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/normal_engine/ScrPrefillWarmup.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -11,7 +10,6 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/StartupTiming.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/CoordinatedStopUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -151,7 +149,7 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           bool                                          defer_loop_start):
+                           bool defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -221,61 +219,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     initScheduler();
     if (defer_loop_start) {
-        warmUpScrPrefill();
         // DP dummy streams also launch kernels without incoming requests.
         // Keep the loop absent until the template has been released.
         RTP_LLM_LOG_INFO("normal engine loop deferred until SCR release");
     } else {
         (void)startLoop();
     }
-}
-
-void NormalEngine::warmUpScrPrefill() {
-#if USING_CUDA
-    if (pd_sep_config.role_type != RoleType::PREFILL || model_config_.mm_model_config.is_multimodal
-        || ffn_disaggregate_config.enable_ffn_disaggregate
-        || !autil::EnvUtil::getEnv("RTP_LLM_SCR_PREFILL_WARMUP", true)) {
-        return;
-    }
-    const auto lengths =
-        scrPrefillWarmupTokenLens(autil::EnvUtil::getEnv("RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", std::string()),
-                                  model_config_.max_seq_len,
-                                  reserve_step_);
-    StartupTiming                timing("template.prefill_warmup");
-    c10::cuda::CUDAGuard         device_guard(getDeviceId());
-    ScopedKmonMetricsSuppression suppress_metrics;
-    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
-    const auto free_before = resource_context_.cache_manager->freeBlocksNum();
-    for (const auto length : lengths) {
-        StartupTiming request_timing("template.prefill_warmup_request");
-        auto          input       = makeFakeInput(length);
-        const int64_t token_count = model_config_.embedding_size ?
-                                        std::min(model_config_.embedding_size, model_config_.vocab_size) :
-                                        model_config_.vocab_size;
-        input->input_ids.fill_(std::min<int64_t>(100, token_count - 1));
-        input->generate_config->max_new_tokens        = 1;
-        input->generate_config->reuse_cache           = false;
-        input->generate_config->temperature           = 0.0;
-        input->generate_config->do_sample             = false;
-        input->generate_config->can_use_pd_separation = false;
-        input->generate_config->enable_device_cache   = false;
-        input->generate_config->enable_memory_cache   = false;
-        input->generate_config->enable_remote_cache   = false;
-        // Every rank executes before the barrier, without a serving loop or
-        // external connectors. Return request blocks to the allocator, retaining
-        // the backing allocation and addresses in the empty template cache.
-        RTP_LLM_LOG_INFO("SCR template prefill warmup begin: tokens=%ld rank=%ld", length, parallelism_config.tp_rank);
-        {
-            auto result = preRun(input, preRunMode::build_system_prompt);
-            THROW_IF_STATUS_ERROR(result.status());
-            RTP_LLM_CHECK_WITH_INFO(cudaDeviceSynchronize() == cudaSuccess, "SCR prefill warmup sync failed");
-            result.value()->releaseResource();
-        }
-        RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager->freeBlocksNum() == free_before,
-                                "SCR prefill warmup retained KV blocks");
-        RTP_LLM_LOG_INFO("SCR template prefill warmup done: tokens=%ld rank=%ld", length, parallelism_config.tp_rank);
-    }
-#endif
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -536,7 +485,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, bool defer_connector_start) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result,
+                                    bool defer_connector_start) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
@@ -621,13 +571,8 @@ absl::Status NormalEngine::startLoop() {
     // External cache connectors can allocate large host-memory pools and open
     // remote/P2P resources. Keep them out of the checkpoint template and only
     // create them when the controller releases the SCR barrier.
-    StartupTiming startup_timing("backend.engine_start_loop");
-    {
-        StartupTiming timing("backend.cache_connectors");
-        resource_context_.cache_manager->startDeferredServices();
-    }
+    resource_context_.cache_manager->startDeferredServices();
     if (parallelism_config.tp_rank == 0) {
-        StartupTiming timing("backend.system_prompt");
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
@@ -636,10 +581,7 @@ absl::Status NormalEngine::startLoop() {
     // Run after KV cache, executor, scheduler and system-prompt initialization,
     // but before the engine loop can accept work. The temporary torch::Tensor is
     // released into the same CUDACachingAllocator used by Prefill model forwards.
-    {
-        StartupTiming timing("backend.prefill_cuda_pool");
-        preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
-    }
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
 #endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;

@@ -32,7 +32,6 @@ from typing import Optional
 from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.scr_runtime_fixup import fixup_runtime_after_restore
 from rtp_llm.utils.scr_template_lifecycle import CallbackHook, get_template_lifecycle
-from rtp_llm.utils.startup_timing import mark_restore_resumed, startup_stage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,7 +156,6 @@ SCR_INACTIVITY_TIMEOUT_ALIASES = (
 )
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 10
-
 
 def _flag(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in {
@@ -419,11 +417,7 @@ def _epsilon_capabilities(epsilon: Any) -> EpsilonCapabilities:
     timeout = _callable_accepts(checkpoint, "timeout")
     inactivity_timeout = _callable_accepts(checkpoint, "inactivity_timeout")
     if timeout is None:
-        timeout = bool(
-            explicit.get(
-                "supports_timeout", getattr(epsilon, "SUPPORTS_TIMEOUT", False)
-            )
-        )
+        timeout = bool(explicit.get("supports_timeout", getattr(epsilon, "SUPPORTS_TIMEOUT", False)))
     if inactivity_timeout is None:
         inactivity_timeout = bool(
             explicit.get(
@@ -477,7 +471,6 @@ class EpsilonAdapter:
         if self.capabilities.supports_inactivity_timeout:
             kwargs["inactivity_timeout"] = inactivity_timeout
         return _call_result(checkpoint, **kwargs)
-
 
 @dataclass(frozen=True)
 class ScrParticipantManifest:
@@ -588,17 +581,11 @@ def _prepare_cuda_for_arrival(device: Any | None = None) -> None:
     """Synchronize registered GPU state, or explicitly record a CPU skip."""
 
     with _registration_lock:
-        gpu_state_registered = any(
-            bool(record.tensors) for record in _registrations.values()
-        )
+        gpu_state_registered = any(bool(record.tensors) for record in _registrations.values())
     torch = sys.modules.get("torch")
-    cuda_initialized = bool(
-        torch is not None and getattr(torch.cuda, "_initialized", False)
-    )
+    cuda_initialized = bool(torch is not None and getattr(torch.cuda, "_initialized", False))
     if gpu_state_registered and not cuda_initialized:
-        raise RuntimeError(
-            "GPU KV state is registered but torch CUDA is not initialized"
-        )
+        raise RuntimeError("GPU KV state is registered but torch CUDA is not initialized")
     if not gpu_state_registered:
         LOGGER.debug("sCR arrival CUDA prepare skipped for CPU-only participant")
         return
@@ -721,11 +708,7 @@ def _restore_elapsed_ms() -> float | None:
     try:
         return max(0.0, time.time() * 1000.0 - float(raw))
     except (TypeError, ValueError):
-        LOGGER.warning(
-            "invalid %s=%r; restore elapsed time unavailable",
-            SCR_RESTORE_START_TIME_ENV,
-            raw,
-        )
+        LOGGER.warning("invalid %s=%r; restore elapsed time unavailable", SCR_RESTORE_START_TIME_ENV, raw)
         return None
 
 
@@ -801,9 +784,7 @@ def _register_for_scr_once(
             LOGGER.warning("sCR active but no non-empty KV-cache tensors were found")
             ok = False
         else:
-            LOGGER.warning(
-                "sCR active but Epsilon KV-cache registration is unavailable"
-            )
+            LOGGER.warning("sCR active but Epsilon KV-cache registration is unavailable")
             ok = False
 
         with _registration_lock:
@@ -828,9 +809,7 @@ def _register_for_scr_once(
                     _before_checkpoint_hooks.add(engine_key)
             ok = ok and hook_result in (None, 0)
         else:
-            LOGGER.warning(
-                "sCR active but Epsilon before-checkpoint hook is unavailable"
-            )
+            LOGGER.warning("sCR active but Epsilon before-checkpoint hook is unavailable")
             ok = False
     except Exception:
         # Registration is an optimization hint; generic sCR dump remains a
@@ -998,7 +977,9 @@ def arrive_scr_checkpoint_barrier(
             _scr_generation(),
             exc,
         )
-        return _raise_if_strict(f"sCR timeout configuration conflict: {exc}", exc)
+        return _raise_if_strict(
+            f"sCR timeout configuration conflict: {exc}", exc
+        )
     try:
         resolved_timeout = int(timeout) if timeout is not None else default_timeout
         resolved_inactivity = (
@@ -1010,22 +991,16 @@ def arrive_scr_checkpoint_barrier(
         # argument. Refuse an explicit disagreement rather than logging one
         # value while the provider waits with another.
         timeout_names = (SCR_TIMEOUT_ENV,) + SCR_TIMEOUT_ALIASES
-        if (
-            timeout is not None
-            and any(name in os.environ for name in timeout_names)
-            and resolved_timeout != default_timeout
-        ):
+        if timeout is not None and any(
+            name in os.environ for name in timeout_names
+        ) and resolved_timeout != default_timeout:
             raise EpsilonProtocolError(
                 "explicit timeout disagrees with configured SCR timeout"
             )
-        inactivity_names = (
-            SCR_INACTIVITY_TIMEOUT_ENV,
-        ) + SCR_INACTIVITY_TIMEOUT_ALIASES
-        if (
-            inactivity_timeout is not None
-            and any(name in os.environ for name in inactivity_names)
-            and resolved_inactivity != default_inactivity
-        ):
+        inactivity_names = (SCR_INACTIVITY_TIMEOUT_ENV,) + SCR_INACTIVITY_TIMEOUT_ALIASES
+        if inactivity_timeout is not None and any(
+            name in os.environ for name in inactivity_names
+        ) and resolved_inactivity != default_inactivity:
             raise EpsilonProtocolError(
                 "explicit inactivity timeout disagrees with configured SCR timeout"
             )
@@ -1152,9 +1127,7 @@ def arrive_scr_checkpoint_barrier(
                 _restore_elapsed_ms(),
             )
             if fail_closed:
-                raise ScrArrivalError(
-                    f"sCR snapshot arrival returned status {result!r}"
-                )
+                raise ScrArrivalError(f"sCR snapshot arrival returned status {result!r}")
         elif elapsed_ms >= resolved_timeout * 1000.0:
             LOGGER.error(
                 "sCR snapshot arrival exceeded timeout generation=%s phase=%s "
@@ -1252,11 +1225,8 @@ def arrive_scr_template_barrier(
             # the arrival boundary instead of interpreting None here.
             fail_closed=True,
         )
-        mark_restore_resumed(actual_generation, worker_id)
-        with startup_stage("restore.runtime_fixup"):
-            fixup_runtime_after_restore(actual_generation, lifecycle)
-        with startup_stage("restore.release_hooks"):
-            lifecycle.release_template(actual_generation)
+        fixup_runtime_after_restore(actual_generation, lifecycle)
+        lifecycle.release_template(actual_generation)
         return result
     except BaseException:
         lifecycle.abort_template(actual_generation)

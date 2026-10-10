@@ -9,7 +9,6 @@
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/StartupTiming.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
@@ -112,7 +111,7 @@ void RtpLLMOp::init(py::object model,
                     py::object mm_process_engine,
                     py::object propose_model,
                     py::object token_processor,
-                    bool       defer_service_start) {
+                    bool      defer_service_start) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -140,7 +139,8 @@ void RtpLLMOp::init(py::object model,
                           std::move(deferred_token_processor_),
                           true);
         rpc_server_deferred_ = true;
-        RTP_LLM_LOG_INFO("backend service/cache initialization deferred until SCR checkpoint release");
+        RTP_LLM_LOG_INFO(
+            "backend service/cache initialization deferred until SCR checkpoint release");
         return;
     }
     pybind11::gil_scoped_release release;
@@ -149,8 +149,8 @@ void RtpLLMOp::init(py::object model,
     deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
     grpc_server_thread_   = std::thread([this,
                                        mm_process_engine = std::move(mm_process_engine),
-                                       propose_params    = std::move(propose_params),
-                                       token_processor   = std::move(token_processor)]() mutable {
+                                       propose_params = std::move(propose_params),
+                                       token_processor = std::move(token_processor)]() mutable {
         try {
             initRPCServer(*deferred_init_params_,
                           std::move(mm_process_engine),
@@ -188,7 +188,7 @@ void RtpLLMOp::startRPCServer() {
         pybind11::gil_scoped_release release;
         server_start_failed_ = false;
         stop_requested_      = false;
-        grpc_server_thread_  = std::thread([this]() {
+        grpc_server_thread_ = std::thread([this]() {
             try {
                 startRPCServerInternal(*deferred_init_params_);
             } catch (const std::exception& e) {
@@ -210,8 +210,8 @@ void RtpLLMOp::startRPCServer() {
 void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && deferred_init_params_ != nullptr,
                             "runtime endpoints can only be updated before deferred RPC start");
-    auto config                                             = runtime_config.cast<RuntimeConfig>();
-    deferred_init_params_->runtime_config.worker_addrs      = config.worker_addrs;
+    auto config = runtime_config.cast<RuntimeConfig>();
+    deferred_init_params_->runtime_config.worker_addrs = config.worker_addrs;
     deferred_init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
     if (model_rpc_service_) {
         model_rpc_service_->updateRuntimeEndpoints(config);
@@ -388,7 +388,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
                                  py::object                                    mm_process_engine,
                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                  py::object                                    token_processor,
-                                 bool                                          defer_network_services) {
+                                 bool                                           defer_network_services) {
     std::string server_address;
     int64_t     http_port              = 0;
     int64_t     model_rpc_port         = 0;
@@ -402,7 +402,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
             model_rpc_port >= 0 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
             && maga_init_params.parallelism_config.tp_size > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
-        server_address           = "0.0.0.0:" + std::to_string(model_rpc_port);
+        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         deferred_server_address_ = server_address;
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
@@ -503,10 +503,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
 
     // This is the single post-checkpoint release point for the engine loop,
     // cache connectors, remote CacheStore and the model RPC listener.
-    {
-        StartupTiming timing("backend.rpc_deferred_services");
-        model_rpc_service_->startDeferredServices();
-    }
+    model_rpc_service_->startDeferredServices();
     if (model_rpc_port < 0) {
         is_server_ready_ = true;
         setKmonServiceServing(true);
@@ -516,7 +513,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
     grpc::ServerBuilder builder;
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
     builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
-    const GrpcConfig& grpc_config   = maga_init_params.grpc_config;
+    const GrpcConfig& grpc_config  = maga_init_params.grpc_config;
     auto              server_config = grpc_config.get_server_config();
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
@@ -529,12 +526,12 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
     builder.RegisterService(model_rpc_service_.get());
     grpc::Server* grpc_server = nullptr;
     {
-        StartupTiming               timing("backend.grpc_bind");
         std::lock_guard<std::mutex> lock(server_state_mutex_);
         grpc_server_ = builder.BuildAndStart();
         grpc_server  = grpc_server_.get();
     }
-    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr, "grpc server start failed at address " + deferred_server_address_);
+    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr,
+                            "grpc server start failed at address " + deferred_server_address_);
     RTP_LLM_LOG_INFO("Server listening on %s", deferred_server_address_.c_str());
     is_server_ready_ = true;
     setKmonServiceServing(true);
@@ -559,7 +556,6 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
                                py::object world_info,
                                py::object tokenizer,
                                py::object render) {
-    StartupTiming timing("backend.http_start");
     if (http_server_ == nullptr) {
         RTP_LLM_FAIL("normal HTTP Server nullptr error.");
         return;
@@ -740,7 +736,7 @@ void RtpLLMOp::pause() {
 
 void RtpLLMOp::releaseMlaHostCacheForCheckpoint() {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
-                            "host KV release is only allowed before deferred service startup");
+                           "host KV release is only allowed before deferred service startup");
     auto manager = model_rpc_service_->getEngine()->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
     if (auto pool = manager->mlaHostCachePool()) {
@@ -750,7 +746,7 @@ void RtpLLMOp::releaseMlaHostCacheForCheckpoint() {
 
 void RtpLLMOp::restoreMlaHostCacheAfterCheckpoint() {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
-                            "host KV restore is only allowed before deferred service startup");
+                           "host KV restore is only allowed before deferred service startup");
     auto manager = model_rpc_service_->getEngine()->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
     if (auto pool = manager->mlaHostCachePool()) {

@@ -23,7 +23,7 @@ enum { LOG_LEVEL_ERROR=1, LOG_LEVEL_WARN=2, LOG_LEVEL_INFO=3,
        LOG_LEVEL_DEBUG=4, LOG_LEVEL_TRACE1=5 };
 class Logger {
 public:
-    static Logger* getLogger(const char*, bool = true) { static Logger l; return &l; }
+    static Logger* getLogger(const char*) { static Logger l; return &l; }
     void setLevel(uint32_t l) { level=l; }
     uint32_t getLevel() { return level; }
     bool isLevelEnabled(int32_t) { return true; }
@@ -68,7 +68,6 @@ class ScrNativeLoggerTest(unittest.TestCase):
     def test_existing_and_late_loggers_use_each_restored_ip(self):
         source = r"""
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/StartupTiming.h"
 #include "autil/NetUtil.h"
 #include <thread>
 #include <vector>
@@ -106,13 +105,6 @@ int main() {
     for (int i=0; i<100; ++i)
         Logger::refreshRuntimeIdentity(i % 2 ? "192.0.2.20" : "192.0.2.30");
     for (auto& reader : readers) reader.join();
-    { rtp_llm::StartupTiming timing("test.success"); }
-    try {
-        rtp_llm::StartupTiming timing("test.failure");
-        throw std::runtime_error("original");
-    } catch (const std::runtime_error& error) {
-        if (std::string(error.what()) != "original") return 3;
-    }
 }
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -154,16 +146,6 @@ int main() {
             self.assertIn("[192.0.2.30]", line)
         self.assertIn("[RANK 7][192.0.2.30] trace-check", output)
         concurrent = [line for line in output if line.endswith("concurrent")]
-        timing = [line for line in output if "[RTPLLM_STARTUP]" in line]
-        self.assertEqual(len(timing), 4)
-        self.assertIn("stage=test.success event=begin", timing[0])
-        self.assertRegex(
-            timing[1], r"stage=test.success event=end elapsed_ms=\d+\.\d{3}"
-        )
-        self.assertIn("stage=test.failure event=begin", timing[2])
-        self.assertRegex(
-            timing[3], r"stage=test.failure event=failed elapsed_ms=\d+\.\d{3}"
-        )
         self.assertEqual(len(concurrent), 400)
         self.assertTrue(
             all(

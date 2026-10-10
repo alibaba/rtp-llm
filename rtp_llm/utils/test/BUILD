@@ -275,12 +275,6 @@ py_test(
 )
 
 py_test(
-    name = "startup_timing_test",
-    srcs = ["startup_timing_test.py"],
-    deps = ["//rtp_llm:utils"],
-)
-
-py_test(
     name = "scr_template_lifecycle_test",
     srcs = ["scr_template_lifecycle_test.py"],
     deps = ["//rtp_llm:utils"],

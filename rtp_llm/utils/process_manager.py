@@ -6,8 +6,6 @@ import time
 from multiprocessing import Process
 from typing import Callable, Dict, List, Optional, Set
 
-from rtp_llm.utils.startup_timing import startup_event
-
 DEFER_FIRST_SIGTERM_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM"
 DEFER_FIRST_SIGTERM_SECONDS_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM_SECONDS"
 DEFER_FIRST_SIGTERM_VALUE = "1"
@@ -823,24 +821,12 @@ class ProcessManager:
         processes = self.health_check_processes
         retry_interval = config["retry_interval_seconds"]
         check_ready_fn = config["check_ready_fn"]
-        started = time.monotonic()
-        last_report = started
-        attempts = 0
-        startup_event("launcher.process_health", "begin", process=process_name)
 
         while True:
             if not self.is_available():
                 with self.health_check_lock:
                     self.health_check_status[process_name]["ready"] = False
                     self.health_check_status[process_name]["checked"] = True
-                startup_event(
-                    "launcher.process_health",
-                    "failed",
-                    process=process_name,
-                    elapsed_ms=(time.monotonic() - started) * 1000,
-                    attempts=attempts,
-                    reason="manager_unavailable",
-                )
                 logging.error(f"{process_name} process manager is not available")
                 return
             # Check if process is still alive
@@ -848,47 +834,18 @@ class ProcessManager:
                 with self.health_check_lock:
                     self.health_check_status[process_name]["ready"] = False
                     self.health_check_status[process_name]["checked"] = True
-                startup_event(
-                    "launcher.process_health",
-                    "failed",
-                    process=process_name,
-                    elapsed_ms=(time.monotonic() - started) * 1000,
-                    attempts=attempts,
-                    reason="process_dead",
-                )
                 logging.error(f"{process_name} process is not alive")
                 return
 
-            attempts += 1
-            last_error = "not_ready"
             try:
                 if check_ready_fn():
                     with self.health_check_lock:
                         self.health_check_status[process_name]["ready"] = True
                         self.health_check_status[process_name]["checked"] = True
                     logging.info(f"{process_name} is ready")
-                    startup_event(
-                        "launcher.process_health",
-                        "ready",
-                        process=process_name,
-                        elapsed_ms=(time.monotonic() - started) * 1000,
-                        attempts=attempts,
-                    )
                     return
             except Exception as e:
-                last_error = type(e).__name__
                 logging.debug(f"{process_name} health check exception: {str(e)}")
-            now = time.monotonic()
-            if now - last_report >= 10:
-                startup_event(
-                    "launcher.process_health",
-                    "waiting",
-                    process=process_name,
-                    elapsed_ms=(now - started) * 1000,
-                    attempts=attempts,
-                    reason=last_error,
-                )
-                last_report = now
             time.sleep(retry_interval)
 
     def start_parallel_health_checks(self):

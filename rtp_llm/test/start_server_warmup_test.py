@@ -38,7 +38,7 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
                 for starter in starters:
-                    self.assertIs(starter.call_args.args[3], event)
+                    self.assertIs(starter.call_args.args[-1], event)
                 event.set()
                 previous = event
 
