@@ -54,8 +54,8 @@ class XQAAttnOp:
         if is_sm12x() or _sm() < 90:
             return False
         group_size = self.attn_configs.head_num // self.attn_configs.kv_head_num
-        _, support_xqa, _ = _cuda_xqa()
         try:
+            _, support_xqa, _ = _cuda_xqa()
             return bool(
                 support_xqa(
                     group_size,

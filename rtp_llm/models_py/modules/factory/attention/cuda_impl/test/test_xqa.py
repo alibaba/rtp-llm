@@ -11,7 +11,7 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
 from rtp_llm.ops import RopeStyle
-from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp
 from rtp_llm.ops.fused_rope_kvcache_op import (
     DecodeRopeContractError,
     FusedRopeAttnParams,
@@ -88,10 +88,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"as a pass."
             )
 
-        # Prepare parameters
-        params_base = attn_op.prepare(attn_inputs)
-        # Cast to XQAParams for forward call
-        params = XQAParams() if not isinstance(params_base, XQAParams) else params_base
+        params = attn_op.prepare(attn_inputs)
 
         # Create query input [batch_size, head_num, head_dim]
         local_head_num = config.head_num // config.tp_size
