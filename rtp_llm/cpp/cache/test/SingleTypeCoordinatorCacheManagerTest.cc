@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include <set>
 #include <optional>
@@ -14,7 +15,6 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -165,6 +165,13 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
                                     rtp_llm::DataType::TYPE_FP16,
                                     /*local_head_num_kv=*/8,
                                     /*size_per_head=*/128);
+}
+
+void resolveSingleTypeCpLayout(CacheConfig& config, const ParallelismConfig& parallelism) {
+    auto policy = config.topology().groups().front().policy;
+    policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    setTestGroupPolicies(config, {policy});
+    config.finalizeStorageLayout(parallelism);
 }
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
@@ -885,10 +892,13 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsAtFirstNullBlo
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLastRankCanonicalKeys) {
-    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
+    auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    resolveSingleTypeCpLayout(config, parallelism);
     allocator_        = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
     ASSERT_TRUE(allocator_->init());
-    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
     auto block_pool = allocator_->groupBlockPools().front();
@@ -900,9 +910,11 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLast
     auto seed = createBatchKVCacheResource(/*batch_size=*/1, config);
     seed->setBatchBlocks(0, "default", seed_blocks);
     seed->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+    seed->setLastBlockAligned(true);
     {
         size_t resident_prefix_length = 0;
-        allocator_->insertIntoCache(InsertInfo{seed, nullptr, /*is_resident=*/false}, resident_prefix_length);
+        InsertInfo insert_info{seed, nullptr, /*is_resident=*/false};
+        allocator_->insertIntoCache(insert_info, resident_prefix_length);
     }
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
@@ -922,6 +934,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLast
     hit->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200, 201});
     auto       hit_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
     MallocInfo hit_info{hit, hit_tokens};
+    hit_info.request_layout = snapshotGlobalCacheRequest(*hit, *hit_tokens);
     auto       hit_result = allocator_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 16);
@@ -937,6 +950,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLast
     unaligned->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
     auto       unaligned_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo unaligned_info{unaligned, unaligned_tokens};
+    unaligned_info.request_layout = snapshotGlobalCacheRequest(*unaligned, *unaligned_tokens);
     auto       unaligned_result = allocator_->malloc(unaligned_info);
     ASSERT_TRUE(unaligned_result.success);
     EXPECT_EQ(unaligned_result.reuse_len, 8);
@@ -1983,15 +1997,18 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, MaxSeqLen) {
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    resolveSingleTypeCpLayout(config, parallelism);
     allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
     ASSERT_TRUE(allocator_->init());
-
-    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    EXPECT_EQ(config.localAllocTokens("default", 65), 40);
     EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
 }
 

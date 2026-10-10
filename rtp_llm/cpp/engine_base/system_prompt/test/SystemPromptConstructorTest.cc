@@ -8,8 +8,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -42,6 +44,52 @@ public:
 
 private:
     size_t pre_run_calls_{0};
+};
+
+// Run the request cache path against one cache-owned CP2 layout.
+// A full TP2 engine needs a second rank for cache-size all-gather; this
+// focused preRun stops after real Stream allocation, before model execution.
+class PreparedCp2PromptEngine: public NormalEngine {
+public:
+    using NormalEngine::NormalEngine;
+
+    bool configureCp2Cache() {
+        const auto block_num = resource_context_.cache_manager->cacheConfig().topology().groups().front().block_num;
+        ParallelismConfig parallelism;
+        parallelism.tp_size = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        auto config = CacheConfigCreator::createConfig(model_config_, parallelism, kv_cache_config);
+        config.finalizeBlockNums(block_num, runtime_config);
+        auto manager = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, parallelism);
+        if (!manager->init()) {
+            return false;
+        }
+        resource_context_.cache_manager = std::move(manager);
+        return true;
+    }
+
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& input, preRunMode mode) override {
+        EXPECT_EQ(mode, preRunMode::build_system_prompt);
+        auto stream = std::make_shared<NormalGenerateStream>(
+            input, model_config_, runtime_config, resource_context_, nullptr);
+        auto status = stream->initKVBlock();
+        if (!status.ok()) {
+            return status;
+        }
+        status = stream->streamCacheResource().waitForAllocatorLoad();
+        if (!status.ok()) {
+            return status;
+        }
+        full_keys_ = stream->kvCache().cacheKeys(0);
+        return std::static_pointer_cast<GenerateStream>(stream);
+    }
+
+    const CacheKeysType& fullKeys() const {
+        return full_keys_;
+    }
+
+private:
+    CacheKeysType full_keys_;
 };
 
 class CountingReadyContext: public LoadAsyncContext {
@@ -167,14 +215,17 @@ TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow)
 TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndReleasesRequestOwnership) {
     const std::shared_ptr<NormalEngine>   engine         = createFocusedEngine<NormalEngine>();
     const std::shared_ptr<KVCacheManager> engine_manager = engine->resourceContext().cache_manager;
+    ASSERT_NE(engine_manager, nullptr);
     const DeviceBlockPoolPtr pool = engine_manager->blockTreeCache()->groupSets().front()->devicePools().front();
     const size_t             request_blocks_before = pool->referencedBlocksNum();
     auto                     insert_manager = std::make_shared<KVCacheManager>(engine_manager->cacheConfig(), true);
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(insert_manager->cacheConfig());
     insert_manager->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
-        .WillOnce(testing::Invoke([](const InsertInfo& info, size_t& resident_prefix_length) {
+        .WillOnce(testing::Invoke([&](const InsertInfo& info, size_t& resident_prefix_length) {
             EXPECT_TRUE(info.is_resident);
+            ASSERT_NE(info.batch_kv_cache_resource, nullptr);
+            EXPECT_EQ(insert_manager->canonicalKeyCount(*info.batch_kv_cache_resource, 0), 1u);
             resident_prefix_length = 0;
         }));
     KVCacheConfig config;
@@ -186,6 +237,28 @@ TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndRelea
     EXPECT_EQ(result.status().code(), absl::StatusCode::kFailedPrecondition);
     EXPECT_NE(result.status().message().find("blocked_prompt"), std::string::npos);
     EXPECT_EQ(pool->referencedBlocksNum(), request_blocks_before);
+}
+
+TEST_F(SystemPromptConstructorTest, testCp2ResidentInsertUsesCacheCanonicalKeys) {
+    auto engine = createFocusedEngine<PreparedCp2PromptEngine>();
+    ASSERT_TRUE(engine->configureCp2Cache());
+    auto manager = engine->resourceContext().cache_manager;
+    ASSERT_NE(manager, nullptr);
+    ASSERT_TRUE(manager->cacheConfig().cache_key_layout_resolved);
+    EXPECT_EQ(manager->cacheConfig().storage_cp_size, 2);
+
+    KVCacheConfig config;
+    config.multi_task_prompt_tokens = {{"cp2", {1, 2, 3, 4, 5, 6, 7, 8}}};
+    SystemPromptConstructor constructor;
+    auto result = constructor.construct(config, engine.get(), manager.get(), true);
+    ASSERT_TRUE(result.ok()) << result.status();
+    EXPECT_EQ(result->at("cp2").prompt_tokens.size(), 8u);
+    ASSERT_EQ(result->at("cp2").group_block_ids.at("full").size(), 2u);
+
+    const auto& full_keys = engine->fullKeys();
+    ASSERT_EQ(full_keys.size(), 4u);
+    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys,
+              (CacheKeysType{full_keys[1], full_keys[3]}));
 }
 
 TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestOwnership) {

@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -26,29 +25,33 @@
 namespace rtp_llm {
 namespace {
 
-// CP shard helpers: when mapper is null/passthrough, all helpers no-op.
-inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
-    return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
+int resolvedGroupTokens(const CacheConfig& config, std::string_view tag, bool common, int raw_tokens) {
+    // STATE request endpoints use the absolute token cursor. It is a ring
+    // coordinate request, not a rank-local allocation length.
+    if (!common && config.state_entry_tags.count(std::string(tag)) != 0) {
+        return raw_tokens;
+    }
+    return config.localAllocTokens(std::string(tag), raw_tokens);
 }
 
-inline bool
-cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, std::string_view tag) {
-    return mapper && mapper->isSharded() && mapper->blockRoundRobinGroup(config, tag);
+int requestSeqLength(const MallocInfo& info) {
+    return info.request_layout ? info.request_layout->request_seq_len : info.complete_token_ids->seqLength();
 }
 
-inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
-                                     const CacheConfig&                   config,
-                                     std::string_view                     tag,
-                                     int                                  seq_len) {
-    return cpBlockRoundRobinGroup(mapper, config, tag) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) :
-                                                         seq_len;
+int requestIncrSeqLength(const MallocInfo& info) {
+    return info.request_layout ? info.request_layout->request_incr_seq_len : info.incrSeqLen();
 }
 
-inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
-                                       const CacheConfig&                   config,
-                                       std::string_view                     tag,
-                                       int                                  seq_len) {
-    return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) : seq_len;
+int requestCommonSeqLength(const MallocInfo& info) {
+    return info.request_layout ? info.request_layout->request_common_seq_len : info.complete_token_ids->commonSeqLength();
+}
+
+int requestTotalSeqLength(const MallocInfo& info) {
+    return info.request_layout ? info.request_layout->request_total_seq_len : info.complete_token_ids->totalSeqLength();
+}
+
+int requestReserveStep(const MallocInfo& info) {
+    return info.request_layout ? info.request_layout->request_reserve_step : info.complete_token_ids->getReserveStep();
 }
 
 void appendPoolSummary(std::ostringstream&          os,
@@ -203,6 +206,8 @@ MallocResult CoordinatorCacheManager::malloc(const MallocInfo& malloc_info) {
         RTP_LLM_LOG_ERROR("CompleteTokenIds is null");
         return {false, 0};
     }
+    RTP_LLM_CHECK_WITH_INFO(!config_.request_projection_required || malloc_info.request_layout,
+                            "sharded cache malloc requires a global request snapshot");
 
     if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
         auto result = initMalloc(malloc_info);
@@ -319,16 +324,20 @@ void CoordinatorCacheManager::blockBatchCopy(const torch::Tensor& copy_mapping) 
 }
 
 size_t CoordinatorCacheManager::logicalSeqSizePerBlockForCapacity(const std::string& tag) const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
+    const auto resolved = config_.capacity_tokens_per_block.find(tag);
+    if (resolved != config_.capacity_tokens_per_block.end()) {
+        return resolved->second;
     }
+    RTP_LLM_CHECK_WITH_INFO(!config_.request_projection_required,
+                            "resolved capacity token span missing: tag=%s", tag.c_str());
     return config_.topology().group(tag).seqSizePerBlock();
 }
 
 int CoordinatorCacheManager::deviceCacheMetricTokensPerBlock() const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->virtualBlockSize();
+    if (config_.cache_info_block_tokens) {
+        return static_cast<int>(*config_.cache_info_block_tokens);
     }
+    RTP_LLM_CHECK_WITH_INFO(!config_.request_projection_required, "resolved cache metric token span missing");
     return seqSizePerBlock();
 }
 
@@ -373,31 +382,18 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
     return snapshots;
 }
 
-bool CoordinatorCacheManager::cpCompactSwaGroup(const std::string&                   tag,
-                                                const std::shared_ptr<CPSlotMapper>& mapper) const {
-    return mapper && mapper->isSharded() && mapper->compactLastRankGroup(config_, tag);
-}
-
-size_t CoordinatorCacheManager::loadTargetPosition(size_t                               path_index,
-                                                   const std::string&                   tag,
-                                                   const std::shared_ptr<CPSlotMapper>& mapper,
-                                                   int                                  cp_scale) const {
-    const CacheGroupType type = config_.topology().group(tag).policy.group_type;
-    return type == CacheGroupType::LINEAR || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, mapper)) ?
-               (path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-               path_index;
+size_t CoordinatorCacheManager::loadTargetPosition(size_t path_index, const std::string& tag) const {
+    return config_.canonicalBlockPosition(tag, path_index);
 }
 
 std::shared_ptr<LoadAsyncContext>
-CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cache_keys,
-                                        BatchKVCacheResource&                kv_resource,
-                                        const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                        PreparedKVCache&                     prepared,
-                                        const std::function<bool(size_t)>&   valid_prefix) {
+CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache_keys,
+                                        BatchKVCacheResource&              kv_resource,
+                                        PreparedKVCache&                   prepared,
+                                        const std::function<bool(size_t)>& valid_prefix) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
-    const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
@@ -407,8 +403,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
             for (const auto& tag : group_set->groupTags()) {
-                const size_t reuse_size =
-                    loadTargetPosition(prepared.total_logical_blocks - 1, tag, cp_mapper, cp_scale) + 1;
+                const size_t reuse_size = loadTargetPosition(prepared.total_logical_blocks - 1, tag) + 1;
                 kv_resource.mutableBlockIds(0, tag).assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
             }
         }
@@ -418,8 +413,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
         const auto& group_tags = group_sets[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
             const size_t group_id = groupIdForTag(group_tags[member_group_id]);
-            const size_t target_position =
-                loadTargetPosition(path_index, group_tags[member_group_id], cp_mapper, cp_scale);
+            const size_t target_position = loadTargetPosition(path_index, group_tags[member_group_id]);
             kv_resource.mutableBlockIds(0, group_tags[member_group_id]).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
         }
@@ -452,9 +446,12 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
 
 MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&       kv_resource       = malloc_info.batch_kv_cache_resource;
-    const int   seq_len           = malloc_info.complete_token_ids->seqLength();
-    const auto& cp_mapper         = cp_slot_mapper_;
-    const int   reuse_unit_tokens = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
+    const int   seq_len           = requestSeqLength(malloc_info);
+    const size_t reuse_tokens =
+        config_.cache_key_layout_resolved ? config_.reuse_unit_tokens : config_.seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(reuse_tokens > 0 && reuse_tokens <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "cache reuse unit token span exceeds int range");
+    const int reuse_unit_tokens = static_cast<int>(reuse_tokens);
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
     int64_t              match_cost_time_us = 0;
@@ -465,10 +462,9 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     std::shared_ptr<LoadAsyncContext> load_context;
 
     if (malloc_info.enable_cache_lookup) {
-        CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        const size_t  max_keys   = static_cast<size_t>(config_.maxPrefixReuseTokens(seq_len))
-                                / static_cast<size_t>(std::max(1, reuse_unit_tokens));
-        match_keys.resize(std::min(match_keys.size(), max_keys));
+        CacheKeysType match_keys = config_.canonicalCacheKeys(
+            malloc_info.request_layout ? malloc_info.request_layout->match_keys : cache_keys);
+        match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
         while (!match_keys.empty()
                && !malloc_info.complete_token_ids->isValidReuseLength(
                    static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
@@ -478,7 +474,6 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         load_context =
             prepareKVCache(match_keys,
                            *kv_resource,
-                           cp_mapper,
                            prepared,
                            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
                                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
@@ -541,20 +536,17 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                                                        LoadAsyncContext* context,
                                                        size_t            matched_blocks) {
     auto&       kv_resource = *malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper   = cp_slot_mapper_;
-    const int   cp_scale    = cp_mapper && cp_mapper->isSharded() ? cp_mapper->cpSize() : 1;
     prepared.required_positions.assign(kv_cache_groups_.size(), {});
 
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
             for (const auto& tag : group_set->groupTags()) {
-                kv_resource.mutableBlockIds(0, tag).resize(
-                    loadTargetPosition(matched_blocks - 1, tag, cp_mapper, cp_scale) + 1);
+                kv_resource.mutableBlockIds(0, tag).resize(loadTargetPosition(matched_blocks - 1, tag) + 1);
             }
         }
     }
     auto add_target = [&](size_t path, size_t group_id, const std::string& tag) {
-        prepared.required_positions[group_id].insert(loadTargetPosition(path, tag, cp_mapper, cp_scale));
+        prepared.required_positions[group_id].insert(loadTargetPosition(path, tag));
     };
     if (context != nullptr) {
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
@@ -574,8 +566,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         }
     }
 
-    const int seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    const int seq_len        = requestSeqLength(malloc_info);
+    const int common_seq_len = std::min(requestCommonSeqLength(malloc_info), seq_len);
     prepared.materialize_status =
         evaluatePreparedInitCapacity(malloc_info, reserveBlocksNum(), prepared, context != nullptr);
     if (prepared.materialize_status != MallocStatus::NONE) {
@@ -587,7 +579,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         std::vector<size_t> backfilled_positions;
         if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                 block_ids,
-                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len),
+                resolvedGroupTokens(config_, tag, true, common_seq_len),
                 malloc_info.reuse_cache,
                 0,
                 &backfilled_positions,
@@ -603,7 +595,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
     auto target_blocks = [&](size_t path, size_t group_set_id) {
         BlockIndicesType blocks;
         for (const auto& tag : block_tree_cache_->groupSets()[group_set_id]->groupTags()) {
-            blocks.push_back(kv_resource.blocks(0, tag)[loadTargetPosition(path, tag, cp_mapper, cp_scale)]);
+            blocks.push_back(kv_resource.blocks(0, tag)[loadTargetPosition(path, tag)]);
         }
         return blocks;
     };
@@ -621,7 +613,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                 context->setBackendTargetBlock(
                     key_index,
                     handle_index,
-                    kv_resource.blocks(0, handle.tag)[loadTargetPosition(key_index, handle.tag, cp_mapper, cp_scale)]);
+                    kv_resource.blocks(0, handle.tag)[loadTargetPosition(key_index, handle.tag)]);
             }
         }
     }
@@ -661,10 +653,9 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
 
 MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) {
     auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper    = cp_slot_mapper_;
     const int   batch_size   = kv_resource->batchSize();
-    const int   raw_seq_len  = malloc_info.incrSeqLen();
-    const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
+    const int   raw_seq_len  = requestIncrSeqLength(malloc_info);
+    const int   reserve_step = requestReserveStep(malloc_info);
 
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));
@@ -685,7 +676,7 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
             const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
-            const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
+            const int   group_seq_len    = resolvedGroupTokens(config_, tag, false, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
@@ -820,8 +811,6 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         return;
     }
 
-    const auto& cp_mapper = cp_slot_mapper_;
-    const bool  cp_active = cp_mapper && cp_mapper->isSharded();
     // Preserve the single-group publication contract: only batch zero becomes
     // reusable. Multi-group requests retain their per-batch publication semantics.
     const int batch_size =
@@ -832,7 +821,11 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         if (full_keys.empty()) {
             continue;
         }
-        CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
+        CacheKeysType insert_keys = full_keys;
+        if (config_.cache_key_layout_resolved && !kv_cache_resource->lastBlockAligned()) {
+            insert_keys.pop_back();
+        }
+        insert_keys = config_.canonicalCacheKeys(insert_keys);
         if (insert_keys.empty()) {
             continue;
         }
@@ -857,13 +850,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                     mapping_valid = false;
                     break;
                 }
-                const auto type           = config_.group(tag).policy.group_type;
-                const bool sparse_logical = cp_active
-                                            && (type == CacheGroupType::LINEAR
-                                                || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
-                    const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
+                    const size_t position = config_.canonicalBlockPosition(tag, i);
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }
@@ -1344,12 +1333,11 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
-    const auto& cp_mapper          = cp_slot_mapper_;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
-    const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
-    const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
+    const int   total_seq_len      = requestTotalSeqLength(malloc_info);
+    const int   raw_common_seq_len = std::min(requestCommonSeqLength(malloc_info), total_seq_len);
+    const int   raw_seq_len        = requestSeqLength(malloc_info);
+    const int   reserve_step       = requestReserveStep(malloc_info);
     const bool  reuse_enabled      = malloc_info.reuse_cache;
     const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
@@ -1358,8 +1346,8 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
         const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
-        const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
-        const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
+        const int   group_common_seq = resolvedGroupTokens(config_, tag, true, raw_common_seq_len);
+        const int   group_seq_len    = resolvedGroupTokens(config_, tag, false, raw_seq_len);
         const auto  need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
@@ -1396,50 +1384,13 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return peak_blocks;
 }
 
-void CoordinatorCacheManager::checkCPShardedMallocResult(const MallocInfo& malloc_info) const {
-    if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
-        return;
-    }
-
-    const auto& kv_resource  = malloc_info.batch_kv_cache_resource;
-    const int   seq_len      = malloc_info.incrSeqLen();
-    const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
-
-    for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
-        for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-            const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-            if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, tag)) {
-                continue;
-            }
-            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);
-            const int expected_blocks =
-                kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, 0, reserve_step);
-            const int actual_blocks = kv_resource->blocksNum(batch_id, tag);
-            RTP_LLM_CHECK_WITH_INFO(actual_blocks == expected_blocks,
-                                    "CP invariant violated: batch=%d group=%d blocks=%d != expected_local_blocks=%d "
-                                    "(seq_len=%d, effective_seq_len=%d, reserve_step=%d, cp_size=%d, "
-                                    "block_size=%d, cacheKeys=%zu)",
-                                    batch_id,
-                                    group_id,
-                                    actual_blocks,
-                                    expected_blocks,
-                                    seq_len,
-                                    effective_seq_len,
-                                    reserve_step,
-                                    cp_slot_mapper_->cpSize(),
-                                    cp_slot_mapper_->blockSize(),
-                                    kv_resource->cacheKeys(batch_id).size());
-        }
-    }
-}
-
 int CoordinatorCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
                                                    int                            reserve_step) const {
     int need_blocks = 0;
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
         const auto& tag               = config_.groupTags()[static_cast<size_t>(group_id)];
-        const int   effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);
+        const int   effective_seq_len = config_.localAllocTokens(tag, seq_len);
         const int   cur_blocks        = batch_kv_cache_resource->blocksNum(0, tag);
         need_blocks +=
             kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
@@ -1939,12 +1890,11 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
                             "prepared load group count mismatch: required_positions=%zu groups=%zu",
                             required_positions == nullptr ? 0 : required_positions->size(),
                             kv_cache_groups_.size());
-    const auto& cp_mapper          = cp_slot_mapper_;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
-    const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
-    const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
+    const int   total_seq_len      = requestTotalSeqLength(malloc_info);
+    const int   raw_common_seq_len = std::min(requestCommonSeqLength(malloc_info), total_seq_len);
+    const int   raw_seq_len        = requestSeqLength(malloc_info);
+    const int   reserve_step       = requestReserveStep(malloc_info);
     const bool  reuse_enabled      = malloc_info.reuse_cache;
 
     size_t total_reservable_blocks = 0;
@@ -1965,8 +1915,8 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const size_t group_index            = static_cast<size_t>(group_id);
         const auto&  tag                    = topology_groups[group_index].tag;
-        const int    group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_common_seq_len);
-        const int    group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_seq_len);
+        const int    group_common_seq       = resolvedGroupTokens(config_, tag, true, raw_common_seq_len);
+        const int    group_seq_len          = resolvedGroupTokens(config_, tag, false, raw_seq_len);
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
         const auto&  group_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
@@ -2069,12 +2019,11 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
     }
 
     const auto& resource       = malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper      = cp_slot_mapper_;
     const int   batch_size     = resource->batchSize();
-    const int   raw_seq_len    = incremental ? malloc_info.incrSeqLen() : malloc_info.complete_token_ids->seqLength();
-    const int   raw_common_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), raw_seq_len);
-    const int   total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
-    const int   request_reserve_step = malloc_info.complete_token_ids->getReserveStep();
+    const int   raw_seq_len    = incremental ? requestIncrSeqLength(malloc_info) : requestSeqLength(malloc_info);
+    const int   raw_common_len = std::min(requestCommonSeqLength(malloc_info), raw_seq_len);
+    const int   total_seq_len  = requestTotalSeqLength(malloc_info);
+    const int   request_reserve_step = requestReserveStep(malloc_info);
     const bool  reserve_admission    = !incremental && failed_group < 0;
     const int   reserve_step         = incremental || reserve_admission ? request_reserve_step : 0;
     const int   planning_raw_seq_len = !incremental && !reserve_admission ? raw_common_len : raw_seq_len;
@@ -2105,7 +2054,8 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
         const size_t group_index   = static_cast<size_t>(gid);
         const auto&  group         = topology_groups[group_index];
         const auto   group_type    = group.policy.group_type;
-        const int    group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, planning_raw_seq_len);
+        const int    group_seq_len =
+            resolvedGroupTokens(config_, group.tag, !incremental && !reserve_admission, planning_raw_seq_len);
 
         int    need_blocks          = 0;
         int    need_slots           = 0;
@@ -2130,7 +2080,7 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             need_blocks = 0;
             need_slots  = 0;
         } else {
-            const int  group_common_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_common_len);
+            const int  group_common_len = resolvedGroupTokens(config_, group.tag, true, raw_common_len);
             const int  reuse_blocks_len = malloc_info.reuse_cache ? resource->blocksNum(0, group.tag) : 0;
             const auto need             = kv_cache_groups_[group_index]->getNeedBlocks(
                 group_common_len, group_seq_len, reserve_step, reuse_blocks_len, malloc_info.reuse_cache);

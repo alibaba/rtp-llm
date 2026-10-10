@@ -10,7 +10,6 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -88,10 +87,9 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
-    // KVCacheResource reuse counters follow the topology's canonical cache-key namespace.
+    // KVCacheResource reuse counters follow the cache's canonical key namespace.
     int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        return mapper ? mapper->reuseBlockTokens(resource_context_.cache_manager->cacheConfig()) : seqSizePerBlock();
+        return resource_context_.cache_manager->reuseUnitTokens();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {

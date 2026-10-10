@@ -5,14 +5,17 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -23,7 +26,6 @@
 namespace rtp_llm {
 
 class RtpLLMCacheReuseMetricsCollector;
-class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
@@ -73,6 +75,14 @@ public:
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
+    int reuseUnitTokens() const {
+        const size_t tokens =
+            config_.cache_key_layout_resolved ? config_.reuse_unit_tokens : config_.seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && tokens <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "cache reuse unit token span exceeds int range");
+        return static_cast<int>(tokens);
+    }
+    size_t canonicalKeyCount(const BatchKVCacheResource& resource, int batch) const;
 
     int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                int                            seq_len,
@@ -105,6 +115,18 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
+    // Resolve an already selected logical page to this decoder's physical
+    // destination. Missing blocks retain a region with null buffer.addr.
+    std::vector<CacheBlockRegion> queryDecodeCacheBlockRegions(int                     global_layer_id,
+                                                               const std::string&      tag,
+                                                               size_t                  key_count,
+                                                               size_t                  logical_page,
+                                                               int                     producer_cp_size,
+                                                               int                     decode_peer_count,
+                                                               int                     peer_index,
+                                                               bool                    opaque_wire,
+                                                               const BlockIndicesType& destination_blocks) const;
+
     GroupedCacheLayerLayout allLayerCacheBase() const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
@@ -120,6 +142,11 @@ public:
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void        refreshKVCacheInfoSnapshot();
+    KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    bool needsPrefillHitSnapshot() const {
+        return prefill_cache_hit_metrics_reporter_ != nullptr;
+    }
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -142,13 +169,6 @@ public:
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
-
-    // CP page-level RR sharding context. Returns nullptr when sharding is not active
-    // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
-    // remap cacheKeys -> last-rank-key namespace.
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
-    }
 
 private:
     std::function<void()> allocationChangeCallback() const;
@@ -174,7 +194,6 @@ private:
     void                               initCacheEventPublisher();
     void                               stopCacheEventPublisher();
 
-    std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
     std::mutex                            cache_hit_mutex_;

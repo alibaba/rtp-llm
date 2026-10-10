@@ -5,6 +5,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
@@ -160,7 +161,11 @@ SpecBuildContext makeSpecBuildContext(const ModelConfig&       model_config,
                                       const ParallelismConfig& parallelism_config,
                                       uint32_t                 seq_size_per_block,
                                       uint32_t                 kernel_tokens_per_block,
-                                      int                      gen_num_per_cycle) {
+                                      int                      gen_num_per_cycle,
+                                      const ResolvedStateEntryLayouts* state_entry_layouts,
+                                      const ResolvedSwaByteLayouts* swa_byte_layouts,
+                                      const ResolvedCompressedLayouts* compressed_layouts,
+                                      const RequiredSpecProjectionTags* required_spec_tags) {
     RTP_LLM_CHECK_WITH_INFO(
         gen_num_per_cycle >= 0, "cache config requires non-negative gen_num_per_cycle, got %d", gen_num_per_cycle);
     SpecBuildContext ctx;
@@ -171,6 +176,10 @@ SpecBuildContext makeSpecBuildContext(const ModelConfig&       model_config,
     ctx.linear_attention_config = &model_config.linear_attention_config;
     ctx.parallelism_config      = &parallelism_config;
     ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
+    ctx.state_entry_layouts     = state_entry_layouts;
+    ctx.swa_byte_layouts        = swa_byte_layouts;
+    ctx.compressed_layouts      = compressed_layouts;
+    ctx.required_spec_projection_tags = required_spec_tags;
     return ctx;
 }
 
@@ -217,7 +226,10 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
 void populateGroups(CacheConfig&                 config,
                     const LayerKVCacheSpecDescs& descs_by_layer,
                     const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
+                    const ModelConfig&           model_config,
+                    const ResolvedCpGroupPolicies* cp_group_policies) {
+    RTP_LLM_CHECK_WITH_INFO(cp_group_policies == nullptr || cp_group_policies->size() == descs_by_layer.size(),
+                            "resolved CP group policy layer count differs from descriptors");
     struct BuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
@@ -230,6 +242,8 @@ void populateGroups(CacheConfig&                 config,
         layers[layer_id].layer_id = static_cast<int>(layer_id);
         const auto& descs         = descs_by_layer[layer_id];
         const auto& specs         = specs_by_layer[layer_id];
+        RTP_LLM_CHECK_WITH_INFO(cp_group_policies == nullptr || (*cp_group_policies)[layer_id].size() == descs.size(),
+                                "resolved CP group policy descriptor count differs at layer %u", layer_id);
         RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
                                 "cache layer %u desc count %zu != spec count %zu",
                                 layer_id,
@@ -245,6 +259,11 @@ void populateGroups(CacheConfig&                 config,
                                     layer_id,
                                     spec->tag.c_str());
             auto policy = SpecBuilder::groupPolicy(desc);
+            if (cp_group_policies != nullptr) {
+                const auto& cp_policy = (*cp_group_policies)[layer_id][i];
+                policy.cp_mapping = cp_policy.mapping;
+                policy.cp_slice = cp_policy.slice;
+            }
             checkGroupResidencyBudget(policy, spec->tag);
             if (policy.group_type == CacheGroupType::SWA) {
                 RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
@@ -284,6 +303,66 @@ void populateGroups(CacheConfig&                 config,
     config.setTopology(std::move(groups), std::move(layers));
 }
 
+RequiredSpecProjectionTags resolveRequiredSpecProjectionTags(const ModelConfig& model) {
+    RequiredSpecProjectionTags tags;
+    for (const auto& layer : model.kv_cache_spec_descs) {
+        for (const auto& desc : layer) {
+            if (desc.cache_type != KVCacheSpecType::OpaqueKV && desc.cache_type != KVCacheSpecType::OpaqueState) {
+                continue;
+            }
+            const bool scale = desc.cp.has_value() && desc.cp->scale_seq_size.value_or(false);
+            const bool align = desc.cp.has_value() && desc.cp->align_payload.value_or(false);
+            const auto slice = desc.cp.has_value() ?
+                                   desc.cp->prefill_slice_layout.value_or(CpPrefillSliceLayout::NONE) :
+                                   CpPrefillSliceLayout::NONE;
+            if (scale || align || slice != CpPrefillSliceLayout::NONE) {
+                tags.insert(desc.tag);
+            }
+        }
+    }
+    return tags;
+}
+
+ResolvedCpGroupPolicies resolveCpGroupPolicies(const ModelConfig& model) {
+    ResolvedCpGroupPolicies policies;
+    policies.reserve(model.kv_cache_spec_descs.size());
+    for (const auto& layer : model.kv_cache_spec_descs) {
+        auto& resolved_layer = policies.emplace_back();
+        resolved_layer.reserve(layer.size());
+        for (const auto& desc : layer) {
+            ResolvedCpGroupPolicy policy;
+            // Preserve the former FULL/SWA mapping defaults in cache policy resolution.
+            switch (SpecBuilder::groupType(desc)) {
+                case CacheGroupType::FULL:
+                    policy.mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+                    break;
+                case CacheGroupType::SWA:
+                    policy.mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+                    break;
+                case CacheGroupType::LINEAR:
+                    policy.mapping = CpBlockMappingMode::NONE;
+                    break;
+            }
+            if (desc.cp.has_value()) {
+                policy.mapping = desc.cp->mapping.value_or(policy.mapping);
+                policy.slice   = desc.cp->slice.value_or(policy.slice);
+                policy.uses_physical_projection =
+                    (desc.cache_type == KVCacheSpecType::OpaqueKV || desc.cache_type == KVCacheSpecType::OpaqueState)
+                    && (desc.cp->scale_seq_size.value_or(false) || desc.cp->align_payload.value_or(false)
+                        || desc.cp->prefill_slice_layout.value_or(CpPrefillSliceLayout::NONE)
+                               != CpPrefillSliceLayout::NONE);
+            }
+            resolved_layer.push_back(policy);
+        }
+    }
+    return policies;
+}
+
+LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs&   layer_descs,
+                                           const SpecBuildContext&        ctx,
+                                           int64_t                        expected_layer_num,
+                                           const ResolvedCpGroupPolicies* cp_group_policies);
+
 CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                                   const ParallelismConfig& parallelism_config,
                                   const KVCacheConfig&     kv_cache_config,
@@ -291,10 +370,25 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     const auto [seq_size, kernel_seq_size] = resolveSeqSizes(model_config, kv_cache_config);
     validateDescs(model_config, kernel_seq_size);
     validateAttentionMetadata(model_config);
-    const auto ctx =
-        makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
+    const auto state_entry_layouts = FixedStateCacheSpec::resolveEntryLayouts(
+        model_config.kv_cache_spec_descs, parallelism_config, seq_size, gen_num_per_cycle, kernel_seq_size);
+    const auto swa_byte_layouts = FixedStateCacheSpec::resolveSwaByteLayouts(
+        model_config.kv_cache_spec_descs, parallelism_config, seq_size, gen_num_per_cycle, kernel_seq_size);
+    const auto compressed_layouts = CompressedKVCacheSpec::resolveLayouts(
+        model_config.kv_cache_spec_descs, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
+    const auto required_spec_tags = resolveRequiredSpecProjectionTags(model_config);
+    const auto cp_group_policies  = resolveCpGroupPolicies(model_config);
+    const auto ctx                = makeSpecBuildContext(model_config,
+                                          parallelism_config,
+                                          seq_size,
+                                          kernel_seq_size,
+                                          gen_num_per_cycle,
+                                          &state_entry_layouts,
+                                          &swa_byte_layouts,
+                                          &compressed_layouts,
+                                          &required_spec_tags);
     const auto specs =
-        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+        buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers, &cp_group_policies);
 
     CacheConfig config;
     config.dtype                   = ctx.dtype;
@@ -305,7 +399,12 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config, &cp_group_policies);
+    for (const auto& entry : state_entry_layouts) {
+        if (config.group(entry.first).policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
+            config.state_entry_tags.insert(entry.first);
+        }
+    }
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
@@ -318,6 +417,16 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
 }
 
 }  // namespace
+
+uint32_t CacheConfigCreator::resolvedBaseBlockTokens(const ModelConfig& model_config,
+                                                     const KVCacheConfig& kv_cache_config) {
+    return resolveSeqSizes(model_config, kv_cache_config).first;
+}
+
+uint32_t CacheConfigCreator::resolvedKernelBlockTokens(const ModelConfig& model_config,
+                                                       const KVCacheConfig& kv_cache_config) {
+    return resolveSeqSizes(model_config, kv_cache_config).second;
+}
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
     RTP_LLM_CHECK_WITH_INFO(budget.paged_block_bytes > 0 || budget.swa_block_bytes > 0,
@@ -336,25 +445,42 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
     return low;
 }
 
-LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                               const SpecBuildContext&      ctx,
-                                                               int64_t                      expected_layer_num) {
+namespace {
+
+LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs&   layer_descs,
+                                           const SpecBuildContext&        ctx,
+                                           int64_t                        expected_layer_num,
+                                           const ResolvedCpGroupPolicies* cp_group_policies) {
     RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
                             "kv_cache_spec_descs size %zu != num_layers %ld",
                             layer_descs.size(),
                             expected_layer_num);
     LayerKVCacheSpecs layer_specs(layer_descs.size());
+    RTP_LLM_CHECK_WITH_INFO(cp_group_policies == nullptr || cp_group_policies->size() == layer_descs.size(),
+                            "resolved CP group policy layer count differs from descriptors");
+    const RequiredSpecProjectionTags no_projection_tags;
     for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
         const auto& descs = layer_descs[layer_id];
         RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
+        RTP_LLM_CHECK_WITH_INFO(cp_group_policies == nullptr || (*cp_group_policies)[layer_id].size() == descs.size(),
+                                "resolved CP group policy descriptor count differs at layer %zu", layer_id);
         auto& specs = layer_specs[layer_id];
         specs.reserve(descs.size());
-        for (const auto& desc : descs) {
-            specs.push_back(SpecBuilder::build(desc, ctx));
+        for (size_t desc_id = 0; desc_id < descs.size(); ++desc_id) {
+            auto local_ctx = ctx;
+            if (cp_group_policies != nullptr && !(*cp_group_policies)[layer_id][desc_id].uses_physical_projection) {
+                local_ctx.state_entry_layouts = nullptr;
+                local_ctx.swa_byte_layouts = nullptr;
+                local_ctx.compressed_layouts = nullptr;
+                local_ctx.required_spec_projection_tags = &no_projection_tags;
+            }
+            specs.push_back(SpecBuilder::build(descs[desc_id], local_ctx));
         }
     }
     return layer_specs;
 }
+
+}  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
@@ -379,6 +505,7 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
     auto config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    config.finalizeStorageLayout(parallelism_config, /*warmup=*/true);
     // Upstream warmup pools reserve the sentinel block plus one allocatable
     // block per group, and never inherit linear_step: the SWA
     // ceil(baseline/step) shrink would collapse those groups to sentinel-only.
@@ -402,8 +529,10 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         "draft proposal token count must fit a non-negative int");
     const int gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    config.finalizeStorageLayout(parallelism_config);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        draft.finalizeStorageLayout(parallelism_config);
         int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));

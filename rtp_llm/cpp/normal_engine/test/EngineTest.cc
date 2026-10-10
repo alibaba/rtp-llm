@@ -20,7 +20,10 @@
 #include "gtest/gtest.h"
 #include <limits>
 #include <memory>
+#include <optional>
 #include <pybind11/embed.h>
+#include <utility>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -282,6 +285,9 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_TRUE(saw_decode_warmup);
+    ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
+    EXPECT_EQ(engine->resourceContext().cache_manager->reuseUnitTokens(),
+              engine->resourceContext().cache_manager->cacheConfig().seq_size_per_block);
 }
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
@@ -307,6 +313,104 @@ TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) 
     EXPECT_EQ(resource_context.cache_manager, previous);
     EXPECT_EQ(resource_context.role_type, RoleType::PREFILL);
     EXPECT_EQ(group_num, 17);
+}
+
+TEST_F(NormalEngineTest, testWarmupBindingRestoresManagerAfterException) {
+    ModelConfig model;
+    model.num_layers = 1;
+    model.attn_config.head_num = 1;
+    model.attn_config.kv_head_num = 1;
+    model.attn_config.size_per_head = 1;
+    model.attn_config.tokens_per_block = 1;
+    model.kv_cache_spec_descs = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config = CacheConfigCreator::createWarmupConfig(model, {});
+    auto previous_manager = std::make_shared<KVCacheManager>(config, true);
+    auto            temporary_manager  = std::make_shared<KVCacheManager>(config, true);
+    ResourceContext context;
+    context.cache_manager = previous_manager;
+    ResourceContext stream_snapshot;
+    try {
+        ScopedWarmUpCacheManagerBinding binding(context, temporary_manager);
+        stream_snapshot = context;
+        EXPECT_EQ(stream_snapshot.cache_manager, temporary_manager);
+        throw std::runtime_error("simulate warmup preRun failure");
+    } catch (const std::runtime_error&) {
+    }
+    EXPECT_EQ(context.cache_manager, previous_manager);
+    EXPECT_EQ(stream_snapshot.cache_manager, temporary_manager);
+}
+
+TEST_F(NormalEngineTest, testCacheStoreProducerFactsFollowBoundWarmupCache) {
+    ModelConfig model;
+    model.num_layers                       = 1;
+    model.max_seq_len                      = 16;
+    model.vocab_size                       = 16;
+    model.hidden_size                      = 4;
+    model.attn_config.head_num             = 1;
+    model.attn_config.kv_head_num          = 1;
+    model.attn_config.size_per_head        = 4;
+    model.attn_config.tokens_per_block     = 2;
+    model.kv_cache_spec_descs              = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    auto       cache_config = CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
+    const auto draft_config = cache_config;
+    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+    cache_config.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
+    auto       warmup_config       = CacheConfigCreator::createWarmupConfig(model, parallelism);
+    const auto warmup_draft_config = warmup_config;
+    warmup_config.mtp_sub_configs.push_back(
+        warmup_config.mergeMTPModule(warmup_draft_config, 0, warmup_config.layer_num));
+    warmup_config.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
+    auto live_manager = std::make_shared<KVCacheManager>(
+        cache_config, /*warmup=*/false, nullptr, KVCacheConfig{}, parallelism);
+    auto fake_manager = std::make_shared<KVCacheManager>(warmup_config, /*warmup=*/true);
+    ASSERT_TRUE(live_manager->init());
+    ASSERT_TRUE(fake_manager->init());
+    ASSERT_TRUE(live_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(live_manager->cacheConfig().storage_cp_size, 2);
+    ASSERT_FALSE(fake_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(fake_manager->cacheConfig().storage_cp_size, 1);
+
+    EngineInitParams params;
+    params.model_config_       = model;
+    params.parallelism_config  = parallelism;
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    params.py_model            = py::none();
+    std::vector<std::optional<std::pair<int, int>>> observed;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+        observed.push_back(init.cache_store_producer_cp_topology);
+        return std::make_unique<MockModel>(model.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    NormalExecutor live(params, live_manager, /*warm_up=*/false);
+    NormalExecutor warmup(params, fake_manager, /*warm_up=*/true);
+    ASSERT_EQ(observed.size(), 2u);
+    ASSERT_TRUE(observed[0].has_value());
+    ASSERT_TRUE(observed[1].has_value());
+    EXPECT_EQ(*observed[0], (std::pair<int, int>{1, 2}));
+    EXPECT_EQ(*observed[1], (std::pair<int, int>{0, 1}));
+
+    for (const auto speculative_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        params.sp_config.type = speculative_type;
+        NormalExecutor draft(params, live_manager, /*warm_up=*/false, /*is_propose=*/true, /*index=*/0);
+        NormalExecutor draft_warmup(params, fake_manager, /*warm_up=*/true, /*is_propose=*/true, /*index=*/0);
+    }
+    ASSERT_EQ(observed.size(), 6u);
+    for (size_t i = 2; i < observed.size(); i += 2) {
+        ASSERT_TRUE(observed[i].has_value());
+        ASSERT_TRUE(observed[i + 1].has_value());
+        EXPECT_EQ(*observed[i], (std::pair<int, int>{1, 2}));
+        EXPECT_EQ(*observed[i + 1], (std::pair<int, int>{0, 1}));
+    }
 }
 
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {

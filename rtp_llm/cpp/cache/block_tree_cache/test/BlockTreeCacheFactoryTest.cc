@@ -16,7 +16,6 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -251,6 +250,7 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
     auto second = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto first_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    first_policy.cp_mapping           = CpBlockMappingMode::COMPACT_LAST_RANK;
     first_policy.enable_prefix_reuse  = true;
     first_policy.sliding_window_size  = 128;
     auto second_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
@@ -911,14 +911,19 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
     }
     policies[0].sliding_window_size = 128;
     test::setTestGroupPolicies(config, policies);
+    const auto original_config = config;
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    config.finalizeStorageLayout(parallelism);
     auto allocator = initAllocator<CoordinatorCacheManager>(config);
-    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 16));
     auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     auto swa = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
     ASSERT_NE(swa, nullptr);
     EXPECT_EQ(config.group("group0").seqSizePerBlock(), 16u);
-    EXPECT_EQ(config.group("group0").cacheKeyTokenStride(), 16u);
+    EXPECT_EQ(original_config.group("group0").cacheKeyTokenStride(), 16u);
+    EXPECT_EQ(config.group("group0").cacheKeyTokenStride(), 32u);
     EXPECT_EQ(swa->seqSizePerBlock(), 32u);
     EXPECT_EQ(swa->computeReuseBlockCount(8), 4u);
     auto             validator = swa->createMatchValidator();

@@ -341,19 +341,60 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     EXPECT_EQ(writer.cp_size_, 1);
 }
 
-TEST_F(CacheStoreAsyncWriterTest, UsesPhysicalCpTopologyFromAllocatorMapper) {
+TEST_F(CacheStoreAsyncWriterTest, RequiresExplicitPhysicalCpTopology) {
     auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
     ParallelismConfig parallelism;
     parallelism.tp_rank                            = 1;
     parallelism.tp_size                            = 2;
     parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    config.finalizeStorageLayout(parallelism);
     auto cache_manager                             = std::make_shared<KVCacheManager>(
         config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
-    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);
+    EXPECT_THROW((void)CacheStoreAsyncWriter(/*device_id=*/-1, cache_manager), std::exception);
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0,
+                                 /*mtp_cache_config_index=*/std::nullopt,
+                                 /*store_completion_timeout=*/std::nullopt,
+                                 std::make_pair(1, 2));
 
     EXPECT_EQ(writer.cp_rank_, 1);
     EXPECT_EQ(writer.cp_size_, 2);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, ExplicitProducerTopologyUsesProvidedValues) {
+    auto config        = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
+    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+
+    for (const auto [rank, size] : std::vector<std::pair<int, int>>{{0, 1}, {1, 2}, {3, 4}}) {
+        CacheStoreAsyncWriter writer(/*device_id=*/-1,
+                                     cache_manager,
+                                     /*cache_model_id=*/0,
+                                     /*mtp_cache_config_index=*/std::nullopt,
+                                     /*store_completion_timeout=*/std::nullopt,
+                                     std::make_pair(rank, size));
+        EXPECT_EQ(writer.cp_rank_, rank);
+        EXPECT_EQ(writer.cp_size_, size);
+    }
+}
+
+TEST_F(CacheStoreAsyncWriterTest, DraftConfigKeepsExplicitProducerTopology) {
+    auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
+    main_config.mtp_sub_configs.push_back(
+        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    main_config.finalizeStorageLayout(parallelism);
+    auto cache_manager = std::make_shared<KVCacheManager>(
+        main_config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
+    CacheStoreAsyncWriter draft_writer(
+        /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0,
+        /*store_completion_timeout=*/std::nullopt, std::make_pair(1, 2));
+
+    EXPECT_EQ(draft_writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
+    EXPECT_EQ(draft_writer.cp_rank_, 1);
+    EXPECT_EQ(draft_writer.cp_size_, 2);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, ForwardCpWithoutPhysicalShardingKeepsCompleteNamespace) {
