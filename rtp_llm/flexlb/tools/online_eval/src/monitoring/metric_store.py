@@ -198,6 +198,12 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
                     raise MetricContractError("conflicting producer definition: " + identity)
                 declared[identity] = spec
                 observations[identity] = previous["metrics"].get(identity, [])
+    if destination.exists() and not archives:
+        # A metrics-only frozen archive still carries collection validity.
+        # Retaining its observations must retain gaps/errors and plan identity too.
+        gaps = copy.deepcopy(previous["collection_gaps"])
+        errors = copy.deepcopy(previous["errors"])
+        plans = dict(previous.get("plans", {}), **plans)
     metadata = previous.get("run", {}) if destination.exists() else {}
     for identity in declared:
         observations.setdefault(identity, [])

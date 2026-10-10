@@ -71,8 +71,6 @@ def observe(ctx, p, deadline):
     )
     from cases.cache_scale_in import analysis as cache_gate, program, inputs
     path = ctx.artifact_dir / "cache-gate-evidence.json"
-    futures = []
-    intermediate_removals = []
 
     def event(name, row=None):
         timestamp = None if row is None else {key: row[key] for key in ("epoch_s", "monotonic_s")}
@@ -148,54 +146,6 @@ def observe(ctx, p, deadline):
                     break
             if t >= p["warmup_timeout_s"]:
                 raise ValueError("stable warm baseline not reached")
-        intermediate_removals = []
-        if "intermediate_p" in p:
-            intermediate = p["intermediate_p"]
-            event("intermediate_withdraw_start")
-            with ThreadPoolExecutor(
-                max_workers=len(initial) - intermediate,
-                thread_name_prefix="scale-in-intermediate",
-            ) as intermediate_pool:
-                intermediate_futures = [
-                    intermediate_pool.submit(
-                        mock_json,
-                        ctx.ops,
-                        "remove_engine",
-                        deadline,
-                        dict(
-                            engine=name,
-                            mode=p["removal_mode"],
-                            drain_timeout_ms=p["drain_timeout_ms"],
-                        ),
-                    )
-                    for name in initial[intermediate:]
-                ]
-                topology_end = ctx.clock() + p["topology_timeout_s"]
-                for row in poll_samples(deadline, p["sample_s"], sample):
-                    if topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
-                        event("intermediate_topology_observed")
-                        break
-                    if ctx.clock() >= topology_end:
-                        raise ValueError("intermediate topology did not converge")
-                hold_end = row["t"] + p["intermediate_hold_s"]
-                for row in poll_samples(deadline, p["sample_s"], sample, until=origin + hold_end):
-                    if not topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
-                        raise ValueError(
-                            "intermediate topology changed during hold"
-                        )
-                evidence["intermediate_window"] = window(
-                    evidence["samples"],
-                    row["t"] - p["baseline_s"],
-                    row["t"],
-                    initial[:intermediate],
-                    p["max_gap_s"],
-                )
-                intermediate_removals = [
-                    future.result(timeout=max(0.01, deadline.remaining()))
-                    for future in intermediate_futures
-                ]
-            initial = initial[:intermediate]
-
         removed = initial[p["target_p"] :]
         event("withdraw_start")
         # Every removal withdraws discovery before waiting. Parallel requests do
@@ -228,7 +178,7 @@ def observe(ctx, p, deadline):
         event("observation_end", row)
         flow.stop_sending(deadline)
         event("sending_stopped")
-        evidence["removals"] = intermediate_removals + [
+        evidence["removals"] = [
             f.result(timeout=max(0.01, deadline.remaining())) for f in futures
         ]
     except Exception as exc:
@@ -238,7 +188,7 @@ def observe(ctx, p, deadline):
             # The underlying HTTP calls and server drains are deadline-bounded.
             pool.shutdown(wait=True, cancel_futures=True)
         # Preserve individual drain outcomes even if topology observation failed.
-        evidence["removals"] = list(intermediate_removals)
+        evidence["removals"] = []
         for index, future in enumerate(futures):
             try:
                 evidence["removals"].append(future.result())

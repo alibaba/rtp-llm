@@ -18,9 +18,14 @@ from cases.metric_inputs import bind_engine_metrics
 def default(case):
     data = case.inputs(
         traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
+        procedure={"analysis_timeout_s"},
         observation=OBSERVATION_FIELDS | {"inputs", "slo", "windows", "capture"},
         checks=set(RULES) | {"engine_tps"},
     )
+    from input_contract import finite_number
+    analysis_timeout = data.procedure["analysis_timeout_s"]
+    if not finite_number(analysis_timeout) or analysis_timeout <= 0:
+        raise ValueError("analysis_timeout_s must be finite and positive")
     inputs = data.observation["inputs"]
     if not isinstance(inputs, dict) or set(inputs) != {"engine_tps"}:
         raise ValueError("performance gate requires engine_tps input")
@@ -58,7 +63,7 @@ def default(case):
         params=dict(
             flow=output("traffic", "flow"), evidence=output("measure", "evidence")
         ),
-        timeout_s=int(client["TIMEOUT_MS"]) / 1000 + 45,
+        timeout_s=analysis_timeout,
     )
     case.step("teardown", "teardown")
 
