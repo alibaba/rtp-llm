@@ -113,6 +113,8 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
                     swa_history = pool.tensors[SWA_KV][pool.block_tables[SWA_KV].long()]
                     # [batch, blocks_per_request, bytes_per_block]
                     test.assertEqual(swa_history.ndim, 3, label)
+                    # Reduce bytes to [batch, blocks_per_request]; all() then
+                    # requires nonzero history in every block of every request.
                     populated_blocks = swa_history.any(dim=-1)
                     test.assertTrue(populated_blocks.all().item(), label)
                     if batch_size > 1:
