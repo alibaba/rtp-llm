@@ -58,6 +58,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
     sparse_sink_div_rn,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_prefill_reference import (
+    sparse_prefill_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
@@ -112,6 +115,13 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_engram = os.environ.get("DSV41_TEST_COMPARE_ENGRAM") == "1"
     compare_query = os.environ.get("DSV41_TEST_COMPARE_QUERY") == "1"
     compare_output = os.environ.get("DSV41_TEST_COMPARE_OUTPUT") == "1"
+    compare_sparse_prefill = (
+        os.environ.get("DSV41_TEST_COMPARE_SPARSE_PREFILL_REFERENCE") == "1"
+    )
+    if compare_sparse_prefill and not compare_output:
+        raise ValueError(
+            "Sparse prefill diagnostic requires the qualified output composition"
+        )
     if compare_output and not all(
         (
             compare_tp8,
@@ -137,6 +147,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_engram
         or compare_query
         or compare_output
+        or compare_sparse_prefill
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -199,6 +210,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             )
     if compare_output:
         profiles.append(f"{profiles[-1]}_output_reference")
+    if compare_sparse_prefill:
+        profiles.append(f"{profiles[-1]}_sparse_prefill_reference")
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -319,8 +332,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                output_reference = profile.endswith("_output_reference")
-                output_base = profile.removesuffix("_output_reference")
+                sparse_prefill = profile.endswith("_sparse_prefill_reference")
+                prefill_base = profile.removesuffix("_sparse_prefill_reference")
+                output_reference = prefill_base.endswith("_output_reference")
+                output_base = prefill_base.removesuffix("_output_reference")
                 query_reference = output_base.endswith("_query_reference")
                 query_base = output_base.removesuffix("_query_reference")
                 engram = query_base.endswith("_engram_reference")
@@ -401,6 +416,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 if output_reference
                                 else {}
                             ),
+                            **(
+                                {
+                                    "sparse_prefill_reference": True,
+                                    "sparse_prefill_reference_scope": "short-single-initial",
+                                    "sparse_prefill_reference_kernel_sha256": reference_hash,
+                                }
+                                if sparse_prefill
+                                else {}
+                            ),
                         }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
@@ -432,6 +456,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 ), output_projection_reference(
                     output_reference,
                     kernel=reference_kernel,
+                ), sparse_prefill_reference(
+                    sparse_prefill,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -595,7 +621,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_output_reference")
+                                or profile.removesuffix("_sparse_prefill_reference")
+                                .removesuffix("_output_reference")
                                 .removesuffix("_query_reference")
                                 .endswith("_engram_reference")
                                 else 3
@@ -604,7 +631,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_output_reference")
+                        or profile.removesuffix("_sparse_prefill_reference")
+                        .removesuffix("_output_reference")
                         .removesuffix("_query_reference")
                         .removesuffix("_engram_reference")
                         .endswith("_mhc_post_reference")

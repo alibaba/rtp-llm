@@ -326,7 +326,10 @@ py_test(
         "test_v41_attention_owner_sm120.py",
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
-    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_trace"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_sparse_prefill_reference_testlib",
+        "//rtp_llm/tools:dsv41_trace",
+    ],
     tags = ["RTX_5000_PRO", "manual"],
     env = {"GPU_COUNT": "8"},
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
