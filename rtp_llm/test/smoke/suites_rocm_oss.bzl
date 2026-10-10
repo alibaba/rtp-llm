@@ -124,6 +124,22 @@ def rocm_oss_suites():
         ],
     )
 
+    # Manual plugin smoke: ATOM is an external source dependency, so the
+    # runner must receive its source directory through --test_env=PYTHONPATH.
+    # Do not add this suite to maga_model_smoke until ATOM and the checkpoint
+    # are provisioned in the ROCm CI environment.
+    native.test_suite(
+        name = "smoke_rocm_atom_qwen38",
+        tests = [
+            smoke_test(
+                name = "rocm_atom_qwen38_ptpc_fp8_tp2_cg",
+                task_info = "data/model/qwen38/atom_qwen38_ptpc_fp8_tp2.json",
+                smoke_args = "--external_model_packages atom.plugin.rtpllm.models --tp_size 2 --ep_size 2 --dp_size 1 --act_type BF16 --seq_size_per_block 64 --max_seq_len 8192 --concurrency_limit 8 --kv_cache_mem_mb 24000 --think_mode enabled --enable_cuda_graph 1",
+                gpu_type = ["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
     # ROCm Qwen3.6 dense MTP: TP1 PD separation with decode CUDA Graph.
     # Keep this suite standalone until Qwen3.6-27B is provisioned on the shared
     # ROCm CI workers; run it directly on an MI308X host with that checkpoint.
