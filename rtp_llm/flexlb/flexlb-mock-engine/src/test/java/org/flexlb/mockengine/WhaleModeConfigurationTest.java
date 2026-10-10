@@ -37,15 +37,15 @@ class WhaleModeConfigurationTest {
         var decode = java.util.Map.of("role", "ROLE_TYPE_DECODE", "engine", "decode-1",
                 "hippo_role", "mock.decode_part0", "hippo_app", "mock-app");
         var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "prefill-1");
-        monitor.sample(java.util.Map.of("mock_completed_requests_total", 0), decode, now, true);
-        monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 2_000_000_000L, true);
-        monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 3_000_000_000L, true);
-        monitor.sample(java.util.Map.of("mock_completed_requests_total", 20), prefill, now + 3_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 0), decode, now, true);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 2_000_000_000L, true);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 3_000_000_000L, true);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 20), prefill, now + 3_000_000_000L);
         assertEquals(List.of(0.0, 4.0, 0.0), reports);
         assertEquals(List.of(0.0, 8.0, 0.0), dashboardReports);
         assertEquals(java.util.Map.of("hippo_role", "mock.decode_part0", "hippo_app", "mock-app"),
                 dashboardTags.get(1));
-        monitor.sample(java.util.Map.of("mock_completed_requests_total", 9), decode, now + 4_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 9), decode, now + 4_000_000_000L);
         assertEquals(3, dashboardReports.size());
     }
 

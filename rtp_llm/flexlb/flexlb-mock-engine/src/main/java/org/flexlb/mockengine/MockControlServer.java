@@ -1004,53 +1004,10 @@ final class MockControlServer {
      * HELP/TYPE lines for the supported metrics contract (see METRICS.md).
      */
     private static void appendMetricsMeta(StringBuilder sb) {
-        String[][] meta = {
-                {"mock_context_compute_tokens_total", "cumulative computed input tokens", "counter"},
-                {"mock_context_tokens_total", "cumulative input tokens including hits", "counter"},
-                {"mock_hit_tokens_total", "cache hit tokens of completed prefill requests", "counter"},
-                {"mock_context_requests_total", "completed prefill requests", "counter"},
-                {"mock_engine_admission_open", "whether new work RPCs may enter", "gauge"},
-                {"mock_engine_admitted_rpcs_total", "work RPCs admitted at entry before removal", "counter"},
-                {"mock_engine_rejected_rpcs_total", "work RPCs rejected by removal admission gate", "counter"},
-                {"mock_prefill_batch_size", "executed prefill batch size in requests", "histogram"},
-                {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
-                {"rtp_llm_running_stream_size", "currently executing scheduler streams", "gauge"},
-                {"rtp_llm_wait_stream_size", "scheduler waiting streams (excludes pre-GENERATE decode reservations)", "gauge"},
-                {"mock_engine_accepted_total", "total accepted requests", "counter"},
-                {"mock_engine_completed_total", "total completed requests", "counter"},
-                {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
-                {"mock_engine_prefill_ms_avg", "average prefill execution time in ms", "gauge"},
-                {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
-                // Real prefill TPS uses batch execution time; wall TPS uses
-                // elapsed reporting time. Never interchange the denominators.
-                {"rtp_llm_context_tps", "computed context tokens per second of corresponding batch execution", "gauge"},
-                {"rtp_llm_context_tps_with_cache", "context tokens including cache hits per second of corresponding batch execution", "gauge"},
-                {"rtp_llm_context_wall_tps", "computed context tokens per elapsed report second", "gauge"},
-                {"rtp_llm_context_wall_tps_with_cache", "context tokens including cache hits per elapsed report second", "gauge"},
-                {"rtp_llm_wall_tps_report_interval_us", "elapsed prefill reporting window in microseconds", "gauge"},
-                {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
-                // Block-pool observability (KV capacity model v2): the
-                // three-state block split + the admission/reuse counters.
-                // Gauges read the pool state; counters are cumulative
-                // (prefill rejects synchronously, decode degrades un-pooled
-                // and stalls growth; decode reuse = the fix #5 net-demand
-                // deduction against the engine's own LRU).
-                {"rtp_llm_kv_cache_pool_total_blocks", "total block-pool size in blocks", "gauge"},
-                {"rtp_llm_kv_cache_pool_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
-                {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
-                {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
-                {"mock_engine_kv_admission_fails_total", "total decode KV admission/growth failures, RETRYABLE family (temporarily short; 8211 terminals after the ALLOCATE retry window)", "counter"},
-                {"mock_engine_lack_mem_rejects_total", "total LACK_MEM rejections, PERMANENT family (never fits) + prefill pool 602 surface", "counter"},
-                {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
-                // Mock key-level cache-hit observability: cumulative counters recorded at
-                // the prefill admission hit computation (shape()'s prefixHitBlocks
-                // call). hit ratio = hits/requested, both per-engine + role.
-                {"mock_engine_cache_key_hits_total", "total prefix-matched cache keys at prefill admission", "counter"},
-                {"mock_engine_cache_keys_requested_total", "total request block keys observed at prefill admission (empty-bh adds 0)", "counter"},
-        };
-        for (String[] m : meta) {
-            sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
-            sb.append("# TYPE ").append(m[0]).append(' ').append(m[2]).append('\n');
+        for (var metric : MockMetricContract.HTTP) {
+            sb.append("# HELP ").append(metric.name()).append(' ').append(metric.help()).append('\n');
+            sb.append("# TYPE ").append(metric.name()).append(' ')
+                    .append(metric.type().name().toLowerCase(java.util.Locale.ROOT)).append('\n');
         }
     }
 
@@ -1072,43 +1029,7 @@ final class MockControlServer {
                     service.getGrpcPort(),
                     escapeLabel(service.getHost()),
                     escapeLabel(String.valueOf(snap.get("engine_incarnation"))));
-            sb.append(String.format("rtp_llm_running_stream_size{%s} %s%n", labels, snap.get("scheduler_running")));
-            sb.append(String.format("rtp_llm_wait_stream_size{%s} %s%n", labels, snap.get("waiting")));
-            sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
-            sb.append(String.format("mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
-            for (String field : List.of("admission_open", "admitted_rpcs_total", "rejected_rpcs_total")) {
-                sb.append(String.format("mock_engine_%s{%s} %s%n", field, labels, snap.get(field)));
-            }
-            sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
-            if ("prefill".equalsIgnoreCase(service.getRoleName())) {
-                sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
-                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
-                    sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
-                }
-                for (String name : List.of("hit_tokens_total", "context_requests_total")) {
-                    sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
-                }
-                appendPrefillBatchHistogram(sb, labels, List.of(snap));
-                appendPrefillTps(sb, labels, List.of(snap), true);
-            } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
-                sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
-                sb.append(String.format("mock_generate_tokens_total{%s} %s%n", labels, snap.get("generate_tokens_total")));
-                sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
-            }
-            // Block-pool observability (KV v2): gauges + cumulative counters,
-            // same snapshot fields the /snapshot endpoint exposes.
-            sb.append(String.format("rtp_llm_kv_cache_pool_total_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
-            sb.append(String.format("rtp_llm_kv_cache_pool_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
-            sb.append(String.format("mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
-            sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
-            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
-            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %s%n", labels, snap.get("lack_mem_rejects")));
-            if ("prefill".equalsIgnoreCase(service.getRoleName())) {
-                sb.append(String.format("mock_engine_cache_key_hits_total{%s} %s%n", labels, snap.get("cache_key_hits")));
-                sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %s%n", labels, snap.get("cache_keys_requested")));
-            } else if ("decode".equalsIgnoreCase(service.getRoleName())) {
-                sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
-            }
+            appendEngineMetrics(sb, labels, List.of(snap), service.getRoleName(), true);
         }
     }
 
@@ -1135,84 +1056,69 @@ final class MockControlServer {
             }
             String label = "role=\"" + bucket.getKey() + "\"";
 
-            sb.append(String.format("rtp_llm_running_stream_size{%s} %d%n", label, sumLong(group, "scheduler_running")));
-            sb.append(String.format("rtp_llm_wait_stream_size{%s} %d%n", label, sumLong(group, "waiting")));
-            sb.append(String.format("mock_engine_accepted_total{%s} %d%n", label, sumLong(group, "accepted")));
-            sb.append(String.format("mock_engine_completed_total{%s} %d%n", label, sumLong(group, "completed")));
-            sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
-            if ("prefill".equals(bucket.getKey())) {
-                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
-                    sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
-                }
-                appendPrefillBatchHistogram(sb, label, group);
-                appendPrefillTps(sb, label, group, false);
-            } else {
-                sb.append(String.format("mock_generate_tokens_total{%s} %d%n", label, sumLong(group, "generate_tokens_total")));
-                sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
-            }
-            // Block-pool observability (KV v2): blocks and cumulative counters
-            // sum across engines (role-level pool totals; the report layer
-            // derives per-engine averages via its engine-count chain).
-            sb.append(String.format("rtp_llm_kv_cache_pool_total_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
-            sb.append(String.format("rtp_llm_kv_cache_pool_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
-            sb.append(String.format("mock_engine_held_blocks{%s} %d%n", label, sumLong(group, "held_blocks")));
-            sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
-            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
-            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %d%n", label, sumLong(group, "lack_mem_rejects")));
-            if ("prefill".equals(bucket.getKey())) {
-                sb.append(String.format("mock_engine_cache_key_hits_total{%s} %d%n", label, sumLong(group, "cache_key_hits")));
-                sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
-            } else {
-                sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
-            }
-
-            appendLatencyAggregates(sb, label, group, bucket.getKey());
+            appendEngineMetrics(sb, label, group, bucket.getKey(), false);
         }
     }
 
     private static void appendPrefillBatchHistogram(StringBuilder sb, String labels,
-                                                     List<Map<String, Object>> snapshots) {
+                                                     List<Map<String, Object>> snapshots, MockMetricContract.Metric metric) {
         int finiteBuckets = JavaMockEngineCluster.PREFILL_BATCH_SIZE_BUCKETS.length;
         for (int i = 0; i <= finiteBuckets; i++) {
             long count = 0;
             for (Map<String, Object> snapshot : snapshots) {
-                count += ((Number) ((List<?>) snapshot.get("prefill_batch_size_buckets")).get(i)).longValue();
+                count += ((Number) ((List<?>) snapshot.get(metric.field())).get(i)).longValue();
             }
             String bound = i == finiteBuckets ? "+Inf"
                     : Integer.toString(JavaMockEngineCluster.PREFILL_BATCH_SIZE_BUCKETS[i]);
-            sb.append(String.format("mock_prefill_batch_size_bucket{%s,le=\"%s\"} %d%n",
-                    labels, bound, count));
+            sb.append(String.format("%s_bucket{%s,le=\"%s\"} %d%n",
+                    metric.name(), labels, bound, count));
         }
-        sb.append(String.format("mock_prefill_batch_size_count{%s} %d%n",
-                labels, sumLong(snapshots, "prefill_batches")));
-        sb.append(String.format("mock_prefill_batch_size_sum{%s} %d%n",
-                labels, sumLong(snapshots, "prefill_batch_requests")));
+        sb.append(String.format("%s_count{%s} %d%n",
+                metric.name(), labels, sumLong(snapshots, "prefill_batches")));
+        sb.append(String.format("%s_sum{%s} %d%n",
+                metric.name(), labels, sumLong(snapshots, "prefill_batch_requests")));
     }
 
-    private static void appendPrefillTps(StringBuilder sb, String labels,
-                                         List<Map<String, Object>> snapshots, boolean perEngine) {
-        for (String name : List.of("context_tps", "context_tps_with_cache", "context_wall_tps",
-                "context_wall_tps_with_cache", "wall_tps_report_interval_us")) {
-            if (!perEngine && name.equals("wall_tps_report_interval_us")) continue;
-            // Long in-flight steps have no sample, rather than a fabricated zero.
-            if (snapshots.stream().noneMatch(snapshot -> snapshot.containsKey(name))) continue;
-            double value = snapshots.stream().mapToDouble(snapshot -> asDouble(snapshot.get(name))).sum();
-            sb.append(String.format(java.util.Locale.ROOT, "rtp_llm_%s{%s} %.6f%n", name, labels, value));
-        }
-    }
-
-    private static void appendLatencyAggregates(StringBuilder sb, String label,
-                                                List<Map<String, Object>> group, String kind) {
-        long totalCount = sumLong(group, kind + "_ms_count");
-        double avg = 0.0;
-        if (totalCount > 0) {
-            double weighted = 0.0;
-            for (Map<String, Object> e : group) {
-                weighted += asDouble(e.get(kind + "_ms_avg")) * asLong(e.get(kind + "_ms_count"));
+    private static void appendEngineMetrics(StringBuilder sb, String labels,
+                                           List<Map<String, Object>> snapshots, String role, boolean perEngine) {
+        for (var metric : MockMetricContract.HTTP) {
+            if (!metric.belongsTo(role)) continue;
+            if (!perEngine && metric.aggregation() == MockMetricContract.Aggregation.NONE) continue;
+            if (metric.type() == MockMetricContract.Type.HISTOGRAM) {
+                appendPrefillBatchHistogram(sb, labels, snapshots, metric);
+                continue;
             }
-            avg = weighted / totalCount;
+            // A missing execution sample is not a zero. Required snapshot fields fail explicitly.
+            if (snapshots.stream().noneMatch(snapshot -> snapshot.containsKey(metric.field()))) {
+                if (metric.unit() == MockMetricContract.Unit.TOKENS_PER_SECOND
+                        || metric.name().equals("rtp_llm_wall_tps_report_interval_us")) continue;
+                throw new IllegalStateException("Missing metric field: " + metric.field());
+            }
+            for (var snapshot : snapshots) {
+                Object value = snapshot.get(metric.field());
+                if (value != null && !(value instanceof Number))
+                    throw new IllegalStateException("Non-numeric metric field: " + metric.field());
+            }
+            if (metric.type() == MockMetricContract.Type.COUNTER) {
+                sb.append(String.format(java.util.Locale.ROOT, "%s{%s} %d%n",
+                        metric.name(), labels, sumLong(snapshots, metric.field())));
+                continue;
+            }
+            double value;
+            if (metric.aggregation() == MockMetricContract.Aggregation.WEIGHTED_MEAN) {
+                String countField = metric.field().replace("_avg", "_count");
+                long count = sumLong(snapshots, countField);
+                value = count == 0 ? 0 : snapshots.stream().mapToDouble(snapshot ->
+                        asDouble(snapshot.get(metric.field())) * asLong(snapshot.get(countField))).sum() / count;
+            } else {
+                value = snapshots.stream().mapToDouble(snapshot -> asDouble(snapshot.get(metric.field()))).sum();
+            }
+            if (metric.unit() == MockMetricContract.Unit.COUNT || metric.unit() == MockMetricContract.Unit.BLOCKS) {
+                sb.append(String.format(java.util.Locale.ROOT, "%s{%s} %d%n", metric.name(), labels, (long) value));
+            } else {
+                sb.append(String.format(java.util.Locale.ROOT, "%s{%s} %.6f%n", metric.name(), labels, value));
+            }
         }
-        sb.append(String.format("mock_engine_%s_ms_avg{%s} %.1f%n", kind, label, avg));
     }
 
     private static long sumLong(List<Map<String, Object>> group, String key) {

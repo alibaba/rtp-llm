@@ -1,6 +1,6 @@
 # Mock 指标合同
 
-指标定义以 `MockControlServer` 的 HTTP exposition、`JavaMockEngineCluster.whaleMetrics` 和相应 Java 测试为准。测试采集与报告声明位于 [online_eval 指标配置](../tools/online_eval/config/monitoring/README.md)；不在此复制完整 metric registry。
+指标名称、单位、P/D 角色、HTTP snapshot 字段和汇总方式统一定义于 `MockMetricContract`。`MockControlServer` 根据该定义生成 HELP/TYPE 与两种 HTTP exposition；Whale 上报按同一份定义检查指标与角色，未知指标显式失败。KMonitor 的注册类型与 Prometheus 类型按各自适配器解释，不能直接互换。测试采集与报告声明位于 [online_eval 指标配置](../tools/online_eval/config/monitoring/README.md)；不在此复制完整 metric registry。
 
 ## 来源与身份
 
@@ -24,6 +24,10 @@ Token 成员在执行开始时冻结，完成派发后与实际执行时间原�
 参考为 `RtpLLMMetrics.h` 的 `RtpLLMTokenPSMetricsCollector`、`RtpLLMMetrics.cc` 及执行器时间边界。Mock 实测时间包含模拟等待和运行时开销，不证明绝对 GPU 吞吐；不模拟完整 chunked prefill / beam 执行或 per-priority TPS。比较时固定输入、完整 Fetch、模型与采集版本，并对齐 DP / 引擎聚合口径。
 
 Decode 的 `rtp_llm_sp_estimate_tpot_us` 使用模拟 step 微秒除以实际推进 stream 新产生 token 的平均数；不包含 Prefill 首 token、中途加入或 KV 增长失败的 stream。它是执行估计，不能替代客户端 TTFT / TPOT，也不伪造 draft proposal 和接受率。
+
+Decode 的 `rtp_llm_generate_tps` 在 HTTP 与 Whale 均为实际执行步骤产生的 token 增量除以各自观察窗口秒数。两者共用 `CounterRateMetrics` 累计账本与计算规则，保留独立游标；首次采样包含引擎启动以来的执行，重启按新 generation 重建窗口。`mock_decode_step_tokens_total` 是对应执行累计量，`mock_generate_tokens_total` 仍是成功完成请求的输出 token 累计量，不能混用。
+
+两个 sink 的完成数、device cache 驱逐数和准入 cache-key 数统一使用 `mock_engine_completed_total`、`mock_engine_cache_evictions_total`、`mock_engine_cache_key_hits_total`、`mock_engine_cache_keys_requested_total`。平台 dashboard 别名及微秒到毫秒转换保留在 Whale 适配器中。HTTP 的汇总模式和单引擎模式共用导出定义；report interval 仅按单引擎导出，平均执行时间按样本数加权。
 
 ## 队列、批次与累计量
 

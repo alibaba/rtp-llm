@@ -107,4 +107,42 @@ class TpsMetricsAccountingTest {
                     value(body, "rtp_llm_context_tps_with_cache", "role=\"prefill\""), 0.000001);
         }
     }
+    @Test
+    void decodeHttpRateUsesExecutedWorkAndElapsedTime() throws Exception {
+        try (var cluster = MockEngineTestCluster.start(performanceModel(tempDir, "10"), 63040, 1, 1)) {
+            var d = cluster.decode(0);
+            enqueueAndFetch(cluster.prefill(0), batch(5000, slot(0,
+                    inputWithDecode(500, 100, d.getGrpcPort(), 12))));
+            cluster.awaitCompleted(1, 5000);
+            cluster.awaitAllInflightZero(2000);
+            var work = d.decodeTpsSnapshot();
+            assertTrue(work.tokens() > 0);
+            long before = System.nanoTime();
+            String body = httpGet(cluster.controlPort(), "/metrics");
+            long after = System.nanoTime();
+            double rate = value(body, "rtp_llm_generate_tps", "role=\"decode\"");
+            assertTrue(rate >= CounterRateMetrics.rate(work.tokens(), after - work.startedNanos()) - 0.000001);
+            assertTrue(rate <= CounterRateMetrics.rate(work.tokens(), before - work.startedNanos()) + 0.000001);
+            assertEquals(work.tokens(), value(body, "mock_decode_step_tokens_total", "role=\"decode\""));
+            // A new HTTP scrape sees no new execution; the Whale reader still sees it.
+            assertEquals(0.0, value(httpGet(cluster.controlPort(), "/metrics"),
+                    "rtp_llm_generate_tps", "role=\"decode\""));
+            Map<String, Double> reports = new HashMap<>();
+            var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("report") && args.length == 3)
+                            reports.put((String) args[0], ((Number) args[2]).doubleValue());
+                        return null;
+                    });
+            var monitor = new WhaleMockMonitor(sink);
+            before = System.nanoTime();
+            monitor.sample(d);
+            after = System.nanoTime();
+            rate = reports.get("rtp_llm_generate_tps");
+            assertTrue(rate >= CounterRateMetrics.rate(work.tokens(), after - work.startedNanos()));
+            assertTrue(rate <= CounterRateMetrics.rate(work.tokens(), before - work.startedNanos()));
+        }
+    }
+
 }

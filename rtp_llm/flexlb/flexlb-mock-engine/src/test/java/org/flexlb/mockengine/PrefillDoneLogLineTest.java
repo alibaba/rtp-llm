@@ -6,6 +6,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -14,7 +15,6 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,14 +52,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * wall-clock stamp taken at batch completion) and the SAME batch_size. All
  * are asserted here via a single 3-request enqueueBatch.
  *
- * <p>Observation channel: the test injects its own response queues into the
- * service's {@code responseQueues} map (enqueueBatch's computeIfAbsent keeps
- * pre-registered entries), and the event row is written BEFORE the terminal
- * frame is offered on the same completion-callback iteration (no decode role
- * addr configured → startDecode returns false → finished=true frame offered
- * from the prefill side) — so each frame's arrival proves that member's row
- * was already written. The EngineEventLog autoflushes per row, so the file is
- * readable right after the frames land.
+ * <p>Observation channel: normal Fetch attaches after admission. The terminal
+ * frame proves the event row was written, because JSONL publication precedes
+ * frame delivery. No response queues are inserted into the engine's active
+ * context map before admission.
  *
  * <p>Regression guard: stdout must stay CLEAN of the legacy trace line —
  * per-request data flows exclusively through the JSONL file now.
@@ -117,24 +113,13 @@ class PrefillDoneLogLineTest {
 
         long[] rids = {5151L, 5152L, 5153L};
         int[] inputLens = {10, 20, 30};
-        // Hold DIRECT queue references: the batch completion callback removes
-        // the entry from responseQueues after offering the terminal frame (per-
-        // request state cleanup), so re-fetching from the map would NPE once
-        // the callback has already run (batch books ~2 ms).
+        // Client-owned queues receive frames through normal Fetch observers.
         @SuppressWarnings("unchecked")
         LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>[] queues =
                 (LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>[])
                         new LinkedBlockingQueue[rids.length];
-        Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues =
-                responseQueuesOf(prefill);
-        for (int i = 0; i < rids.length; i++) {
-            queues[i] = new LinkedBlockingQueue<>();
-            responseQueues.put(rids[i], queues[i]);
-        }
-
-        // This instrumentation probe owns response queues directly; use the
-        // explicit no-client shortcut to publish the completion into them.
-        prefill.setAutoFetch(true);
+        for (int i = 0; i < rids.length; i++) queues[i] = new LinkedBlockingQueue<>();
+        prefill.setAutoFetch(false);
         long beforeMs = System.currentTimeMillis();
         PrintStream originalOut = System.out;
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
@@ -154,6 +139,15 @@ class PrefillDoneLogLineTest {
                     rids.length,
                     response.getSuccessesCount(),
                     "all batch members must be admitted, got: " + response);
+            for (int i = 0; i < rids.length; i++) {
+                var queue = queues[i];
+                prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                        .setRequestId(rids[i]).build(), new StreamObserver<>() {
+                    public void onNext(EngineRpcService.GenerateOutputsPB frame) { queue.offer(frame); }
+                    public void onError(Throwable error) { }
+                    public void onCompleted() { }
+                });
+            }
             // One terminal frame per member proves its event row was written
             // (the JSONL write precedes the frame offer in the same callback
             // iteration).
@@ -290,12 +284,4 @@ class PrefillDoneLogLineTest {
         return service;
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueuesOf(
-            JavaMockEngineCluster.FastRpcService service) throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("responseQueues");
-        field.setAccessible(true);
-        return (Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>>)
-                field.get(service);
-    }
 }
