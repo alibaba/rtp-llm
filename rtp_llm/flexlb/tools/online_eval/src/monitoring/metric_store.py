@@ -207,6 +207,15 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     return MetricStore(document)
 
 
+def series_row(points, *, epoch, source, labels):
+    """A numeric stream's identity; physical origin is in definition.source_type."""
+    if type(epoch) is not int or epoch < 1:
+        raise MetricContractError("produced series requires a positive environment epoch")
+    if type(source) is not str or not source.strip() or not isinstance(labels, dict):
+        raise MetricContractError("produced series requires source identity and labels")
+    return dict(epoch=str(epoch), source=source, labels=dict(labels), points=points)
+
+
 def publish(store, metric_id, definition, rows, *, producer, evidence):
     """A declared Python producer publishes numeric data with explicit provenance."""
     import hashlib
@@ -232,7 +241,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
                for t, v in points) or any(b[0] <= a[0] for a, b in zip(points, points[1:])):
             raise MetricContractError("invalid or unordered produced samples: " + metric_id)
         result.append(dict(metric_id=metric_id, epoch=str(row["epoch"]), source=row["source"],
-            labels=row["labels"], points=points, status="PRESENT" if points else "ABSENT",
+            labels=row["labels"], points=points, status="PRESENT" if any(v is not None for _, v in points) else "ABSENT",
             provenance=dict(source_type=definition["source_type"], producer=producer,
                             producer_module=module, producer_sha256=producer_sha256,
                             measurement=copy.deepcopy(definition["measurement"]), evidence=evidence)))

@@ -131,7 +131,7 @@ class HaTrafficRunner:
 
     Phase bookkeeping: the runner stamps wall-clock epoch seconds at
     ``mark()`` call sites; row windows are then sliced offline by
-    send_start_epoch_ms (falling back to wall_clock_ts) — the assertions
+    send_start_epoch_ms — the assertions
     compare pre/post-injection WINDOWS. Controlled stop ends submission and
     drains already submitted requests; final row accounting is validated.
     """
@@ -295,8 +295,6 @@ def rows_between(rows: list, lo_s: Optional[float], hi_s: Optional[float]) -> li
     out = []
     for row in rows:
         ts = row_ts_ms(row)
-        if ts is None:
-            continue
         if lo_s is not None and ts < lo_s * 1000.0:
             continue
         if hi_s is not None and ts >= hi_s * 1000.0:

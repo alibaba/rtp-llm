@@ -69,7 +69,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             analysis["id"] = "master_ha_failover::default::batch-window"
             analysis["status"] = "FAIL"
             analysis["configuration"] = {"environment": {"n_prefill": 2}}
-            analysis["stages"] = [dict(id="finish", artifacts=[str(requests), str(state)])]
+            analysis["stages"] = [dict(id="finish", output=dict(rows=dict(kind="ha_rows", env_epoch=1)),
+                                       artifacts=[str(requests), str(state)])]
             analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11)]
             from monitoring.metric_store import export_metrics
             from monitoring.query_plan import load_plan

@@ -59,6 +59,33 @@ sources:
 
 直方图 p99 与逐请求 nearest-rank p99、PromQL 的 lookback 均值与按实际 scrape 时刻计算的整窗引擎等权均值、全 fleet hit ratio 与 survivor 过滤后的 counter 差分分别使用不同 ID。门禁声明自己使用的 ID、单位和时窗，view 选择需要展示的投影，不把相近曲线作为门禁替身。已由请求流水覆盖且没有展示消费者的查询在所属 case 集合中用 `exclude` 去掉；公共默认集合保留供其他用途选择。
 
+## 选择统计口径
+
+判断是否可以改用 Prometheus 时，先核对统计对象、时间边界和精度，而不是比较展示名：
+
+| 需求 | 选择依据 |
+|---|---|
+| 全局发送/完成速率、服务状态趋势 | 优先使用 PromQL；`rate()` 是采样窗口内估计，不等于逐秒流水计数 |
+| 延迟分位数 | exporter histogram 满足精度要求时用 `histogram_quantile`；需要指定发送 cohort 的精确分位数时读取已核实的请求流水 |
+| 同一批请求的成功率、终态、重试、路由归属、TPOT | 保留请求身份及配对字段，由 producer 计算；现有聚合 exporter 不保留这些关联 |
+| 整窗引擎 TPS | 区分 PromQL lookback 聚合与实际 scrape 样本的引擎等权均值；不同采样与归约口径不能互换 |
+| counter 命中率 | 明确全 fleet 或 survivor 群体、差分边界及 counter reset 检查；来源均可为 Prometheus，但统计对象不同 |
+| HTTP 可回读与 debug ledger | 可回读不是 scrape `up`；用 debug 证据必须声明具体字段和 `debug_api` 来源，不能把 engine 负载当请求分配归属 |
+
+每条指标的权威口径在冻结的 `measurement` 中，包括 `method`、`population`、`accuracy` 和 `requires_request_identity`；门禁绑定的 ID 指定判定权威，view 绑定的 ID 指定展示口径。`exclude` 是集合选择，不是指标失效后的替代链。若明确需要两种口径作诊断，应分别保留 ID、声明用途，不计算“数值应相同”的漂移告警。
+
+请求身份需求不适合通过给 Prometheus 增加逐请求标签解决。若 exporter 预先维护固定 cohort 或路由维度的统计，PromQL 可以查询这些结果，但终态配对与归因仍由 exporter 完成，且需要单独验证其 cohort 和完整性契约。
+
+## 计算与落库
+
+`analysis.statistics.percentile_nr` 使用 nearest-rank，不舍入；空样本返回 `None`，实测零返回 `0`。报告的空分位数不能补零，门禁仍由样本数、完整性与测量有效性决定是否可判定。
+
+`analysis.time_buckets.TimeBuckets` 显式声明 `origin_epoch_s` 和 `width_s`，接收发送或完成的绝对毫秒时间戳，生成半开桶。测量起点分桶与自然秒分桶都合法，公共代码不替 case 选择；桶边界与报告的显示起点是两个概念。落库时间均为绝对秒，渲染时才减显示起点。发送 cohort 的终态计数与完成时窗的终态计数不能混为同一指标；HA 窗口只接受 `send_start_epoch_ms`，不回退到终态记录时间。
+
+`series_row` 构造 producer 的序列信封，必须显式传入来源实例、标签和环境代次。`source` 表示该序列所属的数据流，`source_type` 表示原始数据的物理来源，`producer` 表示计算能力，三者独立。`epoch` 来自冻结的环境代次或资源句柄，不能写死为 `"1"`；Master 重启由 incarnation 表达，不自动产生新的环境代次。`publish` 统一校验定义、标签及有序有限样本；全空值序列标为 `ABSENT`。证据文件缺失直接报错，不能生成空曲线冒充已完成采集。
+
+只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
+
 Master 查询必须用 `exported_metrics` 列出依赖的物理指标名称。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
 
 视图 YAML 的 `curves` 用本地曲线 ID 声明 `metric_id` 和 `labels` 选择，并设置名称、颜色、轴和换算；面板用 `curve_ids` 选曲线。Python program 用 `case.metric(id)` 声明依赖，编译时拒绝未定义 ID。运行时 `MetricStore.select` 显式选择标签与时间窗、检查样本数及最大间隔，`reduce` 只对单条已选序列归约；缺失数据抛出 `MetricUnavailable`，定义冲突抛出 `MetricContractError`，均不能补零。

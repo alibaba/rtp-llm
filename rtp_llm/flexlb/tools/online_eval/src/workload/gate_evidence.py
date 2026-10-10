@@ -5,12 +5,12 @@ import json
 from pathlib import Path
 
 
-def new_evidence(schema_field, clock, criteria, *, instance, version=1, **payload):
+def new_evidence(schema_field, clock, criteria, *, instance, env_epoch, version=1, **payload):
     """Common acquisition envelope; case-owned payload and version stay explicit."""
     if not schema_field.endswith("_evidence_schema_version"):
         raise ValueError("gate evidence requires a named format version")
     return dict({schema_field: version}, clock=clock.to_dict(), criteria=criteria,
-                errors=[], samples=[], provenance=dict(instance=instance), **payload)
+                errors=[], samples=[], provenance=dict(instance=instance, env_epoch=env_epoch), **payload)
 
 
 def trace_workload_sha(path):

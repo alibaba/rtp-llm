@@ -147,7 +147,7 @@ class CacheGateTest(unittest.TestCase):
                 )
             )
         return dict(
-            provenance=dict(instance="cache_scale_in::default::batch-window"),
+            provenance=dict(instance="cache_scale_in::default::batch-window", env_epoch=1),
             samples=rows,
             criteria=dict(
                 max_gap_s=2,

@@ -386,6 +386,7 @@ class MasterActionsTest(unittest.TestCase):
         ]
         for row in rows:
             row["wall_clock_ts"] = 1000
+            row.setdefault("send_start_epoch_ms", 1000000)
         handle = self.ctx.register_resource("ha_rows", rows)
         out = ha._window(
             self.ctx,
@@ -429,8 +430,8 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_dual_kill_steady_excludes_rescued_boundary_requests(self):
         rows = [
-            {"wall_clock_ts": 1000, "failover": False, "master_target": "B"},
-            {"wall_clock_ts": 1000, "failover": True, "master_target": "A"},
+            {"send_start_epoch_ms": 1000000, "failover": False, "master_target": "B"},
+            {"send_start_epoch_ms": 1000000, "failover": True, "master_target": "A"},
         ]
         handle = self.ctx.register_resource("ha_rows", rows)
         out = ha._window(

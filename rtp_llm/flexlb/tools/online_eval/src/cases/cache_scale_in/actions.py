@@ -55,7 +55,7 @@ def observe(ctx, p, deadline):
     budget = SampleBudget(observation["capture"])
     evidence = new_evidence("cache_evidence_schema_version", clock,
         {k: v for k, v in p.items() if k not in ("flow", "gate_input")},
-        instance=ctx.instance["id"],
+        instance=ctx.instance["id"], env_epoch=ctx.env_epoch,
         measurement_policy=MEASUREMENT_POLICY,
         window_declarations=observation["windows"],
         observation_origin_epoch_s=clock.origin_epoch_s,

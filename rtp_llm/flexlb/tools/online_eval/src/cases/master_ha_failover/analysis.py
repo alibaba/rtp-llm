@@ -1,41 +1,37 @@
 """HA client metrics computed from frozen rows and explicit topology inputs."""
 
-from collections import Counter
+import math
+
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-def row_ts_ms(row: dict) -> Optional[float]:
-    """Row send timestamp (ms epoch) — send_start_epoch_ms preferred,
-    wall_clock_ts (s) as the fallback."""
-    v = row.get("send_start_epoch_ms")
-    if isinstance(v, (int, float)) and v > 0:
-        return float(v)
-    w = row.get("wall_clock_ts")
-    if isinstance(w, (int, float)) and w > 0:
-        return float(w) * 1000.0
-    return None
+from analysis.time_buckets import TimeBuckets
+
+
+def row_ts_ms(row: dict) -> float:
+    """Cohorts require the issue timestamp, never a terminal wall-clock fallback."""
+    value = row.get("send_start_epoch_ms")
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise ValueError("HA request requires finite positive send_start_epoch_ms")
+    return float(value)
 
 
 def prefill_assignment_buckets(rows: list) -> dict:
     """Count assigned Prefill endpoints by send second, including failed requests."""
-    from collections import Counter, defaultdict
-
     buckets = defaultdict(Counter)
+    grid = TimeBuckets(0, 1)
     for row in rows:
         address = row.get("prefill")
         if not address:
             continue
         timestamp = row_ts_ms(row)
-        if timestamp is None:
-            raise ValueError("assigned HA request lacks send timestamp")
-        buckets[int(timestamp // 1000)][address] += 1
+        buckets[grid.index(timestamp)][address] += 1
     return dict(buckets)
 
 
 def prefill_assignment_windows(rows: list, seconds: int = 5) -> dict:
     """Rolling Prefill counts at one-second steps over complete windows."""
-    from collections import Counter
-
     buckets = prefill_assignment_buckets(rows)
     if not buckets:
         return {}

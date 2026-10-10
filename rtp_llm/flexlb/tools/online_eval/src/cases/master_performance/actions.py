@@ -1,7 +1,5 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
-import json
-
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from cases.master_performance.analysis import analyze
@@ -46,7 +44,7 @@ def observe(ctx, p, deadline):
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
     evidence = new_evidence("performance_evidence_schema_version", clock, c,
-        instance=ctx.instance["id"], version=2,
+        instance=ctx.instance["id"], env_epoch=ctx.env_epoch, version=2,
         gate_input=p["gate_input"],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
     )

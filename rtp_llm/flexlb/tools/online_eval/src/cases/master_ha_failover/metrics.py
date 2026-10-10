@@ -7,30 +7,39 @@ from collections import defaultdict
 from pathlib import Path
 
 from cases.master_ha_failover.analysis import prefill_assignment_windows
+from analysis.time_buckets import TimeBuckets
+from monitoring.metric_store import MetricUnavailable, series_row
 
 STATE_FIELDS = ("http_up", "scheduler_inflight", "prefill_inflight_requests",
                 "decode_master_queued", "decode_confirmed_running")
 
+
 def _artifacts(payload):
-    finish = next((stage for stage in payload["stages"] if stage["id"] == "finish"), {})
-    paths = {Path(path).name: Path(path) for path in finish.get("artifacts", [])}
-    return paths.get("client_events.jsonl"), paths.get("master_states.jsonl")
+    candidates = []
+    for stage in payload["stages"]:
+        resource = stage.get("output", {}).get("rows", {})
+        if resource.get("kind") != "ha_rows" or not stage.get("artifacts"):
+            continue
+        paths = {Path(path).name: Path(path) for path in stage["artifacts"]}
+        if {"client_events.jsonl", "master_states.jsonl"} <= set(paths):
+            candidates.append((paths["client_events.jsonl"], paths["master_states.jsonl"],
+                               resource["env_epoch"]))
+    if len(candidates) != 1:
+        raise MetricUnavailable("HA metrics require one completed request/state journal resource")
+    return candidates[0]
 
 
 def _read_rows(path):
-    if path is None or not path.is_file():
-        return []
+    if not path.is_file():
+        raise MetricUnavailable("HA metric evidence missing: " + str(path))
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def _request_series(rows, anchor):
-    buckets = defaultdict(lambda: {"sent": 0, "success": 0, "failed": 0})
+    grid = TimeBuckets(0, 1)
+    buckets = defaultdict(lambda: dict(sent=0, success=0, failed=0))
     for row in rows:
-        timestamp = row.get("send_start_epoch_ms")
-        if type(timestamp) not in (int, float) or not math.isfinite(timestamp):
-            raise ValueError("HA request lacks finite send timestamp")
-        bucket = math.floor(timestamp / 1000)
-        counts = buckets[bucket]
+        counts = buckets[grid.index(row["send_start_epoch_ms"])]
         counts["sent"] += 1
         counts["success" if row.get("status") == "ok" else "failed"] += 1
     if not buckets:
@@ -76,12 +85,11 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
-
 def produce(directory, payload):
     from monitoring.metric_store import MetricStore, publish
     store = MetricStore.read(directory)
     anchor = payload["clock_anchor"]["epoch_s"]
-    request_path, state_path = _artifacts(payload)
+    request_path, state_path, epoch = _artifacts(payload)
     requests, states = _read_rows(request_path), _read_rows(state_path)
     configured = (payload.get("configuration") or {}).get("environment", {}).get("n_prefill")
     observed = len({r.get("prefill") for r in requests if r.get("prefill")})
@@ -98,9 +106,8 @@ def produce(directory, payload):
     for field, members in values.items():
         identity = "ha/" + field
         definition = store.document["definitions"][identity]
-        publish(store, identity, definition, [dict(epoch="1", source="ha",
-                labels={"master": master} if master else {},
-                points=[[p["x"] + anchor, p["y"]] for p in points])
+        publish(store, identity, definition, [series_row([[p["x"] + anchor, p["y"]] for p in points],
+                epoch=epoch, source="ha", labels={"master": master} if master else {})
                 for master, points in members], producer="ha_evidence",
                 evidence=dict(request_events=str(request_path) if request_path else None,
                               master_states=str(state_path) if state_path else None,
@@ -127,8 +134,8 @@ def publish_gate(ctx, params, actual, rows):
     labels = gate_labels(params)
     observations = [row for row in store.document["metrics"].get(identity, [])
                     if row["labels"] != labels]
-    current = dict(epoch=str(ctx.env_epoch), source="ha_gate",
-        labels=labels, points=[[time.time(), actual]])
+    current = series_row([[time.time(), actual]], epoch=ctx.env_epoch,
+                         source="ha_gate", labels=labels)
     stamps = [row["send_start_epoch_ms"] / 1000 for row in rows if "send_start_epoch_ms" in row]
     publish(store, identity, store.document["definitions"][identity], [current],
             producer="ha_gates", evidence=dict(input_resource=params["rows"], sample_count=len(rows),

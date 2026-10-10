@@ -6,7 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from cases.master_ha_failover.analysis import measure_client_metric
+from cases.master_ha_failover.analysis import measure_client_metric, row_ts_ms
 from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
 from runtime.master_control import require_process
 from scenario.parameters import validate_fields
@@ -182,15 +182,7 @@ class OwnedHaClient:
                 or type(row["failover"]) is not bool
             ):
                 raise ValueError("invalid HA route evidence")
-            timestamp = row.get("send_start_epoch_ms")
-            if timestamp is None:
-                timestamp = row.get("wall_clock_ts")
-            if (
-                type(timestamp) not in (int, float)
-                or not math.isfinite(timestamp)
-                or timestamp <= 0
-            ):
-                raise ValueError("HA request has no valid issue timestamp")
+            row_ts_ms(row)
         if stop_sending:
             self.flow.validate_drain(rows)
         self.finished = True

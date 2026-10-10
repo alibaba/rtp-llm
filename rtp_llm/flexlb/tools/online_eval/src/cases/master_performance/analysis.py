@@ -84,7 +84,7 @@ def engine_tps_checks(evidence):
 
 
 def percentile(values, q=0.99):
-    return percentile_nr(values, q, nd=None) if values else None
+    return percentile_nr(values, q)
 
 
 def analyze(evidence):

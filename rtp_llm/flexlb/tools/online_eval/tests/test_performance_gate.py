@@ -73,6 +73,7 @@ def evidence():
         samples=[dict(epoch_ms=100000 + i * 1000) for i in range(11)],
         flow=dict(complete=True, errors=[], issued=issued, records=records),
         provenance=dict(
+            env_epoch=1,
             instance="master_performance::default::batch-window",
             configuration_sha256="f" * 64,
             master_artifact=dict(jar_sha256="a" * 64),
@@ -125,7 +126,7 @@ class PerformanceGateTest(unittest.TestCase):
         identity = "master_performance::default::single-nonbatch"
         with tempfile.TemporaryDirectory() as d:
             ctx = SimpleNamespace(
-                artifact_dir=Path(d), instance=dict(id=identity, profile="single-nonbatch"),
+                artifact_dir=Path(d), env_epoch=2, instance=dict(id=identity, profile="single-nonbatch"),
                 clock=lambda: 1, wall_clock=lambda: 100,
                 record_event=lambda identity: dict(id=identity, epoch_s=100, monotonic_s=1),
                 resource=lambda name, kind: mock.Mock(),
@@ -137,6 +138,7 @@ class PerformanceGateTest(unittest.TestCase):
             frozen = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
             self.assertEqual(frozen["performance_evidence_schema_version"], 2)
             self.assertEqual(frozen["provenance"]["instance"], identity)
+            self.assertEqual(frozen["provenance"]["env_epoch"], 2)
             self.assertEqual(frozen["errors"], ["artifact missing"])
             self.assertEqual(analyze(frozen)["verdict"], "INVALID")
 
