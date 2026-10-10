@@ -19,6 +19,26 @@ constexpr int64_t kTokenOffset = kSpanOffset + 12;
 constexpr int64_t kWindowOffset = kTokenOffset + kTokenLimit;
 constexpr int64_t kPacketSize = kWindowOffset + 4 * kTokenLimit;
 
+bool worldRejected(const torch::Tensor& packet, const std::string& error) {
+    auto peers = torch::full({8 * packet.numel()}, -1, torch::kInt64);
+    execAllGather({{peers}, ParallelMode::WORLD, {packet}, false});
+    const auto* peer = peers.data_ptr<int64_t>();
+    bool rejected = false;
+    bool same = true;
+    for (int rank = 0; rank < 8; ++rank) {
+        const auto* row = peer + rank * packet.numel();
+        if (row[0] != 0 && row[0] != 1) {
+            throw std::runtime_error("V4.1 global PP preflight failed at WORLD rank " + std::to_string(rank)
+                                     + " with status " + std::to_string(row[0]) + "; local status "
+                                     + std::to_string(packet.data_ptr<int64_t>()[0]) + ": "
+                                     + (error.empty() ? "missing/fatal peer admission" : error));
+        }
+        rejected |= row[0] == 0;
+        same &= std::equal(peer + 1, peer + packet.numel(), row + 1);
+    }
+    return rejected || !same;
+}
+
 torch::Tensor hostInt32(const torch::Tensor& tensor, int64_t count, const char* name) {
     if (!tensor.defined() || tensor.scalar_type() != torch::kInt32 || tensor.dim() != 1
         || tensor.numel() != count || !tensor.is_contiguous()) {
@@ -108,6 +128,14 @@ V41PPAdmission::V41PPAdmission(std::shared_ptr<KVCacheManager> manager,
 }
 
 V41PPCacheBatchPtr V41PPAdmission::prepare(GptModelInputs& inputs) {
+    return prepareImpl(inputs, nullptr);
+}
+
+V41PPCacheBatchPtr V41PPAdmission::prepareWithWorker(GptModelInputs& inputs, const WorkerPreflight& preflight) {
+    return prepareImpl(inputs, &preflight);
+}
+
+V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const WorkerPreflight* preflight) {
     if (failed_) {
         throw std::runtime_error("V4.1 global PP admission session failed; drain and replace it");
     }
@@ -116,12 +144,15 @@ V41PPCacheBatchPtr V41PPAdmission::prepare(GptModelInputs& inputs) {
     auto packet = torch::full({kPacketSize}, -1, torch::kInt64);
     auto* values = packet.data_ptr<int64_t>();
     values[0] = 1;
-    values[1] = 1;  // Protocol version.
+    values[1] = preflight ? 2 : 1;  // Bind worker-ready versus source-only admission.
     values[2] = round_;
     std::string error;
     try {
         if (round_ == std::numeric_limits<int64_t>::max()) {
             throw std::overflow_error("V4.1 global PP admission rounds exhausted");
+        }
+        if (preflight && !*preflight) {
+            throw std::invalid_argument("V4.1 global PP admission requires its worker preflight callback");
         }
         validateGlobal(prepared, packet, vocab_size_);
         if (!root_ && !prepared.v41_cache_leases.empty()) {
@@ -146,24 +177,9 @@ V41PPCacheBatchPtr V41PPAdmission::prepare(GptModelInputs& inputs) {
         error = exception.what();
     }
     try {
-        auto peers = torch::full({8 * kPacketSize}, -1, torch::kInt64);
-        execAllGather({{peers}, ParallelMode::WORLD, {packet}, false});
-        const auto* peer = peers.data_ptr<int64_t>();
-        bool rejected = false;
-        bool same = true;
-        for (int rank = 0; rank < 8; ++rank) {
-            const auto* row = peer + rank * kPacketSize;
-            if (row[0] != 0 && row[0] != 1) {
-                throw std::runtime_error("V4.1 global PP preflight failed at WORLD rank " + std::to_string(rank)
-                                         + " with status " + std::to_string(row[0]) + "; local status "
-                                         + std::to_string(values[0]) + ": "
-                                         + (error.empty() ? "missing/fatal peer admission" : error));
-            }
-            rejected |= row[0] == 0;
-            same &= std::equal(peer + 1, peer + kPacketSize, row + 1);
-        }
+        const bool rejected = worldRejected(packet, error);
         ++round_;
-        if (rejected || !same) {
+        if (rejected) {
             if (batch) {
                 local_.abort(batch);
             }
@@ -177,6 +193,52 @@ V41PPCacheBatchPtr V41PPAdmission::prepare(GptModelInputs& inputs) {
             local_.abort(batch);
         }
         throw;
+    }
+    if (preflight) {
+        auto ready = torch::full({3}, 1, torch::kInt64);
+        auto* status = ready.data_ptr<int64_t>();
+        status[1] = 3;  // Worker-ready phase, distinct from global admission.
+        status[2] = round_;
+        error.clear();
+        try {
+            // Native CPP zigzag rewrites CPU request lengths in place. A
+            // shallow GptModelInputs copy would mutate our agreed global
+            // snapshot, even through the callback's const tensor handles.
+            GptModelInputs worker_inputs = prepared;
+            worker_inputs.combo_tokens = prepared.combo_tokens.clone();
+            worker_inputs.input_lengths = prepared.input_lengths.clone();
+            worker_inputs.prefix_lengths = prepared.prefix_lengths.clone();
+            worker_inputs.sequence_lengths = prepared.sequence_lengths.clone();
+            worker_inputs.engram_token_windows = prepared.engram_token_windows.clone();
+            worker_inputs.v41_cache_spans = prepared.v41_cache_spans.clone();
+            worker_inputs.kv_cache_block_id = prepared.kv_cache_block_id.clone();
+            worker_inputs.kv_cache_kernel_block_id = prepared.kv_cache_kernel_block_id.clone();
+            if (prepared.combo_position_ids.defined()) {
+                worker_inputs.combo_position_ids = prepared.combo_position_ids.clone();
+            }
+            (*preflight)(worker_inputs, batch);
+        } catch (const V41InputRejected& exception) {
+            status[0] = 0;
+            error = exception.what();
+        } catch (const std::exception& exception) {
+            status[0] = 2;
+            error = exception.what();
+        } catch (...) {
+            status[0] = 2;
+            error = "unknown native worker preflight failure";
+        }
+        try {
+            if (worldRejected(ready, error)) {
+                local_.abort(batch);
+                throw V41InputRejected(error.empty() ? "V4.1 PP worker peer rejected its native dispatch" : error);
+            }
+        } catch (const V41InputRejected&) {
+            throw;
+        } catch (...) {
+            failed_ = true;
+            local_.abort(batch);
+            throw;
+        }
     }
     inputs = std::move(prepared);
     return batch;

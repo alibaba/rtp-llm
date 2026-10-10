@@ -561,17 +561,23 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 dispatch = prepare_native_pp_prefill_dispatch(self, inputs)
             except Exception as exc:
                 error = exc
-            with torch.cuda.stream(self._worker_stream):
-                self._agree_dp(
-                    error,
-                    (
-                        "native-pp-prefill-preflight",
-                        None if dispatch is None else dispatch.schedule,
-                    ),
-                    self._weight_device(),
-                    native_dispatch=True,
-                )
-            return dispatch
+            try:
+                with torch.cuda.stream(self._worker_stream):
+                    self._agree_dp(
+                        error,
+                        (
+                            "native-pp-prefill-preflight",
+                            None if dispatch is None else dispatch.schedule,
+                        ),
+                        self._weight_device(),
+                        native_dispatch=True,
+                    )
+                return dispatch
+            finally:
+                # A validator traceback references this frame and its native
+                # inputs. Break the saved-exception cycle so rejected leases
+                # release during unwinding rather than waiting for cyclic GC.
+                error = None
 
     def _validate_decode(self, inputs, attn):
         from rtp_llm.models_py.modules.dsv4.decode.forward import (

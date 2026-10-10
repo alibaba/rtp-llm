@@ -136,6 +136,7 @@ public:
 
     GptModelInputs inputs{};
     V41PPCacheBatchPtr batch;
+    py::object dispatch = py::none();
 };
 
 class V41NativePPTransportTest {
@@ -286,6 +287,34 @@ public:
             admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
         }
         global->batch = admission_->prepare(global->inputs);
+        return global->batch;
+    }
+
+    V41PPCacheBatchPtr prepareGlobalWorker(const std::shared_ptr<V41PPGlobalInputs>& global, const py::object& hook) {
+        requireOpen();
+        if (!admission_) {
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+        }
+        // Keep the descriptor provisional. If another stage rejects, its
+        // hidden native leases must also drop before returning to the caller.
+        py::object dispatch = py::none();
+        V41PPAdmission::WorkerPreflight preflight;
+        if (!hook.is_none()) {
+            preflight = [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& batch) {
+                try {
+                    dispatch = hook(splitInputs(batch, inputs));
+                } catch (const py::error_already_set& exception) {
+                    const py::object rejected =
+                        py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected");
+                    if (exception.matches(rejected)) {
+                        throw V41InputRejected(exception.what());
+                    }
+                    throw;
+                }
+            };
+        }
+        global->batch = admission_->prepareWithWorker(global->inputs, preflight);
+        global->dispatch = std::move(dispatch);
         return global->batch;
     }
 
@@ -543,6 +572,7 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     py::class_<rtp_llm::test::V41PPGlobalInputs, std::shared_ptr<rtp_llm::test::V41PPGlobalInputs>>(m, "GlobalInputs")
         .def_property_readonly("tensors", &rtp_llm::test::V41PPGlobalInputs::tensors)
         .def_readonly("batch", &rtp_llm::test::V41PPGlobalInputs::batch)
+        .def_readonly("dispatch", &rtp_llm::test::V41PPGlobalInputs::dispatch)
         .def("set_tensor", &rtp_llm::test::V41PPGlobalInputs::setTensor)
         .def("control", &rtp_llm::test::V41PPGlobalInputs::control)
         .def_property_readonly("lease_count", [](const rtp_llm::test::V41PPGlobalInputs& global) {
@@ -598,6 +628,7 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
              py::arg("tensors"),
              py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
         .def("prepare_global", &rtp_llm::test::V41NativePPTransportTest::prepareGlobal)
+        .def("prepare_global_worker", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalWorker)
         .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
         .def("abort_global", &rtp_llm::test::V41NativePPTransportTest::abortGlobal)
         .def("retire_global", &rtp_llm::test::V41NativePPTransportTest::retireGlobal)
