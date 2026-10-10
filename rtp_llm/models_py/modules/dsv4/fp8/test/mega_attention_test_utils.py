@@ -6,7 +6,15 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     allocate_decode_metadata_fp8,
     update_decode_metadata_in_place_fp8,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import HC, MQA_SPLIT_KV
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
+    COMPRESS_RATIO,
+    GEOMETRY_BY_DIM,
+    HC,
+    MQA_SPLIT_KV,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
+    HCA_COMPRESS_RATIO,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.test.utils.numeric_util import calc_diff
@@ -52,7 +60,7 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
             head_dim=attn.head_dim,
             max_seq_len=pools.max_seq_len,
             compress_ratios=[ratio],
-            index_topk=attn.indexer.index_topk if attn.indexer is not None else 1024,
+            index_topk=GEOMETRY_BY_DIM[attn.dim].index_topk,
             device=test.device,
             paged_pool_specs={
                 kind: (
@@ -116,7 +124,7 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
                     ratio
                     * (
                         MQA_SPLIT_KV * (replay + 1) + 1
-                        if ratio == 4
+                        if ratio == COMPRESS_RATIO
                         else 1 + replay * 2
                     )
                     - 1
@@ -148,5 +156,9 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
                     pools,
                     reference_pools,
                     label=label,
-                    **({"expect_boundary_write": True} if ratio == 128 else {}),
+                    **(
+                        {"expect_boundary_write": True}
+                        if ratio == HCA_COMPRESS_RATIO
+                        else {}
+                    ),
                 )

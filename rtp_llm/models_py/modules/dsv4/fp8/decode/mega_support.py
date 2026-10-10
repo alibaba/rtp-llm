@@ -9,7 +9,10 @@ from typing import Any, Optional
 import torch
 
 from .mega_csa_weights import (
+    COMPRESS_RATIO,
     GEOMETRY_BY_DIM,
+    HC,
+    HC_SINKHORN_ITERS,
     HEAD_DIM,
     INDEX_HEAD_DIM,
     INDEX_HEADS,
@@ -123,8 +126,8 @@ def _model_geometry_reason(args: Any) -> Optional[str]:
         ("index_n_heads", args.index_n_heads, INDEX_HEADS),
         ("index_head_dim", args.index_head_dim, INDEX_HEAD_DIM),
         ("index_topk", args.index_topk, geometry.index_topk),
-        ("hc_mult", args.hc_mult, 4),
-        ("hc_sinkhorn_iters", args.hc_sinkhorn_iters, 20),
+        ("hc_mult", args.hc_mult, HC),
+        ("hc_sinkhorn_iters", args.hc_sinkhorn_iters, HC_SINKHORN_ITERS),
     )
     mismatches = [
         f"{name}={actual} (expected {wanted})"
@@ -216,28 +219,14 @@ def _mapping_mismatch(
     return f"rtp-kernel {name} geometry mismatch: {mismatched}" if mismatched else None
 
 
-def _compiled_geometry_reason(args: Any, dsv4_mega: Any) -> Optional[str]:
+def _compiled_geometry_reason(
+    args: Any, dsv4_mega: Any, components: Sequence[str]
+) -> Optional[str]:
     geometry = GEOMETRY_BY_DIM[int(args.dim)]
     csa_suffix = "" if geometry is PRO_GEOMETRY else "_flash"
     hca_suffix = "_pro" if geometry is PRO_GEOMETRY else "_flash"
-    try:
-        csa_geometry = dsv4_mega.geometry_csa()
-        hca_geometry = dsv4_mega.geometry_hca()
-    except Exception as exc:
-        return f"failed to query rtp-kernel DSV4 Mega ABI: {exc}"
-
-    for name, compiled in (("CSA", csa_geometry), ("HCA", hca_geometry)):
-        capacity = compiled.get("max_m") if isinstance(compiled, Mapping) else None
-        if not isinstance(capacity, int) or capacity < MAX_BATCH:
-            return (
-                f"rtp-kernel {name} max_m={capacity!r} is unsupported; "
-                f"requires at least {MAX_BATCH} tokens"
-            )
-
-    reason = _mapping_mismatch(
-        "CSA",
-        csa_geometry,
-        {
+    expected_by_component = {
+        "csa": {
             f"n_main{csa_suffix}": geometry.n_main,
             "n_index": INDEX_HEADS * INDEX_HEAD_DIM,
             f"n_merged{csa_suffix}": geometry.n_merged,
@@ -245,21 +234,30 @@ def _compiled_geometry_reason(args: Any, dsv4_mega: Any) -> Optional[str]:
             "num_index_heads": INDEX_HEADS,
             "slot_dtype_bits": 64,
         },
-    )
-    if reason is not None:
-        return reason
-    reason = _mapping_mismatch(
-        "HCA",
-        hca_geometry,
-        {
+        "hca": {
             f"n_q{hca_suffix}": geometry.n_main,
             f"front_n_fp8{hca_suffix}": geometry.front_fp8_rows,
             "compress_ratio": HCA_COMPRESS_RATIO,
             "state_width": HCA_STATE_WIDTH,
             "slot_dtype_bits": 64,
         },
-    )
-    return reason
+    }
+    for component in components:
+        name = component.upper()
+        try:
+            compiled = getattr(dsv4_mega, f"geometry_{component}")()
+        except Exception as exc:
+            return f"failed to query rtp-kernel DSV4 Mega ABI: {exc}"
+        capacity = compiled.get("max_m") if isinstance(compiled, Mapping) else None
+        if not isinstance(capacity, int) or capacity < MAX_BATCH:
+            return (
+                f"rtp-kernel {name} max_m={capacity!r} is unsupported; "
+                f"requires at least {MAX_BATCH} tokens"
+            )
+        reason = _mapping_mismatch(name, compiled, expected_by_component[component])
+        if reason is not None:
+            return reason
+    return None
 
 
 def require_mega_runtime(device: torch.device, components: Sequence[str]) -> Any:
@@ -273,7 +271,7 @@ def require_mega_runtime(device: torch.device, components: Sequence[str]) -> Any
 
 
 def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[str]:
-    """Return why the complete CSA/HCA Mega attention path is unavailable."""
+    """Return why Mega attention is unavailable for this transformer's layers."""
 
     if not bool(args.fp8_kv_cache):
         return "FP8 KV cache is required"
@@ -289,12 +287,19 @@ def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[
             "expected one of [128, 256, 512]"
         )
 
-    components = ("csa", "hca")
+    ratios = set(args.compress_ratios[: args.n_layers])
+    components = tuple(
+        component
+        for ratio, component in ((COMPRESS_RATIO, "csa"), (HCA_COMPRESS_RATIO, "hca"))
+        if ratio in ratios
+    )
+    if not components:
+        return "no CSA or HCA layers require Mega attention"
     reason, dsv4_mega = _runtime_unavailable_reason(device, components)
     if reason is not None:
         return reason
     assert dsv4_mega is not None
-    return _compiled_geometry_reason(args, dsv4_mega)
+    return _compiled_geometry_reason(args, dsv4_mega, components)
 
 
 __all__ = ["mega_decode_unavailable_reason", "require_mega_runtime"]

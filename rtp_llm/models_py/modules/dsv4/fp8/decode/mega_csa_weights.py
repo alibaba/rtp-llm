@@ -9,6 +9,7 @@ import torch
 
 HC = 4
 HC_MIX = 24
+HC_SINKHORN_ITERS = 20
 HEAD_DIM = 512
 ROPE_DIM = 64
 O_LORA_RANK = 1024

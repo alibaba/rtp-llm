@@ -208,6 +208,8 @@ class MegaHCAAdapter:
             raise TypeError("DSV4 mega hidden must be contiguous CUDA bfloat16")
         if metadata.batch_size != batch_size or metadata.q_len_per_req != q_len:
             raise ValueError("DSV4 mega hidden and metadata geometry disagree")
+        if metadata.position_ids is None:
+            raise RuntimeError("DSV4 mega metadata is missing int32 positions")
         if metadata.position_ids_long is None:
             raise RuntimeError("DSV4 mega metadata is missing int64 positions")
         dsv4_mega = self._require_runtime(hidden.device)
@@ -297,6 +299,8 @@ class MegaHCAAdapter:
             workspace.hc_sum_sq,
             num_split,
         )
+        # The lite reduction writes mix; front_mixed_gemm_hca's fused HC tail
+        # produces post/comb before attn_hc.post consumes them.
         dsv4_mega.hc_reduce_fuse_out(
             hidden_rows,
             workspace.hc_partial,

@@ -146,6 +146,7 @@ def build_paged_pool_specs(
     # the layers that own it.
     specs: Dict[str, Tuple[int, int, int]] = {}
     saved_kv: Dict[int, Any] = {}
+    layer_tags: Dict[int, set[str]] = {}
     try:
         # #50: STATE pool block tables must also flow through metadata so
         # compressor/indexer can gather their fp32 state on each decode
@@ -154,10 +155,12 @@ def build_paged_pool_specs(
         for tag in _DSV4_DECODE_POOL_TAGS:
             for layer in v4.layers:
                 attn = layer.attn
-                if not any(
-                    cache.tag == tag
-                    for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
-                ):
+                if attn.layer_id not in layer_tags:
+                    layer_tags[attn.layer_id] = {
+                        cache.tag
+                        for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
+                    }
+                if tag not in layer_tags[attn.layer_id]:
                     continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (attn, attn._kv_cache)

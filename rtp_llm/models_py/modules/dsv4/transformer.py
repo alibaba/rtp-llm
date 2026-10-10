@@ -226,6 +226,8 @@ class V4Transformer(nn.Module):
         embedding_weight = None
         if not self.commit_only:
             embedding_weight = gw[W.embedding]
+            # Process-level deployment override, intentionally outside V4Args.
+            # Set it consistently in each worker's environment.
             mega_request = _optional_env_bool("DSV4_MEGA")
             if mega_request is not False:
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
@@ -247,6 +249,12 @@ class V4Transformer(nn.Module):
                     )
                 else:
                     self._mega_decode_enabled = True
+                    logging.info(
+                        "DSV4 Mega attention decode enabled on %s (TP1, dim=%d); "
+                        "set DSV4_MEGA=0 to disable",
+                        embedding_weight.device,
+                        args.dim,
+                    )
 
         self.layers = nn.ModuleList(
             [

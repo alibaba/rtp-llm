@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
@@ -114,9 +115,11 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         )
 
         layer_entries = [{SWA_KV: 32}, {HCA_KV: 1, SWA_KV: 32}]
-        cache.get_layer_cache_groups = lambda layer_id: [
-            SimpleNamespace(tag=tag) for tag in layer_entries[layer_id]
-        ]
+        cache.get_layer_cache_groups = Mock(
+            side_effect=lambda layer_id: [
+                SimpleNamespace(tag=tag) for tag in layer_entries[layer_id]
+            ]
+        )
 
         class FakeAttn:
             _kv_cache = None
@@ -136,6 +139,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         specs = build_paged_pool_specs(cache, v4, max_seq_len=256)
 
         self.assertEqual(specs, {HCA_KV: (1, 128, 3), SWA_KV: (32, 128, 3)})
+        self.assertEqual(cache.get_layer_cache_groups.call_count, len(v4.layers))
         self.assertTrue(all(layer.attn._kv_cache is None for layer in v4.layers))
 
     def test_require_pool_tokens_per_block_rejects_unknown_tag(self) -> None:

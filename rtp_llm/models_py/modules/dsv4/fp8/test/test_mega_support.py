@@ -18,6 +18,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
     HCA_STATE_WIDTH,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
+    _DEEP_GEMM_SYMBOLS_BY_COMPONENT,
+    _EXTENSION_SYMBOLS_BY_COMPONENT,
     _REQUIRED_DEEP_GEMM_SYMBOLS,
     _REQUIRED_EXTENSION_PARAMETERS,
     _REQUIRED_EXTENSION_SYMBOLS,
@@ -125,6 +127,44 @@ class MegaSupportTest(unittest.TestCase):
         reason = mega_decode_unavailable_reason(V4Args(dim=3072), torch.device("cpu"))
 
         self.assertIn("unsupported hidden size 3072", reason or "")
+
+    def test_single_component_layers_only_require_their_own_abi(self) -> None:
+        for ratio, other_ratio, component in ((4, 128, "csa"), (128, 4, "hca")):
+            with self.subTest(component=component):
+                complete_extension = _supported_extension()
+                extension = SimpleNamespace(
+                    **{
+                        name: getattr(complete_extension, name)
+                        for name in _EXTENSION_SYMBOLS_BY_COMPONENT[component]
+                    }
+                )
+                deep_gemm = _module_with_symbols(
+                    _DEEP_GEMM_SYMBOLS_BY_COMPONENT[component]
+                )
+                with patch.object(
+                    torch.cuda, "get_device_capability", return_value=(10, 3)
+                ), patch.dict(
+                    sys.modules,
+                    {
+                        "rtp_kernel": SimpleNamespace(dsv4_mega=extension),
+                        "deep_gemm": deep_gemm,
+                    },
+                ):
+                    args = V4Args(n_layers=1, compress_ratios=[ratio, other_ratio])
+                    self.assertIsNone(
+                        mega_decode_unavailable_reason(args, torch.device("cuda:0"))
+                    )
+                    args.n_layers = 2
+                    self.assertIn(
+                        "missing DSV4 Mega ABI",
+                        mega_decode_unavailable_reason(args, torch.device("cuda:0")),
+                    )
+
+    def test_swa_only_layers_do_not_require_mega(self) -> None:
+        reason = mega_decode_unavailable_reason(
+            V4Args(n_layers=1, compress_ratios=[0, 4, 128]), torch.device("cpu")
+        )
+        self.assertIn("no CSA or HCA layers", reason or "")
 
     def test_mhc_geometry_requires_four_lanes(self) -> None:
         reason = mega_decode_unavailable_reason(V4Args(hc_mult=2), torch.device("cpu"))

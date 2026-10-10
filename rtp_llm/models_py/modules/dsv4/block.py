@@ -218,12 +218,18 @@ class Block(nn.Module):
 
     def enable_mega_csa(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
         """Attach the TP1 CSA adapter only to compress-ratio-4 layers."""
-        if int(self.attn.compress_ratio) != 4:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
+            COMPRESS_RATIO,
+        )
+
+        if int(self.attn.compress_ratio) != COMPRESS_RATIO:
             return
         from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import (
             MegaCSAAdapter,
         )
 
+        # Packed Mega weights add GPU memory; keep the original weights for
+        # prefill and decode shapes that use the ordinary attention path.
         self._mega_csa_adapter = MegaCSAAdapter(self, layer_weights, runtime)
 
     def _moe_observer(self, positions: Optional[torch.Tensor]):
@@ -261,7 +267,11 @@ class Block(nn.Module):
 
     def enable_mega_hca(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
         """Attach the TP1 HCA adapter only to compress-ratio-128 layers."""
-        if int(self.attn.compress_ratio) != 128:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
+            HCA_COMPRESS_RATIO,
+        )
+
+        if int(self.attn.compress_ratio) != HCA_COMPRESS_RATIO:
             return
         from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter import (
             MegaHCAAdapter,
@@ -413,6 +423,9 @@ class Block(nn.Module):
             and mega_adapter.supports_decode_shape(x, attn_metadata)
         )
         if use_mega_attention:
+            # Fused HC/norm intermediates are not exposed by Mega. The shared
+            # residual record below remains available; DSV4_MEGA=0 restores
+            # the ordinary attention intermediate records for debugging.
             x = mega_adapter.forward_attention_sublayer(
                 self, x, attn_metadata, kv_cache=kv_cache
             )

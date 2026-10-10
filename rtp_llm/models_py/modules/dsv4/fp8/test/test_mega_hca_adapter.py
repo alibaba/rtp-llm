@@ -409,6 +409,59 @@ class MegaHCARuntimeTest(unittest.TestCase):
         torch.testing.assert_close(first_cos, freqs_cis.real)
         torch.testing.assert_close(first_sin, freqs_cis.imag)
 
+    def test_rope_tables_refresh_after_source_mutation(self) -> None:
+        runtime = MegaCSARuntime()
+        freqs_cis = torch.ones(4, 32, dtype=torch.complex64)
+        runtime.rope_tables(freqs_cis)
+        freqs_cis.fill_(1j)
+
+        cos, sin = runtime.rope_tables(freqs_cis)
+
+        torch.testing.assert_close(cos, freqs_cis.real)
+        torch.testing.assert_close(sin, freqs_cis.imag)
+        self.assertEqual(len(runtime._rope_cache), 1)
+
+    def test_rope_tables_distinguish_views_at_the_same_address(self) -> None:
+        runtime = MegaCSARuntime()
+        freqs_cis = torch.arange(1024, dtype=torch.float32).to(torch.complex64)
+        first = freqs_cis.view(32, 32)
+        second = first.t()
+        self.assertEqual(first.data_ptr(), second.data_ptr())
+        runtime.rope_tables(first)
+
+        cos, sin = runtime.rope_tables(second)
+
+        torch.testing.assert_close(cos, second.real)
+        torch.testing.assert_close(sin, second.imag)
+
+    def test_rope_tables_release_entries_with_the_source(self) -> None:
+        runtime = MegaCSARuntime()
+        first = torch.ones(4, 32, dtype=torch.complex64)
+        second = torch.full_like(first, 1j)
+        runtime.rope_tables(first)
+        second_tables = runtime.rope_tables(second)
+        self.assertEqual(len(runtime._rope_cache), 2)
+
+        del first
+
+        self.assertEqual(len(runtime._rope_cache), 1)
+        self.assertIs(runtime.rope_tables(second), second_tables)
+        del second
+        self.assertEqual(len(runtime._rope_cache), 0)
+
+    def test_rope_tables_support_immutable_inference_tensors(self) -> None:
+        runtime = MegaCSARuntime()
+        with torch.inference_mode():
+            freqs_cis = torch.ones(4, 32, dtype=torch.complex64)
+            first = runtime.rope_tables(freqs_cis)
+            self.assertIs(runtime.rope_tables(freqs_cis), first)
+            freqs_cis = torch.full_like(freqs_cis, 1j)
+            cos, sin = runtime.rope_tables(freqs_cis)
+
+        torch.testing.assert_close(cos, freqs_cis.real)
+        torch.testing.assert_close(sin, freqs_cis.imag)
+        self.assertEqual(len(runtime._rope_cache), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

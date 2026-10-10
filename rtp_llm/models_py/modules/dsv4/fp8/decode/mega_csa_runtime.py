@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from weakref import ReferenceType, ref
 
 import torch
 
@@ -84,7 +85,8 @@ class MegaCSARuntime:
         self._schedule_key: Optional[Tuple[str, int, int, int]] = None
         self._schedule: Optional[torch.Tensor] = None
         self._rope_cache: Dict[
-            Tuple[int, str, Tuple[int, ...]], Tuple[torch.Tensor, torch.Tensor]
+            int,
+            Tuple[ReferenceType, Optional[int], Tuple[torch.Tensor, torch.Tensor]],
         ] = {}
 
     def begin_decode(self, metadata: Any) -> None:
@@ -241,18 +243,27 @@ class MegaCSARuntime:
         return schedule
 
     def rope_tables(self, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Cache tables for each live source tensor, not its allocator address.
+
+        Inference tensors have no version counter and must remain immutable;
+        replace the source tensor to change their RoPE values. Any RoPE change
+        after CUDA graph capture requires recapturing the graph.
+        """
         if freqs_cis.dtype != torch.complex64 or freqs_cis.dim() != 2:
             raise TypeError("DSV4 mega requires contiguous complex64 freqs_cis [S,32]")
-        key = (
-            int(freqs_cis.data_ptr()),
-            str(freqs_cis.device),
-            tuple(int(value) for value in freqs_cis.shape),
-        )
-        tables = self._rope_cache.get(key)
-        if tables is None:
+        key = id(freqs_cis)
+        version = None if freqs_cis.is_inference() else freqs_cis._version
+        cached = self._rope_cache.get(key)
+        if cached is None or cached[0]() is not freqs_cis or cached[1] != version:
             tables = (freqs_cis.real.contiguous(), freqs_cis.imag.contiguous())
-            self._rope_cache[key] = tables
-        return tables
+            cache = self._rope_cache
+            cache[key] = (
+                ref(freqs_cis, lambda _: cache.pop(key, None)),
+                version,
+                tables,
+            )
+            return tables
+        return cached[2]
 
     def hca_layer_workspace(
         self,
