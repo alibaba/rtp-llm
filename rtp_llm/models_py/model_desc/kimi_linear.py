@@ -514,7 +514,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             )
 
         # A compact-cache hit leaves at most one TP-wide alignment unit. Fuse
-        # its 64-token chunk-state recurrence into one launch.
+        # its reference chunk-state recurrence into one CUDA graph replay.
         fuse_kda_state_recurrence = attn_meta.fuse_kda_state_recurrence and q_len <= (
             seq_size_per_block * int(self.parallelism_config.get_attn_tp_size())
         )
@@ -1601,11 +1601,7 @@ class KimiLinearModel(GptModelBase):
         self._kda_replay_page_size = 0
         self.enable_kda_reuse_fusion = (
             os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1"
-            and os.environ.get(
-                "GLM5_KDA_REUSE_FUSION",
-                "0" if model_config.model_type == "glm5_3_flash" else "1",
-            )
-            != "0"
+            and os.environ.get("GLM5_KDA_REUSE_FUSION", "1") != "0"
         )
         self.kda_chunk_size = get_kda_chunk_size()
         logging.info("KDA chunk size: %d", self.kda_chunk_size)

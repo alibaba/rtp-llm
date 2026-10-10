@@ -20,6 +20,9 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_delta_h import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_intra import chunk_kda_fwd_intra
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_o import chunk_gla_fwd_o_gk
 from rtp_llm.models_py.triton_kernels.kimi_kda.gate import kda_gate_chunk_cumsum
+from rtp_llm.models_py.triton_kernels.kimi_kda.reuse_state_graph import (
+    chunk_gated_delta_rule_fwd_h_reuse_graph,
+)
 
 
 def chunk_kda_fwd(
@@ -81,7 +84,19 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute,
     )
 
-    if fuse_state_recurrence and not state_v_first and chunk_size == 64:
+    if (
+        fuse_state_recurrence and not state_v_first and chunk_size == 64
+        and safe_gate and lower_bound == -5.0
+    ):
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h_reuse_graph(
+            k=kg, w=w, u=u, gk=g, initial_state=initial_state,
+            output_final_state=output_final_state, cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size, use_exp2=True,
+            intermediate_state_dtype=(
+                torch.float32 if return_intermediate_states else k.dtype
+            ),
+        )
+    elif fuse_state_recurrence and not state_v_first and chunk_size == 64:
         h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
             k=kg,
             w=w,
