@@ -140,7 +140,12 @@ config_setting(
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),
+    # --as-needed first: the config .so references zero CUDA/nccl/cudnn
+    # symbols (torch C++ ABI only), but the transitive torch_deps() link line
+    # otherwise bakes them in as dead DT_NEEDED entries — which would force
+    # even the CPU-frontend wheel to ship the whole CUDA library tree.
     linkopts = [
+        "-Wl,--as-needed",
         "-Wl,-rpath='$$ORIGIN'",
     ],
     linkshared = 1,
