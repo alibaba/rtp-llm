@@ -140,6 +140,17 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_kv_projection_replay",
+    testonly = True,
+    srcs = ["dsv41_kv_projection_replay.py"],
+    deps = [
+        ":dsv41_kv_boundary_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_kv_projection_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "dsv41_kv_boundary_replay",
     testonly = True,
     srcs = ["dsv41_kv_boundary_replay.py"],
