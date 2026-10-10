@@ -83,11 +83,13 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         weights: List[CkptWeightInfo],
         *,
         cpu_offload: bool = True,
+        scale_weight: Optional[CkptWeightInfo] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(name, weights, **kwargs)
         self.cpu_offload = cpu_offload
         self.resident_device = "cpu" if cpu_offload else None
+        self.scale_weight = scale_weight
 
     def _local_shard_range(self, load_config: LoadConfig) -> range:
         shard_count = len(self.weights)
@@ -118,10 +120,13 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
-        return {
+        names = {
             self.weights[index].tensor_name(layer_id)
             for index in self._local_shard_range(load_config)
         }
+        if self.scale_weight is not None:
+            names.add(self.scale_weight.tensor_name(layer_id))
+        return names
 
     def _load_raw_tensor(
         self,
@@ -133,6 +138,22 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         if layer_id is None:
             raise ValueError("qwen4_exp PLE n-gram table is a per-layer weight")
         convert_type = self.data_type or load_config.compute_dtype
+        scale = None
+        if self.scale_weight is not None:
+            scale = self.scale_weight.merge_fun(
+                tensor_source.load_tensor(
+                    self.scale_weight.tensor_name(layer_id), torch.float32
+                )
+            )
+            if (
+                scale.numel() != 1
+                or not bool(torch.isfinite(scale).all())
+                or not bool((scale > 0).all())
+            ):
+                raise ValueError(
+                    "Qwen4 FP8 PLE requires one finite positive global scale"
+                )
+            scale = scale.to(device=device, dtype=convert_type)
         result: Dict[str, torch.Tensor] = {}
         for shard_index in self._local_shard_range(load_config):
             ckpt_weight = self.weights[shard_index]
@@ -144,9 +165,13 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
                 raise TypeError(
                     f"qwen4_exp PLE shard {tensor_name!r} did not load as a tensor"
                 )
-            result[f"{self.name}.{shard_index}"] = shard.to(
-                device=device, dtype=convert_type
-            )
+            shard = shard.to(device=device, dtype=convert_type)
+            # Match vLLM's lookup contract: cast FP8 values and the scalar to
+            # output dtype, multiply, then retain the BF16 resident shard.
+            # This preserves existing PLE gather and graph replay consumers.
+            if scale is not None:
+                shard = shard * scale
+            result[f"{self.name}.{shard_index}"] = shard
         return result
 
     def _split(
@@ -190,6 +215,25 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
     (``grouped_rms_norm`` for the wide stream, ``Qwen4ExpFusedQKRMSNorm`` for q/k),
     which keeps us bit-exact with upstream.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._moe_only_fp8 = (
+            getattr(self.model_config, "_qwen4_moe_only_fp8", False) is True
+        )
+        if self._moe_only_fp8:
+            if self.ffn_tp_size != 1:
+                raise ValueError(
+                    "Qwen4 expert FP8 requires FFN TP=1 (expert parallelism)"
+                )
+            # Shared expert and all non-expert projections remain BF16.
+            self._align_size = 0
+
+    def _get_moe_config(self):
+        config = super()._get_moe_config()
+        if self._moe_only_fp8:
+            config.align_size = 128
+        return config
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
         for key in weight_keys:
@@ -274,6 +318,10 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         info = super()._get_weight_info()
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
+        if self._moe_only_fp8:
+            from rtp_llm.models.qwen4_exp.moe_fp8 import Qwen4MoeFp8WeightInfo
+
+            return Qwen4MoeFp8WeightInfo(info.weights, info.layer_weights)
         return info
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:
@@ -335,6 +383,14 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                     ],
                     cpu_offload=getattr(
                         self.model_config, "qwen4_ple_cpu_offload", True
+                    ),
+                    scale_weight=(
+                        CkptWeightInfo(
+                            self.prefix
+                            + "layers.{i}.ple.ple_embedding.ngram_embedding.weight_scale"
+                        )
+                        if getattr(self, "_moe_only_fp8", False) is True
+                        else None
                     ),
                 )
             )

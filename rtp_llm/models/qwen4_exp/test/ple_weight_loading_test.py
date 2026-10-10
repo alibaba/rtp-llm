@@ -161,6 +161,62 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         self.assertEqual(database.load_tensors_by_prefix.call_args.args[1], "cpu")
         self.assertFalse(database.load_tensors_by_prefix.call_args.kwargs["direct_io"])
 
+    def test_fp8_global_scale_matches_lookup_cast_order(self):
+        scalar = torch.tensor([0.00019931793212890625], dtype=torch.bfloat16)
+
+        class Source(_RecordingTensorSource):
+            def load_tensor(self, name, data_type=torch.float16):
+                if name.endswith("weight_scale"):
+                    self.requests.append(name)
+                    return [scalar.to(data_type)]
+                self.requests.append(name)
+                shard = int(name.split("shard_")[1].split(".")[0])
+                values = torch.tensor([[1.3], [float(shard)]]).to(torch.float8_e4m3fn)
+                return [values.to(data_type)]
+
+        source = Source()
+        weight = _ngram_weight(
+            scale_weight=CkptWeightInfo(
+                "model.layers.{i}.ple.ngram_embedding.weight_scale"
+            )
+        )
+        config = _load_config(8, 3)
+        config.compute_dtype = torch.bfloat16
+        names = weight.get_tensor_names(1, config)
+        self.assertIn("model.layers.1.ple.ngram_embedding.weight_scale", names)
+        with mock.patch.object(
+            torch, "stack", side_effect=AssertionError("no table stack")
+        ):
+            loaded = weight.load(source, 1, "cuda:0", config)
+        self.assertTrue(all(t.device.type == "cpu" for t in loaded.values()))
+        self.assertEqual(len(source.requests), 17)
+        for shard in range(48, 64):
+            expected = (
+                torch.tensor([[1.3], [float(shard)]])
+                .to(torch.float8_e4m3fn)
+                .to(torch.bfloat16)
+                * scalar
+            )
+            self.assertTrue(
+                torch.equal(loaded[f"{W.qwen4_ple_ngram_shards}.{shard}"], expected)
+            )
+
+    def test_fp8_invalid_global_scale_rejected_before_shard_io(self):
+        for scale in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(scale=scale):
+                source = mock.Mock(spec=TensorSource)
+                source.load_tensor.return_value = [torch.tensor([scale])]
+                weight = _ngram_weight(
+                    scale_weight=CkptWeightInfo(
+                        "model.layers.{i}.ple.ngram_embedding.weight_scale"
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "finite positive global scale"):
+                    weight.load(source, 1, "cpu", _load_config())
+                source.load_tensor.assert_called_once_with(
+                    "model.layers.1.ple.ngram_embedding.weight_scale", torch.float32
+                )
+
     def test_tensor_names_are_selected_before_loading(self):
         weight = _ngram_weight()
 
