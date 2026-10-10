@@ -7,7 +7,7 @@ from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
 
-def write_report(directory, evidence, result):
+def write_report(directory, evidence, result, *, run=None):
     from reporting.view_config import view
 
     presentation = view("master_performance.yaml")
@@ -29,9 +29,9 @@ def write_report(directory, evidence, result):
                 presentation, "checks",
                 [
                     [
-                        x["metric"],
+                        x["id"],
                         x["actual"],
-                        str(x["direction"]) + " " + str(x["bound"]),
+                        str(x["evidence"].get("op", "")) + " " + str(x["expected"]),
                         x["status"],
                     ]
                     for x in result["checks"]
@@ -45,35 +45,28 @@ def write_report(directory, evidence, result):
     from reporting.events import attach_events
     attach_events(spec, presentation, origin=evidence["window"]["start_epoch_ms"] / 1000,
                   phases=evidence.get("phases", []), events=evidence.get("events", []))
+    if run is not None:
+        from reporting.run_context import selected_spec
+        spec = selected_spec(spec, run, presentation)
+        result = dict(result, run=run)
+    meta = run_meta(
+        dict(id=p["instance"], verdict=result["verdict"]),
+        implementation=p.get("master_artifact"), workload=p.get("trace"), configuration=p,
+        evidence=dict(file="performance-gate-evidence.json"),
+    )
+    if run is not None:
+        from reporting.run_context import provenance_from
+        meta = provenance_from(run, meta)
     return write_bundle(
         directory,
         "run",
         "master-performance",
         result,
         spec,
-        meta=run_meta(
-            dict(id=p["instance"], verdict=result["verdict"]),
-            implementation=p.get("master_artifact"),
-            workload=p.get("trace"),
-            configuration=p,
-            evidence=dict(file="performance-gate-evidence.json"),
-        ),
+        meta=meta,
         producer="performance-gate",
         role="gate",
     )
-
-
-def refresh_report(directory):
-    """Refresh final archived curves using the already published gate result."""
-    import json
-    from reporting import bundle_path, load_analysis
-
-    directory = Path(directory)
-    evidence = directory / "performance-gate-evidence.json"
-    bundle = bundle_path(directory, "run", "master-performance")
-    if evidence.is_file() and bundle.exists():
-        frozen = load_analysis(bundle)
-        write_report(directory, json.loads(evidence.read_text()), frozen)
 
 
 def validate_view(path, data, fail):
@@ -82,3 +75,9 @@ def validate_view(path, data, fail):
     validate_section_contract(path, data, {
         "checks": 4, "monitoring": None, "validity": None, "metrics": None,
     }, fail)
+
+
+def render_view(directory, run, presentation):
+    from workload.gate_result import load_gate
+    evidence, result = load_gate(directory, "performance")
+    return write_report(directory, evidence, result, run=run) / "report.html"

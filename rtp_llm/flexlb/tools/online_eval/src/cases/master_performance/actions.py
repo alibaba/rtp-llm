@@ -1,14 +1,15 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
-from scenario.contracts import CheckResult, StageHandler, StageOutput
+from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate, for_profile
-from workload.gate_evidence import compact_flow, write_evidence, new_evidence
-from cases.master_performance.publication import publish_performance
+from artifacts.json_io import write_json
+from workload.gate_evidence import compact_flow, new_evidence
+from workload.gate_result import freeze_gate, gate_check
 from cases.master_performance.inputs import engine_roles
 from traffic.traffic_source import sha256_file
-from runtime.observation import ObservationClock, SampleBudget, poll_samples, verdict_status
+from runtime.observation import ObservationClock, SampleBudget, poll_samples
 
 
 def observe_validate(params, plan):
@@ -73,7 +74,7 @@ def observe(ctx, p, deadline):
     except Exception as exc:
         evidence["errors"].append(str(exc))
     path = ctx.artifact_dir / "performance-gate-evidence.json"
-    write_evidence(path, evidence)
+    write_json(path, evidence)
     return StageOutput(
         {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
         artifacts=[str(path)],
@@ -110,22 +111,18 @@ def finish(ctx, p, deadline):
     except Exception as exc:
         e["errors"].append("monitor archive: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
-    write_evidence(ctx.artifact_dir / "performance-gate-evidence.json", e)
+    write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
     result = analyze(e)
-    bundle = publish_performance(ctx.artifact_dir, e, result)
+    path = freeze_gate(ctx.artifact_dir, "performance", e, result)
     return StageOutput(
         checks=[
-            CheckResult(
-                "absolute_performance",
-                verdict_status(result["verdict"]),
-                actual=result,
-                expected="single run satisfies all absolute criteria",
-            )
+            gate_check("absolute_performance", result, path,
+                       "single run satisfies all absolute criteria")
         ],
         artifacts=[
             str(ctx.artifact_dir / "performance-gate-evidence.json"),
-            str(bundle / "analysis.json"),
-            str(bundle / "report.html"),
+            str(path),
+            str(ctx.artifact_dir / "performance-gate-manifest.json"),
         ],
     )
 

@@ -18,13 +18,14 @@ def performance_main():
     parser.add_argument("--json-only", action="store_true", help="write evidence and verdict without HTML")
     args = parser.parse_args()
     from workload.reinterpretation import load_reinterpretation, import_metrics
-    from workload.gate_evidence import write_evidence
+    from artifacts.json_io import write_json
     e = load_reinterpretation(parser, args, performance_analysis.__file__)
     r = analyze_performance(e)
     if args.json_only:
         args.output.mkdir(parents=True, exist_ok=True)
-        write_evidence(args.output / "performance-gate-evidence.json", e)
-        write_evidence(args.output / "analysis.json", r)
+        from workload.gate_result import freeze_gate
+        freeze_gate(args.output, "performance", e, r)
+        write_json(args.output / "analysis.json", r)
     else:
         import_metrics(args.output, args.evidence.parent)
         publish_performance(args.output, e, r)

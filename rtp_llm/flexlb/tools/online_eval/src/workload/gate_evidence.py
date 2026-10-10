@@ -37,12 +37,3 @@ def compact_flow(snapshot):
     result["records"] = [{k: v for k, v in row.items() if k in terminal}
                          for row in snapshot["records"]]
     return result
-
-
-def write_evidence(path, evidence):
-    """Atomic compact JSON; raw journals remain the source of detailed RPC fields."""
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w") as stream:
-        json.dump(evidence, stream, separators=(",", ":"), allow_nan=False)
-    temporary.replace(path)

@@ -189,8 +189,7 @@ class WorkloadPolicy:
             ),
         )
 
-    def finalize(self, ctx, result):
-        from workload.report import write_views
+    def finalize(self, ctx, result, deadline):
         from workload.evidence_analysis import analyze_report
 
         evidence = ctx.artifact_dir / "workload-evidence.json"
@@ -198,56 +197,14 @@ class WorkloadPolicy:
         incomplete = []
         expected_outages = []
         producers = {}
-        for handle, value, historical in ctx._resources.values():
-            if handle["kind"] == "master_fault" and getattr(value, "injected", False):
-                expected_outages.append(
-                    dict(
-                        source=f"{handle['env_epoch']}/master-{value.target}",
-                        started_epoch_s=value.started_epoch_s,
-                        ended_epoch_s=value.restored_epoch_s or time.time(),
-                        reason=value.mode,
-                    )
-                )
-            if hasattr(value, "evidence_snapshot"):
-                snapshot = value.evidence_snapshot()
-                producers.setdefault(str(handle["env_epoch"]), set()).add(
-                    "python" if snapshot.get("producer_kind") == "python" else id(value)
-                )
-                # Keep one canonical request journal, not a second full copy in workload JSON.
-                manifest = {
-                    k: v
-                    for k, v in snapshot.items()
-                    if k not in ("records", "issued", "unfinished")
-                }
-                if self.profile == "diagnostic":
-                    manifest = snapshot
-                elif hasattr(value, "directory"):
-                    manifest["request_journal"] = str(
-                        value.directory / "client_lifecycle.jsonl"
-                    )
-                records.append(dict(resource=handle, **manifest))
-                if not snapshot["complete"]:
-                    incomplete.append(dict(resource=handle, errors=snapshot["errors"]))
-                continue
-            if hasattr(value, "snapshot_records"):
-                producers.setdefault(str(handle["env_epoch"]), set()).add("python")
-                from runtime.requests import completeness
-
-                rows = value.snapshot_records()
-                integrity = completeness(rows)
-                if not integrity["complete"]:
-                    incomplete.append(
-                        dict(
-                            resource=handle,
-                            errors=["request consumers did not all finish"],
-                            detail=integrity,
-                        )
-                    )
-            elif handle["kind"] == "ha_rows" and isinstance(value, list):
-                rows = value
-            else:
-                continue
-            records.append(dict(resource=handle, records=rows))
+        for handle, snapshot in ctx.export_evidence(self.profile, deadline):
+            expected_outages.extend(snapshot.outages)
+            if snapshot.producer is not None:
+                producers.setdefault(str(handle["env_epoch"]), set()).add(snapshot.producer)
+            if snapshot.requests:
+                records.append(dict(resource=handle, **snapshot.requests))
+            if snapshot.errors:
+                incomplete.append(dict(resource=handle, errors=list(snapshot.errors)))
         for epoch, values in producers.items():
             if epoch in self.environment_metadata:
                 self.environment_metadata[epoch]["load_client_workers"] = len(values)
@@ -272,13 +229,15 @@ class WorkloadPolicy:
 
             joined = join_evidence(payload, self.environments)
             joined_path = ctx.artifact_dir / "request-engine-evidence.json"
-            joined_path.write_text(json.dumps(joined, allow_nan=False) + "\n")
+            from artifacts.json_io import write_json
+            write_json(joined_path, joined)
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = self.profile
         payload["monitor_backend"] = "prometheus"
         from workload.run_provenance import collect
         payload["runtime_provenance"] = collect(ctx.artifact_dir, self.environments, self.environment_metadata)
-        evidence.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+        from artifacts.json_io import write_json
+        write_json(evidence, payload)
         result["workload"] = dict(
             evidence=str(evidence),
             capture_metrics=self.options["capture_metrics"],
@@ -303,21 +262,26 @@ class WorkloadPolicy:
             configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))
         metric_store.save(ctx.artifact_dir)
         result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
-        # A registered program may refresh charts from its frozen result.
         program = ctx.instance.get("implementation", {}).get("program")
         if program is not None:
-            from cases.registry import finalize_reports
-
-            finalize_reports(program, ctx.artifact_dir)
+            from cases.registry import produce_gate_metrics
+            produce_gate_metrics(program, ctx.artifact_dir)
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         from monitoring.producers import produce
         produce(ctx.artifact_dir, analysis)
         from monitoring.metric_store import MetricStore
         analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
             self.anchor["epoch_s"])
+        deadline.check()
+        return analysis
+
+    def render(self, ctx, result, analysis, deadline):
+        from workload.report import write_views
+        deadline.check()
         view_links = write_views(ctx.artifact_dir, analysis, self.reports)
         result["workload"]["report"] = str(next(iter(view_links.values())))
         result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
+        deadline.check()
 
 
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):

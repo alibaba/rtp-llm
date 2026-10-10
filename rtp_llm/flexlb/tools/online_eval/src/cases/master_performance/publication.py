@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from workload.gate_evidence import write_evidence
+from workload.gate_result import freeze_gate
 
 
 def publish_performance(directory, evidence, result):
@@ -11,6 +11,6 @@ def publish_performance(directory, evidence, result):
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    write_evidence(directory / "performance-gate-evidence.json", evidence)
+    freeze_gate(directory, "performance", evidence, result)
     produce(directory, evidence, result)
     return write_report(directory, evidence, result)

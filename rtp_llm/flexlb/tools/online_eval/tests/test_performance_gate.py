@@ -518,8 +518,8 @@ class PerformanceGateTest(unittest.TestCase):
         r = analyze(e)
         self.assertEqual(r["verdict"], "PASS")
         self.assertEqual(
-            next(x for x in r["checks"] if x["metric"] == "tpot_p99_ms")["status"],
-            "NOT_APPLICABLE",
+            next(x for x in r["checks"] if x["id"] == "tpot_p99_ms")["status"],
+            "SKIP",
         )
 
     def test_workload_checksum_preserves_everything_except_rid(self):

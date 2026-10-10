@@ -1,11 +1,9 @@
 """Publish selected case views or the default view of all archived metrics."""
 
 import copy
-import json
-from pathlib import Path
 
-from cases.registry import view_capabilities
-from reporting import bundle_path, details, load_analysis, read_bundle, write_bundle
+from cases.registry import view_capabilities, ReportNotProduced
+from reporting import details, write_bundle
 from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, view
 from workload.report_panels import build_panels
@@ -51,27 +49,17 @@ def write_views(directory, analysis, names=None):
         if name == DEFAULT_VIEW:
             continue
         capability = view_capabilities().get(name)
-        if capability is not None and capability.renderer is not None:
+        if capability is None or capability.renderer is None:
+            raise ValueError("selected view has no registered renderer: " + name)
+        try:
             paths[name] = capability.renderer(directory, analysis, presentation)
-            continue
-        expected = bundle_path(directory, "run", presentation["report"]["id"])
-        if not expected.exists() and analysis["status"] in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
+        except ReportNotProduced:
+            if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
+                raise
             analysis.setdefault("unavailable_report_views", []).append(dict(
                 view=name, producer=presentation["report"]["producer"], status="NOT_PRODUCED",
-                reason="专属报告生产阶段未完成；保留失败与证据，不补算结论。",
+                reason="专属门禁证据未完成；保留失败与证据，不补算结论。",
             ))
-            continue
-        bundle = read_bundle(expected)
-        manifest = json.loads((bundle / "manifest.json").read_text())
-        if manifest.get("producer") != presentation["report"]["producer"]:
-            raise ValueError("report producer mismatch for " + name)
-        spec = json.loads((bundle / "report-spec.json").read_text())
-        frozen = load_analysis(bundle)
-        frozen["run"] = analysis
-        write_bundle(directory, "run", manifest["id"], frozen,
-                     _canonical_selected(spec, analysis, presentation), meta=provenance_from(analysis, spec.get("run_meta")),
-                     producer=manifest["producer"], role=manifest.get("role"))
-        paths[name] = bundle / manifest["entrypoint"]
     for name in names:
         if name == DEFAULT_VIEW:
             paths[name] = write_report(directory, analysis, name=name) / "report.html"
@@ -82,10 +70,3 @@ def write_views(directory, analysis, names=None):
     if DEFAULT_VIEW in paths:
         ordered.append(DEFAULT_VIEW)
     return {name: paths[name] for name in ordered}
-
-
-def _canonical_selected(spec, analysis, presentation):
-    from reporting.events import attach_events
-    return attach_events(canonical_spec(spec, analysis), presentation,
-                         origin=spec["timeOriginEpochS"],
-                         phases=analysis.get("phases", []), events=analysis.get("events", []))

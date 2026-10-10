@@ -183,30 +183,26 @@ class WorkloadReportViewsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing frozen metric unit"):
             build_panels({key: values}, {})
 
-    def test_selected_view_links_verified_analyzer_report(self):
-        curves = [
-            dict(name="P engine count", axis="count", points=[dict(x=0, y=2)]),
-            dict(name="P cache hit ratio", axis="ratio", points=[dict(x=0, y=0.8)]),
-            dict(name="P Waiting / engine", axis="queue", points=[dict(x=0, y=4)]),
-        ]
+    def test_selected_view_renders_verified_frozen_gate_once(self):
+        from cases.cache_scale_in.analysis import analyze
+        from workload.gate_result import freeze_gate
+        from test_cache_scale_gate import CacheGateTest
+        from metric_fixtures import freeze_metrics
         with tempfile.TemporaryDirectory() as d:
-            gate = write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS", "threshold": 0.5},
-                         dict(title="Gate evidence", timeAxis=dict(min=0, max=2),
-                              timeOriginLabel="observation", timeOriginEpochS=10, panels=[dict(
-                                  id="gate", title="All", timeX=True,
-                                  axes={"count": {}, "ratio": {}, "queue": {}}, series=curves,
-                              )]), producer="cache-gate", role="gate")
-            data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]},
-                           discover_reports(d, role="gate"))
-            links = write_views(d, data, ["default.yaml", "cache_scale_in.yaml"])
-            default = links["default.yaml"].parent
-            self.assertEqual(links["cache_scale_in.yaml"].resolve(),
-                             (gate / "report.html").resolve())
-            read_bundle(default)
-            sections = json.dumps(json.loads((default / "report-spec.json").read_text())["sections"], ensure_ascii=False)
-            self.assertIn("门禁检查", sections)
-            self.assertEqual(load_analysis(gate)["threshold"], 0.5)
-            self.assertNotIn("../cache-scale-in/report.html", sections)
+            e = CacheGateTest().evidence(.8)
+            decision = analyze(e)
+            freeze_gate(d, "cache", e, decision)
+            freeze_metrics(d, "cache_scale_in")
+            before = (Path(d) / "cache-gate-result.json").read_bytes()
+            from cases.cache_scale_in import report
+            with mock.patch.object(report, "write_report", wraps=report.write_report) as render:
+                links = write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])
+            self.assertEqual(render.call_count, 1)
+            frozen = load_analysis(links["cache_scale_in.yaml"].parent)
+            self.assertEqual({k: v for k, v in frozen.items() if k != "run"}, decision)
+            self.assertEqual(frozen["run"]["status"], "PASS")
+            self.assertEqual(before, (Path(d) / "cache-gate-result.json").read_bytes())
+            read_bundle(links["default.yaml"].parent)
 
     def test_missing_view_source_and_invalid_declarations_fail_loud(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(OSError):
@@ -235,11 +231,14 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertFalse((Path(d) / "reports/run/cache-scale-in").exists())
             self.assertIn("未生成的报告视角", paths[DEFAULT_VIEW].read_text())
 
-    def test_failed_run_does_not_hide_corrupt_produced_report(self):
+    def test_failed_run_does_not_hide_corrupt_frozen_gate(self):
+        from cases.cache_scale_in.analysis import analyze
+        from workload.gate_result import freeze_gate
+        from test_cache_scale_gate import CacheGateTest
         with tempfile.TemporaryDirectory() as d:
-            bundle = write_bundle(d, "run", "cache-scale-in", {},
-                                  dict(title="gate", panels=[]), producer="cache-gate")
-            (bundle / "analysis.json").write_text("{}")
+            e = CacheGateTest().evidence(.8)
+            freeze_gate(d, "cache", e, analyze(e))
+            (Path(d) / "cache-gate-result.json").write_text("{}")
             data = payload()
             data["status"] = "ERROR"
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):

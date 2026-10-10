@@ -63,3 +63,9 @@ def canonical_spec(spec, analysis):
                     if section.get("title") not in {"门禁检查", "有效性与证据完整性", "其他报告视角", "门禁详细结果"})
     result["sections"] = sections
     return result
+
+def selected_spec(spec, analysis, presentation):
+    from reporting.events import attach_events
+    return attach_events(canonical_spec(spec, analysis), presentation,
+                         origin=spec["timeOriginEpochS"],
+                         phases=analysis.get("phases", []), events=analysis.get("events", []))

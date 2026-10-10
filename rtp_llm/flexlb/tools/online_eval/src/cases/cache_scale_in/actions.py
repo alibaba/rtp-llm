@@ -3,10 +3,11 @@
 import math
 from concurrent.futures import ThreadPoolExecutor
 
-from scenario.contracts import CheckResult, StageHandler, StageOutput
+from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from runtime.observation import ObservationClock, SampleBudget, poll_samples, verdict_status
-from workload.gate_evidence import write_evidence, new_evidence
+from runtime.observation import ObservationClock, SampleBudget, poll_samples
+from artifacts.json_io import write_json
+from workload.gate_evidence import new_evidence
 from workload.run_provenance import gate_provenance
 from runtime.mock_control import mock_json
 from cases.cache_scale_in.analysis import (
@@ -18,7 +19,7 @@ from cases.cache_scale_in.analysis import (
     topology_ready,
     window,
 )
-from cases.cache_scale_in.publication import publish_cache
+from workload.gate_result import freeze_gate, gate_check
 
 from cases.cache_scale_in.inputs import validate_criteria
 
@@ -195,7 +196,7 @@ def observe(ctx, p, deadline):
             except Exception as exc:
                 evidence.setdefault("removal_errors", []).append(dict(index=index, error=str(exc)))
         evidence["measurement_scope"] = scope_contract(evidence)
-        write_evidence(path, evidence)
+        write_json(path, evidence)
     return StageOutput(
         {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
         artifacts=[str(path)],
@@ -243,26 +244,21 @@ def check(ctx, p, deadline):
         ctx.monitor.archive()
     except Exception as exc:
         evidence["errors"].append("monitor archive: " + str(exc))
-    write_evidence(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
+    write_json(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
     result = analyze(evidence)
-    publish_cache(ctx.artifact_dir, evidence, result)
-    status = verdict_status(result["verdict"])
+    path = freeze_gate(ctx.artifact_dir, "cache", evidence, result)
     return StageOutput(
         checks=[
-            CheckResult(
-                "cache_stability",
-                status,
-                actual=result,
-                expected="valid survivor cache measurement without sustained hit collapse",
-            )
+            gate_check("cache_stability", result, path,
+                       "valid survivor cache measurement without sustained hit collapse")
         ],
         artifacts=[
             str(ctx.artifact_dir / name)
             for name in (
                 "cache-gate-evidence.json",
-                "reports/run/cache-scale-in/analysis.json",
-                "reports/run/cache-scale-in/report.html",
+                "cache-gate-result.json",
+                "cache-gate-manifest.json",
             )
         ],
     )

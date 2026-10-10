@@ -303,9 +303,13 @@ def analyze(evidence):
             if first_collapse is not None and w["valid"] and recovery is None:
                 recovery = w["end"]
             run, previous_end = 0, None
-    verdict = (
-        "INVALID" if errors else ("FAIL" if first_collapse is not None else "PASS")
-    )
+    from analysis.checks import evaluate
+    from analysis.gates import gate_checks
+    verdict, checks = gate_checks([
+        evaluate("collapse_detected", int(first_collapse is not None), "eq", 0,
+                 evidence=dict(op="eq", threshold=threshold, sustain_s=p["sustain_s"],
+                               first_collapse_s=first_collapse)),
+    ], sorted(set(errors)))
     half = (evidence["baseline_start"] + evidence["baseline_end"]) / 2
     halves = [window(rows, lo, hi, evidence["initial_engines"], p["max_gap_s"])
               for lo, hi in ((evidence["baseline_start"], half), (half, evidence["baseline_end"]))]
@@ -320,7 +324,7 @@ def analyze(evidence):
         collapse_detected=int(first_collapse is not None),
     )
     return dict(
-        cache_scale_in_analysis_schema_version=1,
+        cache_scale_in_analysis_schema_version=2,
         gate_metrics=gate_metrics,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
@@ -328,6 +332,7 @@ def analyze(evidence):
                            for i, row in enumerate(evidence.get("removals", []))
                            if row.get("drained") is False],
         verdict=verdict,
+        checks=checks,
         errors=sorted(set(errors)),
         threshold=threshold,
         baseline=baseline,

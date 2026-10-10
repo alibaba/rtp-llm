@@ -87,7 +87,8 @@ def test_canonical_reassembly_keeps_native_chart_origin_for_case_events(tmp_path
     evidence['events'] = [dict(id='withdraw_start', epoch_s=1020, t=20)]
     from metric_fixtures import freeze_metrics
     freeze_metrics(tmp_path, "cache_scale_in")
-    bundle_spec = publish_cache(tmp_path, evidence, analyze(evidence))
+    bundle = publish_cache(tmp_path, evidence, analyze(evidence))
+    bundle_spec = json.loads((bundle / "report-spec.json").read_text())
     assert bundle_spec['events'][0]['t'] == 20
     analysis = payload()
     analysis['events'] = evidence['events']

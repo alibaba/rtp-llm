@@ -30,7 +30,8 @@ def catalog():
                 "estimated_duration_s": i + 1,
                 "metadata": {"kind": "functional", "description": "Fixture"},
                 "execution": {"timeout_s": 60, "stage_timeout_s": 30,
-                              "cleanup_timeout_s": 10, "collection": "diagnostic"},
+                              "cleanup_timeout_s": 10, "finalize_timeout_s": 20,
+                              "report_timeout_s": 10, "collection": "diagnostic"},
                 "resource_budget": {
                     "backend": "java_mock",
                     "initial_workers": 6,

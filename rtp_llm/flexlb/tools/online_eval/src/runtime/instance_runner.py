@@ -14,11 +14,11 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from artifacts.json_io import write_json
 from pathlib import Path
 
 from schema_contract import matches_schema
@@ -191,19 +191,7 @@ def _write_timings(rows):
                 for (key, value) in sorted(merged.items())
             ],
         }
-        _write_json(path, doc)
-
-
-def _write_json(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        json.dump(payload, stream, indent=2)
-        stream.write("\n")
-    try:
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        write_json(path, doc)
 
 
 def _error(instance, message):
@@ -230,6 +218,9 @@ def _execution_issues(row):
             or item.get("error")
         ):
             issues.append("cleanup did not complete successfully")
+    for phase in row.get("finalization", []):
+        if not isinstance(phase, dict) or phase.get("status") != "PASS" or phase.get("error"):
+            issues.append("finalization did not complete successfully")
     failed_checks = set()
     green = row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
     for stage in stages:
@@ -356,7 +347,7 @@ def _run_lane(index, lane, lease, args, out, children):
     segment.mkdir(parents=True, exist_ok=True)
     result_path = segment / "scenarios.json"
     lease_path = segment / "lease.json"
-    _write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
+    write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
     command = [
         sys.executable,
         str(SCENARIO_RUNNER),
@@ -376,7 +367,8 @@ def _run_lane(index, lane, lease, args, out, children):
     try:
         execution = [instance.metadata["execution"] for instance in group]
         timeout = (
-            sum((item["timeout_s"] + item["cleanup_timeout_s"] for item in execution))
+            sum((item["timeout_s"] + item["cleanup_timeout_s"]
+                 + item["finalize_timeout_s"] + item["report_timeout_s"] for item in execution))
             + 30
             if execution
             else None
@@ -535,7 +527,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     print(json.dumps(manifest, indent=2))
     if args.dry_run:
         return 0
-    _write_json(out / "manifest.json", manifest)
+    write_json(out / "manifest.json", manifest)
     started = time.monotonic()
     children = ChildProcesses()
     pool = ThreadPoolExecutor(max_workers=len(lanes))
@@ -558,7 +550,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         payload["summary"]["exit_code"] = 130
         payload["summary"]["interrupted"] = True
     target = Path(args.json).resolve() if args.json else out / "aggregate.json"
-    _write_json(target, payload)
+    write_json(target, payload)
     _print_generated_reports(payload["instances"])
     if getattr(args, "archive", None):
         from artifacts.archive import create_archive

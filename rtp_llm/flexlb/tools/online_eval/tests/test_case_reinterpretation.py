@@ -12,7 +12,8 @@ import pytest
 from cases.master_performance.analysis import analyze
 from cases.master_performance.publication import publish_performance
 from cases.master_performance.replay import performance_main
-from cases.master_performance.report import refresh_report
+from cases.master_performance.report import render_view
+from reporting.view_config import view
 from test_performance_gate import evidence
 
 
@@ -62,7 +63,7 @@ def test_html_reinterpretation_is_self_contained_and_source_is_read_only(tmp_pat
     provenance = metrics['metrics']['performance_gate/ttft_p99_ms'][0]['provenance']
     assert provenance['evidence']['path'] == str(destination / 'performance-gate-evidence.json')
     shutil.rmtree(source)
-    refresh_report(destination)
+    render_view(destination, None, view("master_performance.yaml"))
     assert (destination / 'reports/run/master-performance/report.html').is_file()
 
 
@@ -129,4 +130,4 @@ def test_raw_query_archives_are_copied_into_new_output(tmp_path):
     assert archive_bytes(source) == before
     assert (destination / 'telemetry/2/queries.json').read_bytes() == (telemetry / 'queries.json').read_bytes()
     shutil.rmtree(source)
-    refresh_report(destination)
+    render_view(destination, None, view("master_performance.yaml"))

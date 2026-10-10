@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from workload.gate_evidence import write_evidence
+from workload.gate_result import freeze_gate
 
 
 def publish_cache(directory, evidence, result, prepared=None):
@@ -11,6 +11,6 @@ def publish_cache(directory, evidence, result, prepared=None):
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    write_evidence(directory / "cache-gate-evidence.json", evidence)
+    freeze_gate(directory, "cache", evidence, result)
     produce(directory, evidence, result)
     return write_report(directory, evidence, result, prepared=prepared)

@@ -12,6 +12,8 @@
 | `BLOCKED` | 前置阶段失败，依赖步骤未执行 |
 | `runtime_validity=INVALID` | 证据不足以发布成功结论，即使局部检查为 PASS |
 
+实例 `execution_status` 保存阶段与清理结果，`finalization` 记录证据与报告两段收尾的状态、预算、耗时和错误。`status: FINALIZING` 是未完成检查点；报告交付失败不能改写门禁文件中的既定结论，调用方同时检查整体 status、runtime validity 和 report status。
+
 性能门禁的 `INVALID` 映射为执行器 `ERROR`。专属门禁 PASS 不能代替整轮采集与清理通过。故障窗口的预期业务错误由阶段合同解释，采集缺失仍是证据错误。
 
 ## 收取产物
@@ -21,6 +23,7 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 | 产物 | 用途 |
 |---|---|
 | `aggregate.json`、实例 `result.json` | 汇总、阶段与检查状态 |
+| `<gate>-gate-result.json`、对应 evidence / manifest | 独立门禁细项、判定与输入摘要；报告未生成时仍可读取 |
 | `workload-evidence.json`、原始 journal | 请求、资源身份、进程代次与阶段证据 |
 | `telemetry/` | 查询、原始采样和采集错误 |
 | `metrics.json` | 冻结的指标定义、来源、标签和完整时间序列 |

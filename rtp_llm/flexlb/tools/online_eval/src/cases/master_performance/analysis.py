@@ -4,7 +4,8 @@ import bisect
 import math
 
 from schema_contract import matches_schema
-from analysis.checks import compare
+from analysis.checks import compare, CheckResult, evaluate
+from analysis.gates import gate_checks
 from analysis.statistics import percentile_nr
 from cases.master_performance.inputs import validate
 from input_contract import finite_number as finite
@@ -63,8 +64,7 @@ def engine_tps_checks(evidence):
         value = sum(means) / expected
         metrics[name] = value
         metrics[name + "_engine_count"] = len(engines)
-        checks.append(dict(metric=name, actual=value, bound=bounds[name], direction="min",
-                           status="PASS" if compare(value, "ge", bounds[name]) else "FAIL"))
+        checks.append(evaluate(name, value, "ge", bounds[name], evidence={"op": "ge"}))
     return metrics, checks
 
 
@@ -75,7 +75,7 @@ def percentile(values, q=0.99):
 def analyze(evidence):
     errors = []
     result = dict(
-        performance_analysis_schema_version=1,
+        performance_analysis_schema_version=2,
         verdict="INVALID",
         errors=errors,
         checks=[],
@@ -161,6 +161,7 @@ def analyze(evidence):
             errors.append("observer coverage gap")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append(str(exc))
+        result["verdict"], result["checks"] = gate_checks([], errors)
         return result
 
     cohort = [b[rid] for rid, r in a.items() if lo <= r["send_start_epoch_ms"] < hi]
@@ -252,15 +253,12 @@ def analyze(evidence):
         passed = na or (
             v is not None and compare(v, "ge" if direction == "min" else "le", c[key])
         )
-        checks.append(
-            dict(
-                metric=metric,
-                actual=v,
-                bound=c[key],
-                direction=direction,
-                status="NOT_APPLICABLE" if na else "PASS" if passed else "FAIL",
-            )
-        )
+        checks.append(CheckResult(
+            metric, "SKIP" if na else "PASS" if passed else "FAIL",
+            detail="single-token output has no TPOT" if na else "",
+            actual=v, expected=c[key],
+            evidence={"op": "ge" if direction == "min" else "le"},
+        ))
     # Curves use disjoint completion buckets; cohort goodput above includes delayed terminals.
     try:
         engine_metrics, engine_checks = engine_tps_checks(evidence)
@@ -280,13 +278,6 @@ def analyze(evidence):
                 inflight=inflight(end),
             )
         )
-    result.update(
-        metrics=m,
-        checks=checks,
-        verdict=(
-            "INVALID"
-            if errors
-            else "FAIL" if any(x["status"] == "FAIL" for x in checks) else "PASS"
-        ),
-    )
+    verdict, checks = gate_checks(checks, errors)
+    result.update(metrics=m, checks=checks, verdict=verdict)
     return result

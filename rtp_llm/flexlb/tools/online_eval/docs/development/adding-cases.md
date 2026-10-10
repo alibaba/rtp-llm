@@ -110,7 +110,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
-若需最终归档后刷新报告，program 声明可调用的 `REPORT_FINALIZER(directory)`；只读取已发布的结果与指标，不重判或重复生产指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
+program 可声明 `produce_gate_metrics(directory)`，在最终遥测导出后投影已冻结的门禁数值。报告通过 `REPORT_VIEWS` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
 
 ## Action 的边界
 
@@ -121,7 +121,7 @@ program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数�
 - 协议访问复用 `runtime/`，参数校验复用 `scenario.parameters.validate_fields`；不导入其他 action 的私有函数共享工具。
 - 多操作的流程与编译时分支放在 program；单操作的现场判断与有界重试放在 handler。跨阶段动态跳转没有现成契约，不能通过 YAML 表达式或隐式跳步实现。
 
-handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
+handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。需要导出证据的资源在 `register_resource(..., evidence=exporter)` 显式登记适配器；`exporter(value, collection_profile)` 返回 `ResourceEvidence`，声明请求记录、完整性错误、生产者身份和预期中断。公共策略通过 `export_evidence` 枚举声明，不猜测资源方法或 case 名。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
 
 基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查结果保留定义、来源、实际窗口和样本信息；观测不足统一通过 `invalid_check` 返回 ERROR，并将 `validity: INVALID` 放在 `evidence`，不当作实际测量值；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
 

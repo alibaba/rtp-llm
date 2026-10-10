@@ -67,7 +67,7 @@ class RequestBatch(ClientRecords):
         self.ctx, self.ops, self.params = ctx, ctx.ops, params
         self.entries = []
         self.cancelled = False
-        self.artifact = ctx.artifact_dir / f"requests-{len(ctx._resources)+1}.json"
+        self.artifact = ctx.artifact_dir / f"requests-{ctx.resource_count+1}.json"
 
     def persist(self):
         self.artifact.write_text(json.dumps(self.snapshot_records(), indent=2) + "\n")

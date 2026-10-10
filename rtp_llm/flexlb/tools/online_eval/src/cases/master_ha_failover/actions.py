@@ -7,6 +7,7 @@ from cases.master_ha_failover.analysis import measure_client_metric, row_ts_ms
 from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
 from runtime.master_control import require_process
 from scenario.parameters import validate_fields
+from runtime.resource_evidence import row_evidence
 from scenario.contracts import StageHandler, StageOutput
 
 
@@ -93,7 +94,7 @@ def _ha_start(ctx, params, deadline):
         ctx.backend.manager.master_instance_target(ctx.env, target)
         for target in params["targets"]
     ]
-    directory = ctx.artifact_dir / f"ha-client-{len(ctx._resources)}"
+    directory = ctx.artifact_dir / f"ha-client-{ctx.resource_count}"
     directory.mkdir(parents=True, exist_ok=True)
     client = HaReplayClient(
         ctx.backend.manager,
@@ -123,7 +124,15 @@ def _ha_start(ctx, params, deadline):
             else {}
         ),
     )
-    handle = ctx.register_resource("ha_client", client, client.cleanup)
+    def export_client(value, profile):
+        from runtime.resource_evidence import ResourceEvidence
+        snapshot = value.evidence_snapshot()
+        manifest = snapshot if profile == "diagnostic" else {
+            k: v for k, v in snapshot.items() if k != "records"}
+        manifest["request_journal"] = snapshot["path"]
+        return ResourceEvidence(requests=manifest, producer=id(value),
+            errors=() if snapshot["complete"] else tuple(snapshot["errors"] or ["incomplete HA client"]))
+    handle = ctx.register_resource("ha_client", client, client.cleanup, evidence=export_client)
     deadline.check()
     client.start()
     deadline.check()
@@ -144,7 +153,7 @@ def _ha_finish(ctx, params, deadline):
     rows, path = client.finish(deadline, stop_sending=params.get("stop_sending", False))
     sampler = getattr(client, "state_sampler", None)
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
+        {"rows": ctx.register_resource("ha_rows", rows, historical=True, evidence=row_evidence)},
         artifacts=[str(path)] + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
     )
 
@@ -231,7 +240,7 @@ def _window(ctx, params, deadline):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
+        {"rows": ctx.register_resource("ha_rows", selected, historical=True, evidence=row_evidence)}
     )
 
 

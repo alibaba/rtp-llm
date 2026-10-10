@@ -148,10 +148,11 @@ def build_spec(directory, evidence, result, prepared):
     return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
 
-def write_report(directory, evidence, result, prepared=None):
+def write_report(directory, evidence, result, prepared=None, *, run=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     prepared = prepared if prepared is not None else prepare_report(directory, evidence)
+    presentation = view("cache_scale_in.yaml")
     spec = build_spec(directory, evidence, result, prepared)
     provenance = evidence.get("provenance", {})
     meta = run_meta(
@@ -174,7 +175,13 @@ def write_report(directory, evidence, result, prepared=None):
             )
         ],
     )
-    write_bundle(
+    if run is not None:
+        from reporting.run_context import selected_spec
+        from reporting.run_context import provenance_from
+        spec = selected_spec(spec, run, presentation)
+        meta = provenance_from(run, meta)
+        result = dict(result, run=run)
+    return write_bundle(
         directory,
         "run",
         "cache-scale-in",
@@ -184,7 +191,6 @@ def write_report(directory, evidence, result, prepared=None):
         producer="cache-gate",
         role="gate",
     )
-    return spec
 
 
 def validate_view(path, data, fail):
@@ -196,3 +202,9 @@ def validate_view(path, data, fail):
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,
     }, fail)
+
+
+def render_view(directory, run, presentation):
+    from workload.gate_result import load_gate
+    evidence, result = load_gate(directory, "cache")
+    return write_report(directory, evidence, result, run=run) / "report.html"

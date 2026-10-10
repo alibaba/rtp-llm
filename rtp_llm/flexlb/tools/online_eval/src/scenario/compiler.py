@@ -8,7 +8,7 @@ from runtime.resource_plan import VICTIM_OFFSETS
 from runtime.perf_presets import capture_defaults
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
-from scenario.suites import EXECUTION_FIELDS
+from scenario.suites import EXECUTION_FIELDS, EXECUTION_BUDGETS
 from scenario.environment_config import environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {
@@ -107,7 +107,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
         execution = mapping(
             doc.get("execution", {}),
             source + ".execution",
-            {"timeout_s", "stage_timeout_s", "cleanup_timeout_s"},
+            EXECUTION_BUDGETS,
         )
         budgets = {
             key: number(
@@ -117,6 +117,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 ("timeout_s", 600),
                 ("stage_timeout_s", 60),
                 ("cleanup_timeout_s", 120),
+                ("finalize_timeout_s", 120),
+                ("report_timeout_s", 60),
             )
         }
         variants = doc.get("variants", [{"id": "default"}])

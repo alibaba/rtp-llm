@@ -1,7 +1,7 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
 from cases.registry import ReportView
-from cases.master_performance.report import validate_view
+from cases.master_performance.report import validate_view, render_view
 
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
@@ -69,12 +69,15 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-def REPORT_FINALIZER(directory):
-    from cases.master_performance.report import refresh_report
-
-    refresh_report(directory)
-
-
 REPORT_VIEWS = {
-    "master_performance.yaml": ReportView(validate_view),
+    "master_performance.yaml": ReportView(validate_view, render_view),
 }
+
+
+def produce_gate_metrics(directory):
+    from workload.gate_result import load_gate
+    from cases.master_performance.metrics import produce
+    from pathlib import Path
+    if (Path(directory) / "performance-gate-manifest.json").is_file():
+        evidence, result = load_gate(directory, "performance")
+        produce(directory, evidence, result)

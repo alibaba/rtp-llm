@@ -93,6 +93,7 @@ class RuntimeContext:
         self.outputs = {}
         self.report_events = []
         self._resources = {}
+        self._evidence_exporters = {}
         self._cleanup = []
         self.cleanup_results = []
         self.enforce_deadlines = enforce_deadlines
@@ -116,11 +117,30 @@ class RuntimeContext:
     def add_cleanup(self, name, callback):
         self._cleanup.append((name, callback))
 
-    def register_resource(self, kind, value, cleanup=None, historical=False):
+    @property
+    def resource_count(self):
+        return len(self._resources)
+
+    def export_evidence(self, profile, deadline):
+        from runtime.resource_evidence import ResourceEvidence
+        for identity, exporter in self._evidence_exporters.items():
+            deadline.check()
+            handle, value, _ = self._resources[identity]
+            snapshot = exporter(value, profile)
+            if not isinstance(snapshot, ResourceEvidence):
+                raise TypeError("resource exporter must return ResourceEvidence")
+            deadline.check()
+            yield dict(handle), snapshot
+
+    def register_resource(self, kind, value, cleanup=None, historical=False, *, evidence=None):
+        if evidence is not None and not callable(evidence):
+            raise TypeError("resource evidence exporter must be callable")
         handle = ResourceHandle(
             kind, f"resource_{len(self._resources) + 1}", self.env_epoch
         ).to_dict()
         self._resources[handle["id"]] = (handle, value, historical)
+        if evidence is not None:
+            self._evidence_exporters[handle["id"]] = evidence
         if cleanup is not None:
             self.add_cleanup(handle["id"], cleanup)
         return dict(handle)
@@ -392,13 +412,51 @@ def execute_instance(
     result["test_kind"] = instance.get("test_kind", "functional")
     if "implementation" in instance:
         result["implementation"] = copy.deepcopy(instance["implementation"])
+    from artifacts.json_io import write_json
+    result["execution_status"] = result["status"]
+    result["finalization"] = []
+    result_path = ctx.artifact_dir / "result.json"
+    def checkpoint():
+        # An interrupted finalizer must never leave a terminal-looking PASS.
+        pending = dict(result, status="FINALIZING") if _policy is not None else result
+        write_json(result_path, pending)
+    checkpoint()
     if _policy is not None:
-        try:
-            _policy.finalize(ctx, result)
-        except Exception as exc:
-            result["status"] = "ERROR"
-            result["error"] = f"workload evidence/report failed: {exc!r}"
-    (ctx.artifact_dir / "result.json").write_text(
-        json.dumps(result, indent=2, allow_nan=False) + "\n"
-    )
+        analysis = None
+        for phase, budget_key in (("evidence", "finalize_timeout_s"), ("report", "report_timeout_s")):
+            phase_start = clock()
+            budget = instance["execution"][budget_key]
+            deadline = Deadline(phase_start + budget, clock, sleeper)
+            row = dict(phase=phase, status="RUNNING", budget_s=budget, error=None, duration_ms=0)
+            result["finalization"].append(row)
+            checkpoint()
+            try:
+                with interruptible(deadline, enforce_deadlines):
+                    if phase == "evidence":
+                        analysis = _policy.finalize(ctx, result, deadline)
+                    else:
+                        _policy.render(ctx, result, analysis, deadline)
+                    deadline.check()
+                row["status"] = "PASS"
+            except Exception as exc:
+                row["status"] = "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
+                row["error"] = f"{type(exc).__name__}: {exc}"
+                result["status"] = row["status"]
+                result["error"] = result["error"] or f"{phase} finalization failed: {row['error']}"
+                if phase == "evidence":
+                    result.setdefault("workload", {}).update(runtime_validity="INVALID", report_status="BLOCKED")
+                else:
+                    result["workload"]["report_status"] = row["status"]
+            row["duration_ms"] = int((clock() - phase_start) * 1000)
+            result["duration_ms"] = int((clock() - started) * 1000)
+            if phase == "report" and row["status"] == "PASS":
+                result["workload"]["report_status"] = "PASS"
+            checkpoint()
+            if phase == "evidence" and row["status"] != "PASS":
+                result["finalization"].append(dict(phase="report", status="BLOCKED",
+                    budget_s=instance["execution"]["report_timeout_s"],
+                    error="evidence finalization failed", duration_ms=0))
+                break
+    result["duration_ms"] = int((clock() - started) * 1000)
+    write_json(result_path, result)
     return result

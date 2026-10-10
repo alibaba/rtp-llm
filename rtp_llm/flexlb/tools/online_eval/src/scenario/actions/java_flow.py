@@ -94,7 +94,8 @@ def _start(ctx, p, deadline):
             flow.stop_sending(d)
             flow.drain(d)
 
-    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup)
+    from runtime.resource_evidence import flow_evidence
+    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
     flow.start(trace, environment, deadline,
                target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])

@@ -1,6 +1,6 @@
 # 报告契约
 
-报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；选中面板保留曲线的 `hidden`，不再用生产者另算全局可见性。面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与可选渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；选中面板保留曲线的 `hidden`，不再用生产者另算全局可见性。面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
 
 ## 输入与装配
 
@@ -9,7 +9,7 @@
 | 块 | 职责 |
 |---|---|
 | `kind` | `default` 展示全部已归档指标，`selected` 展示 YAML 选择的指标；不能在 YAML 指定 Python 模块 |
-| `report` | `subtitle`；已生产报告另声明 `id`、`producer`，用于定位和校验 bundle |
+| `report` | `subtitle`；已生产报告另声明 `id`、`producer`，声明最终 bundle 身份和生产者 |
 | `metrics` | `query_plan` 选择指标集合；`diagnostic_only` 明确哪些已采指标不绘图 |
 | `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
 | `sections` | 按稳定 section ID 声明附录标题、表头和默认开合状态 |
@@ -63,3 +63,9 @@
 控制变量来自冻结的 configuration、workload、environment 与 criteria。字段缺失标 UNKNOWN，不从两边同时缺失推断一致。对比不产生顶层 verdict，命令退出码只描述读取、校验与写入是否成功；入口见[命令导航](../development/entrypoints.md)。
 
 离线重判必须显式指定 `--reinterpret`，输出目录位于原证据归档之外且为空。原归档只读；来源证据 SHA 与当前分析器 SHA 写入重判证据，指标物化和报告发布只写新目录。`--json-only` 同样遵守目录保护和溯源规则。
+
+## 门禁与发布
+
+在线门禁独立保存 `<gate>-gate-evidence.json`、`<gate>-gate-result.json` 和 `<gate>-gate-manifest.json`。manifest 最后原子提交，记录输入和结果的摘要；读取时校验固定文件名和摘要。缺少提交的 manifest 表示尚未产生门禁，已提交工件缺失或校验失败属于损坏，不能回退成普通缺失视图。
+
+每个专属视图由 program 的 `ReportView` 显式注册 renderer。在线执行在资源清理、证据分析和数值投影完成后调用 renderer，直接写出包含运行上下文的最终 bundle。公共报告层不读取旧 bundle 补写运行上下文；重绘只消费校验后的冻结结果和归档指标，不重判。缺少未提交门禁且运行已失败时，可生成默认监控视图，并明确显示未生成的视角。

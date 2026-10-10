@@ -313,9 +313,10 @@ class JavaMockBackend:
         )
 
     def start_requests(self, ctx, params, deadline):
+        from runtime.resource_evidence import request_evidence
         batch = RequestBatch(ctx, params)
         handle = ctx.register_resource(
-            "requests", batch, batch.cleanup, historical=True
+            "requests", batch, batch.cleanup, historical=True, evidence=request_evidence
         )
         batch.submit(deadline)
         return handle

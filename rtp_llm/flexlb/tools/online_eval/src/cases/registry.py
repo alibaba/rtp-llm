@@ -1,7 +1,7 @@
 """Registered Python case programs. YAML can only select entries in this registry."""
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 
 PROGRAMS = {
@@ -12,22 +12,14 @@ PROGRAMS = {
 }
 
 
-def finalize_reports(program, directory):
-    """Call a declared post-archive presentation hook without changing the verdict."""
-    from importlib import import_module
-
-    module = import_module(PROGRAMS[program])
-    finalizer = getattr(module, "REPORT_FINALIZER", None)
-    if finalizer is not None:
-        if not callable(finalizer):
-            raise ValueError("REPORT_FINALIZER must be callable")
-        finalizer(directory)
+class ReportNotProduced(FileNotFoundError):
+    """No committed source for this view; corruption is a separate hard error."""
 
 
 @dataclass(frozen=True)
 class ReportView:
     validator: Callable
-    renderer: Optional[Callable] = None
+    renderer: Callable
 
 
 def view_capabilities():
@@ -46,9 +38,19 @@ def view_capabilities():
             if name == "default.yaml":
                 raise ValueError("reserved registered view: " + name)
             if (not isinstance(capability, ReportView) or not callable(capability.validator)
-                    or (capability.renderer is not None and not callable(capability.renderer))):
+                    or not callable(capability.renderer)):
                 raise ValueError("invalid registered view capability: " + name)
             if name in views and views[name] != capability:
                 raise ValueError("conflicting registered view capability: " + name)
             views[name] = capability
     return views
+
+
+def produce_gate_metrics(program, directory):
+    """Project frozen gate values after telemetry export, before presentation."""
+    from importlib import import_module
+    producer = getattr(import_module(PROGRAMS[program]), "produce_gate_metrics", None)
+    if producer is not None:
+        if not callable(producer):
+            raise ValueError("produce_gate_metrics must be callable")
+        producer(directory)

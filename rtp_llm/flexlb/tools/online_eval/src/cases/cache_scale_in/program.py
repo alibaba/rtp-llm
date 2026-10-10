@@ -1,7 +1,7 @@
 """Warm once, shrink in one step, keep the Java sender running, adjudicate offline."""
 
 from cases.registry import ReportView
-from cases.cache_scale_in.report import validate_view
+from cases.cache_scale_in.report import validate_view, render_view
 
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
@@ -71,5 +71,14 @@ def default(case):
 
 
 REPORT_VIEWS = {
-    "cache_scale_in.yaml": ReportView(validate_view),
+    "cache_scale_in.yaml": ReportView(validate_view, render_view),
 }
+
+
+def produce_gate_metrics(directory):
+    from workload.gate_result import load_gate
+    from cases.cache_scale_in.metrics import produce
+    from pathlib import Path
+    if (Path(directory) / "cache-gate-manifest.json").is_file():
+        evidence, result = load_gate(directory, "cache")
+        produce(directory, evidence, result)

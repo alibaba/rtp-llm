@@ -57,7 +57,17 @@ def _fault(ctx, params, deadline):
     process = _process(ctx, params["target"])
     fault = MasterFault(params["target"], params["mode"], process, ctx.clock())
     fault.started_epoch_s = time.time()
-    handle = ctx.register_resource("master_fault", fault, fault.cleanup)
+    epoch = ctx.env_epoch
+    def export_fault(value, profile):
+        from runtime.resource_evidence import ResourceEvidence
+        if not value.injected:
+            return ResourceEvidence()
+        return ResourceEvidence(outages=(dict(
+            source=f"{epoch}/master-{value.target}",
+            started_epoch_s=value.started_epoch_s,
+            ended_epoch_s=value.restored_epoch_s or time.time(), reason=value.mode,
+        ),))
+    handle = ctx.register_resource("master_fault", fault, fault.cleanup, evidence=export_fault)
     manager = ctx.backend.manager
     if fault.mode == "freeze":
         process.freeze()
@@ -199,7 +209,7 @@ def _ready(ctx, params, deadline):
     )
     prefill_max = params.get("prefill_residual_max", 0)
     samples = []
-    artifact = ctx.artifact_dir / f"master-readiness-{len(ctx._resources)}.json"
+    artifact = ctx.artifact_dir / f"master-readiness-{ctx.resource_count}.json"
     # Endpoint failures/missing fields are errors, never observations of zero.
     # Valid but not-yet-converged samples are retained until the stage deadline.
     try:

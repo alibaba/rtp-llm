@@ -14,7 +14,8 @@ from metric_fixtures import freeze_metrics
 
 def write_report(directory, evidence, result, prepared=None):
     freeze_metrics(directory, "cache_scale_in")
-    return publish_cache(directory, evidence, result, prepared)
+    bundle = publish_cache(directory, evidence, result, prepared)
+    return json.loads((bundle / "report-spec.json").read_text())
 from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers

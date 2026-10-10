@@ -42,10 +42,15 @@ class ReportPresentationTest(unittest.TestCase):
 
     def test_dedicated_is_primary_even_when_full_view_is_first_in_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
-            original = {"verdict": "FAIL", "checks": [], "threshold": 0.3}
-            bundle = write_bundle(directory, "run", "cache-scale-in", original,
-                                  dict(title="old", panels=[], kpis=[], timeOriginEpochS=10),
-                                  producer="cache-gate", role="gate")
+            from test_cache_scale_gate import CacheGateTest
+            from cases.cache_scale_in.analysis import analyze
+            from workload.gate_result import freeze_gate
+            from metric_fixtures import freeze_metrics
+            evidence = CacheGateTest().evidence(.3)
+            original = analyze(evidence)
+            freeze_gate(directory, "cache", evidence, original)
+            freeze_metrics(directory, "cache_scale_in")
+            bundle = Path(directory) / "reports/run/cache-scale-in"
             source = analysis()
             with mock.patch("workload.report.build_panels", return_value=[]):
                 paths = write_views(directory, source, ["default.yaml", "cache_scale_in.yaml"])

@@ -59,10 +59,11 @@ def test_configuration_gate_lines_do_not_hide_missing_measurements():
 
 
 @pytest.mark.parametrize('declaration', [
-    {'default.yaml':registry.ReportView(lambda *args: None)},
-    {'bad/path.yaml':registry.ReportView(lambda *args: None)},
-    {'extra.yaml':registry.ReportView('invalid')},
+    {'default.yaml':registry.ReportView(lambda *args: None, lambda *args: None)},
+    {'bad/path.yaml':registry.ReportView(lambda *args: None, lambda *args: None)},
+    {'extra.yaml':registry.ReportView('invalid', lambda *args: None)},
     {'extra.yaml':registry.ReportView(lambda *args: None, 'invalid')},
+    {'extra.yaml':registry.ReportView(lambda *args: None, None)},
     [],
 ])
 def test_registry_rejects_invalid_case_view_capabilities(declaration):
@@ -74,7 +75,7 @@ def test_registry_rejects_invalid_case_view_capabilities(declaration):
 
 
 def test_two_registered_programs_cannot_assign_conflicting_view_capabilities():
-    modules = [SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None)})
+    modules = [SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None, lambda *args: None)})
                for _ in range(2)]
     with mock.patch.dict(registry.PROGRAMS, {'a':'a.program','b':'b.program'}, clear=True), \
          mock.patch('importlib.import_module', side_effect=modules):
@@ -83,7 +84,7 @@ def test_two_registered_programs_cannot_assign_conflicting_view_capabilities():
 
 
 def test_shared_capability_can_be_reused_by_registered_programs():
-    module = SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None)})
+    module = SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None, lambda *args: None)})
     with mock.patch.dict(registry.PROGRAMS, {'a':'a.program','b':'b.program'}, clear=True), \
          mock.patch('importlib.import_module', return_value=module):
         assert registry.view_capabilities() == module.REPORT_VIEWS

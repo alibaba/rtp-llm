@@ -32,11 +32,12 @@ case analysis/report     明确判定后装配 HTML bundle
 | 冻结指标归档 | `metrics_schema_version` | 1 |
 | 报告图表 / bundle manifest / 分析封装 | `report_spec_schema_version` / `report_manifest_schema_version` / `report_analysis_schema_version` | 1 |
 | 报告运行信息 | `run_meta_schema_version` | 1 |
+| 门禁冻结 manifest | `gate_result_schema_version` | 1 |
 | workload 证据 / 分析 | `workload_evidence_schema_version` / `workload_analysis_schema_version` | 1 |
 | 请求与引擎关联证据 / 客户端请求记录 | `request_engine_evidence_schema_version` / `client_record_schema_version` | 1 |
 | 观测快照 / 冻结观测窗口 | `observation_snapshot_schema_version` / `observation_window_schema_version` | 1 |
 | 性能证据 | `performance_evidence_schema_version` | 2 |
-| 性能分析 / cache 分析 | `performance_analysis_schema_version` / `cache_scale_in_analysis_schema_version` | 1 |
+| 性能分析 / cache 分析 | `performance_analysis_schema_version` / `cache_scale_in_analysis_schema_version` | 2 |
 | 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
 | Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 
@@ -61,7 +62,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 归属由语义决定，不由文件名或当前调用数决定：包含特定阶段、门槛、指标输出或报告身份的代码属于 case；同一合同能被不同 case 使用的能力才放在公共组件。注册表可以指向专属实现，公共执行器不按 case 名分支。
 
-集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。工作流最终归档后，program 可声明 `REPORT_FINALIZER(directory)` 刷新冻结报告的曲线；该 hook 不改变门禁结论或重新发布数值指标。
+集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。
 
 ## 执行与资源契约
 
@@ -85,10 +86,18 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 采样复用 `poll_samples` 和 `SampleBudget`。`observation.capture` 显式声明样本数与字节上限；超限保留已有现场和错误，证据不完整时不得判 PASS。先保留已获得的失效现场再检查流量状态，允许诊断停止原因；错误样本不能被当作有效门禁证据。HTTP 请求复用 `runtime.network`，timeout 受当前 deadline 或可停止的短请求预算约束。
 
-门禁的获取、终态补全和发布均通过 `write_evidence` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
+门禁的获取、终态补全和发布均通过 `artifacts.json_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
 
 `run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`runtime.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
-停止发流和排空由 program 显式编排，判定与指标发布由所属门禁 handler 完成。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或发布实现异常直接成为 stage ERROR。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
+停止发流和排空由 program 显式编排；门禁 handler 保存判定，最终归档后投影指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
 
 跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `runtime.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
+
+## 收尾与持久化
+
+`execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；父 runner 的进程预算包含这两段时间。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。
+
+清理结束后立即原子保存 `result.json`，每段收尾前后保存检查点。未完成的检查点使用 `status: FINALIZING`，不能作为终态 PASS；`execution_status` 保留阶段与清理的结果，`finalization` 保存各段预算、状态、耗时和错误。最终 `duration_ms` 包含执行、清理、证据和报告。证据阶段失败使 runtime validity 为 INVALID，并阻止报告阶段；报告失败记录 report status，保留已有 runtime validity 和独立门禁结果。整体执行器结果仍报告交付失败，调用方不能把未完成的交付当成成功。
+
+细项检查使用 `CheckResult` 的 id、status、actual、expected、detail、evidence；`gate_checks` 汇总有效阈值检查与完整性错误。ERROR 对应 INVALID，FAIL 对应有效观测越过门槛，SKIP 表示不适用，WARNING 表示 advisory。持续异常、窗口归属和请求 cohort 的计算属于各 case，公共组件只统一结果协议与聚合。

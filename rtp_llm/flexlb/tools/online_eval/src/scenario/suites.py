@@ -34,7 +34,7 @@ def normalize_metadata(value):
     return copy.deepcopy(value)
 
 
-EXECUTION_BUDGETS = {"timeout_s", "stage_timeout_s", "cleanup_timeout_s"}
+EXECUTION_BUDGETS = {"timeout_s", "stage_timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s"}
 EXECUTION_FIELDS = EXECUTION_BUDGETS | {"collection", "monitoring"}
 
 

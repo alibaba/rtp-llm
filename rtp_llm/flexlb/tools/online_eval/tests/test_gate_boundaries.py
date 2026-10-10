@@ -128,20 +128,6 @@ def test_performance_cli_replays_evidence_explicitly():
         assert source.read_bytes() == original
 
 
-def test_report_finalizer_is_a_registered_program_capability():
-    from types import SimpleNamespace
-    from cases import registry
-
-    finalizer = mock.Mock()
-    with mock.patch.dict(registry.PROGRAMS, {'another_case': 'another_case.program'}), \
-         mock.patch('importlib.import_module', return_value=SimpleNamespace(REPORT_FINALIZER=finalizer)):
-        registry.finalize_reports('another_case', '/unused/run')
-    finalizer.assert_called_once_with('/unused/run')
-    with mock.patch('importlib.import_module', return_value=SimpleNamespace(REPORT_FINALIZER='not callable')):
-        with pytest.raises(ValueError, match='must be callable'):
-            registry.finalize_reports('master_performance', '/unused/run')
-
-
 def test_registered_view_extension_needs_no_workload_case_branch():
     from cases import registry
     from types import SimpleNamespace
