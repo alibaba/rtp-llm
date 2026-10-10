@@ -9,17 +9,26 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 
 using namespace std;
 namespace rtp_llm {
 
-int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size) {
+int64_t computeChunkGrant(
+    int64_t budget, int64_t rows, int64_t remaining, int64_t block_size, bool align_final_suffix) {
     if (budget <= 0 || rows <= 0 || remaining <= 0 || block_size <= 0) {
         return 0;
     }
 
     const int64_t max_len = budget / rows;
-    return remaining <= max_len ? remaining : (max_len / block_size) * block_size;
+    if (remaining <= max_len) {
+        const int64_t suffix = remaining % block_size;
+        if (align_final_suffix && suffix > 0 && remaining > block_size) {
+            return remaining - suffix;
+        }
+        return remaining;
+    }
+    return (max_len / block_size) * block_size;
 }
 
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -39,6 +48,9 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
     prefill_chunk_batch_tokens_(runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens),
+    align_final_suffix_(model_config.model_type == "deepseek_v4"
+                        && autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_REUSE", false)
+                        && autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_TAIL_ALIGN", false)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {}
 
@@ -231,7 +243,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
 
         // Keep each stream's chunk bound even when an explicitly larger batch
         // budget permits more independent short streams in this forward.
-        const int64_t grant = computeChunkGrant(std::min(budget_left, prefill_chunk_size_), rows, remaining, block_size);
+        const int64_t grant = computeChunkGrant(
+            std::min(budget_left, prefill_chunk_size_), rows, remaining, block_size, align_final_suffix_);
 
         if (grant <= 0) {
             if (!selected.empty()) {

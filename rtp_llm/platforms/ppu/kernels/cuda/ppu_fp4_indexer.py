@@ -140,6 +140,8 @@ def _identity_page(device):
 
 def topk_decode(scores, lengths, out):
     """SG FP32 Decode selection, returning logical compressed-token indices."""
+    from rtp_llm.platforms.ppu.kernels.ppu_bf16_radix_topk import canonicalize_topk_indices
+
     if scores.dtype != torch.float32 or lengths.dtype != torch.int32:
         raise ValueError("Decode TopK requires FP32 scores and int32 lengths")
     if out.shape[1] not in (512, 1024) or scores.shape[1] >= 2**31:
@@ -150,23 +152,28 @@ def topk_decode(scores, lengths, out):
     _module(
         "topk_decode", torch.cuda.get_device_capability(scores.device), out.shape[1]
     ).forward(scores, lengths, pages, out, 2**31, None)
-    return out
+    return canonicalize_topk_indices(out)
 
 
 def topk_bf16(scores, starts, ends, out):
+    from rtp_llm.platforms.ppu.kernels.ppu_bf16_radix_topk import canonicalize_topk_indices
+
     if scores.dtype != torch.bfloat16 or scores.shape[1] >= 2**31:
         raise ValueError("BF16 TopK requires BF16 scores with fewer than 2**31 columns")
     # A 1M prompt has 250K compressed candidates. The vendor two-pass
     # implementation is not safe for these widths; use checked selection.
     if scores.shape[1] > 16384:
-        return _checked_bf16_topk(scores, starts, ends, out)
+        _checked_bf16_topk(scores, starts, ends, out)
+        return canonicalize_topk_indices(out)
     if not scores.shape[0]:
         return out
     pages = _identity_page(scores.device).expand(scores.shape[0], 1)
     _module(
         "topk", torch.cuda.get_device_capability(scores.device), out.shape[1]
     ).forward(scores, starts, ends, pages, out, 2**31, None)
-    return out
+    # Atomic scatter preserves the set but not its order. Sparse attention's
+    # finite-precision reduction must see a repeatable candidate order.
+    return canonicalize_topk_indices(out)
 
 
 def _checked_bf16_topk(scores, starts, ends, out):

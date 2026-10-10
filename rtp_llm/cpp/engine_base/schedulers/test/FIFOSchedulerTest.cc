@@ -4936,6 +4936,16 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetDefersFanoutProgressCheckUntilReu
     ASSERT_EQ(computeChunkGrant(16, 8, 1, 4), 1);
 }
 
+TEST_F(FIFOSchedulerTest, testAlignedFinalSuffixGrant) {
+    ASSERT_EQ(computeChunkGrant(4096, 1, 2140, 256), 2140);
+    ASSERT_EQ(computeChunkGrant(4096, 1, 2140, 256, true), 2048);
+    ASSERT_EQ(computeChunkGrant(4096, 1, 92, 256, true), 92);
+    ASSERT_EQ(computeChunkGrant(4096, 1, 2048, 256, true), 2048);
+    ASSERT_EQ(computeChunkGrant(4096, 1, 1704, 256, true), 1536);
+    ASSERT_EQ(computeChunkGrant(4096, 2, 1704, 256, true), 1536);
+    ASSERT_EQ(computeChunkGrant(256, 1, 1704, 256, true), 256);
+}
+
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetRejectsOversizedFanoutAndAdmitsShortFinal) {
     ChunkSchedulerTestConfig config;
     ChunkSchedulerTestEnv<FIFOScheduler> env(config);

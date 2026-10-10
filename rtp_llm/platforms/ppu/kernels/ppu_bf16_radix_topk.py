@@ -9,6 +9,27 @@ import triton.language as tl
 
 
 @triton.jit
+def _canonicalize_indices(Out, RowStride, K: tl.constexpr):
+    row = tl.program_id(0)
+    col = tl.arange(0, K)
+    ptr = Out + row.to(tl.int64) * RowStride + col
+    indices = tl.load(ptr)
+    ordered = tl.sort(tl.where(indices < 0, 2147483647, indices), descending=False)
+    tl.store(ptr, tl.where(ordered == 2147483647, -1, ordered))
+
+
+def canonicalize_topk_indices(out):
+    """Keep the selected set, with logical indices ascending and padding last."""
+    if out.dtype != torch.int32 or out.ndim != 2 or out.stride(1) != 1:
+        raise ValueError("TopK indices require int32 rows with contiguous columns")
+    if out.shape[1] not in (512, 1024):
+        raise ValueError("TopK index ordering requires K=512/1024")
+    if out.shape[0]:
+        _canonicalize_indices[(out.shape[0],)](out, out.stride(0), out.shape[1])
+    return out
+
+
+@triton.jit
 def _keys(x):
     bits = x.to(tl.uint16, bitcast=True).to(tl.int32)
     bits = tl.where(x == 0, 0, bits)  # Treat signed zeros as the same score.

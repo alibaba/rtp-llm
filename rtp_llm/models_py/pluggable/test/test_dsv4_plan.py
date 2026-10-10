@@ -122,6 +122,79 @@ class Dsv4PlanTest(unittest.TestCase):
                 topology_digests[4, model_type], topology_digests[8, model_type]
             )
 
+    def test_prefix_reuse_requires_explicit_experimental_opt_in(self):
+        for decode in (False, True):
+            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
+            for value in (None, "0", "true", "1"):
+                options = dict(base)
+                if value is not None:
+                    options["DSV4_PPU_PREFIX_REUSE"] = value
+                changed = dict(reuse_cache=True, execution_options=options)
+                ctx = (
+                    self.decode_context(**changed)
+                    if decode
+                    else self.context(selection(**changed))
+                )
+                with self.subTest(decode=decode, value=value):
+                    if value == "1":
+                        ctx.prepare([request_for("model", ctx.selection)])
+                        self.assertEqual(len(ctx.bindings), 130)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "DSV4_PPU_PREFIX_REUSE"):
+                            ctx.prepare([request_for("model", ctx.selection)])
+
+    def test_prefix_reuse_target_draft_rank_contracts(self):
+        for decode, world in ((False, 4), (True, 4), (True, 8)):
+            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
+            for gamma in (0, 1, 2, 3):
+                models = [("deepseek_v4", 43)]
+                if gamma:
+                    models.append(("deepseek_v4_mtp", 1))
+                for model_type, layers in models:
+                    digests = set()
+                    for rank in range(world):
+                        changed = dict(
+                            role="DECODE" if decode else "PREFILL",
+                            model_type=model_type,
+                            num_layers=layers,
+                            layer_compress_ratios=[0] if layers == 1 else [4] * 43,
+                            speculative=bool(gamma),
+                            speculative_type="MTP" if gamma else "NONE",
+                            gen_num_per_cycle=gamma,
+                            reuse_cache=True,
+                            execution_options={**base, "DSV4_PPU_PREFIX_REUSE": "1"},
+                        )
+                        ctx = (
+                            self.decode_context(
+                                rank, dp_size=world, ep_size=world,
+                                world_size=world, **changed,
+                            )
+                            if decode else self.context(selection(rank, **changed))
+                        )
+                        digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                        self.assertEqual(len(ctx.bindings), 1 + 3 * layers)
+                    self.assertEqual(len(digests), 1)
+
+    def test_prefix_reuse_opt_in_preserves_other_rejections(self):
+        for decode in (False, True):
+            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
+            for unsupported in (
+                {"indexer_cache_mode": "fp8"}, {"fp8_kv_cache": False},
+                {"hidden_size": 8192}, {"speculative": True},
+            ):
+                changed = dict(
+                    reuse_cache=True,
+                    execution_options={**base, "DSV4_PPU_PREFIX_REUSE": "1"},
+                    **unsupported,
+                )
+                ctx = (
+                    self.decode_context(**changed)
+                    if decode else self.context(selection(**changed))
+                )
+                with self.subTest(decode=decode, unsupported=unsupported):
+                    with self.assertRaisesRegex(ValueError, "No compatible"):
+                        ctx.prepare([request_for("model", ctx.selection)])
+
     def test_decode_plan_covers_ep_world_before_runtime_imports(self):
         from rtp_llm.models.dsv4.adapter import validate_parallelism
 
@@ -433,6 +506,7 @@ class Dsv4PlanTest(unittest.TestCase):
         for change in [
             {"tp_size": 8},
             {"ep_size": 8},
+            {"cp_enabled": True},
             {"role": "DECODE"},
             {"speculative": True},
             {"indexer_cache_mode": "fp8"},
@@ -445,9 +519,7 @@ class Dsv4PlanTest(unittest.TestCase):
 
     def test_engine_feature_flags_no_longer_disqualify(self):
         for flagged in (
-            {"cp_enabled": True},
             {"cuda_graph": True},
-            {"reuse_cache": True},
             {"lora": True},
             {"eplb": True},
         ):
@@ -456,9 +528,7 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
         for flagged in (
-            {"cp_enabled": True},
             {"cuda_graph": False},
-            {"reuse_cache": True},
             {"lora": True},
             {"eplb": True},
         ):
@@ -495,6 +565,12 @@ class Dsv4PlanTest(unittest.TestCase):
             digests.append(ctx.prepare([request_for("model", ctx.selection)]))
         self.assertEqual(len(set(digests)), 1)
         env["DSV4_INDEXER_TOPK_BACKEND"] = "torch"
+        ctx = self.context(selection(execution_options=execution_options_snapshot(env)))
+        self.assertNotEqual(
+            digests[0], ctx.prepare([request_for("model", ctx.selection)])
+        )
+        env["DSV4_INDEXER_TOPK_BACKEND"] = "sglang"
+        env["DSV4_PPU_PREFIX_TAIL_ALIGN"] = "1"
         ctx = self.context(selection(execution_options=execution_options_snapshot(env)))
         self.assertNotEqual(
             digests[0], ctx.prepare([request_for("model", ctx.selection)])

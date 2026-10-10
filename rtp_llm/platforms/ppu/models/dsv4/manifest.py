@@ -108,6 +108,12 @@ def _supports_ppu_prefill(selection, request, cache_mode):
             metadata.get("role") in ("PDFUSION", "PREFILL"),
             "requires a Prefill role",
         ),
+        (not metadata.get("cp_enabled"), "CP cache layout is not qualified"),
+        (
+            not metadata.get("reuse_cache")
+            or options.get("DSV4_PPU_PREFIX_REUSE") == "1",
+            "prefix reuse requires experimental DSV4_PPU_PREFIX_REUSE=1",
+        ),
         (
             metadata.get("indexer_cache_mode") == cache_mode,
             f"requires {cache_mode.upper()} indexer cache",
@@ -179,6 +185,12 @@ def supports_ppu_fp4_decode(selection, request):
         ),
         (metadata.get("indexer_cache_mode") == "fp4", "requires FP4 indexer cache"),
         (metadata.get("fp8_kv_cache") is True, "requires FP8 KV cache"),
+        (not metadata.get("cp_enabled"), "CP cache layout is not qualified"),
+        (
+            not metadata.get("reuse_cache")
+            or options.get("DSV4_PPU_PREFIX_REUSE") == "1",
+            "prefix reuse requires experimental DSV4_PPU_PREFIX_REUSE=1",
+        ),
         (
             comm.get("enabled") is True
             and comm.get("low_latency") is True

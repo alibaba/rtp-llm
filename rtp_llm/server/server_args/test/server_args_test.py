@@ -210,6 +210,30 @@ class CacheConfigArgumentsTest(TestCase):
             "unrecognized arguments: --enable_memory_cache_sm_copy", stderr.getvalue()
         )
 
+    def test_legacy_prefix_tree_flags_do_not_select_cache_tiers(self):
+        legacy = {
+            "ENABLE_GPU_PREFIX_TREE": "1",
+            "ENABLE_TIERED_MEMORY_CACHE": "1",
+            "ENABLE_PREFIX_TREE_MEMORY_CACHE": "1",
+        }
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_cache_config(args, legacy)
+                self.assertFalse(config.reuse_cache)
+                self.assertTrue(config.enable_device_cache)
+                self.assertFalse(config.enable_memory_cache)
+                config = self.parse_cache_config(args, {
+                    **legacy,
+                    "REUSE_CACHE": "1",
+                    "ENABLE_DEVICE_CACHE": "0",
+                    "ENABLE_MEMORY_CACHE": "1",
+                    "MEMORY_CACHE_SIZE_MB": "8192",
+                })
+                self.assertTrue(config.reuse_cache)
+                self.assertFalse(config.enable_device_cache)
+                self.assertTrue(config.enable_memory_cache)
+                self.assertEqual(config.memory_cache_size_mb, 8192)
+
     def test_removed_sm_copy_env_does_not_enable_disk_cache(self):
         defaults = self.parse_cache_config([], {})
         for value in ("0", "1"):

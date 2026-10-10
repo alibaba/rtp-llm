@@ -5,6 +5,75 @@ from rtp_llm.platforms.ppu.kernels.ppu_bf16_radix_topk import bf16_radix_topk
 
 @unittest.skipUnless(torch.cuda.is_available(), 'requires PPU/CUDA')
 class RadixTopKTest(unittest.TestCase):
+    def test_native_decode_order_is_repeatable_and_graph_safe(self):
+        from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import topk_decode
+
+        torch.manual_seed(709)
+        for k in (512, 1024):
+            for width in (1024, 4120, 16384, 32768):
+                x = torch.randn(4, width, device='cuda', dtype=torch.float32)
+                lengths = torch.tensor([width, width - 1, 17, 0], device='cuda', dtype=torch.int32)
+                out = torch.empty(4, k, device='cuda', dtype=torch.int32)
+                expected = torch.full_like(out, -1)
+                for row, end in enumerate(lengths.tolist()):
+                    count = min(k, end)
+                    expected[row, :count] = torch.argsort(
+                        x[row, :end], descending=True, stable=True
+                    )[:count].sort().values.int()
+                for _ in range(12):
+                    topk_decode(x, lengths, out)
+                    self.assertTrue(torch.equal(out, expected), (k, width))
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    topk_decode(x, lengths, out)
+                for _ in range(3):
+                    out.fill_(-99)
+                    graph.replay()
+                    self.assertTrue(torch.equal(out, expected), (k, width))
+
+    def test_canonical_indices_preserve_padding_stride_and_graph(self):
+        from rtp_llm.platforms.ppu.kernels.ppu_bf16_radix_topk import canonicalize_topk_indices
+
+        for k in (512, 1024):
+            storage = torch.full((4, k + 11), -77, device='cuda', dtype=torch.int32)
+            out = storage[:, :k]
+            original = torch.full_like(out, -1)
+            original[0] = torch.randperm(k, device='cuda', dtype=torch.int32)
+            original[1, :17] = torch.arange(16, -1, -1, device='cuda', dtype=torch.int32)
+            original[3] = 2 * torch.randperm(k, device='cuda', dtype=torch.int32)
+            expected = original.masked_fill(original < 0, 2147483647).sort(dim=-1).values
+            expected.masked_fill_(expected == 2147483647, -1)
+            out.copy_(original)
+            canonicalize_topk_indices(out)
+            self.assertTrue(torch.equal(out, expected))
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                canonicalize_topk_indices(out)
+            for _ in range(3):
+                out.copy_(original)
+                graph.replay()
+                self.assertTrue(torch.equal(out, expected))
+                self.assertTrue(torch.all(storage[:, k:] == -77).item())
+
+    def test_native_prefill_order_is_repeatable(self):
+        from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import topk_bf16
+
+        torch.manual_seed(708)
+        for width in (1024, 4120, 16384, 32768):
+            x = torch.randn(4, width, device='cuda', dtype=torch.bfloat16)
+            starts = torch.zeros(4, device='cuda', dtype=torch.int32)
+            ends = torch.tensor([width, width - 1, 17, 0], device='cuda', dtype=torch.int32)
+            out = torch.empty(4, 512, device='cuda', dtype=torch.int32)
+            expected = torch.full_like(out, -1)
+            for row, end in enumerate(ends.tolist()):
+                count = min(512, end)
+                expected[row, :count] = torch.argsort(
+                    x[row, :end], descending=True, stable=True
+                )[:count].sort().values.int()
+            for _ in range(12):
+                topk_bf16(x, starts, ends, out)
+                self.assertTrue(torch.equal(out, expected), width)
+
     def test_native_candidate_overflow_and_graph_replay(self):
         from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import topk_bf16, topk_decode
 

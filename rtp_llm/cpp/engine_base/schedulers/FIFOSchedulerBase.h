@@ -18,7 +18,8 @@
 
 namespace rtp_llm {
 
-int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
+int64_t computeChunkGrant(
+    int64_t budget, int64_t rows, int64_t remaining, int64_t block_size, bool align_final_suffix = false);
 
 class FIFOSchedulerBase: public SchedulerBase {
 public:
@@ -95,6 +96,7 @@ protected:
     size_t                          max_inited_kv_cache_streams_ = 0;
     int64_t                         prefill_chunk_size_      = 0;
     int64_t                         prefill_chunk_batch_tokens_ = 0;
+    bool                            align_final_suffix_     = false;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
