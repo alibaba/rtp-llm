@@ -163,7 +163,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (future.isDone()) {
                 return OfferResult.COMPLETED;
             }
-            FlexlbConfig config = context.getConfig();
+            FlexlbConfig config = configService.loadBalanceConfig();
             int maxQueuedRequests = config.queueScheduler().getMaxQueuedRequests();
             if (orderedQueue.size() >= maxQueuedRequests) {
                 if (!priorityOrdering) {
