@@ -1437,6 +1437,12 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
             if (status.ok()) {
                 status = grpc::Status(grpc::StatusCode::INTERNAL, "scheduler rejected request");
             }
+            // A rejected stream never entered the scheduler. Complete its
+            // terminal transition and resource release here; no engine loop owns it.
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "scheduler rejected request");
+            }
+            stream->moveToNext();
             rejectSlot(ready_slot, status, response);
             continue;
         }

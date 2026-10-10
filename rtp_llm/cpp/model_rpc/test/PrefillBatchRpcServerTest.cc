@@ -577,6 +577,11 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
     EXPECT_EQ(ready_slots[0].deferred, accepted_deferred);
     EXPECT_TRUE(rejected_cancel_state->load());
     EXPECT_EQ(engine->streams[1]->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(engine->streams[1]->getStatus(), StreamState::FINISHED);
+    EXPECT_FALSE(engine->streams[1]->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(engine->streams[1]->isDeferredReleasePending());
+    EXPECT_EQ(engine->streams[0]->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(engine->streams[0]->hasError());
     ASSERT_EQ(response.errors_size(), 1);
     EXPECT_EQ(response.errors(0).request_id(), 1002);
     EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::MALLOC_FAILED));
@@ -614,6 +619,35 @@ TEST(PrefillBatchRpcServerTest, SchedulerRejectionPreservesGrammarOverloadCode) 
     EXPECT_EQ(response.errors(0).request_id(), 1012);
     EXPECT_EQ(response.errors(0).error_info().error_code(),
               static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
+}
+
+TEST(PrefillBatchRpcServerTest, SchedulerRejectionWithoutStreamErrorFinishesUnscheduledStream) {
+    PrefillBatchRpcServer server;
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto engine    = std::make_shared<PartialEnqueueEngine>();
+    server.engine_ = engine;
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {1014}, slots, ready_slots);
+    engine->streams = {makeGenerateStream(ready_slots[0].deferred->context->generate_input)};
+    engine->enqueue_successes = {false};
+    ASSERT_FALSE(engine->streams[0]->hasError());
+
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
+
+    EXPECT_TRUE(ready_slots.empty());
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 1014);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(engine->streams[0]->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(engine->streams[0]->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
+    const auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(schedule_info.running_task_info_list.empty());
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].request_id, 1014);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::UNKNOWN_ERROR));
 }
 
 TEST(PrefillBatchRpcServerTest, LatchedPriorityCancelBeforeEnqueuePreservesRaw8429) {

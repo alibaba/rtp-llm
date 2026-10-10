@@ -649,9 +649,6 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             DecodeRpcContext             rpc_context{rpc_stream};
             kmonitor::MetricsReporterPtr reporter;
             auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
-            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
-            context.request_id = 42;
-            context.allocate_request.set_client_id("prefill");
             auto cache = std::make_shared<KVCacheManager>(
                 test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
             EXPECT_TRUE(cache->init());
@@ -668,35 +665,44 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
             EXPECT_TRUE(stream->initKVBlock().ok());
             EXPECT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
-            if (running) {
-                stream->generate_status_->status.store(StreamState::RUNNING);
+            {
+                DecodeGenerateContext context(rpc_context, 0, server_context, reporter, meta);
+                context.request_id = 42;
+                context.allocate_request.set_client_id("prefill");
+                if (running) {
+                    stream->generate_status_->status.store(StreamState::RUNNING);
+                }
+                context.setStream(stream);
+                if (expired) {
+                    context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
+                }
+                if (stream_error) {
+                    stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
+                }
+                DecodeRpcServer server;
+                server.localGenerate(context);
+                status                  = context.error_status;
+                finished                = stream->isFinished();
+                had_error               = stream->hasError();
+                resource_released       = stream->stream_cache_resource_->isResourceReleased();
+                blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
+                const auto timing       = stream->getTimeInfo();
+                executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+                RpcMetricsCollector metrics;
+                context.collectBasicMetrics(metrics);
+                error_qps = metrics.error_qps;
+                if (running) {
+                    // This fixture has no scheduler to drain the deliberately invalid running stream.
+                    stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+                    stream->moveToNext();
+                }
+                // Match RemoteGenerate: complete the handler before derived-context
+                // teardown settles streams that never reached the engine scheduler.
+                context.markRpcHandlingCompleted();
             }
-            context.setStream(stream);
-            if (expired) {
-                context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
-            }
-            if (stream_error) {
-                stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
-            }
-            DecodeRpcServer server;
-            server.localGenerate(context);
-            status                  = context.error_status;
-            finished                = stream->isFinished();
-            had_error               = stream->hasError();
-            resource_released       = stream->stream_cache_resource_->isResourceReleased();
-            blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
-            RpcMetricsCollector metrics;
-            context.collectBasicMetrics(metrics);
-            error_qps = metrics.error_qps;
-            if (running) {
-                // This fixture has no scheduler to drain the deliberately invalid running stream.
-                stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-                stream->moveToNext();
-            }
-            context.stopStream();
             error_after_cleanup = stream->hasError();
+            resource_released_after_cleanup = stream->stream_cache_resource_->isResourceReleased();
+            blocks_after_cleanup = stream->stream_cache_resource_->curBlocksNum();
             remaining_requests  = meta->getEngineScheduleInfo(-1).running_task_info_list.size();
             return status;
         }
@@ -706,6 +712,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         grpc::Status status;
         bool         finished = false, had_error = false, resource_released = false;
         bool         executed = false, error_qps = false, error_after_cleanup = false;
+        bool         resource_released_after_cleanup = false;
+        size_t       blocks_after_cleanup = 1;
         size_t       remaining_requests      = 1;
         size_t       blocks_after_completion = 1;
     };
@@ -740,6 +748,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         server->Shutdown();
         server->Wait();
         EXPECT_EQ(service.remaining_requests, 0u);
+        EXPECT_TRUE(service.resource_released_after_cleanup);
+        EXPECT_EQ(service.blocks_after_cleanup, 0u);
         EXPECT_FALSE(service.executed);
         if (mode == "complete") {
             EXPECT_TRUE(status.ok());
