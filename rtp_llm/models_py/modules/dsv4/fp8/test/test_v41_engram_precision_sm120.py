@@ -2,17 +2,63 @@
 
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from rtp_llm.models_py.modules.dsv4 import engram
+from rtp_llm.models_py.modules.dsv4.fp8.test import v41_engram_precision as precision
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
     engram_gate_reference,
     reference_engram_gate,
 )
+from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import V41MXFP8Linear
 
 
 class EngramPrecisionTest(unittest.TestCase):
+    def test_projection_selects_only_engram_and_restores_nested_exception(self):
+        original_rows = engram.Engram._forward_rows
+        original_dense = V41MXFP8Linear.forward_quantized
+        selected, other = object(), object()
+        owner = SimpleNamespace(wkv=SimpleNamespace(_sm120_linear=selected))
+
+        def rows(owner, *, fail=False):
+            chosen = V41MXFP8Linear.forward_quantized(selected, None, None)
+            untouched = V41MXFP8Linear.forward_quantized(other, None, None)
+            if fail:
+                raise RuntimeError("projection scope failure")
+            return chosen, untouched
+
+        def unchanged(provider, *args, **kwargs):
+            return "original", provider
+
+        with patch.object(engram.Engram, "_forward_rows", rows), patch.object(
+            V41MXFP8Linear, "forward_quantized", unchanged
+        ), patch.object(precision, "_dense_down", return_value="released"):
+            with precision.engram_projection_reference(False):
+                self.assertEqual(
+                    engram.Engram._forward_rows(owner)[0], ("original", selected)
+                )
+            with precision.engram_projection_reference(True, kernel=object()):
+                with precision.engram_projection_reference(True, kernel=object()):
+                    self.assertEqual(
+                        engram.Engram._forward_rows(owner),
+                        ("released", ("original", other)),
+                    )
+                with self.assertRaisesRegex(RuntimeError, "projection scope failure"):
+                    engram.Engram._forward_rows(owner, fail=True)
+                self.assertEqual(
+                    V41MXFP8Linear.forward_quantized(selected, None, None),
+                    ("original", selected),
+                )
+                self.assertEqual(engram.Engram._forward_rows(owner)[0], "released")
+        self.assertIs(engram.Engram._forward_rows, original_rows)
+        self.assertIs(V41MXFP8Linear.forward_quantized, original_dense)
+        with patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
+            with self.assertRaisesRegex(ValueError, "SM120"):
+                with precision.engram_projection_reference(True, kernel=object()):
+                    self.fail("Unsupported device entered projection diagnostic")
+
     @torch.inference_mode()
     def test_scalar_signed_clamp_mask_writeback_and_sources(self):
         dim = 32

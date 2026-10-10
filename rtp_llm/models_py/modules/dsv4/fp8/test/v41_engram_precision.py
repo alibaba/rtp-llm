@@ -1,10 +1,16 @@
-"""Test-only released Engram gate order for held-input accuracy diagnosis."""
+"""Test-only released Engram projection/gate for held-input accuracy diagnosis."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from unittest.mock import patch
 
 import torch
 from rtp_llm.models_py.modules.dsv4 import engram
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
+    _dense_down,
+    load_reference_kernel,
+)
+from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import V41MXFP8Linear
 
 
 def reference_engram_gate(
@@ -68,4 +74,38 @@ def engram_gate_reference(enabled):
     if torch.cuda.get_device_capability() != (12, 0):
         raise ValueError("Engram gate diagnostic is qualified only on SM120")
     with patch.object(engram, "gated_engram_residual", reference_engram_gate):
+        yield
+
+
+@contextmanager
+def engram_projection_reference(enabled, *, kernel=None):
+    """Replace only Engram WKV's output GEMM; retain its native quantizer."""
+    if not enabled:
+        yield
+        return
+    if torch.cuda.get_device_capability() != (12, 0):
+        raise ValueError("Engram projection diagnostic is qualified only on SM120")
+    kernel = load_reference_kernel() if kernel is None else kernel
+    original_rows = engram.Engram._forward_rows
+    original_dense = V41MXFP8Linear.forward_quantized
+    selected = ContextVar("v41_diagnostic_engram_projection", default=None)
+
+    def forward_rows(owner, *args, **kwargs):
+        provider = getattr(owner.wkv, "_sm120_linear", None)
+        if provider is None:
+            raise ValueError("Engram projection diagnostic requires an SM120 provider")
+        token = selected.set(provider)
+        try:
+            return original_rows(owner, *args, **kwargs)
+        finally:
+            selected.reset(token)
+
+    def dense_forward(owner, values, scales, *, out=None):
+        if owner is selected.get():
+            return _dense_down(owner, values, scales, kernel, out=out)
+        return original_dense(owner, values, scales, out=out)
+
+    with patch.object(engram.Engram, "_forward_rows", forward_rows), patch.object(
+        V41MXFP8Linear, "forward_quantized", dense_forward
+    ):
         yield

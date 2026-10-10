@@ -17,6 +17,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.engram import Engram, EngramLayout
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
     engram_gate_reference,
+    engram_projection_reference,
 )
 from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 from rtp_llm.tools.dsv41_attention_history_replay import prepared_engram, require_exact
@@ -89,6 +90,9 @@ def main():
     official = importlib.import_module("model")
     if Path(official.__file__).resolve() != root / "inference/model.py":
         raise ValueError("Unexpected released model module")
+    kernel = importlib.import_module("kernel")
+    if Path(kernel.__file__).resolve() != root / "inference/kernel.py":
+        raise ValueError("Unexpected released kernel module")
     args = model_args(official, root, 256)
     config = json.loads((root / "config.json").read_text())["text_config"]
     layout = official.EngramLayout.from_args(args)
@@ -109,6 +113,7 @@ def main():
     reader, cases = NASReader(root), []
     native_controls = official_controls = restored_controls = source_controls = 0
     reference_controls = projection_controls = 0
+    substituted_projections = combined_controls = owner_restorations = gate_controls = 0
     prefix = "layers.1.engram."
     for step, step_hashes in enumerate(hashes):
         ids = step_hashes[:, :, layout.layer_ids.index(1), :]
@@ -190,6 +195,27 @@ def main():
                         kv,
                     )
                 )
+            with engram_gate_reference(True):
+                gate_only = native_owner(hidden.clone(), native_ids).clone()
+            substituted = []
+
+            def capture_substituted(value):
+                result = native_linear(value)
+                substituted.append(result.clone())
+                return result
+
+            with patch.object(native_owner.wkv, "forward", capture_substituted):
+                with engram_projection_reference(True, kernel=kernel):
+                    projection_only = native_owner(hidden.clone(), native_ids).clone()
+                    working = hidden.clone()
+                    with engram_gate_reference(True):
+                        combined = native_owner(working, native_ids)
+                    if combined.data_ptr() != working.data_ptr():
+                        raise AssertionError(
+                            "Combined Engram diagnostic lost writeback"
+                        )
+                    combined = combined.clone()
+            restored_owner = native_owner(hidden.clone(), native_ids).clone()
             label = f"{stream}.step{step}.layer01.engram"
             # Compare/transfer only after all forwards on these held inputs.
             if stream == "official":
@@ -204,6 +230,17 @@ def main():
                 native_controls += 1
             require_exact(baseline, held[0][2], label + ".fixed_projection_control")
             projection_controls += 1
+            require_exact(held[0][3], gate_only, label + ".actual_gate_control")
+            gate_controls += 1
+            for index, value in enumerate(substituted):
+                require_exact(
+                    projections["released"], value, f"{label}.substituted_wkv{index}"
+                )
+                substituted_projections += 1
+            require_exact(released, combined, label + ".combined_owner")
+            combined_controls += 1
+            require_exact(baseline, restored_owner, label + ".restored_owner")
+            owner_restorations += 1
             for index, (left, right) in enumerate(zip(before, tensors)):
                 require_source_exact(left, right, f"{label}.source{index}")
                 source_controls += 1
@@ -236,6 +273,11 @@ def main():
                         "native_vs_released_residual": difference(released, baseline),
                         "fixed_gate_vs_released": difference(reference, fixed),
                         "candidate_vs_released": candidate_diff,
+                        "gate_only_vs_released_owner": difference(released, gate_only),
+                        "projection_only_vs_released_owner": difference(
+                            released, projection_only
+                        ),
+                        "combined_vs_released_owner": difference(released, combined),
                     }
                 )
     expected_rows = [
@@ -257,9 +299,18 @@ def main():
         source_controls,
     ) != (3, 3, 6, 12, 12, 42):
         raise AssertionError("Engram replay control coverage is incomplete")
+    if (
+        substituted_projections,
+        combined_controls,
+        owner_restorations,
+        gate_controls,
+    ) != (12, 6, 6, 6):
+        raise AssertionError("Engram projection candidate coverage is incomplete")
     source_names = (
         "rtp_llm/tools/dsv41_engram_boundary_replay.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_engram_precision.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/v41_expert_precision.py",
+        "rtp_llm/models_py/modules/dsv4/v41_mxfp8.py",
         "rtp_llm/models_py/modules/dsv4/engram.py",
         "rtp_llm/models_py/modules/dsv4/_engram_inject_triton.py",
         "rtp_llm/models_py/modules/dsv4/utils.py",
@@ -292,6 +343,10 @@ def main():
         "candidate_gate_comparisons_exact": reference_controls,
         "restored_native_controls_exact": restored_controls,
         "source_tensor_checks_exact": source_controls,
+        "substituted_projection_controls_exact": substituted_projections,
+        "combined_owner_comparisons_exact": combined_controls,
+        "restored_owner_controls_exact": owner_restorations,
+        "actual_gate_controls_exact": gate_controls,
         "cases": cases,
         "limitations": [
             "L1 Engram only, with held official/native inputs at three saved steps.",
