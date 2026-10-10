@@ -57,7 +57,10 @@ def requirement(names):
 def cache_store_deps():
     native.alias(
         name = "cache_store_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl",
+        actual = select({
+            "@arch_config//:internal_cache_store_rdma": "@rtp_llm//internal_source/rtp_llm/cpp/disaggregate/cache_store:cache_store_rdma_impl",
+            "//conditions:default": "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl",
+        }),
     )
 
 def rdma_transport_deps():

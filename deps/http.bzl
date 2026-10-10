@@ -4,6 +4,12 @@ def clean_dep(dep):
     return str(Label(dep))
 
 def http_deps():
+    http_file(
+        name = "tnet",
+        urls = ["https://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/third_party_archives/tnet-devel-3.1.0-1.noarch.rpm"],
+        sha256 = "5d78de3c3bd15b2e66448470b9d01006a2e45cfc1b5858f0b180f9f7c588882e",
+    )
+
     http_archive(
         name = "rules_pkg",
         urls = [
