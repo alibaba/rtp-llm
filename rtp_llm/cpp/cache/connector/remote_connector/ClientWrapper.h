@@ -20,7 +20,7 @@ public:
     virtual ~ClientWrapper();
     bool init(const ConfigMap&                                  config_str_map,
               const kv_cache_manager::InitParams&               init_params,
-              const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration = nullptr);
+              const kv_cache_manager::ClientMemoryRegistrations* memory_registrations = nullptr);
     // for meta client
     std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                        const std::string&                      trace_id,
@@ -44,11 +44,12 @@ public:
                      const kv_cache_manager::Locations& locations);
 
     // for transfer client
-    bool loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
-                      kv_cache_manager::BlockBuffers&                             block_buffers,
-                      const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    kv_cache_manager::ClientErrorCode
+    loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                 kv_cache_manager::BlockBuffers&                             block_buffers,
+                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
-    std::pair<bool, kv_cache_manager::UriStrVec>
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
     saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
                  const kv_cache_manager::BlockBuffers&                       block_buffers,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
@@ -77,9 +78,9 @@ private:
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};
 
-    static std::unique_ptr<ClientFactory>                    client_factory_;
-    static std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
-    static std::unique_ptr<remote_connector::Subscriber>     subscriber_;
+    static std::unique_ptr<ClientFactory>                client_factory_;
+    std::unique_ptr<kv_cache_manager::TransferClient>    transfer_client_;
+    static std::unique_ptr<remote_connector::Subscriber> subscriber_;
 };
 
 }  // namespace remote_connector

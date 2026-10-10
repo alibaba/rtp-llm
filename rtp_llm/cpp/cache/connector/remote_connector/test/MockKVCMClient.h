@@ -122,7 +122,7 @@ public:
                 CreateTransferClient,
                 (const std::string&                                config,
                  const kv_cache_manager::InitParams&                init_params,
-                 const kv_cache_manager::SharedMemoryRegistration& shared_memory_registration),
+                 const kv_cache_manager::ClientMemoryRegistrations& memory_registrations),
                 (override, const));
 };
 

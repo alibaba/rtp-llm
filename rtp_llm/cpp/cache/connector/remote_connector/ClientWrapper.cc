@@ -39,15 +39,14 @@ private:
 
 }  // namespace
 
-std::unique_ptr<kv_cache_manager::TransferClient> ClientWrapper::transfer_client_;
-std::unique_ptr<Subscriber>                       ClientWrapper::subscriber_;
-std::unique_ptr<ClientFactory>                    ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
+std::unique_ptr<Subscriber>    ClientWrapper::subscriber_;
+std::unique_ptr<ClientFactory> ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
 
 ClientWrapper::~ClientWrapper() = default;
 
 bool ClientWrapper::init(const ConfigMap&                                  config_map,
                          const kv_cache_manager::InitParams&               init_params,
-                         const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration) {
+                         const kv_cache_manager::ClientMemoryRegistrations* memory_registrations) {
     RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no invalid config");
     init_params_ = init_params;
     // init all meta_client
@@ -72,7 +71,8 @@ bool ClientWrapper::init(const ConfigMap&                                  confi
             return false;
         }
     }
-    // init static transfer client
+    // The transfer client owns registrations for this connector's host/GPU
+    // pools, so its lifetime must remain tied to this ClientWrapper.
     init_params_.storage_configs = meta_client_map_.begin()->second->GetStorageConfig();
     RTP_LLM_LOG_INFO("transfer client storage config [%s]", init_params_.storage_configs.c_str());
     if (init_params_.role_type == kv_cache_manager::RoleType::SCHEDULER) {
@@ -80,9 +80,9 @@ bool ClientWrapper::init(const ConfigMap&                                  confi
         init_params_.role_type = kv_cache_manager::RoleType::WORKER;
     }
     const auto transfer_config = autil::legacy::ToJsonString(config_map_.begin()->second);
-    if (shared_memory_registration != nullptr) {
+    if (memory_registrations != nullptr) {
         transfer_client_ =
-            client_factory_->CreateTransferClient(transfer_config, init_params_, *shared_memory_registration);
+            client_factory_->CreateTransferClient(transfer_config, init_params_, *memory_registrations);
     } else {
         transfer_client_ = client_factory_->CreateTransferClient(transfer_config, init_params_);
     }
@@ -323,35 +323,34 @@ void ClientWrapper::reinitAllMetaClients() {
     rr_other_working_.store(false, std::memory_order_release);
 }
 
-bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
-                                 kv_cache_manager::BlockBuffers&                             block_buffers,
-                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+kv_cache_manager::ClientErrorCode
+ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                            kv_cache_manager::BlockBuffers&                             block_buffers,
+                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     if (transfer_client_ == nullptr) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
-        return false;
+        return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
     auto ec = transfer_client_->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
-        return false;
     }
-    return true;
+    return ec;
 }
 
-std::pair<bool, kv_cache_manager::UriStrVec>
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
 ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
                             const kv_cache_manager::BlockBuffers&                       block_buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     if (transfer_client_ == nullptr) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
-        return {false, {}};
+        return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
     auto [ec, result] = transfer_client_->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
-        return {false, {}};
     }
-    return {true, std::move(result)};
+    return {ec, std::move(result)};
 }
 
 }  // namespace remote_connector

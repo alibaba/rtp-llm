@@ -17,12 +17,15 @@
 namespace rtp_llm {
 namespace {
 
-bool externalZeroCopyConfigured(const KVCacheConfig& kv_cache_config) {
-    const char* zero_copy_env = std::getenv("TAIR_MEMPOOL_ENABLE_EXTERNAL_ZERO_COPY");
-    const bool  zero_copy_enabled = zero_copy_env == nullptr || std::atoi(zero_copy_env) != 0;
-    const char* pin_mode_env      = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
-    const bool  memfd_configured  = pin_mode_env != nullptr && std::string(pin_mode_env) == "memfd_register";
-    return zero_copy_enabled && kv_cache_config.enable_memory_cache && memfd_configured;
+bool hostMemfdRegistrationConfigured(const KVCacheConfig& kv_cache_config) {
+    const char* pin_mode_env     = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
+    const bool  memfd_configured = pin_mode_env != nullptr && std::string(pin_mode_env) == "memfd_register";
+    return kv_cache_config.enable_memory_cache && memfd_configured;
+}
+
+bool remoteCacheGdrConfigured() {
+    const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY");
+    return value != nullptr && std::atoi(value) != 0;
 }
 
 struct MatchMetricsHelper {
@@ -159,6 +162,16 @@ bool RemoteConnectorAsyncContext::success() const {
     return state_.successImpl();
 }
 
+ErrorInfo RemoteConnectorAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return error_info_;
+}
+
+void RemoteConnectorAsyncContext::setErrorInfo(const ErrorInfo& error_info) {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    error_info_ = error_info;
+}
+
 void RemoteConnectorAsyncContext::waitDone() {
     return;
 }
@@ -182,6 +195,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
+    allocator_ = allocator;
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
                                             runtime_config,
@@ -219,6 +233,16 @@ RemoteConnector::~RemoteConnector() {
         thread_pool_.reset();
     }
     broadcaster_.reset();
+    // TransferClient destruction drains its SDK workers and deregisters all
+    // external host/GPU regions. It must happen while allocator_ and the
+    // memory connector's host BlockPool are still alive.
+    client_wrapper_.reset();
+    decltype(quarantined_resources_) released_resources;
+    {
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        released_resources.swap(quarantined_resources_);
+    }
+    released_resources.clear();
 }
 
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
@@ -396,10 +420,10 @@ bool RemoteConnector::init() {
         tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
         &regist_span,
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
-    kv_cache_manager::SharedMemoryRegistration shared_memory_registration;
-    const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration_ptr = nullptr;
+    kv_cache_manager::ClientMemoryRegistrations memory_registrations;
+    const kv_cache_manager::ClientMemoryRegistrations* memory_registrations_ptr = nullptr;
     auto memory_connector = memory_connector_.lock();
-    if (externalZeroCopyConfigured(init_params_->kv_cache_config) &&
+    if (hostMemfdRegistrationConfigured(init_params_->kv_cache_config) &&
         (!memory_connector || memory_connector->hostPoolSharedMemoryFd() < 0)) {
         RTP_LLM_LOG_ERROR("external zero-copy is enabled but shared host block pool memfd is unavailable");
         return false;
@@ -407,25 +431,46 @@ bool RemoteConnector::init() {
     if (memory_connector) {
         const int shared_memory_fd = memory_connector->hostPoolSharedMemoryFd();
         if (shared_memory_fd >= 0) {
-            shared_memory_registration = {memory_connector->hostPoolBaseAddress(),
-                                          memory_connector->hostPoolSizeBytes(),
-                                          shared_memory_fd};
-            RTP_LLM_CHECK_WITH_INFO(shared_memory_registration.base != nullptr && shared_memory_registration.size > 0,
+            memory_registrations.host = {memory_connector->hostPoolBaseAddress(),
+                                         memory_connector->hostPoolSizeBytes(),
+                                         shared_memory_fd};
+            RTP_LLM_CHECK_WITH_INFO(memory_registrations.host.base != nullptr && memory_registrations.host.size > 0,
                                     "invalid shared host block pool registration: fd=%d base=%p size=%zu",
-                                    shared_memory_registration.fd,
-                                    shared_memory_registration.base,
-                                    shared_memory_registration.size);
-            shared_memory_registration_ptr = &shared_memory_registration;
+                                    memory_registrations.host.fd,
+                                    memory_registrations.host.base,
+                                    memory_registrations.host.size);
+            memory_registrations_ptr = &memory_registrations;
             RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu",
-                             shared_memory_registration.fd,
-                             shared_memory_registration.base,
-                             shared_memory_registration.size);
+                             memory_registrations.host.fd,
+                             memory_registrations.host.base,
+                             memory_registrations.host.size);
         }
+    }
+    if (remoteCacheGdrConfigured()) {
+        RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "RemoteCache GDR requires a KV cache allocator");
+        for (const auto& block_pool : allocator_->allBlockPools()) {
+            if (!block_pool || block_pool->where() != MemoryType::MEMORY_GPU) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(block_pool->usesDedicatedCudaAllocation(),
+                                    "RemoteCache GDR requires dedicated cudaMalloc backing for every GPU block pool");
+            RTP_LLM_CHECK_WITH_INFO(block_pool->getBaseAddress() != nullptr
+                                        && block_pool->getAllocationSizeBytes() > 0,
+                                    "invalid GPU block pool registration span");
+            memory_registrations.gpu.push_back({block_pool->getBaseAddress(),
+                                                block_pool->getAllocationSizeBytes(),
+                                                block_pool->getCudaDeviceId()});
+        }
+        RTP_LLM_CHECK_WITH_INFO(!memory_registrations.gpu.empty(),
+                                "RemoteCache GDR is enabled but no GPU block pool was found");
+        memory_registrations_ptr = &memory_registrations;
+        RTP_LLM_LOG_INFO("RemoteCache GDR registers %zu dedicated GPU block pool(s)",
+                         memory_registrations.gpu.size());
     }
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
-    if (!client_wrapper_->init(client_config_map, client_init_params, shared_memory_registration_ptr)) {
+    if (!client_wrapper_->init(client_config_map, client_init_params, memory_registrations_ptr)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }
@@ -582,17 +627,32 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
     kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
     switch (request.op()) {
         case ::RemoteOpType::REMOTE_OPERATION_READ: {
-            if (!Read(trace_id, group_ids, block_ids, uris)) {
-                RTP_LLM_LOG_WARNING("broadcastTp Read failed");
-                return false;
+            if (group_ids.empty() && block_ids.empty() && uris.empty()) {
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+                return true;
             }
-            break;
+            const auto result = Read(trace_id, group_ids, block_ids, uris);
+            response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                         result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                             REMOTE_TRANSFER_STATUS_FAILED);
+            if (result != TransferResult::SUCCESS) {
+                RTP_LLM_LOG_WARNING("broadcastTp Read failed, result=%d", static_cast<int>(result));
+            }
+            return true;
         }
         case ::RemoteOpType::REMOTE_OPERATION_WRITE: {
+            if (group_ids.empty() && block_ids.empty() && uris.empty()) {
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+                return true;
+            }
             kv_cache_manager::UriStrVec out_uris;
-            if (!Write(trace_id, group_ids, block_ids, uris, out_uris)) {
-                RTP_LLM_LOG_WARNING("broadcastTp Write failed");
-                return false;
+            const auto result = Write(trace_id, group_ids, block_ids, uris, out_uris);
+            response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                         result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                             REMOTE_TRANSFER_STATUS_FAILED);
+            if (result != TransferResult::SUCCESS) {
+                RTP_LLM_LOG_WARNING("broadcastTp Write failed, result=%d", static_cast<int>(result));
+                return true;
             }
             if (!out_uris.empty()) {
                 auto mutable_actual_uris = response.mutable_actual_uris();
@@ -602,24 +662,71 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
                     *actual_uri     = uri_str;
                 }
             }
-            break;
+            return true;
         }
         case ::RemoteOpType::REMOTE_OPERATION_WRITE_MEMORY: {
             kv_cache_manager::UriStrVec out_uris;
             if (!WriteMemory(trace_id, block_ids, uris, out_uris)) {
-                return false;
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+                return true;
             }
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
             for (const auto& uri : out_uris) {
                 *response.add_actual_uris() = uri;
             }
-            break;
+            return true;
         }
         default: {
             RTP_LLM_LOG_WARNING("invalid operation [%d]", request.op());
-            return false;
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            return true;
         }
     }
     return true;
+}
+
+RemoteConnector::TransferResult
+RemoteConnector::aggregateTransferResponses(const std::vector<FunctionResponsePB>& responses,
+                                            size_t expected_response_count) const {
+    if (responses.size() != expected_response_count) {
+        return TransferResult::COMPLETION_UNKNOWN;
+    }
+    bool failed = false;
+    for (const auto& response : responses) {
+        if (!response.has_remote_response()) {
+            return TransferResult::COMPLETION_UNKNOWN;
+        }
+        switch (response.remote_response().transfer_status()) {
+            case REMOTE_TRANSFER_STATUS_UNSPECIFIED:  // successful legacy worker
+            case REMOTE_TRANSFER_STATUS_SUCCESS:
+                break;
+            case REMOTE_TRANSFER_STATUS_FAILED:
+                failed = true;
+                break;
+            case REMOTE_TRANSFER_STATUS_TIMEOUT:
+                return TransferResult::TIMEOUT;
+            default:
+                return TransferResult::COMPLETION_UNKNOWN;
+        }
+    }
+    return failed ? TransferResult::FAILED : TransferResult::SUCCESS;
+}
+
+void RemoteConnector::quarantineConnectorResource(const std::shared_ptr<KVCacheResource>& resource) {
+    if (!resource) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(quarantine_mutex_);
+    const bool inserted = quarantined_resources_.emplace(resource.get(), resource).second;
+    if (inserted) {
+        RTP_LLM_LOG_WARNING("quarantine connector KV resource after transfer completion became unknown, blocks=%zu",
+                            resource->reuseBlockNum());
+    }
+}
+
+size_t RemoteConnector::quarantinedConnectorResourceCount() const {
+    std::lock_guard<std::mutex> lock(quarantine_mutex_);
+    return quarantined_resources_.size();
 }
 
 #define RETURN_IF(condition, method)                                                                                   \
@@ -731,8 +838,28 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
     auto broadcast_result =
         broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, get_broadcast_timeout_, rpc_call);
     broadcast_result->waitDone();
-    CHECK_AND_LOG(
-        broadcast_result->success(), RCS_ERROR, "Read failed for grpc status, trace_id [%s]", match_trace_id.c_str());
+    if (!broadcast_result->success()) {
+        quarantineConnectorResource(resource);
+        RTP_LLM_LOG_WARNING("Read completion unknown after grpc failure, trace_id [%s]", match_trace_id.c_str());
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+        return;
+    }
+    const auto transfer_result = aggregateTransferResponses(broadcast_result->responses(), requests.size());
+    if (transfer_result != TransferResult::SUCCESS) {
+        if (transfer_result == TransferResult::TIMEOUT
+            || transfer_result == TransferResult::COMPLETION_UNKNOWN) {
+            quarantineConnectorResource(resource);
+        }
+        if (transfer_result == TransferResult::TIMEOUT) {
+            async_context->setErrorInfo(
+                ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "remote cache read transfer timed out"));
+        }
+        RTP_LLM_LOG_WARNING("Read failed, trace_id [%s], result=%d",
+                            match_trace_id.c_str(),
+                            static_cast<int>(transfer_result));
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+        return;
+    }
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps  = false;
     helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
@@ -782,6 +909,7 @@ void RemoteConnector::asyncWriteMemoryTask(
                          "memory_evict_" + meta->trace_id(),
                          std::move(request_builder),
                          buffer_lease,
+                         nullptr,
                          async_context);
 }
 
@@ -793,6 +921,7 @@ void RemoteConnector::asyncWriteCommonTask(
     std::string trace_id,
     WriteRequestBuilder request_builder,
     std::shared_ptr<void> buffer_lease,
+    std::shared_ptr<KVCacheResource> connector_resource,
     const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
     (void)buffer_lease;
     WriteMetricsHelper helper(trace_id, metrics_reporter_);
@@ -844,13 +973,16 @@ void RemoteConnector::asyncWriteCommonTask(
         },
         write_location.block_mask);
 
-    const auto finish_failed_write = [&]() {
+    const auto finish_failed_write = [&](const ErrorInfo& error_info = ErrorInfo::OkStatus()) {
         async_context->setState(RemoteConnectorState::State::RCS_WRITE_FINISH);
         client_wrapper_->finishWrite(unique_id,
                                      finish_trace_id,
                                      write_location.write_session_id,
                                      kv_cache_manager::BlockMaskOffset{0},
                                      kv_cache_manager::Locations{});
+        if (error_info.hasError()) {
+            async_context->setErrorInfo(error_info);
+        }
         async_context->setState(RemoteConnectorState::State::RCS_ERROR);
     };
     RTP_LLM_LOG_INFO(
@@ -890,12 +1022,27 @@ void RemoteConnector::asyncWriteCommonTask(
     broadcast_result->waitDone();
     helper.collector.remote_write_broadcast_time_us = currentTimeUs() - broadcast_begin_us;
     if (!broadcast_result->success()) {
-        RTP_LLM_LOG_WARNING("Write failed for grpc status, trace_id [%s]", trace_id.c_str());
+        quarantineConnectorResource(connector_resource);
+        RTP_LLM_LOG_WARNING("Write completion unknown after grpc failure, trace_id [%s]", trace_id.c_str());
         finish_failed_write();
         return;
     }
 
     auto responses = broadcast_result->responses();
+    const auto transfer_result = aggregateTransferResponses(responses, requests.size());
+    if (transfer_result != TransferResult::SUCCESS) {
+        if (transfer_result == TransferResult::TIMEOUT
+            || transfer_result == TransferResult::COMPLETION_UNKNOWN) {
+            quarantineConnectorResource(connector_resource);
+        }
+        RTP_LLM_LOG_WARNING("Write failed, trace_id [%s], result=%d",
+                            trace_id.c_str(),
+                            static_cast<int>(transfer_result));
+        finish_failed_write(transfer_result == TransferResult::TIMEOUT
+                                ? ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "remote cache write transfer timed out")
+                                : ErrorInfo::OkStatus());
+        return;
+    }
     bool actual_uri_not_empty = false;
     for (size_t rank = 0; rank < responses.size(); ++rank) {
         const auto& actual_uris = responses[rank].remote_response().actual_uris();
@@ -970,6 +1117,7 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>& res
                          meta->unique_id(),
                          "start_write_" + meta->trace_id(),
                          std::move(request_builder),
+                         resource,
                          resource,
                          async_context);
 }
@@ -1096,10 +1244,10 @@ int RemoteConnector::SetCudaDeviceOnce() const {
     return 0;
 }
 
-bool RemoteConnector::Read(const std::string&                 trace_id,
-                           const std::vector<int32_t>&        group_ids,
-                           const std::vector<int32_t>&        block_ids,
-                           const kv_cache_manager::UriStrVec& uri_str_vec) {
+RemoteConnector::TransferResult RemoteConnector::Read(const std::string&                 trace_id,
+                                                       const std::vector<int32_t>&        group_ids,
+                                                       const std::vector<int32_t>&        block_ids,
+                                                       const kv_cache_manager::UriStrVec& uri_str_vec) {
     [[maybe_unused]] thread_local auto _ = SetCudaDeviceOnce();
     // for transfer client
     // TODO : support only part of the blocks loading successfully
@@ -1107,7 +1255,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
     if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
-        return false;
+        return TransferResult::FAILED;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);
     std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace_info;
@@ -1119,11 +1267,15 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
             trace_info->block_ids.push_back(std::to_string(block_id));
         }
     }
-    if (!client_wrapper_->loadKvCaches(uri_str_vec, block_buffers, trace_info)) {
-        return false;
+    const auto ec = client_wrapper_->loadKvCaches(uri_str_vec, block_buffers, trace_info);
+    if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+        return TransferResult::TIMEOUT;
+    }
+    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        return TransferResult::FAILED;
     }
     helper.collector.remote_sdk_fail_qps = false;
-    return true;
+    return TransferResult::SUCCESS;
 }
 
 bool RemoteConnector::WriteMemory(const std::string& trace_id,
@@ -1164,18 +1316,18 @@ bool RemoteConnector::WriteMemory(const std::string& trace_id,
     RTP_LLM_LOG_INFO("memory remote SDK write, trace_id=%s, blocks=%zu, iovs=%zu, bytes=%zu",
                      trace_id.c_str(), buffers.size(), iov_count, total_bytes);
     auto result = client_wrapper_->saveKvCaches(uri_str_vec, buffers);
-    if (!result.first) {
+    if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
         return false;
     }
     out_uri_str_vec = std::move(result.second);
     return true;
 }
 
-bool RemoteConnector::Write(const std::string&                 trace_id,
-                            const std::vector<int32_t>&        group_ids,
-                            const std::vector<int32_t>&        block_ids,
-                            const kv_cache_manager::UriStrVec& uri_str_vec,
-                            kv_cache_manager::UriStrVec&       out_uri_str_vec) {
+RemoteConnector::TransferResult RemoteConnector::Write(const std::string&                 trace_id,
+                                                        const std::vector<int32_t>&        group_ids,
+                                                        const std::vector<int32_t>&        block_ids,
+                                                        const kv_cache_manager::UriStrVec& uri_str_vec,
+                                                        kv_cache_manager::UriStrVec&       out_uri_str_vec) {
     [[maybe_unused]] thread_local auto _ = SetCudaDeviceOnce();
     // for transfer client
     // TODO : support finish partially
@@ -1183,7 +1335,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
     if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
-        return false;
+        return TransferResult::FAILED;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);
     std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace_info;
@@ -1196,15 +1348,18 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
         }
     }
     auto result = client_wrapper_->saveKvCaches(uri_str_vec, block_buffers, trace_info);
-    if (!result.first) {
-        return false;
+    if (result.first == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+        return TransferResult::TIMEOUT;
+    }
+    if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
+        return TransferResult::FAILED;
     }
     if (!result.second.empty()) {
         if (uri_str_vec.size() != result.second.size()) {
             RTP_LLM_LOG_WARNING("some internal error happens in saveKvCaches, expectd [%lu], actual [%lu]",
                                 uri_str_vec.size(),
                                 result.second.size());
-            return false;
+            return TransferResult::FAILED;
         }
 
         if (uri_str_vec != result.second) {
@@ -1212,7 +1367,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
         }
     }
     helper.collector.remote_sdk_fail_qps = false;
-    return true;
+    return TransferResult::SUCCESS;
 }
 
 }  // namespace rtp_llm

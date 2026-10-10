@@ -502,8 +502,9 @@ bool StreamCacheResource::loadCacheDone() {
         return false;  // coordinator 后台线程尚未处理完
     }
     // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
+    waitLoadCacheDone(load_cache_context_, /*report_error=*/false);
     if (!load_cache_context_->success()) {
+        const auto load_error = load_cache_context_->errorInfo();
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         bool      should_retry = false;
@@ -542,14 +543,19 @@ bool StreamCacheResource::loadCacheDone() {
                 RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
                                     load_cache_retry_count_,
                                     stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
-                                                "load cache failed after " + std::to_string(max_retry)
-                                                    + " retries (transfer error)");
+                const ErrorCode error_code = load_error.hasError() ? load_error.code() : ErrorCode::LOAD_CACHE_TIMEOUT;
+                const std::string error_message = load_error.hasError() ?
+                                                      load_error.ToString() :
+                                                      "load cache failed after " + std::to_string(max_retry)
+                                                          + " retries (transfer error)";
+                stream_->reportEventWithoutLock(StreamEvents::Error, error_code, error_message);
                 releaseResource();
                 return true;
             }
             load_cache_retry_count_++;
+            // load_cache_once_ prevents a second external initKVBlock call,
+            // but an internal retry must be allowed to create a new context.
+            load_cache_once_.store(false);
             asyncLoadCache();
             return false;  // 失败重试
         } else {
@@ -678,7 +684,7 @@ void StreamCacheResource::loadCacheSync() {
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool report_error) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
@@ -689,7 +695,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
-        if (error.hasError()) {
+        if (report_error && error.hasError()) {
             stream_->reportError(error.code(), error.ToString());
         }
         return;

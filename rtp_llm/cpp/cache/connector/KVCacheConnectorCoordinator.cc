@@ -176,9 +176,14 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
     stopTieredEvictionWorker();
-    // release all connectors to make sure all async context done
-    memory_connector_.reset();
+    // Drop the dispatch list first, then destroy the remote connector while
+    // the memory connector and allocator are still alive. RemoteConnector
+    // owns TransferClient, whose destructor deregisters the external host
+    // and GPU regions.
     connectors_.clear();
+    remote_connector_.reset();
+    p2p_connector_.reset();
+    memory_connector_.reset();
     // connectors already released, all async context should be done
     autil::ScopedTime2 timer;
     while (true) {

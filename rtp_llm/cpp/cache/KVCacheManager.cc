@@ -212,7 +212,7 @@ bool KVCacheManager::init() {
     }
 
     if (use_cuda_malloc_block_pool_) {
-        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
+        RTP_LLM_LOG_INFO("use cudaMalloc KV cache block-pool backing");
         allocator_->setUseCudaMallocBlockPool(true);
     }
 

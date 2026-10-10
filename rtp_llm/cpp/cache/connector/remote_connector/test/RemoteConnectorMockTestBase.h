@@ -96,15 +96,11 @@ class RemoteConnectorMockTestBase: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
         autil::EnvUtil::setEnv("KVCM_SDK_CHECK", "1");
-        ClientWrapper::client_factory_  = std::make_unique<MockClientFactory>();
-        mock_client_factory_            = dynamic_cast<MockClientFactory*>(ClientWrapper::client_factory_.get());
-        auto transfer_client            = std::make_unique<kv_cache_manager::MockTransferClient>();
-        transfer_client_                = transfer_client.get();
-        ClientWrapper::transfer_client_ = std::move(transfer_client);
+        ClientWrapper::client_factory_ = std::make_unique<MockClientFactory>();
+        mock_client_factory_           = dynamic_cast<MockClientFactory*>(ClientWrapper::client_factory_.get());
     }
 
     static void TearDownTestSuite() {
-        ClientWrapper::transfer_client_.reset();
         ClientWrapper::client_factory_.reset();
     }
 
@@ -113,6 +109,10 @@ public:
         kv_cache_config_.reco_server_address = fake_address_;
         initDevice();
         initServer();
+        auto transfer_client = std::make_unique<kv_cache_manager::MockTransferClient>();
+        transfer_client_     = transfer_client.get();
+        EXPECT_CALL(*mock_client_factory_, CreateTransferClient(_, _))
+            .WillOnce(Return(ByMove(std::move(transfer_client))));
     }
 
     void TearDown() override {}

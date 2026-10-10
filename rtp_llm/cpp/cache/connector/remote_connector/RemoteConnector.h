@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <future>
+#include <mutex>
 
 #include "autil/ThreadPool.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -20,6 +21,10 @@
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
+
+namespace test {
+class RemoteConnectorMockFullLinearTest;
+}
 
 class KVCacheAllocator;
 class RemoteAsyncMatchContext;
@@ -64,6 +69,13 @@ public:
     bool copyCache(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
 
 private:
+    enum class TransferResult {
+        SUCCESS,
+        FAILED,
+        TIMEOUT,
+        COMPLETION_UNKNOWN,
+    };
+
     // for rank_0:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
     void asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
@@ -92,6 +104,7 @@ private:
                               std::string trace_id,
                               WriteRequestBuilder request_builder,
                               std::shared_ptr<void> buffer_lease,
+                              std::shared_ptr<KVCacheResource> connector_resource,
                               const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
     void asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                         const std::shared_ptr<Meta>&                        meta,
@@ -112,19 +125,19 @@ private:
                          std::vector<FunctionRequestPB>&         requests,
                          ActualUriGather&                        actual_uri_gather) const;
     // for all_rank:
-    bool Read(const std::string&                 trace_id,
-              const std::vector<int32_t>&        group_ids,
-              const std::vector<int32_t>&        block_ids,
-              const kv_cache_manager::UriStrVec& uri_str_vec);
+    TransferResult Read(const std::string&                 trace_id,
+                        const std::vector<int32_t>&        group_ids,
+                        const std::vector<int32_t>&        block_ids,
+                        const kv_cache_manager::UriStrVec& uri_str_vec);
     bool WriteMemory(const std::string&                 trace_id,
                      const std::vector<int32_t>&        block_ids,
                      const kv_cache_manager::UriStrVec& uri_str_vec,
                      kv_cache_manager::UriStrVec&       out_uri_str_vec);
-    bool Write(const std::string&                 trace_id,
-               const std::vector<int32_t>&        group_ids,
-               const std::vector<int32_t>&        block_ids,
-               const kv_cache_manager::UriStrVec& uri_str_vec,
-               kv_cache_manager::UriStrVec&       out_uri_str_vec);
+    TransferResult Write(const std::string&                 trace_id,
+                         const std::vector<int32_t>&        group_ids,
+                         const std::vector<int32_t>&        block_ids,
+                         const kv_cache_manager::UriStrVec& uri_str_vec,
+                         kv_cache_manager::UriStrVec&       out_uri_str_vec);
 
 private:
     remote_connector::ClientWrapper::ConfigMap genClientConfig();
@@ -133,6 +146,10 @@ private:
          genLocationSpecInfoMapAndGroups(int64_t tp_size);
     void printInfo() const;
     int  SetCudaDeviceOnce() const;
+    TransferResult aggregateTransferResponses(const std::vector<FunctionResponsePB>& responses,
+                                              size_t expected_response_count) const;
+    void quarantineConnectorResource(const std::shared_ptr<KVCacheResource>& resource);
+    size_t quarantinedConnectorResourceCount() const;
 
 private:
     struct InitParams {
@@ -153,10 +170,18 @@ private:
     int                                              get_broadcast_timeout_ = 2000;
     int                                              put_broadcast_timeout_ = 2000;
     std::shared_ptr<InitParams>                      init_params_;
+    std::shared_ptr<KVCacheAllocator>                allocator_;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
     std::weak_ptr<KVCacheMemoryConnector>           memory_connector_;
     const kmonitor::MetricsReporterPtr             metrics_reporter_;
+
+    // Rank 0 retains the reference acquired by KVCacheConnectorCoordinator.
+    // It is released after TransferClient shutdown drains delayed operations.
+    mutable std::mutex quarantine_mutex_;
+    std::unordered_map<const KVCacheResource*, std::shared_ptr<KVCacheResource>> quarantined_resources_;
+
+    friend class test::RemoteConnectorMockFullLinearTest;
 };
 
 class RemoteConnectorState {
@@ -256,6 +281,7 @@ public:
 public:
     bool done() const override;
     bool success() const override;
+    ErrorInfo errorInfo() const override;
     void waitDone() override;
 
     inline RemoteConnectorState::State state() const {
@@ -267,8 +293,11 @@ private:
     inline void setState(RemoteConnectorState::State state) {
         state_.setState(state);
     }
+    void setErrorInfo(const ErrorInfo& error_info);
 
     RemoteConnectorState state_;
+    mutable std::mutex error_mutex_;
+    ErrorInfo          error_info_{ErrorInfo::OkStatus()};
 };
 
 }  // namespace rtp_llm
