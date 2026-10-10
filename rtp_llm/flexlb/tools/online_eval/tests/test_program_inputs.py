@@ -95,10 +95,42 @@ def test_bad_inactive_window_boundary_is_rejected_at_compile_time():
 
 
 @pytest.mark.parametrize("wait", [{"wait_s": True}, {"wait_s": 181}, {"wait_s": 0, "typo": 1}])
-def test_inactive_observation_parameters_still_have_a_strict_contract(wait):
+def test_inactive_procedure_waits_still_have_a_strict_contract(wait):
     data = config("master_ha_failover")
     del data["variants"]
     del data["variant_axis"]
-    data["parameters"]["observation"]["outage_wait"] = wait
+    data["parameters"]["procedure"]["outage_wait"] = wait
     with pytest.raises(ValueError):
+        configure_program(data, "ha.yaml")
+
+
+def test_ha_flow_waits_and_evidence_offsets_have_separate_effects():
+    original = config("master_ha_failover")
+    changed = config("master_ha_failover")
+    changed["parameters"]["procedure"]["settle"]["wait_s"] = 7
+    baseline = configure_program(original, "ha.yaml")
+    compiled = configure_program(changed, "ha.yaml")
+    for before, after in zip(baseline["variants"], compiled["variants"]):
+        expected = [s.copy() for s in before["stages"]]
+        for stage in expected:
+            if stage["action"] == "master_mark" and stage["id"] in {
+                "b_start", "a_start", "both_start", "outage_start",
+            }:
+                stage["params"] = {**stage["params"], "wait_s": 7}
+        assert expected == after["stages"]
+    changed = config("master_ha_failover")
+    changed["parameters"]["observation"]["windows"]["baseline"]["until"]["offset_s"] = -3
+    compiled = configure_program(changed, "ha.yaml")
+    for before, after in zip(baseline["variants"], compiled["variants"]):
+        expected = [s.copy() for s in before["stages"]]
+        for stage in expected:
+            if stage["id"] == "baseline":
+                stage["params"] = {**stage["params"], "until_offset_s": -3}
+        assert expected == after["stages"]
+
+
+def test_ha_waits_cannot_be_redeclared_as_observation_inputs():
+    data = config("master_ha_failover")
+    data["parameters"]["observation"]["settle"] = {"wait_s": 5}
+    with pytest.raises(ScenarioError, match="unknown configuration fields"):
         configure_program(data, "ha.yaml")

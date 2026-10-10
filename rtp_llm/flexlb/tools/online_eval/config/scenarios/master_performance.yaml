@@ -66,7 +66,6 @@ parameters:
     jvm_xms: 8g
     jvm_xmx: 8g
   observation:
-    benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10
     sample_s: 1
     max_gap_s: 3
     inputs:

@@ -31,6 +31,12 @@ BLOCK_FIELDS = {
     'source': ('kind', 'model', 'version', 'parameters'),
     'client': ('playback',),
 }
+# Sampling settings, inputs, measurement rules, capture bounds, then windows.
+OBSERVATION_FIELDS = (
+    'warmup_timeout_s', 'sample_s', 'window_s', 'step_s', 'max_gap_s',
+    'inputs', 'slo', 'collapse', 'capture', 'windows',
+)
+
 QUERY_FIELDS = ('promql', 'mode', 'producer', 'source_type', 'unit', 'value_kind',
                 'labels', 'measurement', 'exported_metrics', 'required')
 CURVE_FIELDS = ('metric_id', 'labels', 'name', 'group', 'unit', 'axis', 'scale',
@@ -53,6 +59,10 @@ def fields(kind, path):
             return CURVE_FIELDS
         if len(path) == 2 and path[0] == 'sections':
             return ('title', 'columns', 'opened')
+    if kind == 'scenarios' and path in {
+        ('parameters', 'observation'), ('variants', '[]', 'parameters', 'observation'),
+    }:
+        return OBSERVATION_FIELDS
     # Trace/source.parameters is a producer-specific contract, not case.parameters.
     if kind == 'scenarios' and path[-1] in BLOCK_FIELDS and (
         path[-1] != 'parameters' or len(path) == 1

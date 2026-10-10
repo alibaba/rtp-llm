@@ -61,8 +61,9 @@ def read_cycle(case):
         traffic={"kind", "source", "targets", "duration_s", "timeout_ms", "replay_speed", "loop",
                  "max_concurrency", "max_requests", "fallback"},
         procedure={"setup_timeout_s", "kill_a", "kill_b", "b_ready", "a_ready",
-                   "restart_timeout_s", "finish_timeout_s"},
-        observation={"baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait", "windows", "capture"},
+                   "restart_timeout_s", "finish_timeout_s",
+                   "baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"},
+        observation={"windows", "capture"},
         checks={"baseline_success", "b_success", "b_route", "b_balance", "outage_failures",
                 "outage_no_master", "outage_terminal", "a_success", "a_route", "a_balance",
                 "both_success", "both_balance", "handover_errors", "late_errors",
@@ -71,8 +72,8 @@ def read_cycle(case):
     from runtime.observation import capture_limits
     capture_limits(data.observation["capture"], "parameters.observation.capture")
     for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"):
-        fields(data.observation[name], {"wait_s"}, "parameters.observation." + name)
-        validate_wait(data.observation[name], path="parameters.observation." + name)
+        fields(data.procedure[name], {"wait_s"}, "parameters.procedure." + name)
+        validate_wait(data.procedure[name], path="parameters.procedure." + name)
     window_names = {"baseline", "b_only", "a_only", "both", "outage",
                     "a_handover", "post_recovery", "all_requests"}
     fields(data.observation["windows"], window_names, "parameters.observation.windows")

@@ -28,7 +28,6 @@ def metric_panel(directory, evidence, result, presentation=None):
 def evidence():
     # Small arithmetic fixture only; never a runnable benchmark.
     c = {
-        "benchmark_id": "synthetic-100ms-10qps-v1",
         "warmup_s": 5,
         "measure_s": 30,
         "sample_s": 1,
@@ -66,7 +65,7 @@ def evidence():
             dict(r, status="ok", total_ms=100, ttft_ms=50, observed_output_tokens=8)
         )
     return dict(
-        performance_evidence_schema_version=1,
+        performance_evidence_schema_version=2,
         criteria=c,
         errors=[],
         window=dict(start_epoch_ms=100000, end_epoch_ms=110000),
@@ -74,7 +73,7 @@ def evidence():
         flow=dict(complete=True, errors=[], issued=issued, records=records),
         provenance=dict(
             instance="master_performance::default::batch-window",
-            benchmark_id=c["benchmark_id"],
+            configuration_sha256="f" * 64,
             master_artifact=dict(jar_sha256="a" * 64),
             mock_jar_sha256="b" * 64,
             actual_master_config=dict(dispatcher=dict(type="BATCH")),
@@ -135,6 +134,7 @@ class PerformanceGateTest(unittest.TestCase):
                             side_effect=ValueError("artifact missing")):
                 observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None), mock.Mock())
             frozen = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
+            self.assertEqual(frozen["performance_evidence_schema_version"], 2)
             self.assertEqual(frozen["provenance"]["instance"], identity)
             self.assertEqual(frozen["errors"], ["artifact missing"])
             self.assertEqual(analyze(frozen)["verdict"], "INVALID")
@@ -441,9 +441,20 @@ class PerformanceGateTest(unittest.TestCase):
             r["status"] = "engine_error"
         self.assertEqual(analyze(e)["verdict"], "FAIL")
 
+    def test_unsupported_evidence_contract_is_rejected_explicitly(self):
+        e = evidence()
+        e["performance_evidence_schema_version"] = 1
+        result = analyze(e)
+        self.assertEqual(result["verdict"], "INVALID")
+        self.assertIn("unsupported evidence version", result["errors"])
+
     def test_missing_or_corrupt_evidence_never_passes(self):
         mutations = [
             lambda e: e["flow"]["records"][0].pop("observed_output_tokens"),
+            lambda e: e["provenance"].pop("instance"),
+            lambda e: e["provenance"].update(instance=[]),
+            lambda e: e["provenance"].pop("configuration_sha256"),
+            lambda e: e["provenance"].update(configuration_sha256="invalid"),
             lambda e: e["provenance"].pop("mock_jar_sha256"),
             lambda e: e["provenance"].pop("analyzer_sha256"),
             lambda e: e.update(provenance=[]),

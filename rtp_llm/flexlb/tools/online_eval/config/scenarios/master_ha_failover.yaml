@@ -64,7 +64,6 @@ parameters:
       inflight_zero: false
     restart_timeout_s: 300
     finish_timeout_s: 150
-  observation:
     baseline_wait:
       wait_s: 20
     settle:
@@ -75,6 +74,10 @@ parameters:
       wait_s: 30
     both_wait:
       wait_s: 20
+  observation:
+    capture:
+      max_samples: 1000
+      max_bytes: 67108864
     windows:
       baseline:
         until:
@@ -121,9 +124,6 @@ parameters:
           stage: both_start
           field: epoch_s
       all_requests: {}
-    capture:
-      max_samples: 1000
-      max_bytes: 67108864
   checks:
     baseline_success:
       window: baseline
@@ -285,19 +285,19 @@ parameter_schema:
   procedure.finish_timeout_s:
     minimum: 0
     integer: false
-  observation.baseline_wait.wait_s:
+  procedure.baseline_wait.wait_s:
     minimum: 0
     integer: false
-  observation.settle.wait_s:
+  procedure.settle.wait_s:
     minimum: 0
     integer: false
-  observation.survivor_wait.wait_s:
+  procedure.survivor_wait.wait_s:
     minimum: 0
     integer: false
-  observation.outage_wait.wait_s:
+  procedure.outage_wait.wait_s:
     minimum: 0
     integer: false
-  observation.both_wait.wait_s:
+  procedure.both_wait.wait_s:
     minimum: 0
     integer: false
   observation.windows.baseline.until.offset_s:

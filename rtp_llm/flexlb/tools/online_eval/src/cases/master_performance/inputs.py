@@ -3,7 +3,7 @@
 from cases.metric_inputs import metric_fields
 from input_contract import finite_number as finite
 
-OBSERVATION_FIELDS = frozenset({"benchmark_id", "sample_s", "max_gap_s"})
+OBSERVATION_FIELDS = frozenset({"sample_s", "max_gap_s"})
 CHECK_FIELDS = frozenset({
     "qps_tolerance", "min_requests", "max_pacing_lag_ms", "min_input_tps",
     "min_output_tps", "min_goodput_rps", "min_slo_fraction", "max_error_rate",
@@ -94,19 +94,14 @@ def observation_contract(data):
     return dict(warmup_s=bounds["from"], measure_s=bounds["until"]-bounds["from"])
 
 
-NUMERIC = (OBSERVATION_FIELDS - {"benchmark_id"}) | CHECK_FIELDS | {"qps", "warmup_s", "measure_s"}
+NUMERIC = OBSERVATION_FIELDS | CHECK_FIELDS | {"qps", "warmup_s", "measure_s"}
 
 
 def validate(criteria, gate_input=None):
-    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps", "engine_tps_by_profile"} != NUMERIC | {"benchmark_id"}:
+    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps", "engine_tps_by_profile"} != NUMERIC:
         raise ValueError(
             "performance criteria must explicitly supply every contract field"
         )
-    if (
-        not isinstance(criteria["benchmark_id"], str)
-        or not criteria["benchmark_id"].strip()
-    ):
-        raise ValueError("benchmark_id required")
     for k in NUMERIC:
         if not finite(criteria[k]) or criteria[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")

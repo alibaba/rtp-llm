@@ -28,13 +28,12 @@ def observe_validate(params, plan):
     return p
 
 
-def provenance(ctx, flow, criteria):
+def provenance(ctx, flow):
     from runtime.paths import MOCK_JAR
     from workload.run_provenance import gate_provenance
     from cases.master_performance import analysis, program, inputs
     value = gate_provenance(ctx, flow, source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__))
-    value.update(benchmark_id=criteria["benchmark_id"],
-                 mock_jar_sha256=value["files"][str(MOCK_JAR)],
+    value.update(mock_jar_sha256=value["files"][str(MOCK_JAR)],
                  analyzer_sha256=value["files"][str(analysis.__file__)])
     return value
 
@@ -47,12 +46,12 @@ def observe(ctx, p, deadline):
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
     evidence = new_evidence("performance_evidence_schema_version", clock, c,
-        instance=ctx.instance["id"],
+        instance=ctx.instance["id"], version=2,
         gate_input=p["gate_input"],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
     )
     try:
-        evidence["provenance"].update(provenance(ctx, flow, c))
+        evidence["provenance"].update(provenance(ctx, flow))
         budget = SampleBudget(p["observation"]["capture"])
         evidence["window_declarations"] = p["observation"]["windows"]
         def sample():

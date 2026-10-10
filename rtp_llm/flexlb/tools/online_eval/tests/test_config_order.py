@@ -89,3 +89,47 @@ def test_bundled_configs_follow_declared_order():
     for path, kind in configurations():
         assert path.read_text() == ordered_yaml(path.read_text(), kind), path
     assert main(['--check']) == 0
+
+
+def test_observation_order_covers_base_and_variant_without_sorting_named_windows():
+    source = """parameters:
+  observation:
+    windows:
+      second: {until: {event: end, offset_s: 10}}
+      first: {from: {event: start, offset_s: 0}}
+    capture: {max_samples: 10, max_bytes: 1024}
+    collapse: {sustain_s: 1}
+    slo: {ttft_ms: 2}
+    inputs: {engine: {source: metric_store}}
+    max_gap_s: 3
+    sample_s: 1
+variants:
+- id: extra
+  parameters:
+    observation:
+      windows: {measurement: {}}
+      capture: {max_samples: 20}
+      sample_s: 2
+"""
+    result = ordered_yaml(source, 'scenarios')
+    parsed = yaml.safe_load(result)
+    assert parsed == yaml.safe_load(source)
+    assert list(parsed['parameters']['observation']) == [
+        'sample_s', 'max_gap_s', 'inputs', 'slo', 'collapse', 'capture', 'windows',
+    ]
+    assert list(parsed['parameters']['observation']['windows']) == ['second', 'first']
+    assert list(parsed['variants'][0]['parameters']['observation']) == ['sample_s', 'capture', 'windows']
+    assert ordered_yaml(result, 'scenarios') == result
+
+
+def test_observation_order_does_not_rewrite_a_traffic_producers_parameters():
+    source = """parameters:
+  traffic:
+    source:
+      parameters:
+        observation:
+          windows: {}
+          sample_s: 1
+"""
+    result = ordered_yaml(source, 'scenarios')
+    assert list(yaml.safe_load(result)['parameters']['traffic']['source']['parameters']['observation']) == ['windows', 'sample_s']

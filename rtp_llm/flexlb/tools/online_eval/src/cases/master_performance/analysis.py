@@ -11,7 +11,8 @@ from input_contract import finite_number as finite
 
 
 REQUIRED_PROVENANCE = (
-    "benchmark_id",
+    "instance",
+    "configuration_sha256",
     "master_artifact",
     "mock_jar_sha256",
     "actual_master_config",
@@ -103,15 +104,16 @@ def analyze(evidence):
             raise ValueError("errors must be a list")
         errors.extend(evidence.get("errors", []))
         c = validate(evidence["criteria"], evidence.get("gate_input"))
-        if not matches_schema(evidence, "performance_evidence_schema_version", 1):
+        if not matches_schema(evidence, "performance_evidence_schema_version", 2):
             raise ValueError("unsupported evidence version")
         p = evidence["provenance"]
         for k in REQUIRED_PROVENANCE:
             if not p.get(k):
                 raise ValueError("missing provenance: " + k)
-        if p["benchmark_id"] != c["benchmark_id"]:
-            raise ValueError("benchmark identity mismatch")
+        if not isinstance(p["instance"], str) or not p["instance"].strip():
+            raise ValueError("missing/invalid instance identity")
         for v in (
+            p["configuration_sha256"],
             p["mock_jar_sha256"],
             p.get("analyzer_sha256"),
             p["master_artifact"].get("jar_sha256"),

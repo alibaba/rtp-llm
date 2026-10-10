@@ -15,7 +15,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
 | 6 | `analysis`、`reports` | 分析策略及交付视图 |
 
-`parameters` 按 `traffic` → `procedure` → `observation` → `checks` 排列，只声明 program 使用的组。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
+`parameters` 按 `traffic` → `procedure` → `observation` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → 测量规则（`slo`、`collapse`）→ `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
 
 从 `rtp_llm/flexlb` 检查或整理配置：
 
@@ -40,11 +40,18 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 `environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求；`parameter_schema["traffic.count"].maximum` 是该数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
 
-`traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作及流程预算；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
+`traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
 program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
-`observation.windows` 是观测边界的权威声明。跨阶段窗口使用 `stage`、`field: epoch_s` 和可选 `offset_s`，经 `ObservationWindow` 编译成有类型的输出引用；单次观测内的窗口使用 `event` 和显式 `offset_s`，测量能力验证允许的锚点及边界方向。时长从边界计算，不再另写同义的时长参数。program 选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
+`observation.windows` 是取证边界的权威声明，支持两种锚点：
+
+- 跨阶段窗口使用 `stage`、`field: epoch_s` 和可选 `offset_s`，经 `ObservationWindow` 编译成有类型的输出引用。`procedure` 中的 `wait_s` 控制现场流程实际等待；窗口引用完成后记录的时间戳，有效时长由实际边界之差计算，不能把操作的 `timeout_s` 当成窗口长度，也不再另写同义的窗口时长。
+- 单次观测内的窗口使用 `event` 和显式 `offset_s`，测量能力验证允许的锚点及边界方向，并从边界推导预热、测量时长和采集截止时间。偏移量定义取证区间；改变边界也可能改变观测执行时长，并非只改变报告显示。
+
+两种形式遵守同一规则：流程等待、操作超时与取证区间是不同输入，不相互冒充，也不重复声明同一个窗口长度。无条件等待属于 `procedure`；观测能力为等待指标就绪或覆盖达标设置的有界预算属于 `observation`。program 选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
+
+运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
 `parameter_schema` 的每条 dotted path 在 program 构建前统一校验，variant 合并后的值也受约束。未声明字段不会推断边界；缺字段、错误类型、非有限或越界值失败。校验本身不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；schema 不提供缺省值，也不承担环境配置校验。
 
