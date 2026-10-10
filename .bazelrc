@@ -217,7 +217,7 @@ test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda31
 # internal_source/ci/nvidia_runtime_env.sh with the bazel-fetched nvidia
 # wheels) is handed to the test processes.  The image ships no nccl/cudnn.
 test:cuda13_arm --test_env=LD_LIBRARY_PATH
-test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
+test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
@@ -229,6 +229,7 @@ test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bi
 # wheels) is handed to the test processes.  The image ships no nccl/cudnn.
 test:cuda13 --test_env=LD_LIBRARY_PATH
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
+test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true
