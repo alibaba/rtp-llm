@@ -66,7 +66,9 @@ def make_env_spec(plan, profile, lease):
         k: OMIT if v == {"omit": True} else v
         for k, v in plan["config_overrides"].items()
     }
-    preset_perf, preset_runtime = load_preset(plan["perf_preset"])
+    from scenario.environment_snapshot import EnvironmentSnapshot
+    snapshot = EnvironmentSnapshot.read(plan["rendered"])
+    preset_perf, preset_runtime = snapshot.performance, snapshot.runtime
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
@@ -74,6 +76,7 @@ def make_env_spec(plan, profile, lease):
         n_decode=plan["n_decode"],
         master_profile=profile,
         config_overrides=ConfigOverride(**kwargs),
+        raw_config=snapshot.master_json,
         discovery=plan["discovery"],
         master_stable_window_s=plan.get("master_stable_window_s", 3),
         masters=(

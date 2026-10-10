@@ -1,5 +1,6 @@
 """Program-owned numeric types; YAML can only narrow their legal ranges."""
 
+from collections.abc import Mapping
 from input_contract import NumberRule
 from traffic.contracts import PRIORITY, JAVA_LENGTH
 
@@ -44,7 +45,7 @@ COMMON_NUMBERS = {
 def parameter_rules(defaults):
     from scenario.loader import ScenarioError
 
-    if not isinstance(defaults, dict):
+    if not isinstance(defaults, Mapping):
         raise ScenarioError("numeric parameter contract must be a mapping")
     for path, rule in defaults.items():
         if (type(path) is not str or not path or any(not part for part in path.split('.'))

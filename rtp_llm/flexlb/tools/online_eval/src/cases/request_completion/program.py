@@ -54,3 +54,11 @@ def default(case):
                         actual=output(criterion["windows"][0], criterion["output"])),
         )
     case.step("cleanup", "teardown")
+
+
+from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+
+CASE = CaseDefinition(
+    builders={"default": default},
+    numeric_parameters=NUMERIC_PARAMETERS,
+)

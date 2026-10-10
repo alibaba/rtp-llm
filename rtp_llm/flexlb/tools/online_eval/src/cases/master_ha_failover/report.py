@@ -13,7 +13,7 @@ def build_spec(payload, presentation):
     inventory = monitoring_audit(store, presentation)
     anchor = payload["clock_anchor"]["epoch_s"]
     observations = store.document["metrics"]
-    metadata = payload["ha_metric_metadata"]
+    metadata = payload["producer_results"]["ha_evidence"]
     curves = []
     for curve_id, style in presentation["charts"]["curves"].items():
         identity = style["metric_id"]

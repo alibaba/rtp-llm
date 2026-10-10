@@ -81,3 +81,17 @@ def produce_gate_metrics(directory):
     if (Path(directory) / "performance-gate-manifest.json").is_file():
         evidence, result = load_gate(directory, "performance")
         produce(directory, evidence, result)
+
+
+from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from cases.master_performance.metrics import metric_contract
+
+CASE = CaseDefinition(
+    builders={"default": default},
+    numeric_parameters=NUMERIC_PARAMETERS,
+    actions=tuple(ACTION_HANDLERS),
+    report_views=REPORT_VIEWS,
+    producers={
+        "performance_requests": MetricProducer(metric_contract, produce_gate_metrics, ProducerPhase.GATE),
+    },
+)

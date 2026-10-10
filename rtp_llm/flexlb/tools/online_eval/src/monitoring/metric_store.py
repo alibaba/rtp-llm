@@ -226,10 +226,11 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
     """A declared Python producer publishes numeric data with explicit provenance."""
     import hashlib
     from importlib.util import find_spec
-    from monitoring.producers import PRODUCERS, output_contract
+    from monitoring.producers import output_contract
+    from cases.registry import registry
 
     declared = store.document["definitions"].get(metric_id)
-    if declared is None or declared != definition or declared.get("producer") != producer or producer not in PRODUCERS:
+    if declared is None or declared != definition or declared.get("producer") != producer or producer not in registry().producers:
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
     try:
         contract = output_contract(metric_id, definition)
@@ -240,7 +241,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
     calculation_module = ('analysis.request_metrics' if 'calculation' in definition
                           else definition['measurement']['method'].rsplit('.', 1)[0])
     calculation_sha256 = hashlib.sha256(Path(find_spec(calculation_module).origin).read_bytes()).hexdigest()
-    module = PRODUCERS[producer][0]
+    module = registry().producers[producer].module
     producer_sha256 = hashlib.sha256(Path(find_spec(module).origin).read_bytes()).hexdigest()
     result, identities = [], set()
     for row in rows:

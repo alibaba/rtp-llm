@@ -180,15 +180,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 loc + ".environment_overrides",
                 variant_environment_fields(),
             )
-            for key, value in patch.items():
-                if key == "config_overrides":
-                    if not isinstance(value, dict) or not isinstance(
-                        env.get(key, {}), dict
-                    ):
-                        fail(loc, "config_overrides must be mapping")
-                    env[key] = {**env.get(key, {}), **copy.deepcopy(value)}
-                else:
-                    env[key] = copy.deepcopy(value)
+            from cases.config_data import merge_environment
+            env = merge_environment(env, patch)
             capture = capture_defaults(env.get("perf_preset", "default"))
             for field, source_field in (
                 ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),

@@ -58,15 +58,22 @@ def merge_environment(base, patch):
     if not isinstance(base, dict) or not isinstance(patch, dict):
         raise ScenarioError("environment must be a mapping")
     result = {**copy.deepcopy(base), **copy.deepcopy(patch)}
-    if "config_overrides" in patch:
-        if not isinstance(base.get("config_overrides", {}), dict) or not isinstance(
-            patch["config_overrides"], dict
-        ):
-            raise ScenarioError("config_overrides must be a mapping")
-        result["config_overrides"] = {
-            **copy.deepcopy(base.get("config_overrides", {})),
-            **copy.deepcopy(patch["config_overrides"]),
-        }
+    for name in ("config_overrides", "profile_overrides"):
+        if name not in patch:
+            continue
+        previous, changed = base.get(name, {}), patch[name]
+        if not isinstance(previous, dict) or not isinstance(changed, dict):
+            raise ScenarioError(name + " must be a mapping")
+        if name == "config_overrides":
+            # Each configuration field is atomic, including omit and model objects.
+            result[name] = {**copy.deepcopy(previous), **copy.deepcopy(changed)}
+        else:
+            profiles = copy.deepcopy(previous)
+            for profile, overrides in changed.items():
+                if not isinstance(overrides, dict) or not isinstance(profiles.get(profile, {}), dict):
+                    raise ScenarioError("profile_overrides entries must be mappings")
+                profiles[profile] = {**profiles.get(profile, {}), **copy.deepcopy(overrides)}
+            result[name] = profiles
     return result
 
 

@@ -40,7 +40,7 @@
 
 生产阶段未完成的失败运行生成默认报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
 
-通用 bundle 外的输入保真度诊断由 `reporting/traffic_fidelity.py` 生成 `fidelity.html`，提供阈值、ECDF 与联合密度交互；它不参与运行门禁或 bundle 发现。
+通用 bundle 外的输入保真度诊断由 `traffic/fidelity_report.py` 生成 `fidelity.html`，使用公共渲染器展示冻结阈值、ECDF 与联合密度；它不参与运行门禁或 bundle 发现。
 
 ## 展示与交互
 
@@ -50,7 +50,7 @@
 
 单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
 
-门禁检查展示冻结结果中的具体检查，外层 action 的 `actual` 只记录 verdict，完整结果用校验后的工件路径引用，不把整份结果及窗口序列塞入表格单元格。门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
+门禁检查使用 `CheckNode` 树展示冻结结果中的父检查与具体子检查；空子列表不隐藏父结果。外层 action 的 `actual` 只记录 verdict，完整结果用校验后的工件路径引用，不把整份结果及窗口序列塞入表格单元格。门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
 
 场景 YAML 的 `reporting.time_axis` 决定整个 run 的报告零点与默认展示范围，所有视图和时间面板共享，不由 view YAML 分别定义。`origin` 选择 `{event: <id>}` 或 `{stage: <id>, boundary: start|end}`；`range.from` 使用 `origin` 或同型选择器，`range.until` 使用同型选择器。阶段名在编译期验证；事件 ID 引用执行层的实际记录，运行后必须唯一发生。选择自定义 case 事件时由 Python 调用 `ctx.record_event()`，不得把启动请求的时刻冒充操作实际生效时间。
 
@@ -78,9 +78,9 @@ reporting:
 
 `comparison.py` 接收多个 run bundle，先校验再读取结果与 spec，不导入 case 分析器、不读取原始 evidence、不重建单 run 报告。每侧 verdict、KPI、缺采、说明与原报告链接保留；输入归档应留在原位置。
 
-合图只配对 ID、指标集合、单位及坐标轴一致的时间面板。时间原点不一致时分别展示；指定事件缺失、重复或无效时全部保留原坐标，不推导统计窗口、排名或原因。
+合图只配对面板 ID、metric ID、标签、测量口径、显示缩放、单位及坐标轴一致的时间面板。显示文案不参与测量身份匹配，缺少测量身份时保留独立面板。时间原点不一致时分别展示；指定事件缺失、重复或无效时全部保留原坐标，不推导统计窗口、排名或原因。
 
-控制变量来自冻结的 configuration、workload、environment 与 criteria。字段缺失标 UNKNOWN，不从两边同时缺失推断一致。对比不产生顶层 verdict，命令退出码只描述读取、校验与写入是否成功；入口见[命令导航](../development/entrypoints.md)。
+控制变量在写入归档时冻结为 `ComparisonControls`，对照读取显式契约，不从 case 证据重建。字段缺失标 UNKNOWN，不从两边同时缺失推断一致。对比不产生顶层 verdict，命令退出码只描述读取、校验与写入是否成功；入口见[命令导航](../development/entrypoints.md)。
 
 离线重判必须显式指定 `--reinterpret`，输出目录位于原证据归档之外且为空。原归档只读；来源证据 SHA 与当前分析器 SHA 写入重判证据，指标物化和报告发布只写新目录。`--json-only` 同样遵守目录保护和溯源规则。
 
@@ -91,3 +91,7 @@ reporting:
 每个专属视图由 program 的 `ReportView` 显式注册 renderer。在线执行在资源清理、证据分析和数值投影完成后调用 renderer，直接写出包含运行上下文的最终 bundle。公共报告层不读取旧 bundle 补写运行上下文；重绘只消费校验后的冻结结果和归档指标，不重判。缺少未提交门禁且运行已失败时，可生成默认监控视图，并明确显示未生成的视角。
 
 HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输入选择、样本数、窗口边界与实测值进入阶段结果。收尾阶段从已落盘的阶段检查发布门禁标量，不重新测量或比较；门禁判定不依赖指标写入或 HTML 成功。公共报告元信息只接受明确的 `run_meta`，未知信息保留为空，不转换旧 `meta` 字段补造配置。
+
+## 数据边界
+
+`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。

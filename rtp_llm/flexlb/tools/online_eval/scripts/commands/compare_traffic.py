@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'src'))
 from traffic.datasets import profile_path
 from analysis.traffic_fidelity import run
-from reporting.traffic_fidelity import write, markdown
+from traffic.fidelity_report import write, markdown
 
 
 def main(argv=None):

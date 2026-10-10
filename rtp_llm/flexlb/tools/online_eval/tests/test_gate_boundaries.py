@@ -143,8 +143,9 @@ def test_registered_view_extension_needs_no_workload_case_branch():
         (root/'another.yaml').write_text(yaml.safe_dump(definition))
         module = SimpleNamespace(REPORT_VIEWS={
             'another.yaml': registry.ReportView(validator, render)})
-        with mock.patch.dict(registry.PROGRAMS, {'another_case': 'another.program'}, clear=True), \
-             mock.patch('importlib.import_module', return_value=module), \
+        from case_registry_fixtures import entry, snapshot
+        definition = registry.CaseDefinition({'default': lambda case: None}, report_views=module.REPORT_VIEWS)
+        with mock.patch.object(registry, '_snapshot', snapshot(entry('another_case', definition), include_existing=True)), \
              mock.patch('reporting.view_config.VIEWS', root):
             assert write_views(root, {'status': 'PASS'}, ['another.yaml']) == {
                 'another.yaml': Path('/unused/new/report.html')}

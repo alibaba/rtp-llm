@@ -1,9 +1,8 @@
 """Foundational actions and capabilities declared by registered Python cases."""
 
-import importlib
 from dataclasses import replace
 
-from cases.registry import PROGRAMS
+from cases.registry import registry
 from scenario.actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
 from scenario.actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
 from scenario.actions.environment import HANDLERS as ENVIRONMENT_HANDLERS
@@ -23,7 +22,7 @@ FOUNDATION_HANDLERS = (
 
 def handlers(case=None):
     """Return foundations plus one case's capabilities, or all registered cases."""
-    if case is not None and case not in PROGRAMS:
+    if case is not None and case not in registry().cases:
         raise ValueError(f"unknown registered Python case {case!r}")
     result = {}
 
@@ -36,9 +35,8 @@ def handlers(case=None):
         if descriptor.owners:
             raise ValueError(f"foundational action {descriptor.name!r} has a case owner")
         add(descriptor)
-    for name in PROGRAMS if case is None else (case,):
-        module = importlib.import_module(PROGRAMS[name])
-        for descriptor in getattr(module, "ACTION_HANDLERS", ()):
+    for name in registry().cases if case is None else (case,):
+        for descriptor in registry().cases[name].definition.actions:
             if descriptor.owners and descriptor.owners != frozenset({name}):
                 raise ValueError(f"action {descriptor.name!r} has a conflicting case owner")
             owned = replace(descriptor, owners=frozenset({name}))

@@ -3,6 +3,7 @@
 import copy
 
 from reporting.core import run_meta, table, details
+from reporting.run_model import RunPresentation
 
 
 KPI_LABELS = {"execution": "Execution", "validity": "Validity", "request_count": "请求数",
@@ -14,56 +15,55 @@ def title(identity):
 
 
 def provenance_from(analysis, inherited=None):
+    run = RunPresentation.read(analysis)
     meta = copy.deepcopy(inherited or {})
     configuration = copy.deepcopy(meta.get("configuration") or {})
-    configuration.update(declared=analysis.get("configuration"),
-                         sha256=analysis.get("configuration_sha256"),
-                         runtime=analysis.get("workload", {}).get("runtime_configuration"))
-    implementation = copy.deepcopy(analysis.get("implementation") or {})
+    for name, value in (("declared", run.configuration), ("sha256", run.configuration_sha256),
+                        ("runtime", run.runtime_configuration)):
+        if value is not None:
+            configuration[name] = value
+        elif name not in configuration:
+            configuration[name] = None
+    implementation = copy.deepcopy(run.implementation)
     # Configuration and metric definitions already have their own frozen artifacts.
     implementation.pop("configuration", None)
     if isinstance(implementation.get("monitoring_query_plan"), dict):
         implementation["monitoring_query_plan"].pop("definition", None)
     return run_meta(
-        dict(meta.get("identity") or {}, id=analysis["id"], kind="run"),
+        dict(meta.get("identity") or {}, id=run.identity, kind="run"),
         implementation=dict(case=implementation,
                             artifacts=meta.get("implementation")),
-        workload=analysis.get("traffic_manifests") or meta.get("workload"),
+        workload=run.traffic_manifests if run.traffic_manifests is not None else meta.get("workload"),
         configuration=configuration,
-        environment=analysis.get("runtime_provenance") or meta.get("environment"),
-        clock=dict(acquisition=analysis.get("clock_anchor") or meta.get("clock"),
-                   report=analysis["report_timeline"]) if analysis.get("report_timeline") else
-              analysis.get("clock_anchor") or meta.get("clock"),
-        evidence=dict(gate=meta.get("evidence"), requests=analysis.get("request_sources")),
+        environment=run.runtime_provenance if run.runtime_provenance is not None else meta.get("environment"),
+        clock=dict(acquisition=run.clock_anchor if run.clock_anchor is not None else meta.get("clock"),
+                   report=run.report_timeline) if run.report_timeline is not None else
+              run.clock_anchor if run.clock_anchor is not None else meta.get("clock"),
+        evidence=dict(gate=meta.get("evidence"), requests=run.request_sources),
     )
 
 
 def checks_section(analysis):
-    rows = []
-    for row in analysis.get("checks", []):
-        nested = row.get("evidence", {}).get("checks")
-        for check in nested if nested is not None else [row]:
-            identity = row["stage"] + "/" + (row["id"] + "/" if nested is not None else "") + check["id"]
-            rows.append([identity, check["status"], check.get("actual"), check.get("expected")])
+    run = analysis if isinstance(analysis, RunPresentation) else RunPresentation.read(analysis)
+    rows = [row for check in run.checks for row in check.rows()]
     return table("门禁检查", ["阶段 / 检查", "状态", "实际值", "门槛"],
                  rows, opened=True, identity="run.checks")
 
 
 def validity_section(analysis):
-    workload = analysis.get("workload", {})
-    return details("有效性与证据完整性", {key: workload.get(key) for key in (
-        "runtime_validity", "telemetry_completeness", "missing_telemetry",
-        "telemetry_integrity_errors", "telemetry_diagnostics", "telemetry_warnings")}, identity="run.validity")
+    run = analysis if isinstance(analysis, RunPresentation) else RunPresentation.read(analysis)
+    return details("有效性与证据完整性", run.validity.to_dict(), identity="run.validity")
 
 
 def canonical_spec(spec, analysis):
+    run = RunPresentation.read(analysis)
     result = copy.deepcopy(spec)
-    result.update(run_id=analysis["id"], title=title(analysis["id"]))
-    common = {"execution": analysis["status"], "validity": analysis["workload"]["runtime_validity"]}
+    result.update(run_id=run.identity, title=title(run.identity))
+    common = {"execution": run.status, "validity": run.validity.runtime_validity}
     result["kpis"] = [dict(id="run." + key, label=KPI_LABELS[key], value=value)
                       for key, value in common.items()] + [
         item for item in result.get("kpis", []) if item.get("id") not in {"run." + key for key in common}]
-    result["sections"] = [checks_section(analysis), validity_section(analysis)] + [
+    result["sections"] = [checks_section(run), validity_section(run)] + [
         section for section in result.get("sections", [])
         if section.get("id") not in {"run.checks", "run.validity", "case.checks"}]
     from reporting.timeline import apply

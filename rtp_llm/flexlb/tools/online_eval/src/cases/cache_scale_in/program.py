@@ -82,3 +82,17 @@ def produce_gate_metrics(directory):
     if (Path(directory) / "cache-gate-manifest.json").is_file():
         evidence, result = load_gate(directory, "cache")
         produce(directory, evidence, result)
+
+
+from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from cases.cache_scale_in.metrics import metric_contract
+
+CASE = CaseDefinition(
+    builders={"default": default},
+    numeric_parameters=NUMERIC_PARAMETERS,
+    actions=tuple(ACTION_HANDLERS),
+    report_views=REPORT_VIEWS,
+    producers={
+        "cache_windows": MetricProducer(metric_contract, produce_gate_metrics, ProducerPhase.GATE),
+    },
+)

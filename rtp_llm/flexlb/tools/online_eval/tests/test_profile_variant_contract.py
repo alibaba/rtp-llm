@@ -64,9 +64,12 @@ def test_every_case_requires_root_default_even_with_variants(program):
 def test_variants_cannot_replace_a_missing_python_default(monkeypatch):
     from cases.master_ha_failover import program as master_ha_failover
     data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
-    monkeypatch.delattr(master_ha_failover, 'default')
-    with pytest.raises(ScenarioError, match="unknown Python case program 'default'"):
-        configure_program(data, 'ha.yaml')
+    from dataclasses import replace
+    from cases import registry
+    case = registry.registry().cases['master_ha_failover']
+    invalid = replace(case, definition=replace(case.definition, builders={'non_rolling': master_ha_failover.non_rolling}))
+    with pytest.raises(ValueError, match='invalid case builders'):
+        registry.CaseRegistry.build([invalid])
 
 
 def test_default_id_is_reserved_for_the_root_program():

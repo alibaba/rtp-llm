@@ -73,8 +73,14 @@ def test_variant_dimension_guard_runs_before_the_variant_program():
     config = load_document(root/'config/scenarios/request_completion.yaml')
     config.update(variant_axis={'kind': 'data', 'fields': ['parameters.traffic.count']},
                   variants=[{'id': 'two', 'parameters': {'traffic': {'count': 2, 'input_len': 10}}}])
-    with patch.object(program, 'default', wraps=program.default) as build:
-        build.__module__ = program.__name__
+    from dataclasses import replace
+    from cases import registry
+    from case_registry_fixtures import snapshot
+    from unittest.mock import Mock
+    build = Mock(wraps=program.default)
+    original = registry.registry().cases['request_completion']
+    changed = replace(original, definition=replace(original.definition, builders={'default': build}))
+    with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
         with pytest.raises(ScenarioError, match='outside declared dimension'):
             configure_program(config, 'case.yaml')
     # Root default is built; the invalid variant never calls its program.

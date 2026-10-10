@@ -180,7 +180,7 @@ def environment(value, path, profile):
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
-    _, preset_runtime = load_preset(result["perf_preset"])
+    preset_performance, preset_runtime = load_preset(result["perf_preset"])
     paired_settings = preset_runtime.get("paired_master")
     paired_master = paired_settings.for_profile(profile) if paired_settings else {}
     profile_overrides = mapping(value.get("profile_overrides", {}),
@@ -239,7 +239,7 @@ def environment(value, path, profile):
         elif key == "prefill_expression":
             if not isinstance(val, str) or not val.strip() or len(val) > 4096:
                 fail(field, "expected a nonempty formula of at most 4096 characters")
-        elif key == "preemption":
+        elif key == "preemption" and val != {"omit": True}:
             mapping(
                 val,
                 field,
@@ -297,4 +297,9 @@ def environment(value, path, profile):
     result["effective_axes"], result["effective_capabilities"] = effective_capabilities(
         result["resolved_config"]
     )
+    from scenario.environment_snapshot import EnvironmentSnapshot
+    result["rendered"] = EnvironmentSnapshot.freeze(
+        result["resolved_config"], preset_performance,
+        {key: value for key, value in preset_runtime.items() if key != "paired_master"},
+    ).to_dict()
     return result

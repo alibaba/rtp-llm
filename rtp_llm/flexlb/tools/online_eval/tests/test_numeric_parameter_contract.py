@@ -62,9 +62,12 @@ def test_shipped_scenarios_need_no_numeric_schema(name):
 
 def test_shared_field_cannot_drift_between_programs():
     module = program_module('cache_scale_in', 'fixture')
-    declarations = dict(module.NUMERIC_PARAMETERS)
+    declarations = dict(module.definition.numeric_parameters)
     declarations['traffic.source.parameters.priority'] = COUNT
-    with patch.object(module, 'NUMERIC_PARAMETERS', declarations):
+    from cases import registry
+    from case_registry_fixtures import snapshot
+    changed = replace(module, definition=replace(module.definition, numeric_parameters=declarations))
+    with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
         with pytest.raises(ScenarioError, match='conflicting shared numeric field'):
             configure_program(config('cache_scale_in'), 'case.yaml')
 
@@ -116,7 +119,7 @@ def test_every_declared_field_rejects_bool_before_program_build(name):
     from cases.config import CaseBuilder
     data = config(name)
     module = program_module(name, 'fixture')
-    rules = narrow_parameters(parameter_rules(module.NUMERIC_PARAMETERS), data.get('parameter_schema', {}))
+    rules = narrow_parameters(parameter_rules(module.definition.numeric_parameters), data.get('parameter_schema', {}))
     for path in rules:
         parameters = copy.deepcopy(data['parameters'])
         target = parameters

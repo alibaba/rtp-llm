@@ -3,16 +3,15 @@
 import copy
 from dataclasses import asdict
 import hashlib
-import importlib
 import json
 from monitoring.identity import METRIC_ID, NAME
 from pathlib import Path
 
 from scenario.loader import ScenarioError
 from cases.config_data import (
-    merge_data, mapping, data_only, leaf_paths, merge_environment, path_in_scope,
+    merge_data, leaf_paths, merge_environment, path_in_scope,
 )
-from cases.variants import VariantAxis
+from cases.declarations import CaseDeclaration, VariantDeclaration
 
 
 class ProgramDocument(dict):
@@ -105,81 +104,42 @@ class CaseBuilder:
 
 
 def program_module(name, source):
-    from cases.registry import PROGRAMS
-
-    if not isinstance(name, str) or name not in PROGRAMS:
+    from cases.registry import registry
+    if not isinstance(name, str) or name not in registry().cases:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
-    return importlib.import_module(PROGRAMS[name])
+    return registry().cases[name]
 
 
 def configure_program(config, source):
     """Build an internal plan using an allowlisted Python entry point, without I/O."""
-    _validate_configuration(config, source)
-    name = config.get("case")
+    config = CaseDeclaration.read(config, source)
+    name = config.case
     module = program_module(name, source)
-    parameters = config.get("parameters", {})
-    if not isinstance(parameters, dict):
-        raise ScenarioError(f"{source}.parameters: expected mapping")
-    if config.get("program") != "default":
+    if config.program != "default":
         raise ScenarioError(f"{source}: every case must declare program: default")
-    axis = VariantAxis.from_config(config, source)
+    axis = config.variant_axis
     document = _program_document(config, name, source)
     seen = set()
     numeric_contracts = {}
-    for index, row in enumerate([{"id": "default"}, *config.get("variants", [])]):
-        mapping(row, {
-            "id", "program", "profiles", "environment", "execution", "parameters",
-            "metadata", "parameter_schema", "reports",
-        }, source + ".variants")
+    default = VariantDeclaration.read({"id": "default"}, source)
+    for index, row in enumerate((default, *config.variants)):
         if index and axis is not None:
-            axis.validate_patch(row, source)
-        identity = row.get("id")
+            axis.validate_patch(row.declaration, source)
+        identity = row.identity
         if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
             raise ScenarioError(f"{source}: missing or duplicate configuration id {identity!r}")
         seen.add(identity)
         document["variants"].append(_build_variant(
-            config, row, identity, module, axis if index else None, document.get("profiles"), source, numeric_contracts,
+            config, row, identity, module, axis if index else None, config.profiles, source, numeric_contracts,
         ))
     document.implementation = _implementation(config, module, name)
     document.implementation["numeric_parameters"] = numeric_contracts
     return document
 
 
-def _validate_configuration(config, source):
-    data_only(config, source)
-    mapping(
-        config,
-        {
-            "case_schema_version",
-            "case",
-            "program",
-            "variant_axis",
-            "id",
-            "profiles",
-            "environment",
-            "execution",
-            "parameters",
-            "variants",
-            "metadata",
-            "parameter_schema",
-            "reports",
-            "reporting",
-        },
-        source,
-    )
-    from scenario.suites import normalize_metadata, normalize_execution
-
-    metadata = normalize_metadata(config.get("metadata"))
-    normalize_execution(config.get("execution"), kind=metadata["kind"])
-    if type(config.get("case_schema_version")) is not int or config["case_schema_version"] != 2:
-        raise ScenarioError(
-            f"{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python"
-        )
-
-
 def _program_document(config, name, source):
-    environment = config.get("environment", {})
-    metadata = config.get("metadata", {})
+    environment = config.environment
+    metadata = config.metadata
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
     document = ProgramDocument({
@@ -188,13 +148,12 @@ def _program_document(config, name, source):
     document.update(
         program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
-    document["id"] = config.get("id", name)
+    document["id"] = config.identity
     from scenario.suites import EXECUTION_BUDGETS
 
-    if "profiles" in config:
-        document["profiles"] = copy.deepcopy(config["profiles"])
+    document["profiles"] = list(config.profiles)
     document["execution"] = {
-        key: copy.deepcopy(value) for key, value in config["execution"].items()
+        key: copy.deepcopy(value) for key, value in config.execution.to_dict().items()
         if key in EXECUTION_BUDGETS
     }
     selected_profiles = document.get("profiles")
@@ -210,25 +169,20 @@ def _program_document(config, name, source):
 
 
 def _select_program(module, program, source):
-    build = vars(module).get(program) if isinstance(program, str) else None
-    if (
-        not isinstance(program, str)
-        or program.startswith("_")
-        or not callable(build)
-        or getattr(build, "__module__", None) != module.__name__
-    ):
+    build = module.definition.builders.get(program) if isinstance(program, str) else None
+    if build is None:
         raise ScenarioError(f"{source}: unknown Python case program {program!r}")
     return build
 
 
 def _build_variant(config, row, identity, module, axis, selected_profiles, source, numeric_contracts):
-    environment = config.get("environment", {})
-    parameters = config.get("parameters", {})
-    program = row.get("program", config.get("program"))
+    environment = config.environment
+    parameters = config.parameters
+    program = row.program if row.program is not None else config.program
     if axis is not None:
         axis.validate_flow(program, identity, module, source)
     build = _select_program(module, program, source)
-    profiles = selected_profiles
+    profiles = list(selected_profiles)
     if (
         not isinstance(profiles, list)
         or not profiles
@@ -237,17 +191,15 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
         raise ScenarioError(
             f"{source}: profiles must be a nonempty string list in YAML"
         )
-    variant_parameters = row.get("parameters", {})
-    if not isinstance(variant_parameters, dict):
-        raise ScenarioError(f"{source}: variant parameters must be a mapping")
-    patch = row.get("environment", {})
+    variant_parameters = row.parameters
+    patch = row.environment
     from cases.numeric_parameters import parameter_rules, narrow_parameters
-    defaults = parameter_rules(getattr(module, "NUMERIC_PARAMETERS", {}))
-    base_rules = narrow_parameters(defaults, config.get("parameter_schema", {}))
+    defaults = parameter_rules(module.definition.numeric_parameters)
+    base_rules = narrow_parameters(defaults, config.parameter_schema)
     builder = CaseBuilder(
         merge_environment(environment, patch),
         merge_data(parameters, variant_parameters),
-        number_rules=narrow_parameters(base_rules, row.get("parameter_schema", {})),
+        number_rules=narrow_parameters(base_rules, row.parameter_schema),
     )
     builder.validate_numbers()
     numeric_contracts[identity] = {path: asdict(rule) for path, rule in builder.number_rules.items()}
@@ -268,21 +220,19 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
 
 
 def _variant_contract(config, builder, source):
-    from scenario.suites import normalize_metadata, normalize_execution
-
-    metadata = normalize_metadata(config.get("metadata"))
-    execution = normalize_execution(config.get("execution"), kind=metadata["kind"])
+    metadata = config.metadata
+    execution = config.execution.to_dict()
     if (builder.metric_dependencies or "metric_whitelist" in builder.environment
             or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
         _bind_metric_dependencies(builder.metric_dependencies, execution)
     variant = dict(metadata=metadata, execution=execution)
     _bind_reports(config, variant, source, builder.steps)
-    if "reporting" in config:
+    if config.reporting is not None:
         if metadata["kind"] != "workload":
             raise ScenarioError("reporting.time_axis requires a workload case")
         from reporting.timeline import validate_configuration
         try:
-            variant["reporting"] = validate_configuration(config["reporting"], {stage["id"] for stage in builder.steps})
+            variant["reporting"] = validate_configuration(config.reporting, {stage["id"] for stage in builder.steps})
         except ValueError as exc:
             raise ScenarioError(f"{source}.reporting: {exc}") from exc
     if metadata["kind"] == "workload":
@@ -315,7 +265,7 @@ def _bind_metric_dependencies(requirements, execution):
 def _bind_reports(config, variant, source, stages):
     from reporting.view_config import declaration
 
-    reports = config.get("reports")
+    reports = list(config.reports) if config.reports is not None else None
     kind = variant["metadata"]["kind"]
     if reports is not None:
         variant["reports"] = declaration(
@@ -335,16 +285,16 @@ def _bind_reports(config, variant, source, stages):
 
 
 def _implementation(config, module, name):
-    program_path = Path(module.__file__).resolve()
+    program_path = module.path.resolve()
     implementation = {
-        "configuration": copy.deepcopy(config),
+        "configuration": copy.deepcopy(config.declaration),
         "language": "python",
         "program": name,
         "path": str(program_path),
         "sha256": hashlib.sha256(program_path.read_bytes()).hexdigest(),
         "configuration_sha256": hashlib.sha256(
             json.dumps(
-                config, sort_keys=True, separators=(",", ":"), allow_nan=False
+                config.declaration, sort_keys=True, separators=(",", ":"), allow_nan=False
             ).encode()
         ).hexdigest(),
     }

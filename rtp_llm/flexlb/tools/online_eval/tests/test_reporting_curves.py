@@ -67,27 +67,27 @@ def test_configuration_gate_lines_do_not_hide_missing_measurements():
     [],
 ])
 def test_registry_rejects_invalid_case_view_capabilities(declaration):
-    module = SimpleNamespace(REPORT_VIEWS=declaration)
-    with mock.patch.dict(registry.PROGRAMS, {'case':'registered.program'}, clear=True), \
-         mock.patch('importlib.import_module', return_value=module):
-        with pytest.raises(ValueError):
-            registry.view_capabilities()
+    from case_registry_fixtures import entry, snapshot
+    with pytest.raises(ValueError):
+        definition = registry.CaseDefinition({'default': lambda case: None}, report_views=declaration)
+        snapshot(entry('case', definition))
 
 
 def test_two_registered_programs_cannot_assign_conflicting_view_capabilities():
-    modules = [SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None, lambda *args: None)})
-               for _ in range(2)]
-    with mock.patch.dict(registry.PROGRAMS, {'a':'a.program','b':'b.program'}, clear=True), \
-         mock.patch('importlib.import_module', side_effect=modules):
-        with pytest.raises(ValueError, match='conflicting'):
-            registry.view_capabilities()
+    from case_registry_fixtures import entry, snapshot
+    definitions = [registry.CaseDefinition({'default': lambda case: None},
+        report_views={'extra.yaml': registry.ReportView(lambda *args: None, lambda *args: None)})
+        for _ in range(2)]
+    with pytest.raises(ValueError, match='conflicting'):
+        snapshot(entry('a', definitions[0]), entry('b', definitions[1]))
 
 
 def test_shared_capability_can_be_reused_by_registered_programs():
-    module = SimpleNamespace(REPORT_VIEWS={'extra.yaml':registry.ReportView(lambda *args: None, lambda *args: None)})
-    with mock.patch.dict(registry.PROGRAMS, {'a':'a.program','b':'b.program'}, clear=True), \
-         mock.patch('importlib.import_module', return_value=module):
-        assert registry.view_capabilities() == module.REPORT_VIEWS
+    from case_registry_fixtures import entry, snapshot
+    definition = registry.CaseDefinition({'default': lambda case: None},
+        report_views={'extra.yaml': registry.ReportView(lambda *args: None, lambda *args: None)})
+    with mock.patch.object(registry, '_snapshot', snapshot(entry('a', definition), entry('b', definition))):
+        assert registry.view_capabilities() == definition.report_views
 
 
 def test_selected_presets_and_visibility_reach_the_html(tmp_path):

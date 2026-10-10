@@ -126,7 +126,7 @@ calculation:
 
 入库过滤减少序列和存储量，不减少 exporter HTTP 响应生成或网络传输；只减少查询或图表也不会减少 scrape。Master 不增加生产指标、接口或日志。现有 Java 暴露白名单仍受编译校验；client、engine 的源端导出能力可按其自身合同扩展，不把服务端成本下降当成入库过滤的既有效果。
 
-`monitoring.sources.SOURCES` 注册额外数据源能力，选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
+case 的 `CaseDefinition.sources` 声明额外数据源能力，由自动发现的公共注册快照收集，选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
 
 适配器只执行一次严格字段投影，不创建线程、写文件或回退到日志。接口不可达本身是观测时，可以显式产出可达性 0，其余字段缺失；成功响应的坏 JSON、缺字段、非有限数报错。probe 启动必须完成一次成功 scrape 才开始发流。SDK 的 `up` 表示适配器 exporter 是否成功，Master 的 HTTP 可回读是另一条源端观测，不能混淆；坏响应和样本/字节预算超限会在启动或收尾显式失败。
 

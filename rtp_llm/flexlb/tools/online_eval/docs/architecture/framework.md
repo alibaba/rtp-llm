@@ -112,3 +112,9 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 `result.json.outcome` 分别保存 `execution`、`gate`、`validity` 和 `delivery`。流程异常、业务未达标、证据不足与交付失败分别记录，不用一种错误覆盖其他事实。`runtime.outcome.RunOutcome` 是最终状态的唯一计算规则，父 runner 使用同一规则验证子结果一致性。交付失败仍使任务失败，但不能改变已冻结的门禁 verdict；finding 只匹配明确失败的检查。
 
 没有执行有效检查，或只有 `SKIP`，不构成 PASS。`WARNING` 是实际完成的建议性检查；证据不足始终为 ERROR，不受建议性策略豁免。可缺失的测量输出必须显式声明 `nullable_number`，只有伴随证据 ERROR 时才能输出 null；成功结果仍要求实际有限数值。
+
+## 声明与解析结果
+
+数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。
+
+环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。

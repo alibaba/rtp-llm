@@ -92,3 +92,23 @@ REPORT_VIEWS = {
 def produce_gate_metrics(directory):
     from cases.master_ha_failover.metrics import produce_gates
     produce_gates(directory)
+
+
+from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from cases.master_ha_failover.metrics import metric_contract
+from cases.registry import EvidenceSource
+from cases.master_ha_failover.metrics import produce as produce_evidence
+from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
+
+CASE = CaseDefinition(
+    builders={"default": default, "non_rolling": non_rolling},
+    numeric_parameters=NUMERIC_PARAMETERS,
+    actions=tuple(ACTION_HANDLERS),
+    report_views=REPORT_VIEWS,
+    producers={
+        "ha_gates": MetricProducer(metric_contract, produce_gate_metrics, ProducerPhase.GATE),
+        "ha_evidence": MetricProducer(metric_contract, produce_evidence, ProducerPhase.FINALIZE),
+    },
+    sources={"master_inflight": EvidenceSource(master_adapters, frozenset(STATE_FIELDS),
+               "master", frozenset({"http_up"}))},
+)

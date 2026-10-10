@@ -139,6 +139,12 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         dict(id=str(identity), kind=kind),
         clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
     )
+    from reporting.comparison_model import ComparisonControls
+    controls = ComparisonControls(
+        spec["run_meta"].get("configuration"), spec["run_meta"].get("workload"),
+        spec["run_meta"].get("environment"), analysis.get("criteria"), analysis.get("statistic_sources"),
+    )
+    spec["run_meta"]["comparison_controls"] = controls.to_dict()
     _validate_run_meta(spec["run_meta"])
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)

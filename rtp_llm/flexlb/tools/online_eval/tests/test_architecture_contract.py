@@ -94,7 +94,7 @@ def test_report_structure_uses_ids_and_expands_checks_without_window_payloads():
     first = canonical_spec(spec, source)
     assert first == canonical_spec(first, source)
     assert [section["id"] for section in first["sections"]] == ["run.checks", "run.validity", "case.extra"]
-    assert first["sections"][0]["rows"] == [["gate/absolute/ttft", "FAIL", 12, 10]]
+    assert first["sections"][0]["rows"] == [["gate/absolute", "FAIL", "FAIL", "contract"], ["gate/absolute/ttft", "FAIL", 12, 10]]
     assert sum(kpi.get("id") == "run.execution" for kpi in first["kpis"]) == 1
     assert "windows" not in json.dumps(first)
 

@@ -137,7 +137,16 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     for spec in ha['produced'].values():
         spec['source_type'] = 'prometheus'
     export_metrics(tmp_path / 'ha', ha)
-    with patch('cases.master_ha_failover.metrics.produce', return_value={}) as producer:
+    from dataclasses import replace
+    from cases import registry
+    from case_registry_fixtures import snapshot
+    from unittest.mock import Mock
+    producer = Mock(return_value={})
+    case = registry.registry().cases['master_ha_failover']
+    producers = dict(case.definition.producers)
+    producers['ha_evidence'] = replace(producers['ha_evidence'], execute=producer)
+    changed = replace(case, definition=replace(case.definition, producers=producers))
+    with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
         produce(tmp_path / 'ha', {})
     producer.assert_called_once()
 

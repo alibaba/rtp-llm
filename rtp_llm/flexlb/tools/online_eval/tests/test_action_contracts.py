@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 from cases.config import configure_program
 from cases.master_ha_failover import actions as master_ha
-from cases.registry import PROGRAMS
+from cases import registry
+from case_registry_fixtures import entry, snapshot
 from cases.master_performance import program as master_performance
 from scenario import ScenarioError, compile_scenarios
 from scenario.catalog import FOUNDATION_HANDLERS, handlers
@@ -40,10 +41,10 @@ class ActionContractsTest(unittest.TestCase):
 
     def test_duplicate_foundational_or_case_action_is_rejected(self):
         duplicate = FOUNDATION_HANDLERS[0]
-        with patch.object(master_performance, "ACTION_HANDLERS", (duplicate,)):
+        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(duplicate,))), include_existing=True)):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
-        with patch.object(master_performance, "ACTION_HANDLERS", (replace(duplicate, owners=frozenset({"another_case"})),)):
+        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(replace(duplicate, owners=frozenset({"another_case"})),))), include_existing=True)):
             with self.assertRaisesRegex(ValueError, "conflicting case owner"):
                 handlers("master_performance")
 
@@ -61,14 +62,14 @@ class ActionContractsTest(unittest.TestCase):
         self.assertEqual([1], source["required"]["nested"])
 
     def test_shared_implementation_requires_each_program_to_declare_it(self):
-        with patch.dict(PROGRAMS, second_performance=PROGRAMS["master_performance"]):
+        with patch.object(registry, "_snapshot", snapshot(entry("second_performance", master_performance.CASE), include_existing=True)):
             catalog = handlers()
             self.assertEqual(
                 frozenset({"master_performance", "second_performance"}),
                 catalog["performance_finish"].owners,
             )
         descriptor = master_performance.ACTION_HANDLERS[0]
-        with patch.object(master_performance, "ACTION_HANDLERS", (descriptor, descriptor)):
+        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(descriptor, descriptor))), include_existing=True)):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
 

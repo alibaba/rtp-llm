@@ -20,7 +20,7 @@ def materialize(curve_id, style, points, *, origin=0, labels=None,
     group = style["group"] if labels is None else style["group"].format(**labels)
     scale = style.get('scale', 1)
     result = dict(
-        curve_id=curve_id, metric_id=style['metric_id'],
+        curve_id=curve_id, metric_id=style['metric_id'], labels=copy.deepcopy(labels or {}), scale=scale,
         name=name, group=group, axis=style['axis'],
         unit=style.get('unit', unit),
         color=style.get('color') or PALETTE[color_index % len(PALETTE)],

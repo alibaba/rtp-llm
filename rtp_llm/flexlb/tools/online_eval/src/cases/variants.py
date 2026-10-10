@@ -64,5 +64,5 @@ class VariantAxis:
                 raise ScenarioError(f"{source}: variant constraint {path!r} outside declared dimension")
 
     def validate_flow(self, program, identity, module, source):
-        if self.kind == "flow" and (program != identity or program not in getattr(module, "FLOW_PROGRAMS", ())):
+        if self.kind == "flow" and (program != identity or program not in (set(module.definition.builders) - {"default"})):
             raise ScenarioError(f"{source}: flow identity must equal a registered flow program")

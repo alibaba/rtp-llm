@@ -14,6 +14,7 @@ from reporting import (
     read_bundle, run_meta, write_bundle,
 )
 from reporting.pairing import event_anchor, paired_overlay, shifted_panel
+from reporting.comparison_model import FrozenRun, FrozenReport, measurement_signature
 
 
 def _load(path):
@@ -32,33 +33,8 @@ def _load(path):
     spec = json.loads((directory / "report-spec.json").read_text())
     if not isinstance(analysis, dict) or not isinstance(spec, dict):
         raise ValueError("run analysis and report spec must be objects")
-    from reporting.spec import validate
-
-    validate(spec)
-    return directory.resolve(), analysis, spec
-
-
-def _controls(analysis, spec):
-    meta = spec.get("run_meta") or {}
-    # Missing metadata stays unknown; no case-specific reconstruction from evidence.
-    return dict(
-        configuration=meta.get("configuration"),
-        workload=meta.get("workload"),
-        environment=meta.get("environment"),
-        criteria=analysis.get("criteria"),
-        statistic_sources=analysis.get("statistic_sources"),
-    )
-
-
-def _signature(panel):
-    """Pair only charts with the same declared axes and series units."""
-    return {
-        key: panel.get(key)
-        for key in ("type", "unit", "axes", "timeX")
-    } | {"series": sorted(
-        (s["name"], str(s.get("axis")), str(s.get("unit")))
-        for s in panel.get("series", [])
-    )}
+    return FrozenRun(directory.resolve(), analysis, FrozenReport.read(spec),
+                     hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest())
 
 
 def compare(paths, output, *, alignment_event=None):
@@ -70,11 +46,12 @@ def compare(paths, output, *, alignment_event=None):
         raise ValueError("alignment_event must be a nonempty event name")
     loaded = [_load(path) for path in paths]
     destination = bundle_path(output, "comparison", "runs").resolve()
-    for directory, _, _ in loaded:
+    for run in loaded:
+        directory = run.directory
         if directory == destination or destination in directory.parents:
             raise ValueError("comparison output must not contain an input bundle")
     labels = [chr(65 + i) if i < 26 else f"run-{i + 1}" for i in range(len(loaded))]
-    anchors = [event_anchor(spec.get("events", []), alignment_event) for _, _, spec in loaded]
+    anchors = [event_anchor(run.report.events, alignment_event) for run in loaded]
     aligned = alignment_event is not None and all(t is not None for t in anchors)
     time_alignment = dict(
         event=alignment_event,
@@ -86,7 +63,7 @@ def compare(paths, output, *, alignment_event=None):
     caption = (f"按事件 {alignment_event} 对齐到 0 秒。" if aligned else
                f"对齐事件 {alignment_event} 缺失、重复或时间无效，保留各 run 原时间轴。"
                if alignment_event else "保留各 run 原时间轴；不自动选择统计窗口。")
-    controls = [_controls(result, spec) for _, result, spec in loaded]
+    controls = [run.report.controls.to_dict() for run in loaded]
     comparisons = {
         label: compare_controls(controls[0], control, required=(
             "/configuration", "/workload", "/environment", "/criteria",
@@ -94,45 +71,45 @@ def compare(paths, output, *, alignment_event=None):
     }
     sources, panels, groups, kpis, sections = {}, [], {}, [], []
     bounds = []
-    for label, (directory, result, spec), anchor in zip(labels, loaded, anchors):
+    for label, run, anchor in zip(labels, loaded, anchors):
+        directory, result, spec = run.directory, run.analysis, run.report
         shift = anchor if aligned else None
         sources[label] = dict(
             path=str(directory),
-            manifest_sha256=hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest(),
+            manifest_sha256=run.manifest_sha256,
         )
         sections.extend([
             details(label + " · 冻结分析", result),
             details(label + " · 归档报告说明与缺采标注", dict(
-                title=spec.get("title"), subtitle=spec.get("subtitle"),
-                timeOriginLabel=spec.get("timeOriginLabel"), events=spec.get("events", []),
+                title=spec.title, subtitle=spec.subtitle,
+                timeOriginLabel=spec.time_origin_label, events=spec.events,
             )),
             links(label + " · 原始报告", [dict(
                 label="打开已归档的单 run 报告",
                 href=os.path.relpath(directory / "report.html", destination),
             )]),
         ])
-        for section in copy.deepcopy(spec.get("sections", [])):
+        for section in copy.deepcopy(spec.sections):
             section["title"] = label + " · " + section.get("title", "")
             if section["type"] == "links":
                 for item in section["items"]:
                     item["href"] = os.path.relpath(directory / item["href"], destination)
             sections.append(section)
-        for kpi in spec.get("kpis", []):
+        for kpi in spec.kpis:
             item = copy.deepcopy(kpi)
             item["label"] = label + " · " + item["label"]
             kpis.append(item)
-        axis = spec.get("timeAxis") or {}
-        for value in (axis.get("min"), axis.get("max")):
+        for value in (spec.time_min, spec.time_max):
             if type(value) in (int, float) and math.isfinite(value):
                 bounds.append(value - (shift or 0))
-        for original in spec.get("panels", []):
-            panel = shifted_panel(original, shift)
-            key = str(original["id"])
+        for original in spec.panels:
+            panel = shifted_panel(original.to_dict(), shift)
+            key = original.identity
             panel["id"] = label + ":" + key
             panel["title"] = label + " · " + panel.get("title", key)
             panel["caption"] = panel.get("caption", "") + " " + caption
             panels.append(panel)
-            groups.setdefault(key, []).append((label, panel, spec.get("timeOriginLabel")))
+            groups.setdefault(key, []).append((label, panel, spec.time_origin_label))
             if panel.get("timeX"):
                 bounds.extend(p["x"] for s in panel.get("series", [])
                               for p in s.get("points", [])
@@ -141,14 +118,16 @@ def compare(paths, output, *, alignment_event=None):
     for key, group in groups.items():
         reasons = []
         if len(group) != len(loaded):
-            reasons.append("部分 run 缺少此面板")
+            reasons.append("MISSING_PANEL")
         first = group[0][1]
         if first.get("type", "line") != "line" or not first.get("timeX"):
-            reasons.append("非时间曲线，保留独立面板")
-        if any(_signature(p) != _signature(first) for _, p, _ in group):
-            reasons.append("指标集合、单位或坐标轴不同")
+            reasons.append("NOT_TIME_SERIES")
+        if measurement_signature(first) is None:
+            reasons.append("UNKNOWN_MEASUREMENT")
+        elif any(measurement_signature(p) != measurement_signature(first) for _, p, _ in group):
+            reasons.append("MEASUREMENT_MISMATCH")
         if not aligned and any(origin != group[0][2] for _, _, origin in group):
-            reasons.append("时间原点说明不同")
+            reasons.append("TIME_ORIGIN_MISMATCH")
         if reasons:
             pairing.append(dict(panel=key, status="SEPARATE", reasons=reasons))
             continue
@@ -171,7 +150,7 @@ def compare(paths, output, *, alignment_event=None):
         pairing.append(dict(panel=key, status="PAIRED"))
     result = dict(
         purpose="OBSERVATION_ONLY", sources=sources,
-        runs={label: analysis for label, (_, analysis, _) in zip(labels, loaded)},
+        runs={label: run.analysis for label, run in zip(labels, loaded)},
         controls=dict(reference=labels[0], values=dict(zip(labels, controls)), comparisons=comparisons),
         time_alignment=time_alignment, pairing=pairing,
     )
@@ -185,7 +164,7 @@ def compare(paths, output, *, alignment_event=None):
     )
     write_bundle(output, "comparison", "runs", result, spec,
                  meta=run_meta(dict(id="runs", kind="comparison"),
-                               runs={label: s.get("run_meta") for label, (_, _, s) in zip(labels, loaded)},
+                               runs={label: run.report.run_meta for label, run in zip(labels, loaded)},
                                evidence=sources), producer="report-comparison")
     return result
 
