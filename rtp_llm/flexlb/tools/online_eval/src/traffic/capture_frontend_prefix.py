@@ -46,11 +46,14 @@ def capture(a, *, clock=time.monotonic):
     output_path = a.out + (".jsonl.xz" if a.format == "xz" else ".jsonl.gz")
     out = lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1)
     try:
-        for path in sorted(glob.glob(str(a.log_dir / a.log_glob))):
+        paths = [path for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
+                 if os.path.isfile(path) and not path.endswith(".gz")]
+        if not paths:
+            errors.append("no supported log files matched")
+            failure = ValueError("no supported log files matched")
+        for path in paths:
             if clock() - started > a.time_budget_s:
                 raise BudgetExceeded("extraction time budget exceeded")
-            if not os.path.isfile(path) or path.endswith(".gz"):
-                continue
             with open(path, "rb") as f:
                 size = os.fstat(f.fileno()).st_size
                 if not size:

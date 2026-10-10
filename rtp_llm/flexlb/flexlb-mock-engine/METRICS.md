@@ -149,6 +149,13 @@ Compare real engine totals (sum priority buckets where present). Simulated
 execution time is not evidence of absolute GPU throughput. Decode TPS was
 not changed or certified by this prefill migration.
 
+The HTTP role aggregate sums available per-engine execution TPS values; it
+does not divide pooled tokens by pooled engine execution time. Missing
+samples contribute no value, and the series is omitted when all engines
+are silent. A partial role aggregate does not establish full engine coverage;
+consumers needing coverage use per-engine series and engine identities.
+The absolute performance gate uses the per-engine arithmetic mean.
+
 Consumers preserve separate execution and wall curves. Elastic throughput
 checks use wall TPS. `scripts/commands/compare_runs.py` displays frozen run
 report bundles, including archived controls and measurement labels; it does

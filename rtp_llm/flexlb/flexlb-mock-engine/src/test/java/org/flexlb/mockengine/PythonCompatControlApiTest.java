@@ -142,10 +142,30 @@ class PythonCompatControlApiTest {
         assertEquals("200 + sum(computeTokens)", MAPPER.readTree(httpGet("/prefill_formula"))
                 .path("engines").path("prefill-0").path("expression").asText());
         assertEquals(400, httpPostResponse("/prefill_formula", "{\"engine\":\"decode-0\",\"expression\":\"200\"}").statusCode());
+        for (String invalid : List.of("{\"expression\":\"999\",\"enginee\":\"prefill-0\"}",
+                "{\"expression\":\"999\",\"engine\":123}")) {
+            assertEquals(400, httpPostResponse("/prefill_formula", invalid).statusCode());
+            state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
+            assertEquals("200 + sum(computeTokens)", state.path("prefill-0").path("expression").asText());
+            assertEquals("100", state.path("prefill-1").path("expression").asText());
+        }
         httpPost("/prefill_formula", "{\"expression\":\"300\"}");
         state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
         assertEquals("300", state.path("prefill-0").path("expression").asText());
         assertEquals("300", state.path("prefill-1").path("expression").asText());
+    }
+
+    @Test
+    void cacheDiagnosticsMalformedJsonReturns400AndPreservesState() throws Exception {
+        startCluster(model("100", 1.0), 1, 1);
+        assertFalse(MAPPER.readTree(httpGet("/cache_diagnostics")).path("active").asBoolean());
+        assertEquals(400, httpPostResponse("/cache_diagnostics", "{\"action\":").statusCode());
+        assertFalse(MAPPER.readTree(httpGet("/cache_diagnostics")).path("active").asBoolean());
+        assertEquals(200, httpPostResponse("/cache_diagnostics", "{\"action\":\"start\"}").statusCode());
+        assertTrue(MAPPER.readTree(httpGet("/cache_diagnostics")).path("active").asBoolean());
+        assertEquals(400, httpPostResponse("/cache_diagnostics", "{").statusCode());
+        assertTrue(MAPPER.readTree(httpGet("/cache_diagnostics")).path("active").asBoolean());
+        assertEquals(200, httpPostResponse("/cache_diagnostics", "{\"action\":\"stop\"}").statusCode());
     }
 
     @Test

@@ -56,6 +56,32 @@ class CaptureContractTest(unittest.TestCase):
             self.assertEqual(2, len(captured))
             self.assertNotEqual(captured[0]['rid'], captured[1]['rid'])
 
+    def test_missing_or_unsupported_logs_are_incomplete(self):
+        for kind in ('missing', 'empty', 'directory', 'compressed'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                logs = root / 'logs'
+                if kind != 'missing':
+                    logs.mkdir()
+                if kind == 'directory':
+                    (logs / 'dash_sc_grpc_access_r0_s0.log').mkdir()
+                elif kind == 'compressed':
+                    (logs / 'dash_sc_grpc_access_r0_s0.log.gz').write_bytes(b'')
+                with self.assertRaisesRegex(RuntimeError, 'capture incomplete'):
+                    self.run_capture(root, logs)
+                summary = json.loads((root / 'pod-0.summary.json').read_text())
+                self.assertFalse(summary['complete'])
+                self.assertEqual(['no supported log files matched'], summary['errors'])
+
+    def test_valid_logs_with_no_arrivals_in_window_are_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            summary = self.run_capture(root, logs, ('--start', '4000', '--end', '5000'))
+            self.assertTrue(summary['complete'])
+            with gzip.open(root / 'pod-0.jsonl.gz', 'rt') as stream:
+                self.assertEqual('', stream.read())
+
     def test_arrival_window_survives_late_or_unordered_completions(self):
         for last_arrival, last_completion in [(4000, 900001), (100, 500)]:
             with self.subTest(last_completion=last_completion), tempfile.TemporaryDirectory() as directory:

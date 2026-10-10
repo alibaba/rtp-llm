@@ -317,6 +317,13 @@ class OverrideParsingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_overrides("request_timeout_ms=abc")
 
+    def test_bad_float_reports_key_and_value(self) -> None:
+        for key in ("decision_lifetime", "cache_affinity_min_prefix_hit_percent"):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ValueError, f"FLEXLB_CONFIG_OVERRIDE: {key} expects a number, got 'abc'"
+            ):
+                parse_overrides(f"{key}=abc")
+
 
 class VocabTest(unittest.TestCase):
     """closed vocabulary (frozen dataclass)."""

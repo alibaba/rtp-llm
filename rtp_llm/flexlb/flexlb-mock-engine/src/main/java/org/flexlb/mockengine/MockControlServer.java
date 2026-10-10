@@ -405,7 +405,7 @@ final class MockControlServer {
                     cacheDiagnostics = diag;
                     services.values().forEach(s -> s.cacheDiagnostics = s.isDiagnosticPrefill() ? diag : null);
                 } else throw new IllegalArgumentException("action must be start or stop");
-            } catch (IllegalArgumentException error) {
+            } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
                 sendJson(exchange, 400, Map.of("error", error.getMessage()));
                 return;
             }
@@ -443,7 +443,12 @@ final class MockControlServer {
                 JsonNode body = MAPPER.readTree(bytes);
                 if (body == null || !body.isObject() || !body.path("expression").isTextual())
                     throw new IllegalArgumentException("expression string required");
+                body.fieldNames().forEachRemaining(key -> {
+                    if (!key.equals("expression") && !key.equals("engine"))
+                        throw new IllegalArgumentException("unknown field: " + key);
+                });
                 if (body.has("engine")) {
+                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
                     String engine = body.path("engine").asText();
                     targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
                 }
@@ -1193,7 +1198,9 @@ final class MockControlServer {
         for (String name : List.of("context_tps", "context_tps_with_cache", "context_wall_tps",
                 "context_wall_tps_with_cache", "wall_tps_report_interval_us")) {
             if (!perEngine && name.equals("wall_tps_report_interval_us")) continue;
-            // Long in-flight steps have no sample, rather than a fabricated zero.
+            // Role aggregation is the sum of available per-engine rates, not
+            // pooled tokens / pooled execution time. Missing engines contribute
+            // nothing; omit the series entirely when every engine is silent.
             if (snapshots.stream().noneMatch(snapshot -> snapshot.containsKey(name))) continue;
             double value = snapshots.stream().mapToDouble(snapshot -> asDouble(snapshot.get(name))).sum();
             sb.append(String.format(java.util.Locale.ROOT, "rtp_llm_%s{%s} %.6f%n", name, labels, value));

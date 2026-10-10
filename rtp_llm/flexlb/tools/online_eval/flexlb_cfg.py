@@ -753,7 +753,12 @@ def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
                     f"FLEXLB_CONFIG_OVERRIDE: {key} expects an integer, got {raw!r}"
                 ) from None
         elif key in _FLOAT_FIELDS:
-            kwargs[key] = float(raw)
+            try:
+                kwargs[key] = float(raw)
+            except ValueError:
+                raise ValueError(
+                    f"FLEXLB_CONFIG_OVERRIDE: {key} expects a number, got {raw!r}"
+                ) from None
         elif key in _BOOL_FIELDS:
             kwargs[key] = raw.strip().lower() in ("1", "true", "yes", "on")
         else:
