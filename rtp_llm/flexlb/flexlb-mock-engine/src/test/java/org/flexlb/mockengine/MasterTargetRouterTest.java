@@ -2,11 +2,22 @@ package org.flexlb.mockengine;
 
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import com.sun.net.httpserver.HttpServer;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -95,6 +106,13 @@ class MasterTargetRouterTest {
         assertTrue(outcome.failover);
         assertEquals(MasterTargetRouter.ErrorKind.NONE, outcome.errorKind);
         assertEquals(200, outcome.response.getCode());
+        assertEquals(2, outcome.attempts.size());
+        assertEquals(TARGET_A, outcome.attempts.get(0).target);
+        assertEquals("UNAVAILABLE", outcome.attempts.get(0).status);
+        assertEquals(TARGET_B, outcome.attempts.get(1).target);
+        assertEquals("OK", outcome.attempts.get(1).status);
+        assertEquals(Integer.valueOf(200), outcome.attempts.get(1).responseCode);
+        assertTrue(outcome.attempts.get(0).endedEpochMs >= outcome.attempts.get(0).startedEpochMs);
         // Sticky pointer moved to B: the NEXT request goes straight to B.
         assertEquals(TARGET_B, router.stickyTarget());
         verify(stubA).schedule(any());
@@ -256,6 +274,107 @@ class MasterTargetRouterTest {
                 new StatusRuntimeException(Status.INTERNAL)));
         assertEquals("business", MasterTargetRouter.classifyThrowable(
                 new RuntimeException("non-grpc")));
+    }
+
+    @Test
+    void discoveryFollowsLeaderRoleAndRetainsHealthyHostsWhenVipIsEmpty() {
+        MasterRouteDiscovery.Host a = new MasterRouteDiscovery.Host("127.0.0.1:18080", TARGET_A);
+        MasterRouteDiscovery.Host b = new MasterRouteDiscovery.Host("127.0.0.1:18083", TARGET_B);
+        AtomicReference<List<MasterRouteDiscovery.Host>> candidates =
+                new AtomicReference<>(List.of(a));
+        Map<String, String> leader = new HashMap<>();
+        Set<String> down = new HashSet<>();
+        leader.put(a.http(), a.http());
+        leader.put(b.http(), a.http());
+        MasterRouteDiscovery discovery = new MasterRouteDiscovery(candidates::get, host -> {
+            if (down.contains(host.http())) throw new IllegalStateException("down");
+            return new MasterRouteDiscovery.Info(leader.get(host.http()));
+        });
+
+        discovery.refresh();
+        assertEquals(TARGET_A, discovery.route().master());
+        assertNull(discovery.route().slave());
+
+        candidates.set(List.of(a, b));
+        leader.replaceAll((host, ignored) -> b.http());
+        discovery.refresh();
+        assertEquals(TARGET_B, discovery.route().master());
+        assertEquals(TARGET_A, discovery.route().slave());
+
+        candidates.set(List.of());
+        discovery.refresh();
+        assertEquals(TARGET_B, discovery.route().master());
+        down.add(b.http());
+        discovery.refresh();
+        assertEquals(TARGET_B, discovery.route().master()); // one missed probe is tolerated
+        discovery.refresh();
+        assertEquals(TARGET_A, discovery.route().master());
+        assertNull(discovery.route().slave());
+    }
+
+    @Test
+    void discoveredRouteRetriesNonDeadlineGrpcFailureButNotBusinessResponse() {
+        MasterRouteDiscovery.Host a = new MasterRouteDiscovery.Host("127.0.0.1:18080", TARGET_A);
+        MasterRouteDiscovery.Host b = new MasterRouteDiscovery.Host("127.0.0.1:18083", TARGET_B);
+        MasterRouteDiscovery discovery = new MasterRouteDiscovery(() -> List.of(a, b),
+                host -> new MasterRouteDiscovery.Info(a.http()));
+        discovery.refresh();
+        FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
+        FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.INTERNAL))
+                .thenReturn(response(8431));
+        when(stubB.schedule(any())).thenReturn(response(200));
+        MasterTargetRouter router = new MasterTargetRouter(discovery,
+                Map.of(TARGET_A, new FlexlbServiceGrpc.FlexlbServiceBlockingStub[]{stubA},
+                        TARGET_B, new FlexlbServiceGrpc.FlexlbServiceBlockingStub[]{stubB}));
+
+        MasterTargetRouter.ScheduleOutcome retry = router.schedule(request(), 1000L);
+        assertEquals(TARGET_B, retry.lastTarget);
+        assertTrue(retry.failover);
+        assertEquals(200, retry.response.getCode());
+        assertEquals("INTERNAL", retry.attempts.get(0).status);
+
+        MasterTargetRouter.ScheduleOutcome business = router.schedule(request(), 1000L);
+        assertEquals(TARGET_A, business.lastTarget);
+        assertFalse(business.failover);
+        assertEquals(8431, business.response.getCode());
+        verify(stubB).schedule(any());
+    }
+
+    @Test
+    void fileDiscoveryUsesHttpMasterInfoAndRefreshesRole(@TempDir Path dir) throws Exception {
+        HttpServer a = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        HttpServer b = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String httpA = "127.0.0.1:" + a.getAddress().getPort();
+        String httpB = "127.0.0.1:" + b.getAddress().getPort();
+        AtomicReference<String> leader = new AtomicReference<>(httpA);
+        for (HttpServer server : List.of(a, b)) {
+            server.createContext("/rtp_llm/master/info", exchange -> {
+                assertEquals("POST", exchange.getRequestMethod());
+                byte[] body = ("{\"real_master_host\":\"" + leader.get() + "\"}")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                try (var output = exchange.getResponseBody()) { output.write(body); }
+            });
+            server.start();
+        }
+        try {
+            Path file = dir.resolve("master-discovery.json");
+            Files.writeString(file, "{\"hosts\":[{\"http\":\"" + httpA
+                    + "\",\"grpc\":\"" + TARGET_A + "\"},{\"http\":\"" + httpB
+                    + "\",\"grpc\":\"" + TARGET_B + "\"}]}");
+            MasterRouteDiscovery discovery = MasterRouteDiscovery.fromFile(file);
+            discovery.refresh();
+            assertEquals(TARGET_A, discovery.route().master());
+            assertEquals(TARGET_B, discovery.route().slave());
+            leader.set(httpB);
+            discovery.refresh();
+            assertEquals(TARGET_B, discovery.route().master());
+            assertEquals(TARGET_A, discovery.route().slave());
+        } finally {
+            a.stop(0);
+            b.stop(0);
+        }
     }
 
     // ---- GRPC_TARGETS config contract ----

@@ -42,7 +42,6 @@ class BaselineParityE2ETest {
         try (AutoTpmE2EHarness h = singlePlannerHarness()) {
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.fixedWindowDecision().setMaxRequests(2);
-            h.config.getDispatcher().setMaxInflightPerPrefillWorker(1);
             h.startAutoPump(10);
 
             // 预热首笔调度与引擎调用，并从测量记录中排除。
@@ -74,7 +73,7 @@ class BaselineParityE2ETest {
             for (CompletableFuture<Response> future : futures) {
                 Response response = future.get(1, TimeUnit.SECONDS);
                 assertTrue(response.isSuccess(),
-                        "every FIFO baseline request must succeed, got "
+                        "baseline must behave like legacy — every request succeeds, got "
                                 + response.getCode() + ": " + response.getErrorMessage());
             }
 

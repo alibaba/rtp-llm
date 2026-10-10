@@ -1,0 +1,169 @@
+"""Validate case-selected report views; YAML controls presentation, not analysis."""
+
+import re
+import string
+from pathlib import Path
+
+from scenario.loader import ScenarioError, load_document
+
+VIEWS = Path(__file__).resolve().parents[2] / "config/report_views"
+DEFAULT_VIEW = "workload.yaml"
+CURVES = frozenset({"mean", "max", "detail"})
+
+
+def _fail(path, message):
+    raise ScenarioError(f"{path}: {message}")
+
+
+def view(name):
+    if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*\.yaml", name):
+        _fail("reports", "view must be a filename under config/report_views")
+    path = VIEWS / name
+    data = load_document(path)
+    if name == DEFAULT_VIEW:
+        required = {"kind", "title", "subtitle", "group_by", "detail_labels",
+                    "summaries", "default_visible", "max_points_per_series", "presets"}
+        if set(data) != required or data["kind"] != "default":
+            _fail(path, "invalid default view")
+        if data["group_by"] != ["epoch", "source", "metric"]:
+            _fail(path, "default view must retain metric identity")
+        labels = data["detail_labels"]
+        if not isinstance(labels, list) or not labels or any(
+            type(x) is not str or x not in {"engine_name", "pod", "engine"} for x in labels
+        ) or len(set(labels)) != len(labels):
+            _fail(path, "invalid detail_labels")
+        for field in ("summaries", "default_visible"):
+            values = data[field]
+            if not isinstance(values, list) or not values or any(
+                type(x) is not str or x not in CURVES for x in values
+            ) or len(set(values)) != len(values):
+                _fail(path, "invalid " + field)
+        if set(data["summaries"]) - {"mean", "max"} or set(data["default_visible"]) - set(data["summaries"]):
+            _fail(path, "default_visible must select summary curves")
+        points = data["max_points_per_series"]
+        if type(points) is not int or not 32 <= points <= 2048:
+            _fail(path, "max_points_per_series must be 32..2048")
+        presets = data["presets"]
+        if not isinstance(presets, dict) or not presets or any(
+            type(key) is not str or not key or not isinstance(values, list)
+            or not values or any(type(item) is not str or item not in CURVES for item in values)
+            for key, values in presets.items()
+        ):
+            _fail(path, "invalid presets")
+    elif data.get("kind") == "ha":
+        if set(data) != {"kind", "title", "subtitle", "events", "panels"}:
+            _fail(path, "invalid HA view fields")
+        if not isinstance(data["events"], dict) or not data["events"] or any(
+            type(stage) is not str or type(label) is not str or not label
+            for stage, label in data["events"].items()
+        ):
+            _fail(path, "invalid HA event labels")
+        allowed = {"sent", "success", "failed", "http_up", "scheduler_inflight",
+                   "prefill_inflight_requests", "decode_master_queued",
+                   "decode_confirmed_running", "prefill_peak_qps",
+                   "prefill_mean_qps", "prefill_skew"}
+        panels = data["panels"]
+        if not isinstance(panels, list) or not panels or len({
+            panel.get("id") for panel in panels if isinstance(panel, dict)
+        }) != len(panels):
+            _fail(path, "invalid HA panels")
+        for panel in panels:
+            if not isinstance(panel, dict) or set(panel) != {
+                "id", "title", "fields", "caption"
+            } or type(panel["id"]) is not str or not panel["id"] or type(panel["title"]) is not str or not panel["title"] or type(panel["caption"]) is not str or not panel["caption"] or not isinstance(panel["fields"], list) or not panel["fields"] or len(set(panel["fields"])) != len(panel["fields"]) or set(panel["fields"]) - allowed:
+                _fail(path, "invalid HA panel")
+    else:
+        required = {"kind", "report", "producer", "title", "subtitle", "sections"}
+        if not required <= set(data) or set(data) - required - {"panel", "panels", "time_origin", "kpis", "meta", "audit_columns", "criteria_columns"} or data["kind"] != "produced":
+            _fail(path, "invalid produced report view")
+        for field in ("report", "producer"):
+            if type(data[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", data[field]):
+                _fail(path, "invalid " + field)
+        if ("panel" in data) == ("panels" in data):
+            _fail(path, "declare exactly one of panel or panels")
+        panels = data.get("panels", [data.get("panel")])
+        if not isinstance(panels, list) or not panels:
+            _fail(path, "invalid panels")
+        if "panels" in data:
+            ids = []
+            for panel in panels:
+                if not isinstance(panel, dict) or not {"id", "names"} <= set(panel):
+                    _fail(path, "panels require id and names")
+                if type(panel["id"]) is not str or not panel["id"] or panel["id"] in ids:
+                    _fail(path, "invalid panel id")
+                ids.append(panel["id"])
+                if not isinstance(panel["names"], list) or not panel["names"] or any(
+                    type(name) is not str or not name for name in panel["names"]
+                ):
+                    _fail(path, "invalid panel names")
+        for panel in panels:
+            if not isinstance(panel, dict) or "title" not in panel or set(panel) - {"title", "caption", "empty_caption", "presets", "axes", "id", "names"}:
+                _fail(path, "invalid panel presentation")
+            for field in ("title", "caption", "empty_caption"):
+                if field in panel and (type(panel[field]) is not str or not panel[field]):
+                    _fail(path, "invalid panel " + field)
+            presets = panel.get("presets", {})
+            if not isinstance(presets, dict) or any(
+                type(name) is not str or not name or not isinstance(selector, dict)
+                or len(selector) != 1 or not set(selector) <= {"names", "contains", "groups", "visible"}
+                or any((type(values) is not bool or values is not True) if key == "visible"
+                       else (not isinstance(values, list) or not values or any(type(item) is not str or not item for item in values))
+                       for key, values in selector.items())
+                for name, selector in presets.items()
+            ):
+                _fail(path, "invalid panel presets")
+            if "axes" in panel and (not isinstance(panel["axes"], dict) or any(
+                not isinstance(axis, dict) or set(axis) != {"title", "position"}
+                or type(axis["title"]) is not str or axis["position"] not in {"left", "right"}
+                for axis in panel["axes"].values()
+            )):
+                _fail(path, "invalid panel axes")
+        sections = data["sections"]
+        if not isinstance(sections, dict) or not sections or any(
+            type(key) is not str or type(value) is not str or not value
+            for key, value in sections.items()
+        ):
+            _fail(path, "invalid sections")
+        if "time_origin" in data and type(data["time_origin"]) is not str:
+            _fail(path, "invalid time_origin")
+        if "kpis" in data and (not isinstance(data["kpis"], dict) or any(
+            type(key) is not str or type(value) is not str or not value
+            for key, value in data["kpis"].items()
+        )):
+            _fail(path, "invalid kpis")
+        if "meta" in data and (not isinstance(data["meta"], dict) or any(
+            type(key) is not str or type(value) is not str
+            for key, value in data["meta"].items()
+        )):
+            _fail(path, "invalid meta")
+        if "audit_columns" in data and (not isinstance(data["audit_columns"], list)
+            or any(type(value) is not str for value in data["audit_columns"])):
+            _fail(path, "invalid audit_columns")
+        if "criteria_columns" in data and (not isinstance(data["criteria_columns"], list)
+            or any(type(value) is not str for value in data["criteria_columns"])):
+            _fail(path, "invalid criteria_columns")
+    if any(type(data[key]) is not str or not data[key].strip() for key in ("title", "subtitle")):
+        _fail(path, "title and subtitle are required")
+    if data["kind"] == "produced":
+        try:
+            fields = [field for _, field, _, _ in string.Formatter().parse(data["subtitle"])
+                      if field is not None]
+        except ValueError as exc:
+            _fail(path, str(exc))
+        if any(field not in {"verdict", "monitoring_status"} for field in fields):
+            _fail(path, "unknown subtitle placeholder")
+    return data
+
+
+def declaration(value, *, kind, path="reports"):
+    if kind != "workload":
+        _fail(path, "report views require test.kind=workload")
+    if not isinstance(value, list) or not value or any(type(name) is not str for name in value):
+        _fail(path, "expected a nonempty list of view filenames")
+    if len(set(value)) != len(value):
+        _fail(path, "duplicate view")
+    if DEFAULT_VIEW not in value:
+        _fail(path, "include workload.yaml to retain all collected metrics")
+    for name in value:
+        view(name)
+    return list(value)

@@ -89,7 +89,7 @@ import static org.mockito.Mockito.when;
  */
 final class AutoTpmE2EHarness implements AutoCloseable {
 
-    final FlexlbConfig config;
+    final FlexlbConfig config = new FlexlbConfig();
     final DecisionPolicyConfig fixedWindowDecision;
     final ConfigService configService = mock(ConfigService.class);
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
@@ -157,16 +157,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                       boolean realCancelChannel, boolean autoTpm,
                       DecisionPolicyConfig decisionPolicy,
                       boolean productionRouting) {
-        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs, realCancelChannel,
-                autoTpm, decisionPolicy, productionRouting, null);
-    }
-
-    AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
-                      String prefillFormulaMs, double decodeStepMs,
-                      boolean realCancelChannel, boolean autoTpm,
-                      DecisionPolicyConfig decisionPolicy, boolean productionRouting,
-                      FlexlbConfig initialConfig) {
-        this.config = initialConfig == null ? new FlexlbConfig() : initialConfig;
         this.fixedWindowDecision = decisionPolicy.getType()
                 == DecisionPolicyConfig.Type.FIXED_WINDOW
                 ? decisionPolicy : null;
@@ -190,6 +180,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     port, services, engineScheduler, model, poolBlocks,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, svc);
+            // This schedule-only harness has no frontend Fetch consumer.
+            svc.setAutoFetch(true);
             prefillEngines.add(svc);
         }
         for (int i = 0; i < nDecode; i++) {
@@ -204,13 +196,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
         // Conservative defaults; scenarios override before submitting traffic.
         // Priority ordering must be set BEFORE registerEndpoint (WorkerBatcher freezes it).
-        if (initialConfig == null) {
-            if (autoTpm) {
-                config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
-            }
-            config.setDispatcher(new DispatcherConfig());
-            config.queueScheduler().setDecision(decisionPolicy);
+        if (autoTpm) {
+            config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
         }
+        config.setDispatcher(new DispatcherConfig());
+        config.queueScheduler().setDecision(decisionPolicy);
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
         config.getRequestLifecycle().getRequest().setTimeoutMs(3_600_000L);

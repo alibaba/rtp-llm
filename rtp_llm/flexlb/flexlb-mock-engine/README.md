@@ -2,6 +2,48 @@
 
 A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU inference timing with configurable performance formulas, fault injection, and monitoring.
 
+## P/D continuation and Fetch
+
+BATCH defaults to `--auto-fetch false`: Decode reserves KV and reports
+`KV_ALLOCATED` before Prefill execution. Prefill completion releases its
+compute slot but retains the deferred context and connector KV until Fetch,
+cancellation or expiry. Fetch can attach before or after Prefill completes.
+`--fetch-attach-timeout-ms` defaults to 600000; an Enqueue override and the
+request timeout can shorten it. NON_BATCH already has a client stream.
+
+The schedule-only benchmark explicitly opts into `--auto-fetch true` when
+`FETCH_OUTPUT_STREAM=0`. `no_respond` is a server RPC blackhole, not a client
+that omitted Fetch. See [protocol and resource ownership](../tools/online_eval/docs/architecture/request-lifecycle.md).
+
+## WorkerStatus completion reporting
+
+Prefill and Decode publish a terminal record before removing the request from
+`running_task_info`. The running list, retained completions and finished cursor
+are captured under one monitor, so a normal completion cannot disappear between
+the two lists in a status response. Queue/resource operations and file writes
+stay outside the snapshot critical section. Explicit status fault injections
+still produce their requested faulty reports.
+
+`MOCK_COMPLETION_RETAIN_WINDOW` sets the completion capacity (default **1000**
+records). Every insertion immediately evicts the oldest excess records; reads
+filter `requestedVersion < version <= latestVersion` without consuming records.
+A slow consumer permanently loses evicted records. The engine does not replay
+or compensate for them. Zero capacity intentionally retains nothing; invalid
+or negative environment values fall back to 1000.
+
+For a completion-race investigation, set `MOCK_STATUS_SNAPSHOT_LOG=true` and
+provide `--events-file`. The engine appends `worker_status_snapshot` rows to that
+file for the existing status RPCs, with per-engine sequence, requested/latest
+versions, running IDs, retained IDs/versions, returned IDs and eviction count.
+Logging defaults to off. Sort each engine's rows by `sequence` when auditing,
+because file writes happen after releasing the snapshot monitor. This probe
+adds no diagnostic HTTP polling. Under capacity pressure, distinguish intentional
+retention loss from an atomicity violation.
+
+The tests `CompletionSnapshotAtomicityTest` and `CompletionRetainWindowTest`
+cover concurrent P/D execution and the 1000/1001 boundary, respectively. This
+alignment does not change the master's handling of late or lost completions.
+
 ## Features
 
 - **Realistic timing simulation**: Uses `ScheduledExecutorService.schedule()` to wait for formula-computed prefill/decode durations
@@ -16,11 +58,10 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
-export JAVA_MOCK_ENGINE_HEAP_SIZE=2g
-export MOCK_BASE_GRPC_PORT=62000
-export N_PREFILL=2 N_DECODE=4 DURATION_S=30 REPLAY_SPEED=10
-cd tools/online_eval
-bash run_online_eval.sh
+cd rtp_llm/flexlb
+python3 tools/online_eval/scripts/commands/run_stress.py \
+  --mock-heap 2g --mock-base-grpc-port 62000 \
+  --n-prefill 2 --n-decode 4 --duration-s 30 --replay-speed 10
 ```
 
 ## Configuration
@@ -42,6 +83,10 @@ bash run_online_eval.sh
 | decode.step_ms_by_batch | null | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → linear production fit |
 | ~~decode.per_token_ms~~ | — | REMOVED (task #69): fixed per-token latency was a V3-era no-MTP single-stream caliber that overstated low-batch decode ~5.5× and full-batch ~2.8×. Declaring it now fails fast with a migration hint |
 | jitter_pct | 0.0 | Random jitter (±%) |
+| prefill.noise | absent | Optional bounded residual noise for each execution batch. `base_std_ms`, `variance_per_unit_ms2` (per 1024 actually computed tokens), `max_std_ms`, `max_abs_ms`; all zero/absent disables it. P absolute standard deviation grows as a square root and relative noise falls as work grows. |
+| decode.noise | absent | Same fields, with variance unit = current running stream count; sampled independently for each decode step, so longer outputs accumulate greater absolute but smaller relative timing variance. |
+
+Role noise is sampled from a Gaussian truncated to ±3 standard deviations and then limited by `max_abs_ms`. A nonzero model requires positive `max_std_ms` and `max_abs_ms`; it cannot be combined with legacy `jitter_pct`. Keep `sleep_scale=1` when calibrating real-time noise. Fit values from per-execution measurements, not dashboard bucket means (see `prefill-performance-fit` skill).
 
 ### Runtime HTTP API
 | Endpoint | Method | Description |
@@ -67,14 +112,17 @@ The control server listens on `baseGrpcPort - 1` of the mock cluster.
 `/remove_engine` — a running cluster can be scaled up/down over HTTP without a
 restart. New engines register on the next port, write into the endpoints/
 discovery files, and are picked up by the master's file-discovery watcher;
-removal defaults to a graceful drain matching production rolling scale-in:
-the discovery entry is stripped first (the master stops routing new requests),
+removal closes new work RPC admission immediately, then strips the discovery
+entry. The default graceful mode lets accepted work drain independently:
 the engine keeps serving everything already accepted, and the gRPC server is
 torn down only after all in-flight work finishes (bounded by
 `drain_timeout_ms`, default 60000 — on expiry the removal falls back to the
 abrupt teardown and reports `drained=false`). Optional body fields:
 `mode` (`graceful`|`abrupt`) and `drain_timeout_ms`; the response reports
-`running_at_removal`/`waiting_at_removal` plus `drained`/`drain_ms`.
+`running_at_removal`/`waiting_at_removal` plus `drained`/`drain_ms` and an
+`admission` snapshot (closure time, admitted count at closure/final, rejected count).
+Both modes reject late Generate, Enqueue, RemoteGenerate and Fetch RPCs with
+UNAVAILABLE. Existing streams can progress; status and cleanup remain available.
 
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
@@ -99,7 +147,7 @@ timeout. This gate is batch-level and independent of the request-level fault-inj
 
 **Queue metrics — four-state naming and units**: the periodic `java_mock_stats` log
 line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
-`run_online_eval.sh` env passthrough is `JAVA_MOCK_STATS_INTERVAL_MS`) reports
+`run_stress.py` option is `--mock-stats-interval-ms`) reports
 symmetric P/D queue states:
 
 | Field | Unit | Meaning |
@@ -133,47 +181,51 @@ for per-engine series). Configure exactly one scrape target
 (`<host>:<baseGrpcPort - 1>`). The Python-era shard aggregation port formula
 (`base + n_prefill + n_decode + 100 + shard_id`) no longer exists.
 
-**Production-caliber TPS series (`rtp_llm_*`, 20260901)**: `/metrics` reports
-three series under the production metric names so mock dashboards read like
-the real engine's — `rtp_llm_context_tps` (computed context tokens = input −
-cache hits), `rtp_llm_context_tps_with_cache` (input tokens including cache
-hits, the DeepSeek-style "input tokens/s incl. cache hits" caliber) and
-`rtp_llm_generate_tps` (generated output tokens). They are **pure accounting
-on completion events** (prefill completions feed the context pair, decode
-completions feed generate; cancelled completions are excluded — only tokens
-actually accepted and generated count, matching production semantics) and
-every scrape settles the window first, so the window = scrape interval (the
-eval G1 poller is 1s → the value is tokens/s by construction). PD split:
-prefill engines carry the context pair, decode engines the generate series
-(off-role series stay 0). Caliber note: the mock's execution time is itself a
-formula product, so unlike production there is no execute/wall dual
-denominator — the fixed 1s window is the whole denominator. These are
-**accounting-style simulation readings that measure scheduling organization
-efficiency, not GPU compute**: do not compare absolute values against
-production dashboards directly (the caliber semantics map one-to-one, the
-physics does not). `/snapshot` exposes the cumulative `hit_tokens_total`
-per engine (never drained — the `cache_saved_tokens` source via
-`final_snapshot`). The report layer renders these three series as P/D
-role charts at the **per-engine average** (cluster sum ÷ engine count —
-the production dashboard's single-instance-series read, so per-instance
-magnitudes line up; the aggregate's `mock_tps_ts` keeps the raw cluster
-sums and the division is presentation-layer, with a cluster-sum fallback
-caption 「集群和（引擎数未知）」 + stderr warning when the engine count
-is unavailable — chain: `run_meta.json` params > `engine_dist` > mock
-final_snapshot role counts); the client-side token reconciliation is
-not a report panel either — the aggregate validity item
-`token_reconciliation_ok` was removed on 20260903 (fire-and-forget runs
-record ok at schedule success while the engine is still executing, so
-in-flight requests pollute both sides and the aggregate-time in-flight
-compensation cannot close reliably; per-request correctness verification
-is already covered by the client_events × engine_events rid join — the
-same join full_e2e / engine_exec uses — making the aggregate assertion
-redundant).
+**Prefill TPS contract (`execution_us_v1`, 2026-09-21)**: the context pair
+uses the real collector's execution-time denominators:
+`rtp_llm_context_tps = Σcomputed tokens × 1e6 / Σeligible batch execution us`;
+`rtp_llm_context_tps_with_cache` uses input tokens including reuse and its
+own eligible-batch denominator. A zero-compute batch contributes only to
+the latter. These rates cannot be subtracted to infer cache hit rate.
+The `rtp_llm_context_wall_tps` / `rtp_llm_context_wall_tps_with_cache` pair
+uses the same actual report-window denominator and supports throughput and
+window cache-hit analysis; `rtp_llm_wall_tps_report_interval_us` records it.
 
-**Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
+Token counts are frozen at batch execution start and published atomically
+with measured execution time after dispatch completes. Work cancelled after
+execution starts remains in TPS accounting. Successful-request business
+counters remain separate. HTTP and Whale have independent reporting cursors;
+long in-flight steps without completed samples are silent, and idle engines
+report zero. Mock time includes simulated execution and dispatch overhead;
+this aligns accounting, not GPU performance. See [METRICS.md](METRICS.md)
+for source evidence, scope and gate requirements.
+
+PD split remains: context metrics belong to P, `rtp_llm_generate_tps` to D.
+Decode TPS is unchanged by this migration and is not certified by the
+prefill contract. Reports keep cluster sums in `mock_tps_ts` and display
+per-engine averages when engine counts are known. Snapshot
+`hit_tokens_total` remains the successful-request cumulative counter.
+
+**Whale no-Fetch latency**: `GenerateInputPB.start_time` survives master
+dispatch and the P→D handoff. The production frontend sets it in epoch
+microseconds; the Java replay client sets epoch milliseconds. On successful
+completion P reports `mock_backend_ttft_us` and D reports
+`mock_backend_latency_us`, each measured from that request stamp. These feed
+the dashboard's `py_rtp_response_first_token_rt` and (only with
+`FETCH_OUTPUT_STREAM=0`) `py_rtp_framework_rt`, respectively, in milliseconds
+with P/D `hippo_role` tags. Missing/invalid stamps suppress these aliases
+rather than substituting an engine arrival time. The original
+`rtp_llm_first_token_latency_us` and `rtp_llm_latency_us` still measure local
+P/D residence. The backend stamp is taken after frontend ingress and some
+preprocessing, so the aliases remain shorter than true frontend request →
+response latency. The P value uses prefill completion as its first-token
+boundary; it does not observe when a streamed token reaches the client. With
+Fetch enabled, the frontend owns completion timing.
+
+**Block-pool observability series**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes
 (per-engine and role-aggregated) — four per-scrape GAUGES
-`mock_engine_cache_blocks` / `mock_engine_available_blocks` /
+`rtp_llm_kv_cache_pool_total_blocks` / `rtp_llm_kv_cache_pool_available_blocks` /
 `mock_engine_held_blocks` / `mock_engine_referenced_blocks` (the three-state
 split: available = free + pure LRU, held = in-flight keyless leases,
 referenced = in-flight-referenced key blocks — the same snapshot fields the
@@ -200,8 +252,8 @@ memory pages — read the shapes and the admission/reuse events, not
 absolute block counts against production.
 
 **Cache key-hit series (`mock_engine_*`, 20260902)**: `/metrics` also reports
-two cumulative counters aligning the mock with the production
-`recent_cache_key_hit_count / total_count` caliber —
+two cumulative key counters (not the real recent-cache-key token gauges;
+see [metric contract](METRICS.md)) —
 `mock_engine_cache_key_hits_total` (Σ block keys matched by the
 admission-time `prefixHitBlocks` call: keys the engine could reuse) and
 `mock_engine_cache_keys_requested_total` (Σ requested `blockKeys`;
@@ -253,7 +305,8 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | InflightTtlExpiryTest | 1 | TTL cleanup mechanism |
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
-| TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
+| TpsMetricsAccountingTest | 4 | Execution/wall denominators, role sums, executed cancellations, HTTP/Whale parity |
+| PrefillTpsMetricsTest | 6 | Deterministic real-collector formulas, independent readers, long steps, reset and zero-token gates |
 | BlockPoolMetricsObservabilityTest | 6 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
 | CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
 | RealisticTimingTest | 1 | Real timing verification |
@@ -279,7 +332,7 @@ entirely through environment variables (`Config.fromEnv`):
 | LIMIT | 0 | Max requests to replay (0 = all) |
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| FETCH_OUTPUT_STREAM | true | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
+| FETCH_OUTPUT_STREAM | true | Client reads output streams. With `0/false`, `run_stress.py` also sets Mock `--auto-fetch true`; direct launchers must set both ends explicitly (BATCH only). |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
 | EVENT_LOOP_THREADS | 32 | Netty event-loop threads |
@@ -443,17 +496,23 @@ master-side curves are indistinguishable from production:
   executes). Net-demand caliber, same as hand-off admission; the reservation is
   ADOPTED (not re-charged) at hand-off and released on prefill cancel /
   alreadyCancelled completion / a rejected hand-off. A reservation reject is a
-  request-level synchronous 602 in the enqueue ack (message marks it
+  request-level synchronous 8211 in the enqueue ack (message retains raw 602 and marks it
   decode-side), counted on the D engine's `kv_admission_fails` — the P-side
   `lack_mem_rejects` counter stays the P-POOL rejection surface. Single-engine
   / self-routed topologies (no resolvable DECODE in role_addrs) reserve
   nothing; the D engine is located from role_addrs exactly as `startDecode`
   does (mock routing parity: same resolver, same target).
-- **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
-  RETIRED their old meaning ("max cached key count") and now override the pool
-  block count (default `0` = derive from token capacity). The 6000/3000 defaults
-  still passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
-  valid — they now size the pools (6,000 blocks = 6,144,000 tokens prefill;
+  The Decode-side holding states have different jobs: `decodeAllocationInProgress`
+  guards a concurrent ALLOCATE, `decodeWaitingForKv` owns blocks while waiting
+  for Prefill handoff, and `decodePendingQueue` waits for an execution slot
+  after handoff. Only the last is a scheduling queue.
+- **Flag rename + semantics change**: the pool-block overrides are
+  `--prefill-kv-pool-blocks` / `--decode-kv-pool-blocks` (default `0` = derive
+  from token capacity). The old names `--prefill-cache-blocks` /
+  `--decode-cache-blocks` were removed outright — passing either one now fails
+  fast with an unknown-argument error. The 6000/3000 defaults still
+  passed by `run_stress.py` / `harness.py` remain
+  valid — they size the pools (6,000 blocks = 6,144,000 tokens prefill;
   3,000 = 3,072,000 decode) instead of capping key counts.
 - **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
   hardcoded 1024); `/snapshot` and `/metrics` expose `total_kv_tokens`,
@@ -519,6 +578,33 @@ The opt-in default is deliberate: Auto-TPM queue-eviction E2E scenarios need
 deep engine-side queues, so the cap must be explicitly requested. Do not
 "fix" the default to fail-fast without revisiting those scenarios.
 
+### FIFO 配置与准入语义
+
+`prefill.fifo` 存在时，引擎使用 FIFO 准入策略，旧的
+`prefill.max_batch_requests`、`prefill.max_batch_tokens` 和
+`prefill.direct_batch_size_max` 不控制该路径的执行批形。
+
+- `max_requests` 限制 stream 数；`max_batch_tokens` 同时限制含命中前缀的
+  完整 token 总量和最长完整序列长度乘总序列数，两项均采用严格小于边界。
+  多返回序列按 `num_return_sequences` 计宽；beam search 的首次 prefill 宽度为 1。
+- 首条候选保留真实 FIFO 的例外：未命中 context 长度小于 `max_seq_len` 时
+  可以超过批 token 预算；独立输入和物理 KV 容量检查仍在入队阶段执行。
+- `max_batch_tokens_without_cache` 是停止继续准入的计算量配额，CP padding
+  逐序列计算后乘宽度；当前候选可以使累计量越过配额，下一条停止准入。
+- `cp_enabled` 指定 CP 是否启用；未声明时由 `cp_size > 1` 推导。
+  未启用 CP 时 `cp_size` 必须为 1；`force_single` 默认 true，仅在 CP 启用时生效，
+  已采集配置中的显式 false 保持有效。
+  请求上限、CP 宽度和模型长度应使用目标真实部署的有效配置。
+- `max_inited_kv_streams` 限制已持有非空 KV lease 的请求数量；达到上限时，
+  已初始化 KV 的请求可以继续推进，空 lease 不占此配额。
+- `max_batch_kv_len`、`max_waiting_requests` 和 `prefill.max_waiting_batches`
+  是 mock 专属约束，FIFO 默认不启用。原始记录可保留这些数值；只有显式设置
+  `prefill.fifo.fault_limits_enabled: true` 时才用于故障实验。额外 KV 约束不能
+  替代真实 token 和矩形预算；实际物理 KV pool 容量始终生效。
+
+FIFO 准入对齐不代表 decode、多序列输出或完整缓存状态机已经与真实引擎等价。
+耗时公式和采集记录保持独立，由相同输入下的执行与性能证据验证。
+
 ### In-engine dual-budget prefill regroup (#8)
 
 Before #8 the engine executed master `EnqueueBatch` batches verbatim —
@@ -563,7 +649,7 @@ that (production reference: FIFOScheduler.cc:371-481):
   the stress caliber needs no extra opt-in.
 - **Observation surface**: `/snapshot` exposes `prefill_batches` /
   `prefill_batch_requests` / `max_prefill_batch_size` per prefill
-  engine — the executed-batch counters the flexlb_ft regroup cases
+  engine — the executed-batch counters the flexlb_test_framework regroup cases
   assert on.
 
 **Caliber break note**: `avg_batch_size` and the whole
@@ -617,58 +703,20 @@ Representative additions beyond the v2 baseline suite (full list under
   `BaselineParityE2ETest`, `TelemetryEmissionSurfaceTest`,
   `MockMasterConfig` (shared fixtures)
 
-## Java-only cleanup on this branch
+## 测试入口与执行边界
 
-The Python mock engine / Python load client implementations have been
-**removed** from this branch (`tools/online_eval/mock_engine.py`,
-`mock_engine_cluster.py`, `mock_engine_shard_launcher.py`,
-`flexlb_load_client.py`, `run_single_engine.py`, `test_resolve_decode.py` and
-`tests/test_mock_engine.py`), together with `tools/online_eval/run_batch_smoke_only.sh`
-(a matrix subset with no CI references — its coverage is subsumed by
-`run_online_eval.sh` / `run_matrix_smoke.sh`) and the stale
-`tools/online_eval/BUILD` filegroup that still referenced the deleted Python
-files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
-orchestration switches and their Python branches are gone as well, so the
-Java stack described in this README is the only implementation.
+Mock Engine 和负载客户端均使用 Java 实现。Python 负责场景编排、证据归档与报告，入口见 [online_eval](../tools/online_eval/README.md)。
 
-All seven orchestration test scripts have been converted to the Java stack and
-now drive JavaMockEngineCluster / JavaLoadClient through the shared
-`tools/online_eval/lib_load_client.sh` helpers
-(`start_java_mock_cluster` / `wait_mock_cluster_ready` / `mock_http` /
-`stop_java_mock_cluster` / `run_java_load_client`):
+`run_cases.py` 执行 YAML 声明的功能或持续负载实例，`run_stress.py` 执行压测。JavaLoadClient 的可用环境变量由 `tools/online_eval/config/load_client_env.txt` 统一登记。
 
-- `flexlb_behavior_test.sh`
-- `engine_kill_restart_test.sh`
-- `run_cancel_smoke.sh`
-- `run_matrix_smoke.sh`
-- `master_kill_restart_test.sh`
-- `master_recovery_ttft_test.sh`
-- `engine_disconnect_ttft_test.sh`
+每个实例的退出状态反映其独立检查与执行完整性。运行间比较只展示冻结报告，不能用对比报告的生成成功替代单 run 判定。
 
-The Python **smoke client family** has been retired and removed (it was
-tooling, not the mock engine): `flexlb_smoke_base.py`,
-`priority_preemption_smoke.py` and their tests are gone — their coverage
-lives in the `tools/online_eval/flexlb_ft/` functional-test framework,
-which talks to the Java cluster over its gRPC + HTTP control plane.
-`encode_unique_key` now lives in
-`online_eval/proto_utils.py`, used by the remaining analysis tooling.
+取消请求可通过 gRPC `RpcService/Cancel`、HTTP `/cancel_request` 或进程内测试通道到达 Mock，三者使用同一取消合同。
 
-Cancel transport surface: since the Java-only intake the Java mock cluster
-also implements the gRPC `RpcService/Cancel` method, so the cancel intent can
-now travel over three channels that share one cancel contract — the gRPC
-`Cancel` handler, the HTTP `/cancel_request` control endpoint and the
-in-process channel. The smoke suites default to the HTTP control plane (the
-explicit `--flexlb.test.mock-cancel-control-url` wiring); pointing that
-setting at the gRPC endpoint exercises the production channel instead.
+### P→D 断链
 
-Exit-code contract: the `engine_kill_restart` / `master_kill_restart` /
-`flexlb_behavior` fault suites now propagate scenario failures to their exit
-code — the pre-conversion scripts always exited 0. Anything wiring these
-suites into automation should re-check pass/fail on the exit code instead of
-scraping logs.
-
-Assertion semantics: the engine-kill suite's assertion 5 (cancelled request
-counting) is now faithful — since the Java mock implements gRPC `Cancel`,
-cancels issued on the master's active-eviction path really reach the engine
-and are counted. Historical "undercounted PASS" baselines will turn red;
-that is a semantic alignment, not a regression.
+Mock 的 P→D 数据通道使用进程内队列。停止 Decode 端口、崩溃或强制移除时，
+通过已有请求所有权向 Prefill 响应队列即时投递 `8209 REMOTE_GENERATE_FAILED`，
+附带断链说明；不等待客户端 deadline，不通过 Master Cancel。正常排空不产生断链错误。
+响应队列只接受一个终态，后续取消、完成或输出帧不再写入。此错误以现有
+`error_info` 数据帧传递，模拟业务错误语义，不模拟真实 gRPC trailing status 或 keepalive 时延。

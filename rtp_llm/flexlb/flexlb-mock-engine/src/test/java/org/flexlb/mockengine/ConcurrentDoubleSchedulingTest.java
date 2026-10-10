@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
@@ -117,7 +117,7 @@ class ConcurrentDoubleSchedulingTest {
                     startGate.await();
                     EngineRpcService.GenerateInputPB input =
                             inputWithDecode(requestId, 10, decodePort);
-                    enqueue(prefill, batch(batchId, slot(0, input)));
+                    enqueueAndFetch(prefill, batch(batchId, slot(0, input)));
                 } catch (Throwable t) {
                     errors.incrementAndGet();
                 } finally {
@@ -209,7 +209,7 @@ class ConcurrentDoubleSchedulingTest {
                     startGate.await();
                     EngineRpcService.GenerateInputPB input =
                             inputWithDecode(requestId, 10, decodePort);
-                    enqueue(prefill, batch(batchId, slot(0, input)));
+                    enqueueAndFetch(prefill, batch(batchId, slot(0, input)));
                 } catch (Throwable t) {
                     errors.incrementAndGet();
                 } finally {

@@ -1,0 +1,9 @@
+schema_version: 2
+default_suite: core
+ci_suites:
+  core:
+  - request_completion::default
+  workload_manual:
+  - cache_scale_in::default
+  - master_ha_failover::rolling
+  - master_performance::default

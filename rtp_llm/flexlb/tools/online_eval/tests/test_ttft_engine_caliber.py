@@ -11,8 +11,7 @@
     异常跳过该样本不编造。
   * 零样本（join 全 miss / 终态流全 cancelled）summary 键为 None
     （source 仍恒 "engine"），报告层显示缺省——零样本 ≠ 真实 0。
-  * compare_twin：加载层 rid join 注入行级 ttft_engine_ms，ttft 族样本
-    换源；合成 approx 行写 ttft_engine_ms（ttft_ms 占 0）保 round-trip。
+
 
 fixture 数值锚点（send = T0 + i*1000）：
   正常行：prefill(arrival=+10, start=+20, done=+30) → ttft=30 / pw=10；
@@ -27,12 +26,11 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "aggregate_canvas_run.py"
-CANVAS = TOOLS_DIR / "canvas_report_gen.py"
+AGGREGATE = TOOLS_DIR / "src/analysis/aggregate.py"
+CANVAS = TOOLS_DIR / "src/reporting/stress_report.py"
 T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 sys.path.insert(0, str(TOOLS_DIR))
-import compare_twin  # noqa: E402  (module under test; __main__ guarded)
 
 
 def _run(cmd, cwd):
@@ -268,11 +266,11 @@ class EngineTtftMissGuardTest(unittest.TestCase):
 
     def test_ttft_count_and_miss_markers(self):
         # rid0=30 / rid3=60 进样本；rid1（无 prefill 行）与 rid2（cancelled）
-        # 计 miss 不编造。分位按仓库统一 int-rank 约定（v[int(n*p)]）：
-        # [30,60] 的 p50 = v[1] = 60
+        # 计 miss 不编造。统一 pooled nearest-rank（ceil(n*p)-1）：
+        # [30,60] 的 p50 = v[0] = 30
         ttft = self.agg["summary"]["ttft_latency_ms"]
         self.assertEqual(ttft["count"], 2)
-        self.assertEqual(ttft["p50"], 60)
+        self.assertEqual(ttft["p50"], 30)
         self.assertEqual(ttft["p99"], 60)
         self.assertEqual(ttft["mean"], 45.0)
         integ = self.agg["integrity"]
@@ -426,92 +424,6 @@ class EngineTtftCanvasOmissionTest(unittest.TestCase):
         self.assertNotIn("ttft（p95·engine）", self.html)
         # 零样本下报告仍完整生成（不崩溃）且无 engine 数值线
         self.assertNotIn("[30,30,30]", self.html.replace(" ", ""))
-
-
-class CompareTwinEngineCaliberTest(unittest.TestCase):
-    """compare_twin：ttft 族换源 engine join + 合成 round-trip 携带新键。"""
-
-    def test_real_side_latency_samples_engine_join(self):
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            run_dir = Path(tmp.name) / "run"
-            run_dir.mkdir()
-            client_rows = [_client_row(i, T0 + i * 1000) for i in range(3)]
-            ev_rows = [
-                _ev_prefill(0, T0, 10, 20, 30),
-                _ev_decode(0, T0, 40, 50, 80),
-                _ev_prefill(1, T0 + 1000, 10, 20, 30),
-                _ev_decode(1, T0 + 1000, 40, 50, 80),
-                # rid2 无 prefill 行（join miss）；decode done<send 时钟异常行
-                _ev_decode(2, T0 + 2000 - 500, 40, 50, 80),
-            ]
-            _write_streams(run_dir, client_rows, ev_rows)
-            side = compare_twin.load_real_side(str(run_dir / "client_events.jsonl"))
-            # engine 口径样本：rid0/rid1 = 30；client 首帧 999 不进
-            self.assertEqual(side.latency_samples("ttft"), [30, 30])
-            # e2e/schedule 族不受影响（client total_ms / schedule_ms）
-            self.assertEqual(side.latency_samples("e2e"), [200, 200, 200])
-            # 行级注入键存在且 ttft_ms 原样保留（不复写既有键语义）
-            r0 = side.ok_rows()[0]
-            self.assertEqual(r0.get("ttft_engine_ms"), 30)
-            self.assertEqual(r0.get("ttft_ms"), 999)
-            # summary（_aggregate_real_summary）随行级换源自动 engine
-            self.assertEqual(side.summary["ttft"]["count"], 2)
-            self.assertEqual(side.summary["ttft"]["p50"], 30.0)
-        finally:
-            tmp.cleanup()
-
-    def test_no_engine_stream_leaves_rows_without_key(self):
-        # 同目录无 engine_events.jsonl：行保持无 ttft_engine_ms（不编造），
-        # ttft 族样本为空（回退 quantile-approx / absent）
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            run_dir = Path(tmp.name) / "run"
-            run_dir.mkdir()
-            client_rows = [_client_row(0, T0)]
-            (run_dir / "client_events.jsonl").write_text(
-                "\n".join(json.dumps(r) for r in client_rows) + "\n",
-                encoding="utf-8",
-            )
-            side = compare_twin.load_real_side(str(run_dir / "client_events.jsonl"))
-            self.assertEqual(side.latency_samples("ttft"), [])
-            self.assertIsNone(side.ok_rows()[0].get("ttft_engine_ms"))
-        finally:
-            tmp.cleanup()
-
-    def test_synthesize_roundtrip_carries_engine_key(self):
-        # approx path：合成行 ttft_ms 占 0、engine 口径值写 ttft_engine_ms；
-        # 再次加载（无 engine 流）行级直读 round-trip
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            out_dir = Path(tmp.name) / "syn"
-            side = compare_twin.SideData("mock", "mock")
-            side.duration_s = 10.0
-            side.summary = {"total_requests": 2, "success_count": 2}
-            side.approx_modes = {
-                "ttft": [30.0, 60.0],
-                "e2e": [200.0, 220.0],
-                "schedule": [5.0, 6.0],
-            }
-            compare_twin.synthesize_real_inputs(side, str(out_dir))
-            rows = [
-                json.loads(ln)
-                for ln in (out_dir / "client_events.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
-                if ln.strip()
-            ]
-            ok_rows = [r for r in rows if r.get("status") != "schedule_error"]
-            self.assertEqual(len(ok_rows), 2)
-            for r in ok_rows:
-                self.assertEqual(r["ttft_ms"], 0.0)
-                self.assertIn("ttft_engine_ms", r)
-                self.assertIn(r["ttft_engine_ms"], (30, 60, 30.0, 60.0))
-            # round-trip：合成目录作为 real 侧再次加载，行级直读样本
-            side2 = compare_twin.load_real_side(str(out_dir / "client_events.jsonl"))
-            self.assertEqual(sorted(side2.latency_samples("ttft")), [30.0, 60.0])
-        finally:
-            tmp.cleanup()
 
 
 if __name__ == "__main__":

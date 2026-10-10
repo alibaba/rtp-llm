@@ -27,15 +27,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       services map, starts the gRPC server, and appends it to the discovery
  *       file so a master running {@code LocalServiceDiscovery} picks it up
  *       within one sync interval.</li>
- *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes
- *       (user ruling 2026-09: a PLANNED scale-in under load must not lose or
- *       fail any request):
+ *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes.
+ *       Both close new RPC admission at the removal decision:
  *       <ul>
- *       <li><b>graceful</b> (default) — the production rolling scale-in
- *           order. Phase 1 strips the engine's discovery-file entry FIRST so
- *           the master stops routing NEW requests to it (the engine keeps
- *           serving everything already accepted, including stragglers that
- *           race past the strip window). Phase 2 waits a BOUNDED interval
+ *       <li><b>graceful</b> (default) — phase 1 closes admission and strips
+ *           the discovery-file entry. Accepted work can keep progressing;
+ *           late dispatch/retry/Fetch RPCs are explicitly rejected.
+ *           Phase 2 waits a BOUNDED interval
  *           (drainTimeoutMs) for all in-flight work to finish (running
  *           tasks, both pending queues, cross-engine P→D ownership). Phase 3
  *           tears the gRPC server down and removes every bookkeeping entry.
@@ -66,7 +64,8 @@ final class DynamicEngineManager {
     /** Outcome of a successful remove — counters are sampled when the drain
      * STARTS (the "at removal time" report), plus the drain result. */
     record RemovedEngine(String engineName, int grpcPort, int runningAtRemoval,
-                         int waitingAtRemoval, String mode, boolean drained, long drainMs) {
+                         int waitingAtRemoval, String mode, boolean drained, long drainMs, long withdrawalMs, long teardownMs,
+                         long totalMs, Map<String, Integer> remainingWork, Map<String, Object> admission) {
     }
 
     /** Thrown for caller-input problems (bad role, port conflict, unknown engine). */
@@ -152,6 +151,7 @@ final class DynamicEngineManager {
      * @param explicitPort requested gRPC port, or null to auto-allocate max+1
      */
     AddedEngine addEngine(String role, Integer explicitPort) throws EngineOperationException, IOException {
+        if (config.whale && !config.whaleBundle) throw new EngineOperationException(409, "Whale scales Pods, not engines inside a Pod");
         String roleName = normalizeRole(role);
         synchronized (mutationLock) {
             int grpcPort = resolvePort(explicitPort);
@@ -186,6 +186,7 @@ final class DynamicEngineManager {
      */
     RemovedEngine removeEngine(JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
             throws EngineOperationException, IOException {
+        long started = System.nanoTime();
         int port = service.getGrpcPort();
         CompletableFuture<RemovedEngine> drain;
         // "At removal time" counters are sampled at the DECISION instant (lock
@@ -201,22 +202,20 @@ final class DynamicEngineManager {
                 // engine — await the SAME outcome instead of racing it.
                 drain = inProgress;
             } else {
+                if (services.get(port) != service) {
+                    throw new EngineOperationException(404, "engine already removed: " + service.getEngineName());
+                }
                 runningAtRemoval = service.getRunningCount();
                 waitingAtRemoval = removalWaitingCount(service);
-                if ("abrupt".equalsIgnoreCase(mode)) {
-                    return detachLocked(service, "abrupt", false, 0L,
-                            runningAtRemoval, waitingAtRemoval);
-                }
-                // Phase 1 (lock held): strip the discovery entry FIRST so the
-                // master stops routing new requests; the engine keeps serving
-                // everything it already accepted (production rolling scale-in
-                // order — the in-flight set, not the admission gate, is what
-                // the drain below waits on).
+                // Close new RPC admission at the removal decision, independently
+                // of execution/drain state. Existing accepted work may continue.
+                service.closeAdmission();
                 pendingRemovalPorts.add(port);
                 try {
                     rewriteDiscoveryFileLocked();
                 } catch (IOException e) {
                     pendingRemovalPorts.remove(port);
+                    service.reopenAdmissionAfterFailedRemoval();
                     throw new IOException("engine " + service.getEngineName()
                             + " removal aborted (engine NOT removed): discovery file rewrite failed: "
                             + e.getMessage(), e);
@@ -225,9 +224,10 @@ final class DynamicEngineManager {
                 drainingFutures.put(port, drain);
                 final int sampledRunning = runningAtRemoval;
                 final int sampledWaiting = waitingAtRemoval;
+                long withdrawalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
                 Thread drainer = new Thread(
-                        () -> runGracefulDrain(service, drain, drainTimeoutMs,
-                                sampledRunning, sampledWaiting),
+                        () -> runRemoval(service, drain, mode, drainTimeoutMs,
+                                sampledRunning, sampledWaiting, started, withdrawalMs),
                         "engine-drain-" + service.getEngineName());
                 drainer.setDaemon(true);
                 drainer.start();
@@ -254,19 +254,19 @@ final class DynamicEngineManager {
 
     /**
      * Drainer body (dedicated daemon thread): bounded wait for
-     * {@code hasInflightWork()} to clear, then the teardown critical section,
+     * {@code hasInflightWork()} to clear, then independent transport teardown,
      * then publish the outcome to every awaiting caller.  The "at removal"
      * counters are the drain-START samples taken by {@link #removeEngine}.
      */
-    private void runGracefulDrain(JavaMockEngineCluster.FastRpcService service,
+    private void runRemoval(JavaMockEngineCluster.FastRpcService service,
                                   CompletableFuture<RemovedEngine> outcome,
-                                  long drainTimeoutMs,
+                                  String mode, long drainTimeoutMs,
                                   int runningAtRemoval,
-                                  int waitingAtRemoval) {
+                                  int waitingAtRemoval, long started, long withdrawalMs) {
         long start = System.nanoTime();
         long deadline = start + TimeUnit.MILLISECONDS.toNanos(drainTimeoutMs);
         boolean drained = false;
-        while (System.nanoTime() < deadline) {
+        while ("graceful".equalsIgnoreCase(mode) && System.nanoTime() < deadline) {
             if (!service.hasInflightWork()) {
                 drained = true;
                 break;
@@ -280,10 +280,15 @@ final class DynamicEngineManager {
         }
         long drainMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
         try {
-            RemovedEngine result;
+            Map<String, Integer> remainingWork = service.inflightWorkSnapshot();
+            long teardownStart = System.nanoTime();
+            detach(service, mode, drained);
+            RemovedEngine result = new RemovedEngine(service.getEngineName(), service.getGrpcPort(),
+                    runningAtRemoval, waitingAtRemoval, mode, drained, drainMs, withdrawalMs,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - teardownStart),
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), remainingWork, service.admissionSnapshot());
             synchronized (mutationLock) {
-                result = detachLocked(service, "graceful", drained, drainMs,
-                        runningAtRemoval, waitingAtRemoval);
+                drainingFutures.remove(service.getGrpcPort(), outcome);
             }
             outcome.complete(result);
         } catch (Throwable failure) {
@@ -295,30 +300,17 @@ final class DynamicEngineManager {
         }
     }
 
-    /**
-     * Teardown critical section (mutationLock held, single place shared by
-     * both modes): cancel-sweep bookkeeping, cut the gRPC server, drop the
-     * services-map entry, rewrite the discovery file, and report.
-     *
-     * <p>On a completed graceful drain every structure the sweep touches is
-     * already empty, so the cut is bloodless; the abrupt path (and the
-     * graceful timeout fallback) relies on the sweep to net the counters out.
-     */
-    private RemovedEngine detachLocked(JavaMockEngineCluster.FastRpcService service,
-                                       String mode,
-                                       boolean drained,
-                                       long drainMs,
-                                       int runningAtRemoval,
-                                       int waitingAtRemoval) throws IOException {
+    /** Keep the port reserved and discovery withdrawn until transport shutdown
+     * finishes. Blocking service/transport work must never hold mutationLock. */
+    private void detach(JavaMockEngineCluster.FastRpcService service,
+                        String mode, boolean drained) throws IOException {
         int port = service.getGrpcPort();
-        pendingRemovalPorts.remove(port);
-        drainingFutures.remove(port);
         // Same rejection semantics as /stop_engine first, then drain bookkeeping
         // so in-flight counters net out (no leak report for a removed engine)…
         service.setStopped(true);
         service.drainAndShutdown();
         // …then cut the RPC streams.
-        Server server = serversByPort.remove(port);
+        Server server = serversByPort.get(port);
         if (server != null) {
             if ("graceful".equals(mode) && drained) {
                 // Bloodless teardown: every handler has finished, so give the
@@ -342,17 +334,12 @@ final class DynamicEngineManager {
             }
         }
         service.shutdown();
-        services.remove(port, service);
-        try {
+        synchronized (mutationLock) {
+            if (server != null) serversByPort.remove(port, server);
+            services.remove(port, service);
+            pendingRemovalPorts.remove(port);
             rewriteDiscoveryFileLocked();
-        } catch (IOException e) {
-            // Engine is already gone; report the failure so the operator can
-            // retry (a stale entry would keep the master retrying a dead port).
-            throw new IOException("engine " + service.getEngineName() + " removed from port " + port
-                    + " but discovery file rewrite failed: " + e.getMessage(), e);
         }
-        return new RemovedEngine(service.getEngineName(), port,
-                runningAtRemoval, waitingAtRemoval, mode, drained, drainMs);
     }
 
     // ────────────────── Internals (mutationLock held) ──────────────────
@@ -387,9 +374,9 @@ final class DynamicEngineManager {
         } else {
             grpcPort = services.keySet().stream().mapToInt(Integer::intValue).max().orElse(1024) + 1;
         }
-        if (services.containsKey(grpcPort)) {
+        if (services.containsKey(grpcPort) || drainingFutures.containsKey(grpcPort)) {
             throw new EngineOperationException(409,
-                    "port " + grpcPort + " already in use by engine " + services.get(grpcPort).getEngineName());
+                    "port " + grpcPort + " already in use or being removed");
         }
         return grpcPort;
     }

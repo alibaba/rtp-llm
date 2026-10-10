@@ -1,0 +1,87 @@
+schema_version: 2
+case: cache_scale_in
+profiles:
+- single-nonbatch
+- batch-window
+environment:
+  backend: java_mock
+  discovery: discovery_file
+  perf_preset: glm_5_3_l20d
+  model_override:
+    baseline: glm_5_3_l20d
+    reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
+  prefill_cache_policy:
+    device_tree: false
+    memory_tree: false
+
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 60
+  cleanup_timeout_s: 660
+metadata:
+  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P control point.
+  category: kv
+program: step
+parameters:
+  gate:
+    target_p: 64
+    warmup_timeout_s: 300
+    baseline_s: 60
+    observe_s: 240
+    sample_s: 1
+    window_s: 10
+    step_s: 1
+    sustain_s: 30
+    max_gap_s: 5
+    qps: 240
+    qps_tolerance: 0.1
+    baseline_min_hit: 0.85
+    baseline_max_spread: 0.05
+    absolute_min_hit: 0.45
+    max_drop: 0.25
+    min_completed: 20
+    removal_mode: graceful
+    drain_timeout_ms: 30000
+    topology_timeout_s: 37  # discovery convergence budget, independent of drain
+  flow:
+    group_id: scale_in
+    phase_id: continuous
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 48g
+    source:
+      kind: trace
+      model: prefix_lineage
+      version: '2'
+      parameters:
+        path: ../../data/traffic_trace/glm-5.3_20260921_1400_15m.xz
+        sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
+        count: 141113
+        output_tokens: 420
+        priority: 50
+    client:
+      DURATION_S: '588'
+      MAX_CONCURRENCY: '32768'
+      TIMEOUT_MS: '600000'
+      RESPONSE_TIMEOUT: '660'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '16'
+      EVENT_LOOP_THREADS: '16'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+      playback:
+        mode: uniform
+        qps: 240.0
+        max_laps: 1
+        identity: structural-relabel
+analysis:
+  alignment_event: withdraw_start
+
+test:
+  kind: workload
+  description: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
+  collection: request
+reports:
+- workload.yaml
+- cache_scale_in_overview.yaml

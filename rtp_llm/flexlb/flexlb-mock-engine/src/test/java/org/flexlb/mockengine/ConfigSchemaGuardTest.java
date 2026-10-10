@@ -8,12 +8,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class ConfigSchemaGuardTest {
 
     private static final String[] MASTERS = {
-            "../tools/online_eval/data/config/master_fixed_window.json",
+            "src/test/resources/master-config-stress-na130.json",
     };
 
     private static final String[] PERFORMANCES = {
-            "../tools/online_eval/data/performance/dsv4_flash_performance.fast_ab.json",
-            "../tools/online_eval/data/performance/dsv4_flash_performance.sm100_dev.json",
+            "../tools/online_eval/data/performance/dsv4_l20_mock_calibration.json",
+            "../tools/online_eval/data/performance/deepseek_v4_flash_l20c.json",
     };
 
     @Test

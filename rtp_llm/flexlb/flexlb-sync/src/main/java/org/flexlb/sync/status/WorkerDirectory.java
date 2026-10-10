@@ -7,6 +7,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
+import org.flexlb.util.SyncDiagnostics;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -164,6 +165,9 @@ public final class WorkerDirectory {
         Objects.requireNonNull(cacheAwareService, "cacheAwareService");
         Objects.requireNonNull(logger, "logger");
 
+        long diagBegin = System.nanoTime();
+        long diagEndpointEnd = diagBegin;
+        SyncDiagnostics.event("event=retire_begin worker={} role={} generation={}", address, role, status.getGenerationId());
         Throwable cleanupFailure = null;
         try {
             if (detached != null) {
@@ -172,9 +176,13 @@ public final class WorkerDirectory {
         } catch (Throwable retirementFailure) {
             cleanupFailure = retirementFailure;
         } finally {
+            diagEndpointEnd = System.nanoTime();
             finalizeRetirement(
                     role, address, status, cacheAwareService, logger);
         }
+        SyncDiagnostics.event("event=retire_end worker={} role={} generation={} endpoint_ms={} finalize_ms={} total_ms={}",
+                address, role, status.getGenerationId(), SyncDiagnostics.ms(diagEndpointEnd - diagBegin),
+                SyncDiagnostics.ms(System.nanoTime() - diagEndpointEnd), SyncDiagnostics.ms(System.nanoTime() - diagBegin));
         if (cleanupFailure != null) {
             logger.error(
                     "Endpoint cleanup failed after retiring generation {} for {}",

@@ -1,0 +1,241 @@
+"""Selectable request and archived Prometheus views; never affect gate decisions."""
+
+import math
+from collections import defaultdict
+
+from monitoring.session import archived_series
+from reporting.catalog import PERFORMANCE_COLORS, performance_axes, performance_metric_style
+
+COLORS = PERFORMANCE_COLORS
+
+
+def panel(directory, evidence, result):
+    import json
+
+    lo = evidence.get("window", {}).get("start_epoch_ms", 0)
+    duration = evidence.get("criteria", {}).get("measure_s", 1)
+    curves, audit = [], []
+    axes = performance_axes(include_hit_pct=True)
+
+    def add(name, group, axis, points, description, hidden=True):
+        curves.append(
+            dict(
+                name=name,
+                group=group,
+                axis=axis,
+                unit=axes[axis]["title"],
+                points=[dict(x=t, y=v) for t, v in points],
+                hidden=hidden,
+                color=COLORS[len(curves) % len(COLORS)],
+                description=description,
+            )
+        )
+
+    for key, name, group, axis in [
+        ("input_tps", "完成输入 TPS", "客户端吞吐", "input"),
+        ("output_tps", "完成输出 TPS", "客户端吞吐", "output"),
+        ("inflight", "Client inflight", "队列", "count"),
+    ]:
+        add(
+            name,
+            group,
+            axis,
+            [(w["t"], w[key]) for w in result["windows"]],
+            "逐请求终态重建；TPS 按完成时间分桶，inflight 为桶末值",
+            True,
+        )
+    sent, done = defaultdict(list), defaultdict(list)
+    records = evidence.get("flow", {}).get("records", [])
+    terminals_by_id = {r.get("rid"): r for r in records}
+    for issued in evidence.get("flow", {}).get("issued", []):
+        r = dict(
+            issued,
+            **{
+                k: v
+                for k, v in terminals_by_id.get(issued.get("rid"), {}).items()
+                if k not in issued
+            },
+        )
+        if isinstance(r.get("send_start_epoch_ms"), (int, float)):
+            sent[math.floor((r["send_start_epoch_ms"] - lo) / 1000)].append(r)
+    for r in records:
+        if isinstance(r.get("send_start_epoch_ms"), (int, float)) and isinstance(
+            r.get("total_ms"), (int, float)
+        ):
+            done[
+                math.floor((r["send_start_epoch_ms"] + r["total_ms"] - lo) / 1000)
+            ].append(r)
+
+    def p99(values):
+        values = sorted(
+            v for v in values if isinstance(v, (int, float)) and math.isfinite(v)
+        )
+        return values[max(0, math.ceil(0.99 * len(values)) - 1)] if values else None
+
+    metrics = defaultdict(list)
+    for i in range(math.ceil(duration)):
+        arrivals, terminals = sent[i], done[i]
+        ok = [r for r in arrivals if r.get("status") == "ok"]
+        dt = min(1, duration - i)
+        vals = {
+            "发送 QPS": len(arrivals) / dt,
+            "完成 QPS": len(terminals) / dt,
+            "成功 QPS": sum(r.get("status") == "ok" for r in terminals) / dt,
+            "错误 QPS": sum(r.get("status") != "ok" for r in terminals) / dt,
+            "到达 cohort 成功率": len(ok) / len(arrivals) if arrivals else None,
+            "TTFT p99": p99([r.get("ttft_ms") for r in ok]),
+            "E2E p99": p99([r.get("total_ms") for r in ok]),
+            "TPOT p99": p99(
+                [
+                    (r["total_ms"] - r["ttft_ms"]) / (r["observed_output_tokens"] - 1)
+                    for r in ok
+                    if r.get("observed_output_tokens", 0) > 1
+                    and isinstance(r.get("total_ms"), (int, float))
+                    and isinstance(r.get("ttft_ms"), (int, float))
+                ]
+            ),
+            "输入长度均值": (
+                sum(r["input_len"] for r in arrivals) / len(arrivals)
+                if arrivals
+                else None
+            ),
+            "实际输出长度均值": (
+                sum(r.get("observed_output_tokens", 0) for r in ok) / len(ok)
+                if ok
+                else None
+            ),
+        }
+        for k, v in vals.items():
+            metrics[k].append((i, v))
+    for name, points in metrics.items():
+        group, axis = (
+            ("延迟", "ms")
+            if "p99" in name
+            else (
+                "流量",
+                "ratio" if "率" in name else "tokens" if "长度" in name else "qps",
+            )
+        )
+        add(
+            name,
+            group,
+            axis,
+            points,
+            "逐请求证据；1 秒到达 cohort 的终态/延迟，完成与错误 QPS 按完成时间；不替代整窗门禁 p99",
+            True,
+        )
+
+    series, sources, gaps, errors = archived_series(directory, lo / 1000)
+    for key, points in series.items():
+        epoch, source, metric, label_json = key.split("/", 3)
+        if metric == "up":
+            continue
+        labels = json.loads(label_json)
+        role = {"prefill": "P", "decode": "D"}.get(labels.pop("role", ""), "")
+        name, group, axis, primary = performance_metric_style(source, metric, role)
+        special = {
+            ("mock", "rtp_llm_context_tps_engine_mean", "P"):
+                ("P context TPS", "Prefill TPS", "forward", 1),
+            ("mock", "rtp_llm_context_tps_with_cache_engine_mean", "P"):
+                ("P context TPS（含缓存）", "Prefill TPS", "forward", 1),
+            ("mock", "rtp_llm_generate_tps_engine_mean", "D"):
+                ("D generate TPS", "Decode TPS", "forward", 1),
+            ("mock", "cache_hit_ratio", "P"):
+                ("P 实际 token 命中率", "缓存命中率", "hit_pct", 100),
+            ("mock", "simulated_prefill_ms_avg", "P"):
+                ("P model forward 均值", "延迟", "ms", 1),
+            ("mock", "prefill_batch_size_mean", "P"):
+                ("P batch size 均值", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p50", "P"):
+                ("P batch size P50", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p90", "P"):
+                ("P batch size P90", "Prefill Batch", "batch", 1),
+            ("mock", "prefill_batch_size_p99", "P"):
+                ("P batch size P99", "Prefill Batch", "batch", 1),
+            ("mock", "running_avg", "P"):
+                ("P Running / engine", "Prefill 状态", "count", 1),
+            ("mock", "running_max", "P"):
+                ("P Running max", "Prefill 状态", "count", 1),
+            ("mock", "waiting_avg", "P"):
+                ("P Waiting / engine", "Prefill 状态", "count", 1),
+            ("mock", "waiting_max", "P"):
+                ("P Waiting max", "Prefill 状态", "count", 1),
+            ("client-performance", "schedule_p99_seconds", ""):
+                ("调度等待 p99", "延迟", "ms", 1000),
+        }.get((source, metric, role))
+        scale = 1
+        if special:
+            name, group, axis, scale = special
+        if labels:
+            name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        if any(c["name"] == name for c in curves):
+            name += " · epoch " + epoch
+        visible = [(t, v * scale if v is not None else None)
+                   for t, v in points if 0 <= t <= duration]
+        add(name, group, axis, visible, sources[key]["promql"], not primary)
+        audit.append(
+            dict(
+                name=name,
+                samples=sum(v is not None for _, v in visible),
+                **sources[key],
+            )
+        )
+    # Never open an empty chart when only request-level evidence survived.
+    if not any(not c["hidden"] and any(p["y"] is not None for p in c["points"]) for c in curves):
+        for c in curves:
+            if c["group"] == "客户端吞吐": c["hidden"] = False
+    axes["ratio"].update(min=0, max=1)
+    presets = {"核心": [c["name"] for c in curves if not c["hidden"]]}
+    for group in ["Prefill TPS", "Prefill 逐引擎 TPS", "Decode TPS", "Decode 逐引擎 TPS", "客户端吞吐", "延迟", "流量", "队列", "规模", "KV", "模拟执行"]:
+        presets[group] = [c["name"] for c in curves if c["group"] == group]
+    return dict(
+        id="performance",
+        title="性能与运行状态",
+        overlay=True,
+        axes=axes,
+        series=curves,
+        presets=presets,
+        caption="Prefill TPS 按引擎/DP 汇总 priority，与线上 context TPS、with cache TPS 口径对应；不对引擎执行速率求集群总和。时间按测量起点对齐。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
+        + (" 本报告缺少监控归档，只有请求级曲线。" if not series else ""),
+    ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series))
+
+
+def report_panels(curves, criteria, presentation):
+    """Show the four measured views; keep gate floors separate from measurements."""
+    panels = []
+    duration = criteria.get("measure_s", 1)
+    floor_names = {
+        "P context TPS": "rtp_llm_context_tps",
+        "P context TPS（含缓存）": "rtp_llm_context_tps_with_cache",
+        "D generate TPS": "rtp_llm_generate_tps",
+    }
+    for descriptor in presentation["panels"]:
+        selected = [dict(curve, hidden=False) for name in descriptor["names"]
+                    for curve in curves if curve["name"] == name]
+        # A monitoring query may exist but contain only NaNs. Show an explicit
+        # gap rather than a 0% line or an apparently valid empty panel.
+        populated = [curve for curve in selected if any(
+            point["y"] is not None for point in curve["points"])]
+        missing = [name for name in descriptor["names"]
+                   if not any(curve["name"] == name for curve in populated)]
+        caption = descriptor["caption"] if populated else descriptor["empty_caption"]
+        if populated and missing:
+            caption += " 缺少有效曲线：" + "、".join(missing) + "。"
+        if descriptor["id"] == "engine-tps":
+            floors = criteria.get("engine_tps", {})
+            for name in descriptor["names"]:
+                metric = floor_names[name]
+                if metric in floors:
+                    source = next((curve for curve in selected if curve["name"] == name), None)
+                    selected.append(dict(
+                        name=name + " 门禁线", group="门禁", axis="forward",
+                        unit="执行 tok/s", color=source["color"] if source else COLORS[len(selected) % len(COLORS)],
+                        dash=[6, 4], hidden=False,
+                        points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
+                        description="场景配置中的绝对下界；不是实测值",
+                    ))
+        panels.append(dict(
+            id=descriptor["id"], title=descriptor["title"], caption=caption,
+            overlay=True, timeX=True, axes=descriptor["axes"], series=selected,
+        ))
+    return panels

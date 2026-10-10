@@ -18,7 +18,7 @@ no longer read; old runs cannot be re-aggregated):
   * legacy keys ignored — a run dir that still carries counters_timeseries /
     inflight_timeseries (old runs) rebuilds from the G3 timeline anyway.
 
-Output key names/structures are unchanged (downstream canvas/compare_twin
+Output key names/structures are unchanged (downstream canvas
 consume them as-is).
 """
 
@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "aggregate_canvas_run.py"
+AGGREGATE = TOOLS_DIR / "src/analysis/aggregate.py"
 T0 = 1_788_283_848_000  # epoch ms anchor (== first client send)
 
 ARR_BASE = "flexlb_auto_tpm_request_count_total"
@@ -306,7 +306,7 @@ class LegacyKeysIgnoredTest(unittest.TestCase):
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
-    def test_arrivals_rebuilt_from_prometheus_not_legacy_counters(self):
+    def test_arrivals_rebuilt_from_prometheus_not_expected_counters(self):
         # The legacy rows (100 -> 250) must NOT win: the G3 prometheus
         # timeline (0 -> 15 -> 40 ...) is the sole source, so the output
         # matches the G3-derived expectations exactly.
@@ -320,7 +320,7 @@ class LegacyKeysIgnoredTest(unittest.TestCase):
             rows,
         )
 
-    def test_inflight_rebuilt_from_gauges_not_legacy_snapshots(self):
+    def test_inflight_rebuilt_from_gauges_not_expected_snapshots(self):
         # The legacy snapshot (scheduler=9, prefill_batches=2, ...) must
         # NOT win: the G3 gauge sums (identical to the sole-source test
         # above) are the only series produced.

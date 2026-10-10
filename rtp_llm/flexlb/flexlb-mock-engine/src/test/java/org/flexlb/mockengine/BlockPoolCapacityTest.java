@@ -16,7 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,14 +36,111 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>{@code admit} = completion handover to the LRU ({@code release != delete},
  *       {@code free != available}: pure-LRU blocks stay available).</li>
  *   <li>{@code grow} = per-step decode growth ({@code incrMalloc}).</li>
- *   <li>Enqueue-batch LACK_MEM = the master-visible synchronous rejection surface
- *       (error code 602 = production {@code MALLOC_FAILED}).</li>
+ *   <li>An impossible batch request gets the master-visible synchronous
+ *       LACK_MEM rejection (error code 602 = {@code MALLOC_FAILED}); a FIFO
+ *       waiter reserves P KV only when selected by the scheduler.</li>
  * </ul>
  *
  * <p>Mandatory paths per the capacity-model acceptance list: "LRU eviction
  * triggered, then allocation succeeds" and "LACK_MEM rejection".
  */
 class BlockPoolCapacityTest {
+
+    @Test
+    void flatLruEvictsOnlyNeededBlocksAndDoesNotTouchSurvivingParents() {
+        var cache = new MockLruBlockCache(5, 0);
+        cache.setPrefixTreeEnabled(false);
+        cache.admit(List.of(1L, 2L, 3L, 4L, 5L));
+        var first = cache.acquire(1, List.of());
+        assertNotNull(first);
+        assertEquals(java.util.Set.of(2L, 3L, 4L, 5L), cache.snapshotKeys());
+        assertEquals(1, cache.evictions());
+        var next = cache.acquire(1, List.of());
+        assertNotNull(next);
+        assertEquals(java.util.Set.of(3L, 4L, 5L), cache.snapshotKeys());
+        cache.release(first);
+        cache.release(next);
+    }
+
+    @Test
+    void flatLruProtectsReferencesAndHonorsCacheReads() {
+        var cache = new MockLruBlockCache(5, 0);
+        cache.setPrefixTreeEnabled(false);
+        cache.admit(List.of(1L, 2L, 3L));
+        cache.admit(List.of(4L, 5L));
+        assertEquals(1, cache.prefixHitBlocks(List.of(1L)));
+        var pinned = cache.acquire(1, List.of(2L));
+        assertNotNull(pinned);
+        var incoming = cache.acquire(2, List.of());
+        assertNotNull(incoming);
+        assertEquals(java.util.Set.of(1L, 2L, 5L), cache.snapshotKeys());
+        assertEquals(2, cache.evictions());
+        cache.release(incoming);
+        cache.release(pinned);
+        assertEquals(5, cache.availableBlocks());
+    }
+
+    @Test
+    void treeEvictionRemainsDefault() {
+        var cache = new MockLruBlockCache(5, 0);
+        assertTrue(cache.prefixTreeEnabled());
+        cache.admit(List.of(1L, 2L, 3L, 4L, 5L));
+        assertNotNull(cache.acquire(1, List.of()));
+        assertEquals(5, cache.evictions());
+    }
+
+    @Test
+    void cachedHitsMustBeChargedBeforeWatermarkForBothAdmissionPaths() {
+        for (boolean decode : new boolean[] {false, true}) {
+            var cache = new MockLruBlockCache(6, .05);
+            var keys = List.of(1L, 2L, 3L);
+            cache.admit(keys);
+            var other = cache.acquire(1, List.of());
+            assertEquals(5, cache.availableBlocks());
+            var rejected = decode ? cache.acquireWithReuseDetailed(5, keys) : cache.acquireDetailed(5, keys);
+            assertEquals(MockLruBlockCache.AllocationFailure.RETRYABLE, rejected.failure());
+            assertEquals(5, cache.availableBlocks(), "failed admission rolls back newly pinned hits");
+            assertEquals(0, cache.referencedKeyBlocks());
+            assertEquals(0, cache.evictions());
+            cache.release(other);
+            var admitted = decode ? cache.acquireWithReuseDetailed(5, keys) : cache.acquireDetailed(5, keys);
+            assertNotNull(admitted.lease());
+            assertEquals(1, cache.availableBlocks());
+            cache.release(admitted.lease());
+            assertEquals(6, cache.availableBlocks());
+        }
+    }
+
+    @Test
+    void prefillAdmissionChargesOnlyNewBlocksAndPreservesWatermark() {
+        var cache = new MockLruBlockCache(10, .1);
+        var keys = List.of(1L, 2L, 3L, 4L, 5L, 6L);
+        var seed = cache.acquire(6, keys);
+        assertNotNull(seed);
+        var owner = cache.retainComputed(seed, keys);
+        assertEquals(4, cache.availableBlocks());
+
+        // Six blocks are already pinned by a concurrent request. Only three
+        // additional blocks are needed; one block must remain as reserve.
+        var incoming = cache.acquireDetailed(9, keys);
+        assertNotNull(incoming.lease());
+        assertEquals(3, cache.heldBlocks());
+        assertEquals(1, cache.availableBlocks());
+        assertEquals(0, cache.evictions());
+
+        // Fully shared KV remains admissible at the watermark, but a new
+        // physical block cannot consume the last reserved block.
+        var shared = cache.acquire(6, keys);
+        assertNotNull(shared);
+        assertNull(cache.acquire(7, keys));
+        cache.release(shared);
+        cache.release(incoming.lease());
+        assertEquals(6, cache.referencedKeyBlocks());
+        cache.release(owner);
+        assertEquals(10, cache.availableBlocks());
+        assertEquals(0, cache.heldBlocks());
+        assertEquals(0, cache.referencedKeyBlocks());
+    }
 
     private static final int SPB = 1024;
 
@@ -258,7 +355,7 @@ class BlockPoolCapacityTest {
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
                 7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(1, slot(0, tooBig)));
+                enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
         assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
@@ -272,9 +369,109 @@ class BlockPoolCapacityTest {
         EngineRpcService.GenerateInputPB small =
                 inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
         EngineRpcService.EnqueueBatchResponsePB ack2 =
-                enqueue(prefill, batch(2, slot(0, small)));
+                enqueueAndFetch(prefill, batch(2, slot(0, small)));
         assertEquals(0, ack2.getErrorsCount());
         assertEquals(1, ack2.getSuccessesCount());
+    }
+
+    @Test
+    void fifoBatchWaiterDoesNotHoldPrefillKvBeforeSelection() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "1500", 1.0);
+        var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
+        field.setAccessible(true);
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 100000,
+                10000, 8, false, 0, 256, 128, false, true));
+        var prefill = newService(model, 10);
+
+        var first = inputWithBlockKeys(101L, 2 * SPB, List.of(1L, 2L));
+        var waiting = inputWithBlockKeys(102L, 8 * SPB,
+                List.of(11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L));
+        assertEquals(1, enqueueAndFetch(prefill, batch(101, slot(0, first))).getSuccessesCount());
+        var ack = enqueueAndFetch(prefill, batch(102, slot(0, waiting)));
+        assertEquals(1, ack.getSuccessesCount(), "temporary KV shortage is not an enqueue rejection");
+        assertEquals(0, ack.getErrorsCount());
+        assertEquals(1, prefill.getWaitingCount());
+        assertEquals(2L, ((Number) prefill.getSnapshot().get("held_blocks")).longValue(),
+                "only the running request may hold P KV while the second batch waits");
+        assertEquals(0L, ((Number) prefill.getSnapshot().get("cache_evictions")).longValue());
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+        while (System.nanoTime() < deadline && prefill.getCompletedCount() < 2) {
+            Thread.sleep(10);
+        }
+        assertEquals(2, prefill.getCompletedCount(), "the waiter must run after capacity is released");
+        assertEquals(0, prefill.getWaitingCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
+    void allocationEvictionImmediatelyUpdatesOnlyItsEngineCacheVersion() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
+        var first = newService(model, 5);
+        var second = newService(model, 5);
+        var field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("cache");
+        field.setAccessible(true);
+        var cache = (MockLruBlockCache) field.get(first);
+        cache.setPrefixTreeEnabled(false);
+        cache.admit(List.of(1L, 2L, 3L, 4L, 5L));
+        long before = first.getCacheVersion();
+        long peerBefore = second.getCacheVersion();
+        // No event log is installed, and the allocating request has not completed.
+        var lease = cache.acquire(1, List.of());
+        assertNotNull(lease);
+        assertTrue(first.getCacheVersion() > before);
+        assertEquals(peerBefore, second.getCacheVersion());
+        EngineRpcService.CacheStatusPB snapshot = MockEngineTestSupport.unary(observer ->
+                first.getCacheStatus(EngineRpcService.CacheVersionPB.newBuilder()
+                        .setLatestCacheVersion(before).setNeedCacheKeys(true).build(), observer));
+        assertTrue(snapshot.getVersion() > before);
+        assertFalse(snapshot.getCacheKeysMap().containsKey(1L));
+        cache.release(lease);
+    }
+
+    @Test
+    void fifoInitializedWaiterReusesItsLeaseAtTheStreamCap() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "500", 1.0);
+        var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
+        field.setAccessible(true);
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 0,
+                10000, 1, false, 0, 0, 1, false, false));
+        var prefill = newService(model, 10);
+        assertEquals(1, enqueueAndFetch(prefill, batch(107, slot(0,
+                inputWithBlockKeys(107L, 2 * SPB, List.of(1L, 2L))))).getSuccessesCount());
+        assertEquals(1, enqueueAndFetch(prefill, batch(108, slot(0,
+                inputWithBlockKeys(108L, 2 * SPB, List.of(3L, 4L))))).getSuccessesCount());
+        // Model a waiter that already initialized KV before entering this round.
+        var cacheField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("cache");
+        cacheField.setAccessible(true);
+        var cache = (MockLruBlockCache) cacheField.get(prefill);
+        var leasesField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("activeBlockLeases");
+        leasesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var leases = (Map<Long, MockLruBlockCache.BlockLease>) leasesField.get(prefill);
+        var existing = cache.acquire(2, List.of());
+        assertNotNull(existing);
+        leases.put(108L, existing);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+        while (System.nanoTime() < deadline && prefill.getCompletedCount() < 2) Thread.sleep(10);
+        assertEquals(2, prefill.getCompletedCount(), "initialized waiter must advance at cap=1");
+        assertEquals(0, prefill.getWaitingCount());
+        assertEquals(0L, ((Number) prefill.getSnapshot().get("held_blocks")).longValue(),
+                "the existing lease must be reused and released, never overwritten");
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
+    void workerStatusReportsConfiguredFifoLimits() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
+        var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
+        field.setAccessible(true);
+        field.set(model, new MockPrefillBatchPolicy(64, 512000, 3145728,
+                786432, 8, false, 0, 256, 128, false, true));
+        var service = newService(model, 5);
+        var status = MockEngineTestSupport.workerStatus(service, 0);
+        assertEquals(512000L, status.getMaxBatchTokensSize());
+        assertEquals(786432L, status.getMaxSeqLen());
     }
 
     // ─────────────────── helpers ───────────────────

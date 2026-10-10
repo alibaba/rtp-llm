@@ -66,7 +66,7 @@ python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario engine -
 ```
 
 Output directories must not exist. Requires JDK 21, Python `grpcio`, `grpcio-tools`
-and `protobuf`, as does the existing `flexlb_ft` harness. Build jars first using
+and `protobuf`, as does the `online_eval` runtime harness. Build jars first using
 the command above; do not rebuild them during a process test.
 
 Every scenario launches `sh whale_start.sh`, the real supervisor and packaged

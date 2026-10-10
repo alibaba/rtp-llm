@@ -163,7 +163,7 @@ class UniformRampUpTest {
         //   ramp window sends ≈ 100*2/2 = 100 (triangle integral),
         //   steady window adds ≈ 100, total ≈ 200.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                3, 0, 1, 0, false, "uniform", 100.0, 2.0));
+                3, 0, 1, 0, true, "uniform", 100.0, 2.0));
         client.run();
 
         List<Double> dues = readRelativeDues(outDir);
@@ -199,7 +199,7 @@ class UniformRampUpTest {
         // RAMP_UP_SECONDS=0: fixed 20ms interval, byte-identical to the
         // pre-ramp uniform behavior; 50 QPS for 2s -> 100 sends.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                2, 0, 1, 0, false, "uniform", 50.0, 0.0));
+                2, 0, 1, 0, true, "uniform", 50.0, 0.0));
         client.run();
 
         List<Double> dues = readRelativeDues(outDir);
