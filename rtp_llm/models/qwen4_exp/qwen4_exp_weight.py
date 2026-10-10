@@ -66,6 +66,9 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
     separate runtime tensor named ``<name>.<global shard index>`` so loading does
     not create a second table-sized stack/concat allocation.
 
+    Shards default to CPU memory; ``cpu_offload=False`` uses the loader's device.
+    Projections, convolution weights and hash metadata retain normal placement.
+
     Hashed ids can target any rank, so the PLE consumer routes lookups and combines
     results across the TP group. The descriptor remains behind
     ``ModelConfig.enable_qwen4_ple`` (default false) because that correctness path
@@ -73,6 +76,18 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
     """
 
     supports_fastsafetensors_iteration = False
+
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        *,
+        cpu_offload: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(name, weights, **kwargs)
+        self.cpu_offload = cpu_offload
+        self.resident_device = "cpu" if cpu_offload else None
 
     def _local_shard_range(self, load_config: LoadConfig) -> range:
         shard_count = len(self.weights)
@@ -318,6 +333,9 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         )
                         for shard in range(shard_count)
                     ],
+                    cpu_offload=getattr(
+                        self.model_config, "qwen4_ple_cpu_offload", True
+                    ),
                 )
             )
 

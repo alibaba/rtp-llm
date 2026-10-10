@@ -399,6 +399,7 @@ class Qwen4ExpTest(unittest.TestCase):
             {
                 "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true",
                 "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
+                "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "0",
             },
         ):
             config = Qwen4Exp.create_config(self._temp_dir.name)
@@ -430,6 +431,56 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(self.config._replicated_extra_weight_bytes, 0)
         self.assertEqual(self.config._extra_weight_bytes, 102_465_679_640)
         self.assertGreater(self.config._extra_weight_param_count, 51_200_000_000)
+
+    def test_ple_defaults_to_cpu_and_excludes_table_from_gpu_budget(self):
+        with mock.patch.dict(os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true"}):
+            os.environ.pop("RTP_LLM_QWEN4_PLE_CPU_OFFLOAD", None)
+            config = Qwen4Exp.create_config(self._temp_dir.name)
+
+        self.assertTrue(config.qwen4_ple_cpu_offload)
+        self.assertEqual(config._tp_sharded_extra_weight_bytes, 0)
+        self.assertEqual(config._replicated_extra_weight_bytes, 65_679_640)
+        self.assertEqual(config._extra_weight_bytes, 102_465_679_640)
+        config.model_type = "qwen4_exp"
+        with mock.patch.object(Qwen3_5MoeMixin, "eval_mm_model_size", return_value=0):
+            generic = config.eval_model_weight_size() - config._extra_weight_bytes
+            self.assertAlmostEqual(
+                config.eval_model_weight_size_per_rank(tp_size=8, ep_size=16),
+                generic / 16 + 65_679_640,
+            )
+
+    def test_ple_storage_selection_is_frozen_at_config_construction(self):
+        with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "0"}):
+            config = Qwen4Exp.create_config(self._temp_dir.name)
+        with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "1"}):
+            weight = object.__new__(Qwen4ExpWeight)
+            weight.model_config = config
+            weight.model_config.enable_qwen4_ple = True
+            weight.prefix = "model."
+            layer_weights = [[] for _ in range(_NUM_LAYERS)]
+            weight._append_ple_weights(layer_weights)
+
+        self.assertFalse(config.qwen4_ple_cpu_offload)
+        self.assertFalse(layer_weights[1][-1].cpu_offload)
+
+    def test_cpu_ple_disables_graph_even_with_experimental_graph_gate(self):
+        model = Qwen4Exp.__new__(Qwen4Exp)
+        model.model_config = SimpleNamespace(
+            enable_qwen4_ple=True,
+            enable_qwen4_qsa=False,
+            is_mtp=False,
+            qwen4_ple_cpu_offload=True,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "1",
+                "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL": "1",
+            },
+        ):
+            self.assertFalse(model.support_cuda_graph())
+            model.model_config.qwen4_ple_cpu_offload = False
+            self.assertTrue(model.support_cuda_graph())
 
     def test_basic_config(self):
         config = self.config

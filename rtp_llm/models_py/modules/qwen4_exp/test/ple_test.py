@@ -190,6 +190,70 @@ class Qwen4ExpNGramEmbeddingTest(unittest.TestCase):
         self.assertEqual(got.shape, (2, 7, _HEADS * _HEAD_DIM))
         torch.testing.assert_close(got, ref)
 
+    def test_cpu_gather_zeroes_remote_shards(self):
+        module = Qwen4ExpNGramEmbedding(
+            [self.shards[1]],
+            self.vocab_sizes,
+            self.offsets,
+            self.multipliers,
+            ngram_size=_NGRAM_SIZE,
+            eos_token_id=_EOS,
+            shard_indices=[1],
+            total_shards=3,
+            distributed_reduce=True,
+        )
+        ids = torch.tensor([[[0, 19, 20, 21], [39, 40, 59, 20]]])
+
+        got = module._gather_local(ids)
+
+        ref = torch.zeros(*ids.shape, _HEAD_DIM)
+        local = (ids >= 20) & (ids < 40)
+        ref[local] = self.shards[1][ids[local] - 20]
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    def test_cpu_gather_rejects_graph_capture_contract(self):
+        module = self._build()
+        module._graph_gather_required = True
+
+        with self.assertRaisesRegex(RuntimeError, "CPU offload requires eager"):
+            module.gather(torch.zeros(1, 1, _HEADS, dtype=torch.int64))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cpu_table_returns_exact_rows_on_cuda(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                module = Qwen4ExpNGramEmbedding(
+                    [shard.to(dtype=dtype) for shard in self.shards],
+                    self.vocab_sizes.cuda(),
+                    self.offsets.cuda(),
+                    self.multipliers.cuda(),
+                    ngram_size=_NGRAM_SIZE,
+                    eos_token_id=_EOS,
+                )
+                history = torch.randint(0, 50, (2, 9), device="cuda")
+                ids = module.hashed_ids(history, seq_len=7)
+
+                got = module(history, seq_len=7)
+                ref = torch.cat(module.shards)[ids.cpu()].flatten(-2).cuda()
+
+                self.assertEqual(got.device, ids.device)
+                self.assertEqual(got.dtype, dtype)
+                self.assertTrue(
+                    all(shard.device.type == "cpu" for shard in module.shards)
+                )
+                torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    def test_rejects_mixed_storage_devices(self):
+        with self.assertRaisesRegex(ValueError, "shards must share a device"):
+            Qwen4ExpNGramEmbedding(
+                [self.shards[0], self.shards[1].to("meta"), self.shards[2]],
+                self.vocab_sizes,
+                self.offsets,
+                self.multipliers,
+                ngram_size=_NGRAM_SIZE,
+                eos_token_id=_EOS,
+            )
+
     def test_rejects_shards_too_small_for_the_hashed_vocab(self):
         with self.assertRaisesRegex(ValueError, "shards hold .* rows"):
             Qwen4ExpNGramEmbedding(

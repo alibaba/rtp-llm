@@ -23,6 +23,9 @@ class WeightModule(ABC):
     # filtering. Descriptors that must select checkpoint keys *before* I/O (for
     # example a rank-local table) opt out and make ModelLoader use scratch load.
     supports_fastsafetensors_iteration = True
+    # Descriptors may keep their output on a fixed device independently of the
+    # loader's temporary conversion device and the model's execution device.
+    resident_device: Optional[str] = None
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
     lora_B_suffix = "lora_B"
@@ -173,6 +176,9 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
+        # Resolve placement before materializing tensors and use it through the
+        # final flattening step, so offloaded tables never stage on the GPU.
+        device = self.resident_device or device
         raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
@@ -204,6 +210,7 @@ class WeightModule(ABC):
     def update(
         self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
     ):
+        device = self.resident_device or device
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
         flat_res = {}

@@ -28,6 +28,7 @@ _SKELETON_WARNING = (
 
 _EXPERIMENTAL_SERVING_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL"
 _PLE_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_PLE"
+_PLE_CPU_OFFLOAD_ENV = "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD"
 _QSA_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_QSA"
 _GRAPH_EXPERIMENTAL_ENV = "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL"
 
@@ -51,6 +52,12 @@ class Qwen4Exp(Qwen35Moe):
         # that backbone graph path. The MTP draft has a separate graph contract.
         config = getattr(self, "model_config", None)
         if config is None:
+            return False
+        if getattr(config, "enable_qwen4_ple", False) and getattr(
+            config, "qwen4_ple_cpu_offload", True
+        ):
+            # Host gather copies runtime ids to the CPU. It must run eagerly;
+            # capturing it would freeze the lookup results or fail at D2H.
             return False
         side_cache_or_draft = (
             bool(getattr(config, "enable_qwen4_ple", False))
@@ -208,6 +215,11 @@ class Qwen4Exp(Qwen35Moe):
         # experimental gate. This prevents dense-fallback development from
         # allocating unused side pools or loading the 102-GB PLE table.
         config.enable_qwen4_ple = str_to_bool(os.environ.get(_PLE_ENV, "false"))
+        # Snapshot storage selection alongside the PLE feature gate. This has
+        # the same default/meaning as vLLM's EngramConfig.cpu_offload.
+        config.qwen4_ple_cpu_offload = str_to_bool(
+            os.environ.get(_PLE_CPU_OFFLOAD_ENV, "true")
+        )
         config.enable_qwen4_qsa = str_to_bool(os.environ.get(_QSA_ENV, "false"))
         config.attn_config.use_sparse_gqa_fmha = config.enable_qwen4_qsa
         config._qwen4_ple_layer_ids = list(config_json.get("ple_layer_ids", []))
@@ -288,7 +300,8 @@ class Qwen4Exp(Qwen35Moe):
         # feature gates. Resident loader memory only includes PLE when its
         # execution path is explicitly enabled.
         if config.enable_qwen4_ple:
-            config._tp_sharded_extra_weight_bytes = table_bytes
+            if not config.qwen4_ple_cpu_offload:
+                config._tp_sharded_extra_weight_bytes = table_bytes
             config._replicated_extra_weight_bytes = replicated_bytes
 
     @classmethod

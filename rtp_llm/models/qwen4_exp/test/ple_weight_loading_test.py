@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import (
@@ -61,7 +62,7 @@ def _load_config(tp_size=8, tp_rank=0):
     )
 
 
-def _ngram_weight():
+def _ngram_weight(**kwargs):
     return Qwen4ExpPleNgramWeight(
         W.qwen4_ple_ngram_shards,
         [
@@ -70,10 +71,96 @@ def _ngram_weight():
             )
             for shard_id in range(_SHARD_COUNT)
         ],
+        **kwargs,
     )
 
 
 class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
+    def test_default_offload_never_transfers_table_to_execution_device(self):
+        source = _RecordingTensorSource()
+        # CUDA deliberately need not exist: touching the requested execution
+        # device would fail, including WeightModule's final flattening step.
+        loaded = _ngram_weight().load(source, 1, "cuda:0", _load_config(8, 3))
+
+        self.assertEqual(len(source.requests), 16)
+        self.assertTrue(all(t.device.type == "cpu" for t in loaded.values()))
+        for shard_id in range(48, 64):
+            self.assertEqual(
+                loaded[f"{W.qwen4_ple_ngram_shards}.{shard_id}"][0, 0].item(),
+                shard_id,
+            )
+
+    def test_offload_can_be_disabled(self):
+        # The meta device verifies placement without allocating GPU memory.
+        loaded = _ngram_weight(cpu_offload=False).load(
+            _RecordingTensorSource(), 1, "meta", _load_config()
+        )
+
+        self.assertTrue(all(t.device.type == "meta" for t in loaded.values()))
+
+    def test_update_preserves_cpu_residency(self):
+        shards = {f"{W.qwen4_ple_ngram_shards}.0": torch.ones(2, 1)}
+
+        updated = _ngram_weight().update(shards, "cuda:0", _load_config())
+
+        self.assertEqual(updated[next(iter(updated))].device.type, "cpu")
+
+    def test_scratch_cpu_conversion_preserves_only_offloaded_weights(self):
+        loader = object.__new__(ModelLoader)
+        loader._model_weights_info = SimpleNamespace(
+            weights=[], layer_weights=[[_ngram_weight()]]
+        )
+        loader._misc_weights_info = []
+        table_name = f"{W.qwen4_ple_ngram_shards}.0"
+        model_weights = mock.Mock()
+        with mock.patch.object(
+            loader, "_create_model_weights", return_value=model_weights
+        ), mock.patch.object(
+            loader, "_choose_weight_convert_device", return_value="cpu"
+        ), mock.patch.object(
+            loader,
+            "prepare_weights",
+            return_value=iter(
+                [(0, table_name, torch.ones(2, 1)), (0, "auxiliary", torch.ones(1))]
+            ),
+        ):
+            loader._load_from_scratch("meta")
+
+        table_call, auxiliary_call = model_weights.set_layer_weight.call_args_list
+        self.assertEqual(table_call.args[2].device.type, "cpu")
+        self.assertEqual(auxiliary_call.args[2].device.type, "meta")
+
+    def test_exported_checkpoint_preserves_cpu_table_and_device_auxiliary(self):
+        loader = object.__new__(ModelLoader)
+        loader._model_weights_info = SimpleNamespace(
+            weights=[], layer_weights=[[_ngram_weight()]]
+        )
+        loader._misc_weights_info = []
+        loader._global_weight_aliases = {}
+        database = mock.Mock()
+        loader._load_config = SimpleNamespace(
+            database=database,
+            num_layers=1,
+            tp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            compute_dtype=torch.float32,
+            exported_device=SimpleNamespace(support_dio_load=True),
+        )
+        prefix = ModelWeights.layer_weight_prefix(0, 0, 0)
+        table_name = f"{W.qwen4_ple_ngram_shards}.0"
+        database.load_tensors_by_prefix.return_value = {
+            f"{prefix}0.{table_name}": [torch.ones(2, 1)],
+            f"{prefix}0.auxiliary": [torch.ones(1)],
+        }
+
+        loaded = loader._load_from_ft_style("meta")
+
+        self.assertEqual(loaded.weights[0][table_name].device.type, "cpu")
+        self.assertEqual(loaded.weights[0]["auxiliary"].device.type, "meta")
+        self.assertEqual(database.load_tensors_by_prefix.call_args.args[1], "cpu")
+        self.assertFalse(database.load_tensors_by_prefix.call_args.kwargs["direct_io"])
+
     def test_tensor_names_are_selected_before_loading(self):
         weight = _ngram_weight()
 
@@ -158,13 +245,14 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
 
 
 class Qwen4ExpPleWeightGateTest(unittest.TestCase):
-    def _weight(self, enabled):
+    def _weight(self, enabled, **kwargs):
         weight = object.__new__(Qwen4ExpWeight)
         weight.prefix = "model."
         weight.model_config = SimpleNamespace(
             enable_qwen4_ple=enabled,
             _qwen4_ple_layer_ids=[1],
             _qwen4_split_ngram_parts=_SHARD_COUNT,
+            **kwargs,
         )
         return weight
 
@@ -184,6 +272,16 @@ class Qwen4ExpPleWeightGateTest(unittest.TestCase):
         self.assertEqual(len(descriptors), 10)
         self.assertIsInstance(descriptors[-1], Qwen4ExpPleNgramWeight)
         self.assertEqual(len(descriptors[-1].weights), _SHARD_COUNT)
+        self.assertTrue(descriptors[-1].cpu_offload)
+
+    def test_storage_selection_comes_from_model_config(self):
+        layer_weights = [[]]
+
+        self._weight(True, qwen4_ple_cpu_offload=False)._append_ple_weights(
+            layer_weights
+        )
+
+        self.assertFalse(layer_weights[0][-1].cpu_offload)
 
     def test_hash_metadata_stays_int64_from_loader_to_hashed_ids(self):
         layer_weights = [[]]

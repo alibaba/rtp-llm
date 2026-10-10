@@ -21,6 +21,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     The table is row-split across ``shards`` (128 equal parts in the released
     checkpoint). Lookup walks the shards rather than materialising the full
     table, which for the released model would be 102GB.
+
+    Shards can remain on the CPU while hash metadata and activations live on
+    CUDA. Host lookup transfers only ids and gathered rows to the execution
+    device before the TP reduction; this path requires eager execution.
     """
 
     def __init__(
@@ -55,6 +59,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     f"shape {tuple(tensor.shape)}"
                 )
         rows = shards[0].shape[0]
+        if any(shard.device != shards[0].device for shard in shards):
+            raise ValueError("ngram embedding shards must share a device")
         if any(shard.shape[0] != rows for shard in shards):
             raise ValueError("ngram embedding shards must have equal row counts")
         if ngram_size <= 1:
@@ -164,6 +170,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        if self.shards[0].device.type == "cpu":
+            if self._graph_gather_required:
+                raise RuntimeError(
+                    "qwen4_exp PLE CPU offload requires eager execution; set "
+                    "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD=0 to use CUDA Graph"
+                )
+            # Transfer only lookup ids and selected rows. Auxiliary PLE weights
+            # and the TP collective stay on the execution device.
+            cpu_ids = ngram_ids.to(device="cpu")
+            return self._gather_torch(cpu_ids).to(device=ngram_ids.device)
         use_triton = self._graph_gather_required or os.environ.get(
             "RTP_LLM_QWEN4_TRITON_PLE_GATHER", "1"
         ).lower() in ("1", "true", "yes", "on")
@@ -196,6 +212,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     "qwen4_exp PLE CUDA Graph requires the supported "
                     "fixed-shape shard gather"
                 )
+        return self._gather_torch(ngram_ids)
+
+    def _gather_torch(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         shard_idx = torch.div(ngram_ids, self.shard_rows, rounding_mode="floor")
         row_idx = ngram_ids - shard_idx * self.shard_rows
         out = self.shards[0].new_zeros(*ngram_ids.shape, self.shards[0].shape[-1])
