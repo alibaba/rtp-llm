@@ -5,12 +5,12 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
 
-/**
- * Reusable columns for modeled Prefill candidates from one fleet snapshot.
- */
-final class PrefillCandidateSet {
-    private static final int INITIAL_CAPACITY = 16;
+import static com.google.common.base.Preconditions.checkArgument;
 
+/** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
+final class PrefillCandidateSet {
+
+    private static final int INITIAL_CAPACITY = 16;
     private String[] endpointAddresses = new String[0];
     private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
     private long[] projectedTtftMs = new long[0];
@@ -18,7 +18,6 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
-
     private int size;
     long minimumTtftRank;
     boolean hasKnownTtft;
@@ -41,9 +40,9 @@ final class PrefillCandidateSet {
             PrefillEndpoint endpoint,
             RouteProjection.CandidateView candidate,
             long ownershipVersion) {
-        if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
-        }
+        checkArgument(
+                candidate.selectable() || candidate.engineWorkUnmodeled(),
+                "candidate requires available capacity");
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         endpoints[size] = endpoint;
@@ -60,10 +59,6 @@ final class PrefillCandidateSet {
         size++;
     }
 
-    long ttftRank(int index) {
-        return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index];
-    }
-
     PrefillEndpoint endpoint(int index) {
         return endpoints[index];
     }
@@ -74,6 +69,10 @@ final class PrefillCandidateSet {
 
     long cacheHit(int index) {
         return cacheHitTokens[index];
+    }
+
+    long ttftRank(int index) {
+        return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index];
     }
 
     long projectedTtftMs(int index) {

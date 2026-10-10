@@ -41,12 +41,13 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@code /metrics} names/labels in both aggregated and per-engine modes.
  */
 class PythonCompatControlApiTest {
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
-
     private static final int BASE_PORT = 63100;
 
     @TempDir Path tempDir;
+
     private ScheduledExecutorService scheduler;
     private MockControlServer controlServer;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -67,6 +68,90 @@ class PythonCompatControlApiTest {
             scheduler.shutdownNow();
             scheduler.awaitTermination(3, TimeUnit.SECONDS);
         }
+    }
+
+    // ──────────── Cluster setup ────────────
+
+    /**
+     * Creates engines with the Python naming scheme (prefill-i / decode-i)
+     * using the full 12-arg constructor, like JavaMockEngineCluster.startRole.
+     */
+    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
+            throws Exception {
+        startCluster(
+                model,
+                nPrefill,
+                nDecode,
+                JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
+    }
+
+    private void startCluster(
+            MockPerformanceModel model,
+            int nPrefill,
+            int nDecode,
+            long totalKvTokens,
+            int decodeMaxConcurrency)
+            throws Exception {
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "mock-engine-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        services = new ConcurrentHashMap<>();
+        prefillServices = new ArrayList<>();
+        decodeServices = new ArrayList<>();
+
+        for (int i = 0; i < nPrefill; i++) {
+            int port = BASE_PORT + i;
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "prefill-" + i,
+                            "127.0.0.1",
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            new JavaMockEngineCluster.ClusterStats(),
+                            totalKvTokens,
+                            decodeMaxConcurrency);
+            services.put(port, service);
+            prefillServices.add(service);
+        }
+        for (int i = 0; i < nDecode; i++) {
+            int port = BASE_PORT + nPrefill + i;
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "decode-" + i,
+                            "127.0.0.1",
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            new JavaMockEngineCluster.ClusterStats(),
+                            totalKvTokens,
+                            decodeMaxConcurrency);
+            services.put(port, service);
+            decodeServices.add(service);
+        }
+
+        controlServer =
+                new MockControlServer(
+                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+        controlServer.start();
+    }
+
+    private MockPerformanceModel model(String formula, double sleepScale) throws Exception {
+        return MockEngineTestSupport.performanceModel(tempDir, formula, sleepScale);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -281,8 +366,12 @@ class PythonCompatControlApiTest {
                 perf.shape(inputWithDecode("1", 10, BASE_PORT + 1), probeCache);
 
         assertEquals(10L, perf.prefillMs(List.of(shape)), "baseline prefill should be 10ms");
-        assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
-        assertEquals(1, prefill.getMaxPrefillConcurrency(), "default max_prefill_concurrency");
+        assertEquals(
+                1L, MockEngineTestSupport.decodeMs(perf, 1, 1), "baseline decode should be 1ms");
+        assertEquals(
+                1,
+                MockEngineTestSupport.getMaxPrefillConcurrency(prefill),
+                "default max_prefill_concurrency");
 
         httpPost(
                 "/set_perf",
@@ -290,8 +379,11 @@ class PythonCompatControlApiTest {
                         + "\"decode_scale\":2.0,\"max_prefill_concurrency\":3}");
 
         assertEquals(50L, perf.prefillMs(List.of(shape)), "prefill_fixed_ms must take effect");
-        assertEquals(2L, perf.decodeMs(1, 1), "decode_scale must double decode latency");
-        assertEquals(3, prefill.getMaxPrefillConcurrency());
+        assertEquals(
+                2L,
+                MockEngineTestSupport.decodeMs(perf, 1, 1),
+                "decode_scale must double decode latency");
+        assertEquals(3, MockEngineTestSupport.getMaxPrefillConcurrency(prefill));
 
         // worker_status available_concurrency mirrors Python:
         // max(0, max_prefill_concurrency - running) == 3 when idle.
@@ -543,90 +635,6 @@ class PythonCompatControlApiTest {
         assertEquals("enqueue_batch", runningLifecycle.get("method").asText());
     }
 
-    // ──────────── Cluster setup ────────────
-
-    /**
-     * Creates engines with the Python naming scheme (prefill-i / decode-i)
-     * using the full 12-arg constructor, like JavaMockEngineCluster.startRole.
-     */
-    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
-            throws Exception {
-        startCluster(
-                model,
-                nPrefill,
-                nDecode,
-                JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
-                JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
-    }
-
-    private void startCluster(
-            MockPerformanceModel model,
-            int nPrefill,
-            int nDecode,
-            long totalKvTokens,
-            int decodeMaxConcurrency)
-            throws Exception {
-        scheduler =
-                Executors.newScheduledThreadPool(
-                        8,
-                        runnable -> {
-                            Thread thread = new Thread(runnable, "mock-engine-scheduler");
-                            thread.setDaemon(true);
-                            return thread;
-                        });
-        services = new ConcurrentHashMap<>();
-        prefillServices = new ArrayList<>();
-        decodeServices = new ArrayList<>();
-
-        for (int i = 0; i < nPrefill; i++) {
-            int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service =
-                    new JavaMockEngineCluster.FastRpcService(
-                            "prefill-" + i,
-                            "127.0.0.1",
-                            "prefill",
-                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                            port,
-                            services,
-                            scheduler,
-                            model,
-                            100,
-                            new JavaMockEngineCluster.ClusterStats(),
-                            totalKvTokens,
-                            decodeMaxConcurrency);
-            services.put(port, service);
-            prefillServices.add(service);
-        }
-        for (int i = 0; i < nDecode; i++) {
-            int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service =
-                    new JavaMockEngineCluster.FastRpcService(
-                            "decode-" + i,
-                            "127.0.0.1",
-                            "decode",
-                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                            port,
-                            services,
-                            scheduler,
-                            model,
-                            100,
-                            new JavaMockEngineCluster.ClusterStats(),
-                            totalKvTokens,
-                            decodeMaxConcurrency);
-            services.put(port, service);
-            decodeServices.add(service);
-        }
-
-        controlServer =
-                new MockControlServer(
-                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
-        controlServer.start();
-    }
-
-    private MockPerformanceModel model(String formula, double sleepScale) throws Exception {
-        return MockEngineTestSupport.performanceModel(tempDir, formula, sleepScale);
-    }
-
     // ──────────── Helpers ────────────
 
     private JsonNode engineByName(String name) throws Exception {
@@ -640,16 +648,12 @@ class PythonCompatControlApiTest {
         return null;
     }
 
-    private String httpGet(String path) throws Exception {
-        return MockEngineTestSupport.httpGet(controlServer.getPort(), path);
-    }
-
     private void awaitCompleted(
             JavaMockEngineCluster.FastRpcService service, int expected, long timeoutMs)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected) {
                 return;
             }
             Thread.sleep(5);
@@ -660,7 +664,12 @@ class PythonCompatControlApiTest {
                         + " completions on port "
                         + service.getGrpcPort()
                         + ", got "
-                        + service.getCompletedCount());
+                        + MockEngineTestSupport.getCompletedCount(service));
+    }
+
+    private String httpGet(String path) throws Exception {
+        return MockEngineTestSupport.httpGet(
+                MockEngineTestSupport.controlPort(controlServer), path);
     }
 
     private void httpPost(String path, String body) throws Exception {
@@ -669,6 +678,7 @@ class PythonCompatControlApiTest {
     }
 
     private HttpResponse<String> httpPostResponse(String path, String body) throws Exception {
-        return MockEngineTestSupport.httpPostResponse(controlServer.getPort(), path, body);
+        return MockEngineTestSupport.httpPostResponse(
+                MockEngineTestSupport.controlPort(controlServer), path, body);
     }
 }

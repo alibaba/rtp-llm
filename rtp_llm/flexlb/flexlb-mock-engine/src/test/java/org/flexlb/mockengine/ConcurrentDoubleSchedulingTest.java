@@ -168,7 +168,7 @@ class ConcurrentDoubleSchedulingTest {
                     service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
@@ -229,7 +229,7 @@ class ConcurrentDoubleSchedulingTest {
                     service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 

@@ -15,9 +15,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * Loads execution formulas and converts request shapes into simulated Prefill and Decode durations.
- */
+import static com.google.common.base.Preconditions.checkState;
+
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -150,15 +149,12 @@ final class MockPerformanceModel {
                     + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
 
     private volatile int blockSize;
-
     private final double sleepScale;
     private final double prefillScale;
-
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
     // Guards against sleep_scale making prefill unrealistically fast. Null signals
     // "absent in JSON → no floor".
     private final Double prefillMinMs;
-
     // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
     // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
     private final int maxWaitingPrefillBatches;
@@ -176,7 +172,6 @@ final class MockPerformanceModel {
     // master batches). See the DEFAULT_* constants above for the anchors.
     private final int maxBatchTokens;
     private final int maxBatchRequests;
-
     private final PrefillTimeFormula prefillFormula;
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
@@ -184,9 +179,7 @@ final class MockPerformanceModel {
     //   - the linear production fit stepBaseMs + stepPerRunningMs * running
     //     (decodePoints empty; coefficients default to the production DSv4
     //     fit, JSON-declared values override).
-    // The runtime override (setOverrideDecodeStepMs) beats both.
     private final List<DecodePoint> decodePoints;
-
     private final double stepBaseMs;
     private final double stepPerRunningMs;
     // MTP acceptance fold: tokens advanced per running stream per step
@@ -206,17 +199,13 @@ final class MockPerformanceModel {
     // yet". The decode hard concurrency gate (park overflow in the engine-side
     // waiting queue) is unconditional and needs no switch.
     private final boolean reportQueuedAsKvAllocated;
-
     private volatile double jitterPct;
-
     // Explicit performance-JSON "prefill.fixed_ms": a declared flat prefill
     // for duration-blind suites (chaos/elastic). Null = not declared ->
     // formula-driven. This is an explicit configuration channel, NOT the
     // removed silent fallback (a missing key never invents a duration).
     private final Double configuredFixedPrefillMs;
-
     private volatile Double overrideFixedPrefillMs;
-    private volatile Double overrideDecodeStepMs;
     // Python /set_perf compatibility: decode_scale overrides the config-file
     // decode scale (Python-compat /set_perf -> performance.decode_scale).
     private volatile Double overrideDecodeScale;
@@ -295,21 +284,19 @@ final class MockPerformanceModel {
         // that overstated low-batch decode ~5.5x and full-batch ~2.8x versus
         // production. Fail fast with a migration hint instead of silently
         // reinterpreting it.
-        if (decode.has("per_token_ms")) {
-            throw new IllegalStateException(
-                    "Performance JSON '"
-                            + performanceFile
-                            + "': decode.per_token_ms is removed — decode is now priced per STEP"
-                            + " (production fit step_base_ms="
-                            + DEFAULT_DECODE_STEP_BASE_MS
-                            + " + step_per_running_ms="
-                            + DEFAULT_DECODE_STEP_PER_RUNNING_MS
-                            + " × running, "
-                            + DEFAULT_TOKENS_PER_STEP
-                            + " tokens/step by default)."
-                            + " Remove per_token_ms to get the production-fit defaults, or declare"
-                            + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
-        }
+        checkState(
+                !decode.has("per_token_ms"),
+                "Performance JSON '%s': decode.per_token_ms is removed — decode is now priced per STEP"
+                        + " (production fit step_base_ms="
+                        + DEFAULT_DECODE_STEP_BASE_MS
+                        + " + step_per_running_ms="
+                        + DEFAULT_DECODE_STEP_PER_RUNNING_MS
+                        + " × running, "
+                        + DEFAULT_TOKENS_PER_STEP
+                        + " tokens/step by default)."
+                        + " Remove per_token_ms to get the production-fit defaults, or declare"
+                        + " decode.step_ms_by_batch / decode.step_base_ms explicitly.",
+                performanceFile);
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
         List<DecodePoint> points = new ArrayList<>();
@@ -319,15 +306,13 @@ final class MockPerformanceModel {
             }
         }
         boolean hasLinearCoeffs = decode.has("step_base_ms") || decode.has("step_per_running_ms");
-        if (!points.isEmpty() && hasLinearCoeffs) {
-            // Two explicit step-latency declarations are a config conflict;
-            // picking one silently would violate the least-surprise rule.
-            throw new IllegalStateException(
-                    "Performance JSON '"
-                            + performanceFile
-                            + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
-                            + " are mutually exclusive — declare exactly one step-latency source.");
-        }
+        // Two explicit step-latency declarations are a config conflict;
+        // picking one silently would violate the least-surprise rule.
+        checkState(
+                points.isEmpty() || !hasLinearCoeffs,
+                "Performance JSON '%s': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
+                        + " are mutually exclusive — declare exactly one step-latency source.",
+                performanceFile);
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
         // No decode latency declaration at all -> the linear production fit
         // (same pattern as the prefill fallback: the code default IS the
@@ -339,23 +324,17 @@ final class MockPerformanceModel {
         double stepPerRunningMs =
                 decode.path("step_per_running_ms").asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
         double tokensPerStep = decode.path("tokens_per_step").asDouble(DEFAULT_TOKENS_PER_STEP);
-        if (tokensPerStep <= 0) {
-            throw new IllegalStateException(
-                    "Performance JSON '"
-                            + performanceFile
-                            + "': decode.tokens_per_step must be > 0 (got "
-                            + tokensPerStep
-                            + ")");
-        }
+        checkState(
+                !(tokensPerStep <= 0),
+                "Performance JSON '%s': decode.tokens_per_step must be > 0 (got %s)",
+                performanceFile,
+                tokensPerStep);
         int decodeReserveStep = decode.path("reserve_step").asInt(DEFAULT_DECODE_RESERVE_STEP);
-        if (decodeReserveStep < 0) {
-            throw new IllegalStateException(
-                    "Performance JSON '"
-                            + performanceFile
-                            + "': decode.reserve_step must be >= 0 (got "
-                            + decodeReserveStep
-                            + ")");
-        }
+        checkState(
+                decodeReserveStep >= 0,
+                "Performance JSON '%s': decode.reserve_step must be >= 0 (got %s)",
+                performanceFile,
+                decodeReserveStep);
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         return new MockPerformanceModel(
                 blockSize,
@@ -376,6 +355,46 @@ final class MockPerformanceModel {
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated,
                 jitterPct);
+    }
+
+    /**
+     * Resolve the prefill duration formula — exactly one source, never a
+     * silent hard-coded fallback:
+     * <ol>
+     *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
+     *       (blank expression = misconfiguration, fail fast);</li>
+     *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
+     *       DSv4 fit the mock keeps as its own built-in default, and the
+     *       static approximation for a LEARNING estimator the mock cannot
+     *       replay.</li>
+     * </ol>
+     * This keeps mock execution time and master routing predictions on the
+     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
+     * (an explicit performance-JSON "prefill.fixed_ms" declaration still
+     * wins over the formula — see prefillMs).
+     */
+    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
+        JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
+        JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
+        for (JsonNode item : envs) {
+            if (item.isArray()
+                    && item.size() >= 2
+                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
+                FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(item.get(1).asText());
+                var estimator =
+                        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator();
+                if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
+                    String expression = estimator.getExpression();
+                    checkState(
+                            expression != null && !expression.isBlank(),
+                            "Master config %s: router.roles.prefill.executionTimeEstimator is FORMULA with a blank expression — set the expression explicitly or omit the estimator to use the FlexLB formula default",
+                            masterConfigFile);
+                    return expression;
+                }
+                break; // LEARNING estimator: fall through to the production-fit default
+            }
+        }
+        return DSV4_PREFILL_FIT_EXPRESSION;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -456,10 +475,6 @@ final class MockPerformanceModel {
         this.overrideFixedPrefillMs = ms;
     }
 
-    void setOverrideDecodeStepMs(Double ms) {
-        this.overrideDecodeStepMs = ms;
-    }
-
     /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
     void setOverrideDecodeScale(Double scale) {
         this.overrideDecodeScale = scale;
@@ -528,16 +543,6 @@ final class MockPerformanceModel {
     }
 
     /**
-     * Total decode duration for {@code outputLen} tokens at the given running
-     * batch size (external semantics unchanged: "time to produce outputLen
-     * tokens"). Internally per-step: steps = ceil(outputLen / tokensPerStep)
-     * (MTP fold), each step priced by {@link #decodeStepDelayMs}.
-     */
-    long decodeMs(int outputLen, int activeBatchSize) {
-        return scaledMs(decodeSteps(outputLen) * stepMs(activeBatchSize) * effectiveDecodeScale());
-    }
-
-    /**
      * MTP fold: number of decode steps needed to produce {@code outputLen}
      * tokens at the configured tokens_per_step (ceil — the final partial step
      * still costs a full step, like a real engine's last draft round).
@@ -562,69 +567,6 @@ final class MockPerformanceModel {
         return decodeReserveStep;
     }
 
-    /**
-     * Per-step decode delay for the continuous-batching decode loop (production
-     * FIFOScheduler semantics): the step unit WITHOUT output-length
-     * multiplication, resolved with the same source priority as
-     * {@link #decodeMs} (runtime override > step_ms_by_batch curve at the
-     * CURRENT running batch size > linear production fit), then scaled by
-     * decode scale + sleep scale and jittered (same formula as
-     * {@code scaledMs}). Returns >= 1 ms. Each step advances every running
-     * stream by {@link #tokensPerStep()} tokens — the MTP fold the per-step
-     * loop needs on top of the step duration.
-     */
-    long decodeStepDelayMs(int activeBatchSize) {
-        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
-    }
-
-    int blockSize() {
-        return blockSize;
-    }
-
-    /**
-     * Resolve the prefill duration formula — exactly one source, never a
-     * silent hard-coded fallback:
-     * <ol>
-     *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
-     *       (blank expression = misconfiguration, fail fast);</li>
-     *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
-     *       DSv4 fit the mock keeps as its own built-in default, and the
-     *       static approximation for a LEARNING estimator the mock cannot
-     *       replay.</li>
-     * </ol>
-     * This keeps mock execution time and master routing predictions on the
-     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
-     * (an explicit performance-JSON "prefill.fixed_ms" declaration still
-     * wins over the formula — see prefillMs).
-     */
-    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
-        JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
-        JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
-        for (JsonNode item : envs) {
-            if (item.isArray()
-                    && item.size() >= 2
-                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(item.get(1).asText());
-                var estimator =
-                        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator();
-                if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
-                    String expression = estimator.getExpression();
-                    if (expression == null || expression.isBlank()) {
-                        throw new IllegalStateException(
-                                "Master config "
-                                        + masterConfigFile
-                                        + ": router.roles.prefill.executionTimeEstimator is FORMULA"
-                                        + " with a blank expression — set the expression explicitly or"
-                                        + " omit the estimator to use the FlexLB formula default");
-                    }
-                    return expression;
-                }
-                break; // LEARNING estimator: fall through to the production-fit default
-            }
-        }
-        return DSV4_PREFILL_FIT_EXPRESSION;
-    }
-
     /** Effective decode scale (runtime /set_perf override > JSON config). */
     private double effectiveDecodeScale() {
         return overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
@@ -632,19 +574,28 @@ final class MockPerformanceModel {
 
     /**
      * Raw (pre-scale) per-step decode latency at the given running batch
-     * size, one source: runtime override > explicit step_ms_by_batch curve >
+     * size, one source: explicit step_ms_by_batch curve >
      * linear production fit (stepBaseMs + stepPerRunningMs × running).
      */
     private double stepMs(int activeBatchSize) {
-        if (overrideDecodeStepMs != null) {
-            // Runtime override (Python /set_perf decode_step_ms): fixed
-            // per-STEP semantics (one step emits tokens_per_step tokens).
-            return overrideDecodeStepMs;
-        }
         if (!decodePoints.isEmpty()) {
             return interpolateStepMs(activeBatchSize);
         }
         return stepBaseMs + stepPerRunningMs * activeBatchSize;
+    }
+
+    /**
+     * Per-step decode delay for the continuous-batching decode loop (production
+     * FIFOScheduler semantics): the step unit WITHOUT output-length
+     * multiplication, resolved from the step_ms_by_batch curve at the
+     * current running batch size or the linear production fit, then scaled by
+     * decode scale + sleep scale and jittered (same formula as
+     * {@code scaledMs}). Returns >= 1 ms. Each step advances every running
+     * stream by {@link #tokensPerStep()} tokens — the MTP fold the per-step
+     * loop needs on top of the step duration.
+     */
+    long decodeStepDelayMs(int activeBatchSize) {
+        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
     }
 
     private double interpolateStepMs(int activeBatchSize) {
@@ -675,6 +626,10 @@ final class MockPerformanceModel {
             scaled = scaled * factor;
         }
         return Math.max(1L, Math.round(scaled));
+    }
+
+    int blockSize() {
+        return blockSize;
     }
 
     record RequestShape(

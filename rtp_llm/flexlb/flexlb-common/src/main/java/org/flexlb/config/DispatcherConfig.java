@@ -21,12 +21,6 @@ public final class DispatcherConfig {
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
-    public static DispatcherConfig nonBatch() {
-        DispatcherConfig config = new DispatcherConfig();
-        config.type = Type.NON_BATCH;
-        return config;
-    }
-
     public String typeName() {
         return type.name();
     }

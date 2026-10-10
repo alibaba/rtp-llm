@@ -17,14 +17,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Configures the OpenTelemetry SDK before Spring starts serving requests.
- */
+/** Configures the OpenTelemetry SDK before Spring starts serving requests. */
 final class OpenTelemetryBootstrap {
+
     private static boolean initialized;
-
     private static SdkTracerProvider provider;
-
     static final String HOST_IP_ATTRIBUTE = "host.ip";
     static final String HOST_NAME_ATTRIBUTE = "host.name";
     static final String POD_IP_ATTRIBUTE = "rtp_llm.pod_ip";
@@ -116,6 +113,14 @@ final class OpenTelemetryBootstrap {
         }
     }
 
+    static synchronized void shutdown() {
+        FlexlbTrace.configure(null, "");
+        if (provider != null) {
+            provider.shutdown().join(2, TimeUnit.SECONDS);
+            provider = null;
+        }
+    }
+
     static Resource resource() {
         long pid = ProcessHandle.current().pid();
         String hostname = hostname();
@@ -137,19 +142,6 @@ final class OpenTelemetryBootstrap {
         }
         // SDK 的默认 Resource 仅含固有 SDK 身份，不启动环境自动探测。
         return Resource.getDefault().merge(Resource.create(attrs.build()));
-    }
-
-    static synchronized void resetForTest() {
-        shutdown();
-        initialized = false;
-    }
-
-    static synchronized void shutdown() {
-        FlexlbTrace.configure(null, "");
-        if (provider != null) {
-            provider.shutdown().join(2, TimeUnit.SECONDS);
-            provider = null;
-        }
     }
 
     /**

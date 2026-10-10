@@ -4,6 +4,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -16,9 +17,10 @@ import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
  * Reporter for gRPC channel pool metrics.
+ * Metric registration and reporting are best-effort and do not interrupt RPC processing.
  *
  * Note: All gRPC metrics use "engineIp" as the IP tag name (previously "ip"),
- * consistent with other FlexLB reporters (EngineHealthReporter, BatchSchedulerReporter,
+ * consistent with other FlexLB reporters (EngineHealthReporter, DeliveryMetricsReporter,
  * CacheMetricsReporter, etc.). If any Grafana dashboard queries reference the old "ip"
  * tag for these gRPC metrics, they must be updated to use "engineIp" instead.
  */
@@ -28,7 +30,7 @@ public class GrpcReporter {
     private final FlexMonitor monitor;
 
     public GrpcReporter(FlexMonitor monitor) {
-        this.monitor = monitor;
+        this.monitor = SafeFlexMonitor.wrap(monitor);
     }
 
     @PostConstruct

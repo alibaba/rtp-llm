@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
  * Mutually exclusive behavior is represented by tagged unions so inactive
@@ -12,10 +14,10 @@ import lombok.Setter;
 @Getter
 @Setter
 public final class FlexlbConfig {
+
     public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
-
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
@@ -27,16 +29,32 @@ public final class FlexlbConfig {
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
     private ConsistencyConfig consistency = new NoConsistencyConfig();
-
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 
-    @JsonIgnore
-    private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
+    @JsonIgnore private final InternalRuntimeSettings internalRuntime;
+
+    public FlexlbConfig() {
+        this(new InternalRuntimeSettings());
+    }
+
+    public FlexlbConfig(InternalRuntimeSettings internalRuntime) {
+        this.internalRuntime = java.util.Objects.requireNonNull(internalRuntime, "internalRuntime");
+    }
 
     @JsonIgnore
     public boolean isDirect() {
         return scheduler.getType() == SchedulerConfig.Type.DIRECT;
+    }
+
+    @JsonIgnore
+    public boolean isQueue() {
+        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
+    }
+
+    @JsonIgnore
+    public boolean isPriorityOrdering() {
+        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
     }
 
     @JsonIgnore
@@ -70,27 +88,19 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public boolean isPriorityOrdering() {
-        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
+    public long resolveExpiresAtMs(long startTime) {
+        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
     }
 
     @JsonIgnore
-    public boolean isQueue() {
-        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
+    public int defaultPriority() {
+        return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
     }
 
+    /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
-    public boolean isSingleDecision() {
-        return isQueue()
-                && queueScheduler().getDecision().getType() == DecisionPolicyConfig.Type.SINGLE;
-    }
-
-    @JsonIgnore
-    public SchedulerConfig queueScheduler() {
-        if (isQueue()) {
-            return scheduler;
-        }
-        throw new IllegalStateException("queue scheduler configuration is not active");
+    public DecisionPolicyConfig decisionPolicy() {
+        return queueScheduler().getDecision();
     }
 
     @JsonIgnore
@@ -101,33 +111,20 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public DecisionPolicyConfig fixedWindowDecision() {
-        DecisionPolicyConfig policy = decisionPolicy();
-        if (policy.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
-            return policy;
-        }
-        throw new IllegalStateException("fixed-window decision configuration is not active");
-    }
-
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
-    @JsonIgnore
-    public DecisionPolicyConfig decisionPolicy() {
-        return queueScheduler().getDecision();
+    public SchedulerConfig queueScheduler() {
+        checkState(isQueue(), "queue scheduler configuration is not active");
+        return scheduler;
     }
 
     @JsonIgnore
     public QueueOrderingConfig priorityOrdering() {
         QueueOrderingConfig ordering = queueScheduler().getOrdering();
-        if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
-            return ordering;
-        }
-        throw new IllegalStateException("priority ordering configuration is not active");
+        checkState(
+                ordering.getType() == QueueOrderingConfig.Type.PRIORITY,
+                "priority ordering configuration is not active");
+        return ordering;
     }
 
-    /**
-     * Sets serving executor capacities and the quiet-period duration in milliseconds used during
-     * shutdown.
-     */
     @Getter
     @Setter
     public static final class GrpcServerConfig {

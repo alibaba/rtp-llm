@@ -17,12 +17,10 @@ public abstract class MockWorker {
     private static final Logger log = LoggerFactory.getLogger(MockWorker.class);
 
     protected final MockRpcService rpcService;
-    protected final MockWorkerBehavior behavior;
     private Server server;
     private int actualPort = -1;
 
     protected MockWorker(MockWorkerBehavior behavior) {
-        this.behavior = behavior;
         this.rpcService = new MockRpcService();
         this.rpcService.setBehavior(behavior);
     }
@@ -93,10 +91,6 @@ public abstract class MockWorker {
 
     public MockRpcService getRpcService() {
         return rpcService;
-    }
-
-    public MockWorkerBehavior getBehavior() {
-        return behavior;
     }
 
     /**

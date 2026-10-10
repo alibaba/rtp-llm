@@ -25,9 +25,74 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * priority key entirely rather than writing a misleading 0).
  */
 class LoadClientPriorityTest {
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
+
+    private JavaLoadClient dryRunClient(int priority) {
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true,
+                        priority,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
+        return new JavaLoadClient(config);
+    }
+
+    private static JavaLoadClient.TraceRecord record(String requestId, int priority) {
+        return new JavaLoadClient.TraceRecord(
+                Long.parseLong(requestId),
+                "rid-" + requestId,
+                "trace-" + requestId,
+                1000L,
+                2048,
+                10,
+                List.of(1L, 2L),
+                List.of(1, 2, 3),
+                priority);
+    }
+
+    private static EngineRpcService.GenerateInputPB input(String requestId) {
+        return RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
+                .setGenerateConfig(
+                        EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(10).build())
+                .build();
+    }
 
     // ---- priority propagation onto the schedule request ----
 
@@ -83,8 +148,6 @@ class LoadClientPriorityTest {
 
     @Test
     void forcePriorityPinsEveryRecord() throws Exception {
-        // Bottom constructor carries the FORCE_PRIORITY knob (fromEnv reads
-        // the env); the 35-param convenience overload forwards 0 = disabled.
         JavaLoadClient.Config config =
                 new JavaLoadClient.Config(
                         "trace.jsonl",
@@ -122,7 +185,9 @@ class LoadClientPriorityTest {
                         50,
                         "replay",
                         0.0,
-                        true);
+                        0.0,
+                        true,
+                        List.of());
         JavaLoadClient client = new JavaLoadClient(config);
 
         ObjectNode withField =
@@ -229,62 +294,13 @@ class LoadClientPriorityTest {
         assertEquals(0, JavaLoadClient.Config.sanitizeForcePriority(-1));
     }
 
-    private JavaLoadClient dryRunClient(int priority) {
-        JavaLoadClient.Config config =
-                new JavaLoadClient.Config(
-                        "trace.jsonl",
-                        "127.0.0.1:7001",
-                        "127.0.0.1:7003",
-                        0,
-                        16,
-                        10.0,
-                        1,
-                        tempDir.resolve("out").toString(),
-                        1,
-                        0,
-                        0,
-                        120_000L,
-                        500.0,
-                        false,
-                        false,
-                        1,
-                        1,
-                        0L,
-                        120,
-                        true,
-                        "engine_service",
-                        "",
-                        false,
-                        10,
-                        1000,
-                        0,
-                        0,
-                        "",
-                        false,
-                        "",
-                        true,
-                        priority);
-        return new JavaLoadClient(config);
-    }
-
-    private static JavaLoadClient.TraceRecord record(String requestId, int priority) {
-        return new JavaLoadClient.TraceRecord(
-                Long.parseLong(requestId),
-                "rid-" + requestId,
-                "trace-" + requestId,
-                1000L,
-                2048,
-                10,
-                List.of(1L, 2L),
-                List.of(1, 2, 3),
-                priority);
-    }
-
-    private static EngineRpcService.GenerateInputPB input(String requestId) {
-        return RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
-                .setGenerateConfig(
-                        EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(10).build())
-                .build();
+    private static JavaLoadClient.RequestResult result(
+            int priority, String status, double scheduleMs) {
+        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        result.priority = priority;
+        result.status = status;
+        result.scheduleMs = scheduleMs;
+        return result;
     }
 
     /** A collector-synthesized row (timeout/exception fallback): no real
@@ -292,15 +308,6 @@ class LoadClientPriorityTest {
     private static JavaLoadClient.RequestResult syntheticResult(String status) {
         JavaLoadClient.RequestResult result = result(0, status, 0.0);
         result.synthetic = true;
-        return result;
-    }
-
-    private static JavaLoadClient.RequestResult result(
-            int priority, String status, double scheduleMs) {
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
-        result.priority = priority;
-        result.status = status;
-        result.scheduleMs = scheduleMs;
         return result;
     }
 }

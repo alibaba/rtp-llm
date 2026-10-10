@@ -5,12 +5,48 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
- * Models an engine KV block pool with held, reusable LRU and free blocks. Admission counts free and
- * evictable blocks, allocation evicts LRU entries when necessary, and completion releases
- * references; callers taking both locks must acquire the Decode queue lock before the cache monitor.
+ * Block pool with token counting — the mock counterpart of the production
+ * C++ BlockPool/KVCacheAllocator admission chain (KV capacity model v2).
+ *
+ * <p>One pool per engine, sized in BLOCKS: {@code totalBlocks = ceil(totalKvTokens / spb)}.
+ * A block is in exactly one of three states:
+ * <ul>
+ *   <li><b>held</b> — referenced by an in-flight request (prefill batch member,
+ *       running decode stream, decode growth blocks). Never counted as available.</li>
+ *   <li><b>LRU</b> — a cache-key block with reference count 0 (pure LRU). Freely
+ *       evictable, but eviction sacrifices prefix reuse.</li>
+ *   <li><b>free</b> — carrying no data, immediately allocatable.</li>
+ * </ul>
+ *
+ * <p>Production-faithful semantics (C++ verified):
+ * <ul>
+ *   <li>{@code availableBlocks = totalBlocks - held - referencedKeyBlocks} — the
+ *       analogue of {@code BlockPool::availableBlocksNum()} ({@code req_con_ref_counter_
+ *       freeBlockNum()}): free blocks AND pure-LRU blocks count as available, so
+ *       "release != delete" and "free != available" both hold.</li>
+ *   <li>Admission gate ({@code KVCacheAllocator::evaluateInitCapacity},
+ *       TOTAL_AND_AVAILABLE): {@code need <= available && reserve <= available - need}
+ *       with {@code reserve = ceil(reserveRatio x totalBlocks)}; a gate
+ *       failure classifies PERMANENT vs RETRYABLE (see
+ *       {@link AllocationFailure}).</li>
+ *   <li>Allocation coupling: malloc needs FREE blocks; when short, pure-LRU blocks
+ *       are evicted tail-first ({@code KVCacheGroup::ensureFreeBlocks} /
+ *       {@code evictAndFreeForGroup}); only if that still fails is the request
+ *       rejected (LACK_MEM).</li>
+ *   <li>Completion hands held blocks over to the LRU (the hash-keyed part becomes
+ *       cache entries; keyless blocks — decode growth, empty-bh requests — return
+ *       to free, mirroring the hash-channel limit of the mock).</li>
+ * </ul>
+ *
+ * <p>Thread safety: all mutating reads/writes are synchronized on this instance.
+ * Callers must not hold this monitor while taking other engine locks; the
+ * standard order is {@code decodeQueueLock -> cache} (never the reverse).
  */
 final class MockLruBlockCache {
+
     /** Default reserve watermark ratio (production reserve_block_num_ ≈ 5% of init available). */
     static final double DEFAULT_RESERVE_RATIO = 0.05;
 
@@ -49,6 +85,28 @@ final class MockLruBlockCache {
      */
     synchronized int prefixHitBlocks(List<Long> keys) {
         return matchPrefix(keys).size();
+    }
+
+    /**
+     * Prefix match against ALL indexed keys, including ones referenced in-flight.
+     *
+     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
+     * {@code containsKey}), so the access-ordered map refreshes each matched
+     * entry's recency — the prefix-match read path itself keeps matched
+     * chains hot. This is the decode-side positive feedback: the more a
+     * prefix is matched, the later its blocks sit in the eviction order
+     * ("the more you use it, the more you save"), matching the production
+     * prefix-match read that touches every block it confirms.
+     */
+    private List<Long> matchPrefix(List<Long> keys) {
+        List<Long> hits = new ArrayList<>();
+        for (Long key : keys) {
+            if (blocks.get(key) == null) {
+                break;
+            }
+            hits.add(key);
+        }
+        return hits;
     }
 
     // ─────────────────────────── admission ───────────────────────────
@@ -104,32 +162,17 @@ final class MockLruBlockCache {
     }
 
     /**
-     * Available blocks: free + pure-LRU (production availableBlocksNum —
-     * the prefix cache counts toward availability; held does not).
+     * Grow a running request's allocation by one block (decode per-step growth —
+     * production incrMalloc; only free/LRU are consulted, no reserve gate).
+     * @return false when the pool is exhausted (caller degrades growth).
      */
-    synchronized int availableBlocks() {
-        return totalBlocks - heldBlocks - referencedKeyBlocks();
-    }
-
-    /** Cache-key blocks referenced by in-flight requests. */
-    synchronized int referencedKeyBlocks() {
-        int referenced = 0;
-        for (Integer ref : blocks.values()) {
-            if (ref != null && ref > 0) {
-                referenced++;
-            }
+    synchronized boolean grow(BlockLease lease) {
+        if (freeBlocks() <= 0 && !evictOne()) {
+            return false;
         }
-        return referenced;
-    }
-
-    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
-    synchronized int reserveBlocks() {
-        return (int) Math.ceil(totalBlocks * reserveRatio);
-    }
-
-    /** Fully unallocated blocks. */
-    synchronized int freeBlocks() {
-        return totalBlocks - heldBlocks - blocks.size();
+        lease.nakedBlocks++;
+        heldBlocks++;
+        return true;
     }
 
     /**
@@ -151,20 +194,6 @@ final class MockLruBlockCache {
             }
         }
         return new AllocationOutcome(lease, null);
-    }
-
-    /**
-     * Grow a running request's allocation by one block (decode per-step growth —
-     * production incrMalloc; only free/LRU are consulted, no reserve gate).
-     * @return false when the pool is exhausted (caller degrades growth).
-     */
-    synchronized boolean grow(BlockLease lease) {
-        if (freeBlocks() <= 0 && !evictOne()) {
-            return false;
-        }
-        lease.nakedBlocks++;
-        heldBlocks++;
-        return true;
     }
 
     /**
@@ -195,17 +224,8 @@ final class MockLruBlockCache {
      * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))
      * @param keys the request's hash-channel block keys (may be empty)
      * @return the lease ({@code hitKeys} = referenced reuse blocks,
-     *         {@code nakedBlocks} = net-new blocks), or {@code null} = LACK_MEM
-     *         (no state changed)
-     */
-    synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
-        return acquireWithReuseDetailed(totalBlocksDemand, keys).lease();
-    }
-
-    /**
-     * Detailed decode-flavoured admission (same semantics as
-     * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
-     * gate — see {@link AllocationFailure}). Failure changes no state.
+     *         {@code nakedBlocks} = net-new blocks), or the allocation failure
+     *         without changing state
      */
     synchronized AllocationOutcome acquireWithReuseDetailed(
             int totalBlocksDemand, List<Long> keys) {
@@ -234,10 +254,7 @@ final class MockLruBlockCache {
         // Free-first allocation for the net-new part (same coupling as
         // acquire: eviction trades prefix reuse for capacity).
         while (freeBlocks() < netNew) {
-            if (!evictOne()) {
-                throw new IllegalStateException(
-                        "capacity gate admitted without enough evictable blocks");
-            }
+            checkState(evictOne(), "capacity gate admitted without enough evictable blocks");
         }
         heldBlocks += netNew;
         return new AllocationOutcome(new BlockLease(hitKeys, netNew), null);
@@ -284,31 +301,6 @@ final class MockLruBlockCache {
     synchronized void release(BlockLease lease) {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
-    }
-
-    /**
-     * Admit keys with NO holding lease — direct LRU insertion (unit tests and
-     * legacy callers). Capacity comes from free blocks / LRU tail eviction.
-     * @return true when the key set changed
-     */
-    synchronized boolean admit(List<Long> keys) {
-        if (totalBlocks == 0 || keys.isEmpty()) {
-            return false;
-        }
-        boolean changed = false;
-        for (Long key : keys) {
-            // containsKey guard: never clobber a live reference count — a key
-            // currently pinned by an in-flight request only gets its LRU order
-            // refreshed, exactly like the lease-based admit path.
-            if (!blocks.containsKey(key)) {
-                blocks.put(key, 0);
-                changed = true;
-            }
-        }
-        while (blocks.size() > totalBlocks && evictOne()) {
-            // evictOne already counted the eviction
-        }
-        return changed;
     }
 
     // ─────────────────────────── forced eviction (/cache_evict) ───────────────────────────
@@ -362,36 +354,71 @@ final class MockLruBlockCache {
         return totalBlocks;
     }
 
+    /**
+     * Available blocks: free + pure-LRU (production availableBlocksNum —
+     * the prefix cache counts toward availability; held does not).
+     */
+    synchronized int availableBlocks() {
+        return totalBlocks - heldBlocks - referencedKeyBlocks();
+    }
+
     /** Blocks held by in-flight requests (keyless allocations + growth). */
     synchronized int heldBlocks() {
         return heldBlocks;
     }
 
-    /** Indexed cache-key blocks (pure LRU + referenced). */
-    synchronized int lruKeyBlocks() {
-        return blocks.size();
+    /** Cache-key blocks referenced by in-flight requests. */
+    synchronized int referencedKeyBlocks() {
+        int referenced = 0;
+        for (Integer ref : blocks.values()) {
+            if (ref != null && ref > 0) {
+                referenced++;
+            }
+        }
+        return referenced;
+    }
+
+    /** Fully unallocated blocks. */
+    synchronized int freeBlocks() {
+        return totalBlocks - heldBlocks - blocks.size();
+    }
+
+    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    synchronized int reserveBlocks() {
+        return (int) Math.ceil(totalBlocks * reserveRatio);
+    }
+
+    // ─────────────────────────── failure classification ───────────────────────────
+
+    /**
+     * Production {@code KVCacheAllocator.cc} {@code initKVBlock} failure
+     * classification (Zola forensics, lines 100-110):
+     * <ul>
+     *   <li>{@link #PERMANENT} — {@code required + reserve > physical total
+     *       blocks}: the request can NEVER fit this pool, retrying is
+     *       pointless (production still spins to the retry timeout — the
+     *       retry LOOP treats both families identically; only the counting
+     *       differs).</li>
+     *   <li>{@link #RETRYABLE} — the pool TOTAL is sufficient but currently
+     *       short: another request's completion may release blocks and flip
+     *       the verdict within the retry window.</li>
+     * </ul>
+     */
+    enum AllocationFailure {
+        PERMANENT,
+        RETRYABLE
     }
 
     /**
-     * Prefix match against ALL indexed keys, including ones referenced in-flight.
-     *
-     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
-     * {@code containsKey}), so the access-ordered map refreshes each matched
-     * entry's recency — the prefix-match read path itself keeps matched
-     * chains hot. This is the decode-side positive feedback: the more a
-     * prefix is matched, the later its blocks sit in the eviction order
-     * ("the more you use it, the more you save"), matching the production
-     * prefix-match read that touches every block it confirms.
+     * Result of a detailed admission attempt: exactly one of {@code lease}
+     * (success) or {@code failure} (the family for counting/retry policy)
+     * is non-null.
      */
-    private List<Long> matchPrefix(List<Long> keys) {
-        List<Long> hits = new ArrayList<>();
-        for (Long key : keys) {
-            if (blocks.get(key) == null) {
-                break;
-            }
-            hits.add(key);
+    record AllocationOutcome(BlockLease lease, AllocationFailure failure) {
+
+        boolean success() {
+            return lease != null;
         }
-        return hits;
     }
 
     /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
@@ -424,29 +451,6 @@ final class MockLruBlockCache {
             }
         }
         return false;
-    }
-
-    // ─────────────────────────── failure classification ───────────────────────────
-
-    /**
-     * Distinguishes requests that exceed the physical pool including reserve from temporary
-     * shortages that another request's completion may resolve.
-     */
-    enum AllocationFailure {
-        PERMANENT,
-        RETRYABLE
-    }
-
-    /**
-     * Result of a detailed admission attempt: exactly one of {@code lease}
-     * (success) or {@code failure} (the family for counting/retry policy)
-     * is non-null.
-     */
-    record AllocationOutcome(BlockLease lease, AllocationFailure failure) {
-
-        boolean success() {
-            return lease != null;
-        }
     }
 
     /**

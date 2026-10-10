@@ -3,9 +3,7 @@ package org.flexlb.domain.consistency;
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * Carries the instance status submitted for FlexLB synchronization.
- */
+/** Leadership snapshot query; wire fields are retained for compatibility. */
 @Setter
 @Getter
 public class SyncLBStatusReq {

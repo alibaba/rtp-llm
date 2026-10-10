@@ -6,10 +6,10 @@ Build the baseline and current FlexLB reactors, including test classes. Use JDK 
 JAVA_HOME=/path/to/jdk21 python3 tools/routing-hotspots/run.py /path/to/baseline/rtp_llm/flexlb /tmp/routing-hotspots
 ```
 
-Both revisions run the same source and formula. The benchmark uses real Java objects,
-without Mockito instrumentation. Scheduler threads and RPCs are disabled; queue
-mutation goes through `PrefillState` under its actual ownership lock. Reflection is
-used only to access that lock during fixture setup and controlled mutations.
+Both revisions must expose the current scheduler and endpoint APIs; historical revisions with `RequestLifecycle` need their matching historical benchmark harness. Both revisions run the same source and formula. The benchmark uses real endpoint, ledger, and projection objects;
+reporting dependencies are mocked. Scheduler threads and RPCs are disabled; queue
+mutation goes through `PrefillState` under its actual ownership lock. Reflection constructs the package-private endpoint and accesses its ledger/lock
+during fixture setup and controlled mutations. It does not depend on batcher projection APIs.
 
 Cases cover 10/100 endpoints, 32/1024 active requests, 1/64 planner threads, and
 maxRequests=1024 with a 700 ms prediction budget. Each round changes scheduling

@@ -9,12 +9,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Builds frontend scheduling results with consistent error details and selected worker metadata.
- */
+import static com.google.common.base.Preconditions.checkArgument;
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Response {
+
     @JsonProperty("server_status")
     private List<ServerStatus> serverStatus;
 
@@ -45,15 +45,6 @@ public class Response {
     @JsonProperty("admission_reject_reason")
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
-    /** Build a successful delivery response without mutating the original route response. */
-    public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
-        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
-        success.success = true;
-        success.code = 200;
-        success.enqueuedByMaster = enqueuedByMaster;
-        return success;
-    }
-
     /** Deep-copy all response data, preserving null collections and entries. */
     public static Response copyOf(Response source) {
         if (source == null) {
@@ -81,6 +72,15 @@ public class Response {
         copy.ready = source.ready;
         copy.admissionRejectReason = source.admissionRejectReason;
         return copy;
+    }
+
+    /** Build a successful delivery response without mutating the original route response. */
+    public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
+        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
+        success.success = true;
+        success.code = 200;
+        success.enqueuedByMaster = enqueuedByMaster;
+        return success;
     }
 
     public static Response buildErrorResponse(StrategyErrorType errorType, String message) {
@@ -112,13 +112,11 @@ public class Response {
         if (admissionRejectReason == null) {
             admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
         }
-        if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
-            throw new IllegalArgumentException(
-                    "invalid schedule error code/reason: "
-                            + strategyErrorType
-                            + "/"
-                            + admissionRejectReason);
-        }
+        checkArgument(
+                strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason),
+                "invalid schedule error code/reason: %s/%s",
+                strategyErrorType,
+                admissionRejectReason);
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
@@ -145,9 +143,6 @@ public class Response {
         return result;
     }
 
-    /**
-     * Copies selected worker identity fields for one role in a response.
-     */
     @Data
     public static class WorkerRoleSummary {
         private int discovered;

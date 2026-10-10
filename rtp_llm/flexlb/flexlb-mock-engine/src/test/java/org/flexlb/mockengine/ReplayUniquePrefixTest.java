@@ -22,7 +22,57 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * unique routing prefix.
  */
 class ReplayUniquePrefixTest {
+
     @TempDir Path tempDir;
+
+    private static JavaLoadClient.TraceRecord rec(List<Long> blockKeys) {
+        return new JavaLoadClient.TraceRecord(
+                1L, "rid-0", "trace-0", 0L, 128, 16, blockKeys, null, 0);
+    }
+
+    private JavaLoadClient client(boolean replayUniquePrefix) {
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        true,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        replayUniquePrefix,
+                        List.of());
+        return new JavaLoadClient(config);
+    }
 
     @Test
     void loopRoundSaltsFirstBlockKeyOnly() {
@@ -123,58 +173,19 @@ class ReplayUniquePrefixTest {
                         "",
                         false,
                         "",
-                        true);
+                        true,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         JavaLoadClient.TraceRecord sent =
                 new JavaLoadClient(config).makeLoopRequest(rec(List.of(7L)), 1, 0);
         assertNotEquals(
                 7L,
                 sent.blockKeys.get(0),
                 "convenience constructor must default REPLAY_UNIQUE_PREFIX to on");
-    }
-
-    private static JavaLoadClient.TraceRecord rec(List<Long> blockKeys) {
-        return new JavaLoadClient.TraceRecord(1L, "rid-0", "trace-0", 0L, 128, 16, blockKeys, null);
-    }
-
-    private JavaLoadClient client(boolean replayUniquePrefix) {
-        JavaLoadClient.Config config =
-                new JavaLoadClient.Config(
-                        "trace.jsonl",
-                        "127.0.0.1:7001",
-                        "127.0.0.1:7003",
-                        0,
-                        16,
-                        10.0,
-                        1,
-                        tempDir.resolve("out").toString(),
-                        1,
-                        0,
-                        0,
-                        120_000L,
-                        500.0,
-                        false,
-                        true,
-                        1,
-                        1,
-                        0L,
-                        120,
-                        true,
-                        "engine_service",
-                        "",
-                        false,
-                        10,
-                        1000,
-                        0,
-                        0,
-                        "",
-                        false,
-                        "",
-                        true,
-                        0,
-                        0,
-                        "replay",
-                        0.0,
-                        replayUniquePrefix);
-        return new JavaLoadClient(config);
     }
 }

@@ -95,7 +95,7 @@ class CrashAfterTest {
 
             // Arm the crash on the 3rd EnqueueBatch and deliver it.
             httpPost(
-                    controlServer.getPort(),
+                    MockEngineTestSupport.controlPort(controlServer),
                     "/inject",
                     "{\"port\":"
                             + prefillPort
@@ -155,7 +155,10 @@ class CrashAfterTest {
 
             // Recovery: /start_engine rebuilds the gRPC server on CLEAN state
             // (also disarms the fault config and resets the enqueue counter).
-            httpPost(controlServer.getPort(), "/start_engine", "{\"port\":" + prefillPort + "}");
+            httpPost(
+                    MockEngineTestSupport.controlPort(controlServer),
+                    "/start_engine",
+                    "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.isStopped(), "engine must run again after /start_engine");
             assertEquals(
                     0,
@@ -209,7 +212,7 @@ class CrashAfterTest {
 
             // Arm + trigger while both 300ms executions are still running.
             httpPost(
-                    controlServer.getPort(),
+                    MockEngineTestSupport.controlPort(controlServer),
                     "/inject",
                     "{\"port\":"
                             + prefillPort

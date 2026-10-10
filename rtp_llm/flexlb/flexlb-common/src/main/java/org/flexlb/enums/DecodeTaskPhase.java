@@ -11,6 +11,9 @@ package org.flexlb.enums;
  */
 public enum DecodeTaskPhase {
 
+    /** Placement resources reserved locally; no delivery has been published. */
+    LOCAL_RESERVED,
+
     /** Still owned exclusively by the Master queue; Engine cannot have seen it. */
     MASTER_QUEUED_NOT_DISPATCHED,
 

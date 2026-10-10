@@ -1,9 +1,9 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.scheduler.CancelReason;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -34,19 +34,13 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
         this.httpClient = HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build();
     }
 
-    /**
-     * The mock control plane is a single cluster-wide address (110 topology),
-     * so a configured URL supports every endpoint: the control server resolves
-     * the target engine by gRPC port.
-     */
-    @Override
-    public boolean isSupported(DecodeEndpoint endpoint) {
-        return !controlUrl.isEmpty();
-    }
-
     @Override
     public CompletableFuture<CancelAck> cancel(
-            CancelTarget target, String requestId, long timeoutMs) {
+            CancelTarget target, long requestId, CancelReason reason, long timeoutMs) {
+        if (reason != CancelReason.PRIORITY_PREEMPTED) {
+            return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
+        }
+
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
             // engine by the original Prefill endpoint's gRPC port.
@@ -81,7 +75,7 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
      * ACCEPTED, NOT_FOUND (seen but already finished) or REQUEST_FENCED (never
      * seen; the request fence was installed engine-side).
      */
-    private CancelAck mapResponse(HttpResponse<String> response, String requestId) {
+    private CancelAck mapResponse(HttpResponse<String> response, long requestId) {
         if (response.statusCode() == 404) {
             return CancelAck.UNSUPPORTED;
         }
