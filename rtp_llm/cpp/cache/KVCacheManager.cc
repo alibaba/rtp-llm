@@ -624,7 +624,8 @@ void KVCacheManager::refreshKVCacheInfoSnapshot() {
 }
 
 void KVCacheManager::refreshKVCacheInfoSnapshotLocked() {
-    if (!allocator_ || !cacheStatusSnapshotEnabled()) {
+    // SCR prefill warmup runs before the cache connectors are initialized.
+    if (!allocator_ || !coordinator_ || !cacheStatusSnapshotEnabled()) {
         return;
     }
     RTP_LLM_PROFILE_SCOPE("cache_manager.refresh_cache_status_snapshot");
