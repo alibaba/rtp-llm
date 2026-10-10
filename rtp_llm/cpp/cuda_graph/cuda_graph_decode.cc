@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <limits>
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -7,11 +8,24 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    // Also validate direct C++ callers before allocating or slicing capture buffers.
+    RTP_LLM_CHECK_WITH_INFO(max_bs_ > 0 && max_bs_ < std::numeric_limits<int>::max(),
+                            "Decode CUDA Graph capacity must be positive and below INT_MAX");
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
+        for (int bucket : decode_capture_batch_sizes_) {
+            RTP_LLM_CHECK_WITH_INFO(bucket > 0 && static_cast<size_t>(bucket) <= max_bs_,
+                                    "DECODE_CAPTURE_CONFIG bucket %d exceeds Decode CUDA Graph capacity %zu "
+                                    "or is non-positive; check DECODE_CUDA_GRAPH_MAX_BATCH_SIZE",
+                                    bucket,
+                                    max_bs_);
+        }
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
         // Sort in ascending order (from small to large)
         std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
+        decode_capture_batch_sizes_.erase(
+            std::unique(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end()),
+            decode_capture_batch_sizes_.end());
         return decode_capture_batch_sizes_;
     }
 
@@ -26,8 +40,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
         }
     }
     // Add range from 48 to max_generate_batch_size, stepping by 16
-    for (int i = 48; i <= max_generate_batch_size; i += 16) {
-        capture_bs.push_back(i);
+    for (int64_t i = 48; i <= max_generate_batch_size; i += 16) {
+        capture_bs.push_back(static_cast<int>(i));
     }
     if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
         capture_bs.push_back(max_generate_batch_size);

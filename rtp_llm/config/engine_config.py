@@ -243,6 +243,11 @@ class EngineConfig:
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
+        hw_kernel_config.decode_cuda_graph_max_batch_size = (
+            hw_kernel_config.resolve_decode_cuda_graph_max_batch_size(
+                concurrency_config.concurrency_limit
+            )
+        )
 
         # Setup PD separation config
         setup_pd_sep_config(

@@ -66,6 +66,64 @@ The following legacy options and environment variables were removed and must no 
 | `--rocm-hipblaslt-config` | hipBLASLt GEMM configuration file path. | gemm_config.csv |
 | `--ft-disable-custom-ar` | Disables custom AllReduce implementation. | True |
 
+### Decode CUDA Graph capacity
+
+| CLI argument | Environment variable | Meaning | Default |
+|--------------|----------------------|---------|---------|
+| `--decode_cuda_graph_max_batch_size` | `DECODE_CUDA_GRAPH_MAX_BATCH_SIZE` | Maximum sequence rows for Decode/verify graph buffers. For Beam Search, count the total beams across requests. | `CONCURRENCY_LIMIT` |
+| `--decode_capture_config` | `DECODE_CAPTURE_CONFIG` | Comma-separated positive capture buckets; each must fit within the capacity above. | Automatic buckets up to the capacity |
+
+`CONCURRENCY_LIMIT` continues to limit requests. Graph capacity does not change
+admission or truncate beams: a batch beyond the largest captured bucket runs
+Eager. Prefill graph request/token capacities remain separate.
+
+For up to 8 concurrent requests and 2048 total Decode beams:
+
+```bash
+export ENABLE_CUDA_GRAPH=1
+export CONCURRENCY_LIMIT=8
+export DECODE_CUDA_GRAPH_MAX_BATCH_SIZE=2048
+export DECODE_CAPTURE_CONFIG=1,128,256,512,1024,1536,2048
+```
+
+The explicit bucket list is optional. Without it, the existing automatic rule
+captures `1,8,16,24,32`, then every 16 rows from 48, plus the capacity if needed
+(only values within capacity). At 2048 this produces 131 graphs; an explicit
+list can reduce capture time and graph memory. A list ending below capacity is
+valid. A bucket exceeding capacity is a startup error; when migrating such a
+configuration, set `DECODE_CUDA_GRAPH_MAX_BATCH_SIZE` explicitly.
+
+### Beam Search Cascade Attention
+
+`ENABLE_DECODE_CASCADE_ATTENTION=1` (CLI:
+`--enable_decode_cascade_attention 1`) enables shared-prefix attention for CUDA
+MHA/GQA Decode. It is disabled by default and supports FP16/BF16 KV caches.
+It leaves Prefill, MLA, quantized KV caches and speculative verification on
+their existing attention paths.
+
+Complete KV pages shared by adjacent beams are evaluated with a Prefill kernel;
+private pages, including the current token, use a Decode kernel. Their outputs
+are merged using log-sum-exp. The planner verifies every shared page ID, so
+different requests and beam widths can reuse one captured graph.
+
+Request slots follow `CONCURRENCY_LIMIT`, with one additional slot for padded
+rows. No separate request-slot setting or request-count graph buckets are
+required. For example, a 2048-row graph with request capacity 8 can handle
+`4*512`, `3*512+2*256`, or `8*256` beams.
+
+This path targets wide beams with long shared prefixes. Groups smaller than
+32 rows or prefixes shorter than 128 tokens are processed entirely by the
+Decode part. When too many groups are present, all rows use that part as well.
+The graph still executes its prefix and merge nodes, so these cases can be
+slower than ordinary Decode; benchmark the workload before enabling the flag.
+
+The split attention and merge change floating-point reduction order and round
+partial outputs to FP16/BF16. Results are not bitwise identical to ordinary
+Decode, and near-tied Beam Search candidates can change order or membership.
+Validate candidate quality on representative requests before enabling it in
+production; kernel-level numerical tolerance alone does not establish ranking
+equivalence.
+
 ## Device Resource Management
 
 | Arguments | Description | Defaults |

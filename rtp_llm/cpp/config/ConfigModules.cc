@@ -6,6 +6,8 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <limits>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -191,6 +193,24 @@ std::string HybridAttentionConfig::to_string() const {
 }
 
 // HWKernelConfig
+int HWKernelConfig::resolveDecodeCudaGraphMaxBatchSize(int concurrency_limit) const {
+    const int capacity = decode_cuda_graph_max_batch_size == 0 ? concurrency_limit : decode_cuda_graph_max_batch_size;
+    if (capacity <= 0 || capacity >= std::numeric_limits<int>::max()) {
+        throw std::invalid_argument(
+            "DECODE_CUDA_GRAPH_MAX_BATCH_SIZE (defaults to CONCURRENCY_LIMIT) must be positive and below INT_MAX");
+    }
+    if (enable_cuda_graph) {
+        for (int bucket : decode_capture_batch_sizes) {
+            if (bucket <= 0 || bucket > capacity) {
+                throw std::invalid_argument("DECODE_CAPTURE_CONFIG bucket " + std::to_string(bucket)
+                                            + " must be in [1, DECODE_CUDA_GRAPH_MAX_BATCH_SIZE="
+                                            + std::to_string(capacity) + "] (defaults to CONCURRENCY_LIMIT)");
+            }
+        }
+    }
+    return capacity;
+}
+
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
@@ -208,6 +228,8 @@ std::string HWKernelConfig::to_string() const {
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
+        << "decode_cuda_graph_max_batch_size: " << decode_cuda_graph_max_batch_size << "\n"
+        << "enable_decode_cascade_attention: " << enable_decode_cascade_attention << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
     return oss.str();

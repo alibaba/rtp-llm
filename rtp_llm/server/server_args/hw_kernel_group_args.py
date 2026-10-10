@@ -3,6 +3,28 @@ from typing import List
 
 from rtp_llm.server.server_args.util import str2bool
 
+CPP_INT_MAX = (1 << 31) - 1
+
+
+def _positive_int(value: str, config_name: str) -> int:
+    import argparse
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as e:
+        raise argparse.ArgumentTypeError(
+            f"{config_name} must be a positive integer, got {value}"
+        ) from e
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{config_name} must be a positive integer, got {value}"
+        )
+    if parsed >= CPP_INT_MAX:
+        raise argparse.ArgumentTypeError(
+            f"{config_name} must be less than the C++ int maximum {CPP_INT_MAX}, got {parsed}"
+        )
+    return parsed
+
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
     ##############################################################################################################
@@ -143,6 +165,28 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--enable_decode_cascade_attention",
+        env_name="ENABLE_DECODE_CASCADE_ATTENTION",
+        type=str2bool,
+        default=False,
+        bind_to=(hw_kernel_config, "enable_decode_cascade_attention"),
+        help="Use shared-prefix Prefill plus private-tail Decode attention for Beam Search. Request slots follow CONCURRENCY_LIMIT.",
+    )
+
+    hw_kernel_group.add_argument(
+        "--decode_cuda_graph_max_batch_size",
+        env_name="DECODE_CUDA_GRAPH_MAX_BATCH_SIZE",
+        type=lambda value: _positive_int(value, "DECODE_CUDA_GRAPH_MAX_BATCH_SIZE"),
+        default=None,
+        bind_to=(hw_kernel_config, "decode_cuda_graph_max_batch_size"),
+        help=(
+            "Maximum Decode CUDA Graph sequence capacity (sum of beams across requests). "
+            "Defaults to CONCURRENCY_LIMIT. Does not change request admission; batches "
+            "above the captured range use Eager."
+        ),
+    )
+
+    hw_kernel_group.add_argument(
         "--decode_capture_config",
         env_name="DECODE_CAPTURE_CONFIG",
         type=_parse_decode_capture_config,
@@ -151,7 +195,9 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
             "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
-            "If not set, default logic will be used to generate batch sizes."
+            "Every bucket must be <= DECODE_CUDA_GRAPH_MAX_BATCH_SIZE. "
+            "If not set, buckets are generated up to that capacity "
+            "(which defaults to CONCURRENCY_LIMIT)."
         ),
     )
 
@@ -353,8 +399,6 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     Returns:
         List of positive integers (batch sizes), or empty list if config is empty
     """
-    import argparse
-
     if not config:
         # Return empty list to use default logic
         return []
@@ -363,14 +407,8 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     if not config:
         return []
 
-    # Only support comma-separated list format
-    try:
-        return _parse_comma_separated_ints(
-            config,
-            "decode_capture_config",
-            "decode capture batch sizes",
-            raise_on_empty=False,
-        )
-    except ValueError as e:
-        # Convert ValueError to ArgumentTypeError for argparse
-        raise argparse.ArgumentTypeError(str(e))
+    buckets = [
+        _positive_int(item.strip(), "DECODE_CAPTURE_CONFIG bucket")
+        for item in config.split(",")
+    ]
+    return sorted(set(buckets))

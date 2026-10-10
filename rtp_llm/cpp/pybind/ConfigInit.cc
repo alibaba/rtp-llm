@@ -744,6 +744,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
+        .def_readwrite("decode_cuda_graph_max_batch_size", &HWKernelConfig::decode_cuda_graph_max_batch_size)
+        .def_readwrite("enable_decode_cascade_attention", &HWKernelConfig::enable_decode_cascade_attention)
+        .def("resolve_decode_cuda_graph_max_batch_size", &HWKernelConfig::resolveDecodeCudaGraphMaxBatchSize)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def("to_string", &HWKernelConfig::to_string)
@@ -765,10 +768,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag);
+                                      self.rocm_disable_custom_ag,
+                                      self.decode_cuda_graph_max_batch_size,
+                                      self.enable_decode_cascade_attention);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 17)
+                if (t.size() != 14 && t.size() != 17 && t.size() != 19)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -780,7 +785,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_swizzleA                     = t[5].cast<bool>();
                     c.enable_cuda_graph                = t[6].cast<bool>();
                     c.enable_cuda_graph_debug_mode     = t[7].cast<bool>();
-                    const bool has_full_prefill_fields = t.size() == 17;
+                    const bool has_full_prefill_fields = t.size() >= 17;
                     int        offset                  = 0;
                     if (has_full_prefill_fields) {
                         c.enable_full_prefill_cuda_graph            = t[8].cast<bool>();
@@ -794,6 +799,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes = t[11 + offset].cast<std::vector<int>>();
                     c.disable_dpc_random         = t[12 + offset].cast<bool>();
                     c.rocm_disable_custom_ag     = t[13 + offset].cast<bool>();
+                    if (t.size() == 19) {
+                        c.decode_cuda_graph_max_batch_size = t[17].cast<int>();
+                        c.enable_decode_cascade_attention  = t[18].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

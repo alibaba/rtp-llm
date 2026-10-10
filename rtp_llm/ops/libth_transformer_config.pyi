@@ -604,6 +604,10 @@ class GrpcConfig:
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
+    decode_cuda_graph_max_batch_size: int
+    enable_decode_cascade_attention: bool
+    def resolve_decode_cuda_graph_max_batch_size(self, concurrency_limit: int) -> int:
+        ...
     deep_gemm_num_sm: int
     deterministic_attn: bool
     deterministic_gemm: bool

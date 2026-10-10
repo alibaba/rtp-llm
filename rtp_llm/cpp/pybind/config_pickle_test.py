@@ -1,7 +1,26 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import DeviceResourceConfig, GrammarConfig
+from rtp_llm.ops import DeviceResourceConfig, GrammarConfig, HWKernelConfig
+
+
+class HWKernelConfigPickleTest(unittest.TestCase):
+    def test_decode_capacity_and_cascade_round_trip(self):
+        config = HWKernelConfig()
+        config.decode_cuda_graph_max_batch_size = 2048
+        config.enable_decode_cascade_attention = True
+        result = pickle.loads(pickle.dumps(config))
+        self.assertEqual(result.decode_cuda_graph_max_batch_size, 2048)
+        self.assertTrue(result.enable_decode_cascade_attention)
+
+    def test_previous_layouts_keep_defaults(self):
+        state = HWKernelConfig().__getstate__()
+        for legacy in (state[:17], state[:8] + state[11:17]):
+            result = HWKernelConfig.__new__(HWKernelConfig)
+            result.__setstate__(legacy)
+            self.assertEqual(result.decode_cuda_graph_max_batch_size, 0)
+            self.assertFalse(result.enable_decode_cascade_attention)
+            self.assertEqual(result.resolve_decode_cuda_graph_max_batch_size(8), 8)
 
 
 def _new_grammar_config():
