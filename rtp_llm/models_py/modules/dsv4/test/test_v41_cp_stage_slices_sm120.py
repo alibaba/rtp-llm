@@ -149,9 +149,10 @@ def call(model, cache, ids, positions, lengths, prefixes, pages, cp=None, hidden
         0 if cp is None else cp.cp_rank,
     )
     local_lengths = lengths if cp is None else cp.chunk_lengths_per_req
-    cu = torch.tensor(
-        [0, local_lengths[0], sum(local_lengths)], device="cuda", dtype=torch.int32
-    )
+    boundaries = [0]
+    for length in local_lengths:
+        boundaries.append(boundaries[-1] + length)
+    cu = torch.tensor(boundaries, device="cuda", dtype=torch.int32)
     inputs = SimpleNamespace(
         is_prefill=True,
         cache_store_inputs=None,

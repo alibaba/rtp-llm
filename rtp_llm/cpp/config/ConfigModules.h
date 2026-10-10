@@ -141,10 +141,15 @@ struct ParallelismConfig {
         if (!prefill_cp_config.is_prefill_enabled() || role_type == RoleType::DECODE || tp_size <= 1) {
             return;
         }
-        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || (speculative && !dspark_prefill)
+        const bool v41 = model_type == "deepseek_v41" && role_type == RoleType::PREFILL
+                         && pp_size == 2 && tp_size == 4 && ep_size == 4 && dp_size == 1 && world_size == 8
+                         && pp_ep_enabled && pp_ep_backend == "fork_nccl_mxfp8"
+                         && pp_stage_layer_counts == std::vector<int64_t>{21, 19} && !speculative
+                         && ffn_sp_size == 1;
+        if ((model_type != "deepseek_v4" && !v41) || !dsv4_prefill_cp_profile_valid() || (speculative && !dspark_prefill)
             || cuda_graph || layer_micro_batch || enable_sp || use_ub_comm
             || ffn_disaggregate_config.enable_ffn_disaggregate) {
-            throw std::invalid_argument("local PREFILL_CP requires a DSV4 PDFUSION CP2PP4 or opted-in "
+            throw std::invalid_argument("local PREFILL_CP requires exact V4.1 CEP4PP2 PREFILL, or a DSV4 PDFUSION CP2PP4 or opted-in "
                                         "CEP4PP2/CEP2PP2 prefill-only profile (PDFUSION, or PREFILL role for "
                                         "the PP+EP shapes), with unsharded cache and no speculative, graph, "
                                         "micro-batch, SP, UB or FFN-disaggregation execution");

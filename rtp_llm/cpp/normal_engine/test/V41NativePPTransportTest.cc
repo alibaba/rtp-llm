@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocationLease.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
@@ -166,6 +167,7 @@ public:
         runtime.max_generate_batch_size = 4;
         runtime.fifo_scheduler_config.max_context_batch_size = 4;
         runtime.use_batch_decode_scheduler = false;
+        scheduler_runtime_ = runtime;
         KVCacheConfig cache_options;
         cache_options.test_block_num = 12 + parallelism.world_rank;
         cache_options.seq_size_per_block = cache_options.kernel_seq_size_per_block = 256;
@@ -600,8 +602,131 @@ public:
         return round_leases_.size();
     }
 
+    void startScheduler(int64_t chunk_size) {
+        requireOpen();
+        if (!executor_->model_ || scheduler_ || chunk_size <= 0 || chunk_size > 256) {
+            throw std::invalid_argument("native PP scheduler requires its attached model and a short chunk");
+        }
+        scheduler_runtime_.max_generate_batch_size = 2;
+        auto& fifo = scheduler_runtime_.fifo_scheduler_config;
+        fifo.max_context_batch_size = 2;
+        fifo.max_batch_tokens_size = 512;
+        fifo.cp_force_single_prefill = false;
+        fifo.enable_fast_gen = true;
+        fifo.fast_gen_max_context_len = chunk_size;
+        if (parallelism_.world_rank == 0) {
+            PDSepConfig role;
+            role.role_type = RoleType::PREFILL;
+            scheduler_ = std::make_unique<PPScheduler>(scheduler_runtime_, model_config_, role,
+                                                       parallelism_, ModelSpecificConfig{},
+                                                       SpeculativeExecutionConfig{}, manager_, nullptr);
+        }
+    }
+
+    std::vector<int64_t> enqueueScheduled(const std::vector<std::vector<int32_t>>& requests,
+                                          bool full_outputs, bool pd_separation) {
+        requireOpen();
+        if (!scheduler_) {
+            throw std::invalid_argument("only the scheduler root can enqueue a test request");
+        }
+        ResourceContext context;
+        context.cache_manager = manager_;
+        context.reuse_cache = false;
+        std::vector<int64_t> ids;
+        for (const auto& tokens : requests) {
+            if (tokens.empty() || tokens.size() > 256) {
+                throw std::invalid_argument("native PP scheduler test requires short nonempty prompts");
+            }
+            auto input = std::make_shared<GenerateInput>();
+            input->input_ids = torch::tensor(tokens, torch::kInt32);
+            input->request_id = ++scheduler_request_id_;
+            input->generate_config = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 1;
+            input->generate_config->top_k = 1;
+            input->generate_config->is_streaming = false;
+            input->generate_config->return_logits = true;
+            input->generate_config->return_hidden_states = true;
+            input->generate_config->return_all_hidden_states = full_outputs;
+            input->generate_config->pd_separation = pd_separation;
+            auto stream = std::make_shared<NormalGenerateStream>(
+                input, model_config_, scheduler_runtime_, context, nullptr);
+            const auto status = scheduler_->enqueue(stream);
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
+            scheduled_streams_.push_back(stream);
+            ids.push_back(input->request_id);
+        }
+        return ids;
+    }
+
+    py::dict schedulerTick() {
+        requireOpen();
+        ScheduleOutput scheduled;
+        if (scheduler_) {
+            // Explicit ticks model the engine's schedule trigger without a
+            // second host thread competing for the qualified CUDA stream.
+            scheduler_->schedule_trigger_ = true;
+            auto result = scheduler_->schedule();
+            if (!result.ok()) {
+                throw std::runtime_error(result.status().ToString());
+            }
+            scheduled = std::move(result.value());
+        }
+        const auto status = executor_->process(scheduled);
+        if (!status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
+        cudaSyncAndCheck();
+        py::dict result;
+        result["active_requests"] = executor_->v41_pp_admission_->activeRequests();
+        result["identity_count"] = executor_->v41_request_identities_.size();
+        size_t retained = 0;
+        for (const auto& slot : executor_->slots_) {
+            retained += slot.v41_cache_batch ? 1 : 0;
+        }
+        result["retained_slots"] = retained;
+        result["free_blocks"] = freeBlocks();
+        result["shutdown"] = executor_->shutdownCompleted();
+        return result;
+    }
+
+    py::list scheduledOutputs() {
+        py::list result;
+        for (auto it = scheduled_streams_.begin(); it != scheduled_streams_.end();) {
+            const auto& stream = *it;
+            if (!stream->isFinished() && !stream->hasError()) {
+                ++it;
+                continue;
+            }
+            py::dict output;
+            output["request_id"] = stream->streamId();
+            output["outstanding"] = stream->ppOutstandingResults();
+            auto next = stream->nextOutput(1);
+            if (!next.ok()) {
+                output["error"] = next.status().ToString();
+                output["invalid_params"] = next.status().code() == ErrorCode::INVALID_PARAMS;
+            } else {
+                const auto& generated = next.value().generate_outputs.front();
+                output["tokens"] = stream->completeTokenIdsVec();
+                output["hidden"] = generated.hidden_states;
+                output["logits"] = generated.logits;
+                output["all_hidden"] = generated.all_hidden_states;
+            }
+            result.append(std::move(output));
+            it = scheduled_streams_.erase(it);
+        }
+        return result;
+    }
+
+    void shutdownScheduler() {
+        executor_->notifyShutdown();
+    }
+
     void close() {
         finish();
+        scheduler_.reset();
+        scheduled_streams_.clear();
         admission_.reset();
         local_cache_.reset();
         executor_.reset();
@@ -667,6 +792,10 @@ private:
     std::unique_ptr<V41PPAdmission>        admission_;
     PPTickets                             tickets_;
     std::vector<KVCacheAllocationLeasePtr> round_leases_;
+    RuntimeConfig scheduler_runtime_;
+    std::unique_ptr<PPScheduler> scheduler_;
+    std::vector<GenerateStreamPtr> scheduled_streams_;
+    int64_t scheduler_request_id_ = 5000;
 };
 
 }  // namespace test
@@ -765,6 +894,12 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def_property_readonly("capacity", &rtp_llm::test::V41NativePPTransportTest::capacity)
         .def_property_readonly("pending_tickets", &rtp_llm::test::V41NativePPTransportTest::pendingTickets)
         .def_property_readonly("retained_leases", &rtp_llm::test::V41NativePPTransportTest::retainedLeases)
+        .def("start_scheduler", &rtp_llm::test::V41NativePPTransportTest::startScheduler)
+        .def("enqueue_scheduled", &rtp_llm::test::V41NativePPTransportTest::enqueueScheduled,
+             py::arg("requests"), py::arg("full_outputs"), py::arg("pd_separation") = false)
+        .def("scheduler_tick", &rtp_llm::test::V41NativePPTransportTest::schedulerTick)
+        .def("scheduled_outputs", &rtp_llm::test::V41NativePPTransportTest::scheduledOutputs)
+        .def("shutdown_scheduler", &rtp_llm::test::V41NativePPTransportTest::shutdownScheduler)
         .def("send", &rtp_llm::test::V41NativePPTransportTest::send)
         .def("receive", &rtp_llm::test::V41NativePPTransportTest::receive)
         .def("wait", &rtp_llm::test::V41NativePPTransportTest::wait)

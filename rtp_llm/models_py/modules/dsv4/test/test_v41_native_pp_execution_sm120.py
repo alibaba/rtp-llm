@@ -84,7 +84,13 @@ def raw_snapshot(cache):
 
 def require_raw(cache, expected):
     for key, value in raw_snapshot(cache).items():
-        torch.testing.assert_close(value, expected[key], rtol=0, atol=0)
+        torch.testing.assert_close(
+            value,
+            expected[key],
+            rtol=0,
+            atol=0,
+            msg=lambda message: f"storage layer/tag={key}: {message}",
+        )
 
 
 def world_check(check, label, group=None):
@@ -140,7 +146,9 @@ def full_owner(rank, config, worker):
     return model, reference
 
 
-def oracle_forward(oracle, reference, cache, dispatch, lengths, prefixes):
+def oracle_forward(
+    oracle, reference, cache, dispatch, lengths, prefixes, *, transfer_round=None
+):
     reference._prepare_engram(
         SimpleNamespace(
             input_ids=dispatch.input_ids,
@@ -158,12 +166,10 @@ def oracle_forward(oracle, reference, cache, dispatch, lengths, prefixes):
         )
     )
     pages = {
-        tag: dispatch.tables.get(
-            tag,
-            torch.tensor(
-                [[1], [2]], device=dispatch.input_ids.device, dtype=torch.int32
-            ),
-        )
+        # The full oracle also owns tags absent from a native PP stage. Their
+        # independent pools follow the stable request-owned SWA allocation;
+        # current batch row numbers do not identify retained request history.
+        tag: dispatch.tables.get(tag, dispatch.tables["swa_kv"])
         for tag in cache.layouts
     }
     try:
@@ -191,7 +197,7 @@ def oracle_forward(oracle, reference, cache, dispatch, lengths, prefixes):
             proxy,
             CONTRACT,
             dispatch.cp.cp_rank,
-            dispatch.spans[0].chunk_id,
+            dispatch.spans[0].chunk_id if transfer_round is None else transfer_round,
             dispatch.spans,
             l20_tables(dispatch),
         )

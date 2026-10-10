@@ -92,6 +92,7 @@ cc_library(
         ":dsv4_dp_prefill_policy",
         ":pipeline_types",
         ":pp_prefill_guard_policy",
+        ":v41_pp_admission",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:pp_topology_validator",
         "//rtp_llm/cpp/config:config_modules",

@@ -52,8 +52,7 @@ def parallelism_for(rank):
     config.prefill_cp_config.prefill_cp_size = 4
     config.pp_ep_enabled = True
     config.pp_ep_backend = "fork_nccl_mxfp8"
-    # The donor resolver admits this fixture; public V4.1 startup stays gated.
-    config.resolve_local_cp("deepseek_v4", False, False, False)
+    config.resolve_local_cp("deepseek_v41", False, False, False)
     assert config.local_cp_enabled()
     return config
 
