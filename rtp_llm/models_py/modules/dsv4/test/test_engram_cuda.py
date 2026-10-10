@@ -3,6 +3,7 @@
 import os
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -317,6 +318,212 @@ class EngramCudaTest(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
         torch.testing.assert_close(output[1], hidden[1], rtol=0, atol=0)
+
+    def _prefetch_model(self):
+        model = Engram(
+            self.layout,
+            0,
+            self.embedding,
+            torch.nn.Linear(384, 640, bias=False, device="cuda", dtype=torch.bfloat16),
+            torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
+            1e-20,
+        )
+        with patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}):
+            from cuda.bindings import driver
+
+            from rtp_llm.models_py.modules.dsv4 import _engram_triton
+            from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                warmup_v41_engram_jit,
+            )
+
+            startup = SimpleNamespace(
+                _engram_hash_state=self.hash,
+                v4=SimpleNamespace(layers=[SimpleNamespace(engram=model)]),
+            )
+            warmup_v41_engram_jit(startup, max_m=32768, device="cuda:0")
+            self.assertIsNotNone(model._lookup_stream)
+            self.assertTrue(_engram_triton._PREFETCH_LOOKUP_PREPARED)
+            attribute = (
+                driver.CUfunction_attribute.CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT
+            )
+            for kernel in _engram_triton._PREFETCH_LOOKUP_PREPARED:
+                status, value = driver.cuFuncGetAttribute(
+                    attribute, driver.CUfunction(kernel.function)
+                )
+                self.assertEqual(status, driver.CUresult.CUDA_SUCCESS)
+                self.assertEqual(value, 100)
+        return model
+
+    def test_prefetch_startup_leaves_sync_function_attributes_unchanged(self):
+        from cuda.bindings import driver
+
+        from rtp_llm.models_py.modules.dsv4 import _engram_triton
+
+        ids = torch.zeros(
+            (16, self.layout.n_hash_cols), dtype=torch.int64, device="cuda"
+        )
+        output = torch.empty(
+            (*ids.shape, self.layout.head_dim), dtype=torch.bfloat16, device="cuda"
+        )
+        rows = ids.numel()
+        grid = min((rows + 15) // 16, self.embedding._num_sms)
+        sync_kernel = _engram_triton._lookup_host_kernel[(grid,)](
+            *self.embedding._uva,
+            ids,
+            output,
+            rows,
+            self.weight.shape[0],
+            ids.stride(0),
+            ids.stride(1),
+            HEADS=ids.shape[1],
+            DIM=self.layout.head_dim,
+            QUANT_BLOCK=32,
+            BLOCK_R=16,
+            GRID=grid,
+            num_warps=4,
+        )
+        attribute = (
+            driver.CUfunction_attribute.CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT
+        )
+        function = driver.CUfunction(sync_kernel.function)
+        before = driver.cuFuncGetAttribute(attribute, function)
+        self.assertEqual(before[0], driver.CUresult.CUDA_SUCCESS)
+        self._prefetch_model()
+        after = driver.cuFuncGetAttribute(attribute, function)
+        self.assertEqual(after, before)
+        self.assertNotIn(sync_kernel, _engram_triton._PREFETCH_LOOKUP_PREPARED)
+        actual = self.embedding(ids, "cuda", prefetch=True)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, output, rtol=0, atol=0)
+
+    def test_prefetch_nondefault_producer_consumer_and_exact_mask(self):
+        model = self._prefetch_model()
+        producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+        for count in (1, 16, 257):
+            windows = torch.full((count, 4), 7, dtype=torch.int32, device="cuda")
+            hidden = torch.randn(count, 4, 128, device="cuda", dtype=torch.bfloat16)
+            ids = self.hash(windows)[:, 0].contiguous()
+            mask = torch.ones(count, dtype=torch.bool, device="cuda")
+            # Compile the original specialization before testing side scheduling.
+            model(hidden, ids, mask)
+            torch.cuda.synchronize()
+            for token in (3, 11):
+                producer.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(producer):
+                    torch.cuda._sleep(1_000_000)
+                    windows.fill_(token)
+                    windows[::3] = -1
+                    windows[1::7, 0] = 9  # Synthetic image/dead-token position.
+                    dead = windows == 9
+                    ids.copy_(self.hash(windows, dead)[:, 0])
+                    mask.copy_((windows[:, 0] >= 0) & (windows[:, 0] != 9))
+                    self.assertIsNotNone(model.prefetch_lookup(ids))
+                # Consumer deliberately does not wait on producer: lookup's
+                # event is the transitive producer -> lookup -> consumer edge.
+                with torch.cuda.stream(consumer):
+                    actual = model(hidden, ids, mask)
+                consumer.synchronize()
+                expected = model(hidden, ids, mask)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(actual[~mask], hidden[~mask], rtol=0, atol=0)
+                self.assertIsNone(model._lookup_work)
+
+    def test_prefetch_event_reuse_without_synchronizing_between_forwards(self):
+        model = self._prefetch_model()
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        ids = torch.zeros(16, self.layout.n_hash_cols, dtype=torch.int64, device="cuda")
+        mask = torch.arange(16, device="cuda") % 3 != 0
+        expected = []
+        for token in (7, 11, 3):
+            ids.fill_(token)
+            expected.append(model(hidden, ids, mask))
+        torch.cuda.synchronize()
+        actual = []
+        for token in (7, 11, 3):
+            ids.fill_(token)
+            self.assertIsNotNone(model.prefetch_lookup(ids))
+            actual.append(model(hidden, ids, mask))
+        torch.cuda.synchronize()
+        for result, reference in zip(actual, expected):
+            torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+    def test_prefetch_records_output_stream_under_allocator_reuse(self):
+        model = self._prefetch_model()
+        count = 4096
+        ids = torch.randint(0, 4000, (count, self.layout.n_hash_cols), device="cuda")
+        expected = self.embedding(ids, "cuda")
+        torch.cuda.synchronize()
+        consumer = torch.cuda.Stream()
+        work = model.prefetch_lookup(ids)
+        with torch.cuda.stream(consumer):
+            rows = work.consume(ids, torch.empty(count, device="cuda"))
+            torch.cuda._sleep(5_000_000)
+            actual = rows.clone()
+        model._lookup_work = None
+        del ids, rows, work
+        # Reuse pressure on the output allocation's original stream, while the
+        # delayed consumer still reads it. Missing record_stream corrupts actual.
+        with torch.cuda.stream(model._lookup_stream):
+            pressure = [torch.empty_like(expected).fill_(42) for _ in range(8)]
+        consumer.synchronize()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        del pressure
+
+    def test_prefetch_boundaries_and_strided_fallback_match_original(self):
+        model = self._prefetch_model()
+        for count in (0, 1, 16, 32768, 32769):
+            ids = torch.randint(
+                0, 4000, (count, self.layout.n_hash_cols), device="cuda"
+            )
+            expected = self.embedding(ids, "cuda")
+            work = model.prefetch_lookup(ids)
+            if 0 < count <= 32768:
+                self.assertIsNotNone(work)
+                actual = work.consume(ids, torch.empty(count, device="cuda"))
+                model._lookup_work = None
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            else:
+                self.assertIsNone(work)
+        ids = torch.randint(0, 4000, (16, self.layout.n_hash_cols * 2), device="cuda")[
+            :, ::2
+        ]
+        self.assertIsNone(model.prefetch_lookup(ids))
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(
+            model(hidden, ids), model(hidden, ids.contiguous()), rtol=0, atol=0
+        )
+
+    def test_prefetch_capture_falls_back_and_replay_uses_changed_inputs(self):
+        model = self._prefetch_model()
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        windows = torch.ones(16, 4, dtype=torch.int32, device="cuda")
+
+        def forward():
+            ids = self.hash(windows)[:, 0].contiguous()
+            work = model.prefetch_lookup(ids)
+            if torch.cuda.is_current_stream_capturing():
+                self.assertIsNone(work)
+            return model(hidden, ids, windows[:, 0] >= 0)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                forward()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = forward()
+        for token in (7, 11, 3):
+            windows.fill_(token)
+            windows[::3] = -1
+            hidden.normal_()
+            expected = forward()
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            self.assertIsNone(model._lookup_work)
 
 
 if __name__ == "__main__":

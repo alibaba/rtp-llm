@@ -596,7 +596,10 @@ def forward_layers(
                 if prefill_fast_layer_calls is not None
                 else v4.layers
             )
+            engram_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
             for layer_idx, layer_call in enumerate(layer_calls):
+                if engram_prefetch is not None:
+                    engram_prefetch.before_layer(layer_idx)
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:

@@ -418,6 +418,8 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             k_weight=torch.ones((4, 8)),
             eps=1e-20,
             layer_hash_index=0,
+            prepare_lookup_prefetch=mock.Mock(),
+            _lookup_stream=None,
         )
         model = types.SimpleNamespace(
             _engram_hash_state=state,
@@ -427,7 +429,17 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         name = "rtp_llm.models_py.modules.dsv4.engram"
         self.stack.enter_context(
             mock.patch.dict(
-                sys.modules, {name: fake_module(name, gated_engram_residual=gate)}
+                sys.modules,
+                {
+                    name: fake_module(
+                        name,
+                        gated_engram_residual=gate,
+                        engram_lookup_prefetch_enabled=lambda: os.getenv(
+                            "DSV41_ASYNC_ENGRAM_LOOKUP", "0"
+                        )
+                        == "1",
+                    )
+                },
             )
         )
         for name, replacement in {
@@ -468,6 +480,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "hash compile failed"):
             warmup.warmup_v41_engram_jit(model, max_m=3, device="cuda:0")
         self.assertFalse(warmup._ENGRAM_WARMED)
+        model.v4.layers[0].engram.prepare_lookup_prefetch.assert_not_called()
         state.hash_token_windows.side_effect = lambda windows, **kw: torch.empty(
             (windows.shape[0], 1, 64), dtype=torch.int64
         )
@@ -479,6 +492,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(gate.call_args_list[1].args[-1].dtype, torch.bool)
         warmup.warmup_v41_engram_jit(model, max_m=3, device="cuda:0")
         self.assertEqual(embed.call_count, 3)
+        self.assertEqual(
+            model.v4.layers[0].engram.prepare_lookup_prefetch.call_count, 2
+        )
 
     def test_engram_uses_physical_sm_limit_and_memoizes_it(self):
         model, state, embed, _ = self.engram_fixture()
@@ -499,6 +515,96 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         warmup.warmup_v41_engram_jit(model, max_m=128, device="cuda:0")
         self.assertEqual(embed.call_count, 53 + 49)
         self.assertEqual(len(warmup._ENGRAM_WARMED), 2)
+
+    def test_engram_prefetch_warms_its_grid_and_memoizes_launch_config(self):
+        model, state, embed, _ = self.engram_fixture()
+        embed._num_sms = 148
+        state.layout.n_hash_cols = 24
+        state.hash_token_windows.side_effect = lambda windows, **kw: torch.empty(
+            (windows.shape[0], 1, 24), dtype=torch.int64
+        )
+        name = "rtp_llm.models_py.modules.dsv4._engram_triton"
+        kernel = fake_module(
+            name, PREFETCH_LOOKUP_CONFIG=(4, 4), PREFETCH_LOOKUP_CARVEOUT=100
+        )
+        with (
+            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(sys.modules, {name: kernel}),
+        ):
+            warmup.warmup_v41_engram_jit(model, max_m=32768, device="cuda:0")
+            sync_rows = [call.args[0].shape[0] for call in embed.call_args_list]
+            async_rows = [
+                call.args[0].shape[0] for call in embed.warmup_prefetch.call_args_list
+            ]
+            self.assertEqual(sync_rows, list(range(1, 116)))
+            self.assertEqual(async_rows, list(range(1, 42)))
+            warmed_grids = {min((rows * 24 + 3) // 4, 148) for rows in async_rows}
+            runtime_grids = {min((rows * 24 + 3) // 4, 148) for rows in range(1, 32769)}
+            self.assertEqual(warmed_grids, runtime_grids)
+            self.assertEqual({rows % 16 for rows in async_rows[25:]}, set(range(16)))
+            calls = embed.call_count
+            warmup.warmup_v41_engram_jit(model, max_m=32768, device="cuda:0")
+            self.assertEqual(embed.call_count, calls)
+            kernel.PREFETCH_LOOKUP_CONFIG = (4, 1)
+            warmup.warmup_v41_engram_jit(model, max_m=32768, device="cuda:0")
+            self.assertEqual(len(warmup._ENGRAM_WARMED), 2)
+            self.assertEqual(embed.call_count, calls * 2)
+            kernel.PREFETCH_LOOKUP_CARVEOUT = 99
+            warmup.warmup_v41_engram_jit(model, max_m=32768, device="cuda:0")
+            self.assertEqual(len(warmup._ENGRAM_WARMED), 3)
+
+    def test_engram_prefetch_compile_failure_cannot_mark_stream_ready(self):
+        model, state, embed, _ = self.engram_fixture()
+        state.hash_token_windows.side_effect = lambda windows, **kw: torch.empty(
+            (windows.shape[0], 1, 64), dtype=torch.int64
+        )
+
+        embed.warmup_prefetch.side_effect = RuntimeError("prefetch compile failed")
+        name = "rtp_llm.models_py.modules.dsv4._engram_triton"
+        with (
+            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    name: fake_module(
+                        name,
+                        PREFETCH_LOOKUP_CONFIG=(4, 4),
+                        PREFETCH_LOOKUP_CARVEOUT=100,
+                    )
+                },
+            ),
+            self.assertRaisesRegex(RuntimeError, "prefetch compile failed"),
+        ):
+            warmup.warmup_v41_engram_jit(model, max_m=3, device="cuda:0")
+        model.v4.layers[0].engram.prepare_lookup_prefetch.assert_not_called()
+        self.assertFalse(warmup._ENGRAM_WARMED)
+
+    def test_engram_prefetch_carveout_failure_cannot_mark_stream_ready(self):
+        model, state, embed, _ = self.engram_fixture()
+        state.hash_token_windows.side_effect = lambda windows, **kw: torch.empty(
+            (windows.shape[0], 1, 64), dtype=torch.int64
+        )
+        embed.warmup_prefetch.side_effect = RuntimeError(
+            "Engram prefetch carveout verification failed"
+        )
+        name = "rtp_llm.models_py.modules.dsv4._engram_triton"
+        with (
+            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    name: fake_module(
+                        name,
+                        PREFETCH_LOOKUP_CONFIG=(4, 4),
+                        PREFETCH_LOOKUP_CARVEOUT=100,
+                    )
+                },
+            ),
+            self.assertRaisesRegex(RuntimeError, "carveout verification failed"),
+        ):
+            warmup.warmup_v41_engram_jit(model, max_m=3, device="cuda:0")
+        model.v4.layers[0].engram.prepare_lookup_prefetch.assert_not_called()
+        self.assertFalse(warmup._ENGRAM_WARMED)
 
     def shared_fixture(self):
         model = nn.Module()

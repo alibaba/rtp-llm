@@ -41,6 +41,13 @@ py_test(
 )
 
 py_test(
+    name = "test_engram_prefetch",
+    srcs = ["test_engram_prefetch.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_engram_cuda",
     srcs = ["test_engram_cuda.py"],
     deps = _DSV4_TEST_DEPS,

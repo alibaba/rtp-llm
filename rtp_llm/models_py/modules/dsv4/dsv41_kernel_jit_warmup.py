@@ -14,6 +14,7 @@ import time
 from functools import partial
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4 import dsv4_kernel_jit_warmup as common
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -242,7 +243,10 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if state is None:
         return
     common._assert_not_capturing()
-    from rtp_llm.models_py.modules.dsv4.engram import gated_engram_residual
+    from rtp_llm.models_py.modules.dsv4.engram import (
+        engram_lookup_prefetch_enabled,
+        gated_engram_residual,
+    )
 
     layers = [layer.engram for layer in model.v4.layers if layer.engram is not None]
     if not layers or max_m <= 0:
@@ -254,6 +258,16 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if min(lookup_sms) <= 0:
         raise ValueError("Engram lookup requires a positive physical SM count")
     sms = max(lookup_sms)
+    prefetch_config = None
+    prefetch_carveout = None
+    if engram_lookup_prefetch_enabled():
+        from rtp_llm.models_py.modules.dsv4._engram_triton import (
+            PREFETCH_LOOKUP_CARVEOUT,
+            PREFETCH_LOOKUP_CONFIG,
+        )
+
+        prefetch_config = PREFETCH_LOOKUP_CONFIG
+        prefetch_carveout = PREFETCH_LOOKUP_CARVEOUT
     key = (
         str(device),
         layout.layer_ids,
@@ -269,14 +283,29 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         ),
         max_m,
         lookup_sms,
+        prefetch_config,
+        prefetch_carveout,
     )
     if key in _ENGRAM_WARMED:
+        for layer in layers:
+            layer.prepare_lookup_prefetch()
+        common._sync_cuda(device)
         return
     # The UVA lookup uses GRID=min(ceil(tokens*heads/16),SMs) as constexpr.
     # Every reachable grid is represented, including the saturated grid and
     # aligned/unaligned token-count variants. Table contents stay on the host.
     limit = min(max_m, (sms * 16 + layout.n_hash_cols - 1) // layout.n_hash_cols + 16)
-    for rows in range(1, limit + 1):
+    prefetch_limit = (
+        min(
+            max_m,
+            32768,
+            (sms * prefetch_config[0] + layout.n_hash_cols - 1) // layout.n_hash_cols
+            + 16,
+        )
+        if prefetch_config is not None
+        else 0
+    )
+    for rows in range(1, max(limit, prefetch_limit) + 1):
         windows = torch.zeros(
             (rows, layout.max_ngram_size), dtype=torch.int32, device=device
         )
@@ -292,12 +321,20 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         )
         for layer in layers:
             ids = hashes[:, layer.layer_hash_index].contiguous()
-            common._run_triton_warmup_launch_with_retry(
-                "DSV41 Engram",
-                f"lookup rows={rows}",
-                partial(layer.embed_tokens, ids, device),
-                device=device,
-            )
+            if rows <= limit:
+                common._run_triton_warmup_launch_with_retry(
+                    "DSV41 Engram",
+                    f"lookup rows={rows}",
+                    partial(layer.embed_tokens, ids, device),
+                    device=device,
+                )
+            if rows <= prefetch_limit:
+                common._run_triton_warmup_launch_with_retry(
+                    "DSV41 Engram",
+                    f"prefetch lookup rows={rows} config={prefetch_config}",
+                    partial(layer.embed_tokens.warmup_prefetch, ids, device),
+                    device=device,
+                )
         if rows in (1, 16):
             for layer in layers:
                 hc, dim = layer.q_weight.shape
@@ -323,10 +360,19 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                         ),
                         device=device,
                     )
+    for layer in layers:
+        layer.prepare_lookup_prefetch()
     common._sync_cuda(device)
     _ENGRAM_WARMED.add(key)
     logging.info(
-        "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens", limit
+        "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens; "
+        "async lookup ready=%s block_rows=%s warps=%s carveout=%s covered_tokens=%d",
+        limit,
+        all(layer._lookup_stream is not None for layer in layers),
+        prefetch_config[0] if prefetch_config else None,
+        prefetch_config[1] if prefetch_config else None,
+        prefetch_carveout,
+        prefetch_limit,
     )
 
 

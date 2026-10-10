@@ -436,8 +436,9 @@ class _PinnedSharedTable:
             if int(result) != 0:
                 self._lease_finalizer()
                 raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+        self._lookup_events = []
         self._registration_finalizer = weakref.finalize(
-            self, self._unregister, runtime, self.storage
+            self, self._unregister, runtime, self.storage, self._lookup_events
         )
         if not self.storage.is_pinned():
             self._registration_finalizer()
@@ -451,7 +452,11 @@ class _PinnedSharedTable:
         )
 
     @staticmethod
-    def _unregister(runtime, storage):
+    def _unregister(runtime, storage, lookup_events):
+        # Unlike CUDA allocator tensors, mapped host storage has no record_stream
+        # support. Keep its registration until every asynchronous reader exits.
+        for event in lookup_events:
+            event.synchronize()
         (result,) = runtime.cudaHostUnregister(storage.data_ptr())
         if int(result) != 0:
             logger.warning("Engram cudaHostUnregister failed: %s", result)
@@ -497,11 +502,26 @@ class HostEngramEmbedding:
                 pinned.device
             ).multi_processor_count
 
-    def __call__(self, indices: torch.Tensor, device) -> torch.Tensor:
+    def warmup_prefetch(self, indices: torch.Tensor, device):
+        """Compile and configure the asynchronous lookup during model startup."""
+        from rtp_llm.models_py.modules.dsv4._engram_triton import (
+            warmup_lookup_prefetch_rows,
+        )
+
+        return warmup_lookup_prefetch_rows(*self._uva, indices, self._num_sms)
+
+    def __call__(
+        self, indices: torch.Tensor, device, *, prefetch=False
+    ) -> torch.Tensor:
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv4 import _engram_triton
 
-            return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
+            lookup = (
+                _engram_triton.lookup_prefetch_rows
+                if prefetch
+                else _engram_triton.lookup_host_rows
+            )
+            return lookup(*self._uva, indices, self._num_sms)
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()
@@ -639,6 +659,108 @@ def gated_engram_residual(
     return result if out is None else out.copy_(result)
 
 
+def engram_lookup_prefetch_enabled():
+    return os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", "0") == "1"
+
+
+def _tensor_version(tensor):
+    # Production hashes are fresh inference tensors, immutable for this forward.
+    # Ordinary tensors additionally let us reject an in-place edit before consume.
+    if tensor.is_inference():
+        return None
+    return tensor._version
+
+
+class _EngramLookupWork:
+    """One forward's lookup; CUDA dependencies never imply a host-side wait."""
+
+    def __init__(self, embedding, ids, rows, done):
+        self.embedding = embedding  # Own the custom UVA registration while pending.
+        self.ids = ids
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.rows = rows
+        self.done = done
+
+    def consume(self, ids, hidden):
+        valid = (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and self.rows.shape[0] == hidden.shape[0]
+            and self.rows.device == hidden.device
+        )
+        if not valid:
+            self.clear()
+            return None
+        current = torch.cuda.current_stream(hidden.device)
+        current.wait_event(self.done)
+        rows = self.rows
+        rows.record_stream(current)
+        self.rows = self.ids = self.embedding = None
+        return rows
+
+    def clear(self):
+        if self.rows is not None:
+            # Only abandoned/invalid work waits on the CPU. The normal consumer
+            # joins on its stream and record_stream covers the output allocator.
+            self.done.synchronize()
+        self.rows = self.ids = self.embedding = None
+
+
+class EngramLookupPrefetch:
+    """Forward-local, two-layer lookahead with at most one pending lookup.
+
+    Hash tensors must remain immutable for this forward. No lookup result or
+    hash is reused by a later request, including requests reusing tensor storage.
+    Layers in the CED query domain are conservatively left synchronous.
+    """
+
+    def __init__(self, layers):
+        self.layers = tuple(
+            (index, layer.engram, layer.engram_hashes)
+            for index, layer in layers
+            if index < 20 and layer.engram is not None
+        )
+        self.cursor = 0
+        self.pending = None
+
+    def before_layer(self, index):
+        if self.pending is not None:
+            target, module, work = self.pending
+            if work.rows is None:
+                self.pending = None
+            elif target < index:
+                module.clear_lookup_prefetch()
+                self.pending = None
+            else:
+                return
+        while self.cursor < len(self.layers):
+            target, module, ids = self.layers[self.cursor]
+            if target > index + 2:
+                return
+            self.cursor += 1
+            if target < index:
+                continue
+            from rtp_llm.models_py.modules.dsv4 import _profiler
+
+            with _profiler.record_function_range(f"dsv41.engram.prefetch.L{target}"):
+                work = module.prefetch_lookup(ids)
+            if work is not None:
+                self.pending = (target, module, work)
+                return
+
+    def clear(self):
+        if self.pending is not None:
+            _, module, work = self.pending
+            # The module can already have consumed the work; clear is idempotent.
+            module.clear_lookup_prefetch()
+            work.clear()
+            self.pending = None
+        self.layers = ()
+
+
 class Engram(nn.Module):
     def __init__(
         self,
@@ -658,6 +780,67 @@ class Engram(nn.Module):
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
+        self._lookup_stream = None
+        self._lookup_done = None
+        self._lookup_work = None
+
+    def prepare_lookup_prefetch(self):
+        """Called after lookup JIT warmup, never from a request or capture."""
+        if (
+            not engram_lookup_prefetch_enabled()
+            or not self.q_weight.is_cuda
+            or self.embed_tokens._uva is None
+            or self._lookup_stream is not None
+        ):
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Engram prefetch must be initialized before capture")
+        device = self.q_weight.device
+        stream = torch.cuda.Stream(device=device, priority=0)
+        done = torch.cuda.Event()
+        stream.wait_stream(torch.cuda.current_stream(device))
+        done.record(stream)
+        torch.cuda.current_stream(device).wait_event(done)
+        # Register the event once, not once per request. Its latest recording
+        # covers all earlier reads on this stream when the table is destroyed.
+        self.embed_tokens._pinned._lookup_events.append(done)
+        self._lookup_stream, self._lookup_done = stream, done
+
+    def prefetch_lookup(self, hash_ids):
+        if (
+            self._lookup_stream is None
+            or self._lookup_work is not None
+            or not hash_ids.is_cuda
+            or hash_ids.device != self.q_weight.device
+            or hash_ids.dtype != torch.int64
+            or hash_ids.ndim != 2
+            or hash_ids.shape[1] != self.layout.n_hash_cols
+            or not 0 < hash_ids.shape[0] <= 32768
+            or not hash_ids.is_contiguous()
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        stream = self._lookup_stream
+        stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
+        hash_ids.record_stream(stream)
+        try:
+            with torch.cuda.stream(stream):
+                rows = self.embed_tokens(hash_ids, hash_ids.device, prefetch=True)
+                self._lookup_done.record(stream)
+        except BaseException:
+            # Preserve owners until queued reads have finished, then propagate
+            # the launch/runtime error instead of silently running a fallback.
+            stream.synchronize()
+            raise
+        work = _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
+        self._lookup_work = work
+        return work
+
+    def clear_lookup_prefetch(self):
+        work = self._lookup_work
+        self._lookup_work = None
+        if work is not None:
+            work.clear()
 
     @classmethod
     def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
@@ -746,7 +929,14 @@ class Engram(nn.Module):
         )
 
     def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
+        work = self._lookup_work
+        rows = None
+        if work is not None:
+            self._lookup_work = None
+            rows = work.consume(hash_ids, hidden)
+        if rows is None:
+            rows = self.embed_tokens(hash_ids, hidden.device)
+        rows = rows.flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
