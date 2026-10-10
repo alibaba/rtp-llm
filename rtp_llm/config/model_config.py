@@ -82,6 +82,8 @@ class ModelConfig(CppModelConfig):
     # bare ModelConfig before model-specific parsing; those objects must keep
     # the legacy, feature-disabled behavior instead of raising AttributeError.
     enable_qwen4_ple: bool = False
+    # Like vLLM EngramConfig.cpu_offload, PLE tables default to host memory.
+    qwen4_ple_cpu_offload: bool = True
     enable_qwen4_qsa: bool = False
 
     # Model-specific weight estimators add to these fields when needed. Class
@@ -129,6 +131,7 @@ class ModelConfig(CppModelConfig):
         "lora_infos",
         "headwise_config",
         "enable_qwen4_ple",
+        "qwen4_ple_cpu_offload",
         "enable_qwen4_qsa",
         "linear_attn_norm_activation",
     }
@@ -327,7 +330,7 @@ class ModelConfig(CppModelConfig):
         return model_size
 
     def eval_model_weight_size_per_rank(self, tp_size: int, ep_size: int) -> float:
-        """Estimate the resident weight bytes for one loader rank.
+        """Estimate the resident device weight bytes for one loader rank.
 
         Generic weights retain the existing ``max(EP, TP)`` approximation.
         Model-specific TP-only tables must be divided by attention TP instead:

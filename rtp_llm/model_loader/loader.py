@@ -229,9 +229,13 @@ class ModelLoader:
         # 清空现有的权重
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
+        resident_devices = self._resident_weight_devices()
+        source_device = "cpu" if resident_devices else device
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
+            (layer_weight_prefix, global_weight_prefix),
+            source_device,
+            direct_io=direct_io and source_device == device,
         )
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
@@ -241,13 +245,19 @@ class ModelLoader:
                 name = ".".join(parts[1:])
                 # 将张量移动到设备，并设置到对应的层
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                weights[layer_id][name] = tensor[0].to(device)
+                weights[layer_id][name] = tensor[0].to(
+                    self._resident_weight_device(
+                        resident_devices, layer_id, name, device
+                    )
+                )
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
                 if name in self._global_weight_aliases:
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                global_weights[name] = tensor[0].to(device)
+                global_weights[name] = tensor[0].to(
+                    self._resident_weight_device(resident_devices, None, name, device)
+                )
         model_weights.weights = weights
         model_weights.global_weights = global_weights
         return model_weights
@@ -698,16 +708,49 @@ class ModelLoader:
         )
         return device
 
+    def _resident_weight_devices(self) -> Dict[Tuple[Optional[int], str], str]:
+        """Collect descriptor storage overrides, including named shard outputs."""
+        result = {}
+        groups = [(None, self._model_weights_info.weights + self._misc_weights_info)]
+        groups.extend(enumerate(self._model_weights_info.layer_weights))
+        for layer_id, modules in groups:
+            if isinstance(modules, WeightModule):
+                modules = [modules]
+            for module in modules:
+                for component in module.get_components():
+                    if component.resident_device is not None:
+                        result[(layer_id, component.name)] = component.resident_device
+        return result
+
+    @staticmethod
+    def _resident_weight_device(
+        resident_devices: Dict[Tuple[Optional[int], str], str],
+        layer_id: Optional[int],
+        name: str,
+        device: str,
+    ) -> str:
+        for (weight_layer, prefix), resident_device in resident_devices.items():
+            if weight_layer == layer_id and (
+                name == prefix or name.startswith(prefix + ".")
+            ):
+                return resident_device
+        return device
+
     def _load_from_scratch(self, device: str):
         weights = self._create_model_weights(device)
         convert_device = self._choose_weight_convert_device(
             device
         )  # choose convert device to avoid out of mem
         logging.info(f"load weight by device: {convert_device}")
+        resident_devices = self._resident_weight_devices()
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
-                tensor = tensor.to(device)
+                tensor = tensor.to(
+                    self._resident_weight_device(
+                        resident_devices, layer_id, name, device
+                    )
+                )
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
