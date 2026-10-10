@@ -246,6 +246,15 @@ py_test(
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
+py_library(
+    name = "v41_sparse_prefill_reference_testlib",
+    testonly = True,
+    srcs = ["v41_sparse_prefill_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_sparse_precision_replay"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "test_v41_engram_full_tables_sm120",
     srcs = ["test_v41_engram_full_tables_sm120.py"],

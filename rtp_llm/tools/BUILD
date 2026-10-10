@@ -101,6 +101,18 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_sparse_prefill_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_prefill_owner_replay.py"],
+    deps = [
+        ":dsv41_output_owner_replay",
+        ":dsv41_sparse_order_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_sparse_prefill_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
